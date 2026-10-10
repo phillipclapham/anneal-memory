@@ -95,8 +95,9 @@ _O_NONBLOCK = getattr(os, "O_NONBLOCK", 0)
 _O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
 
 
-def _open_log(path: Path, *, write: bool) -> int:
-    """The one way the outcome log is opened: a descriptor on a REGULAR file.
+def _open_log(path: Path, *, write: bool, what: str = "the outcome log") -> int:
+    """The one way the outcome log (and a receipt file, named by ``what``) is
+    opened: a descriptor on a REGULAR file.
 
     The open is non-blocking and the check is ``fstat`` on that descriptor, so a
     FIFO at the log's name refuses at once instead of hanging a reader or a
@@ -104,9 +105,10 @@ def _open_log(path: Path, *, write: bool) -> int:
     ``_open_regular`` is the same construct). A write also refuses a symlink as
     the final component (``O_NOFOLLOW``), so an append never lands in whatever
     file the link names (same review, codex HIGH). Windows has neither flag: it
-    has no FIFOs, and a symlink there is followed. Anything refused raises
-    ``OSError``; a missing file raises ``FileNotFoundError`` unless ``write``
-    creates it.
+    has no FIFOs, and a symlink there is followed. Only the final component is
+    checked: a symlinked parent directory is followed, as for any path the user
+    names. Anything refused raises ``OSError``; a missing file raises
+    ``FileNotFoundError`` unless ``write`` creates it.
     """
     if write:
         flags = os.O_RDWR | os.O_APPEND | os.O_CREAT | _O_NOFOLLOW
@@ -115,12 +117,18 @@ def _open_log(path: Path, *, write: bool) -> int:
     try:
         fd = os.open(path, flags | _O_NONBLOCK, 0o644)
     except OSError as exc:
-        if write and exc.errno == errno.ELOOP:
-            raise OSError(errno.ELOOP, "the outcome log is a symlink; it is written only as a regular file", str(path)) from exc
+        # ELOOP on Linux and macOS, EMLINK on FreeBSD (L2 r1).
+        if write and exc.errno in (errno.ELOOP, errno.EMLINK):
+            raise OSError(
+                exc.errno,
+                f"{what} is a symlink and is written only as a regular file; point the store at "
+                "the link's target or replace the link with the file",
+                str(path),
+            ) from exc
         raise
     try:
         if not stat.S_ISREG(os.fstat(fd).st_mode):
-            raise OSError(errno.EINVAL, "the outcome log is not a regular file", str(path))
+            raise OSError(errno.EINVAL, f"{what} is not a regular file", str(path))
         if _O_NONBLOCK:
             os.set_blocking(fd, True)
     except BaseException:
@@ -806,9 +814,10 @@ def fold_surfaced(
         seen_events: set[str] = set()
         for path in paths:
             try:
-                f = open(path, "r", encoding="utf-8", errors="replace")
+                fd = _open_log(Path(path), write=False, what="a receipt file")
             except FileNotFoundError:
                 continue
+            f = open(fd, "r", encoding="utf-8", errors="replace")
             with f:
                 for line in f:
                     if not line.strip():
@@ -1007,10 +1016,11 @@ def load_receipts(
     missing: list[str] = []
     for path in ps:
         try:
-            f = open(path, "r", encoding="utf-8", errors="replace")
+            fd = _open_log(Path(path), write=False, what="a receipt file")
         except FileNotFoundError:
             missing.append(str(path))
             continue
+        f = open(fd, "r", encoding="utf-8", errors="replace")
         with f:
             for line in f:
                 if not line.strip():

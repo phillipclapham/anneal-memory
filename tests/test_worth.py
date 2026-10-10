@@ -470,3 +470,15 @@ def test_a_symlinked_outcome_log_is_still_read(tmp_path):
     except OSError:
         pytest.skip("cannot create a symlink here")
     assert "e1" in OutcomeLog(link).latest()[0]
+
+
+@pytest.mark.skipif(_NO_FIFO, reason="no FIFOs on this platform")
+def test_a_fifo_receipt_file_refuses_instead_of_hanging(tmp_path):
+    """outcomes-open L1 r1: the receipt readers opened a user-named path with a
+    plain open, so a FIFO hung them like the outcome log did."""
+    import os
+    from anneal_memory.worth import load_receipts
+    fifo = tmp_path / "receipts.jsonl"
+    os.mkfifo(fifo)
+    with pytest.raises(OSError, match="receipt file is not a regular file"):
+        load_receipts([fifo])

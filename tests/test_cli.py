@@ -2895,6 +2895,250 @@ class TestGraphJsonOutput:
         assert len(graph["nodes"]) == 2
 
 
+class TestTextExportsNeverOverwrite:
+    """Ruled 10-10 (Phill, via the desk): export json/markdown and graph json/dot
+    refuse an existing --output exactly as export --format sqlite does."""
+
+    WRITERS = [("export", "json"), ("export", "markdown"), ("graph", "json"), ("graph", "dot")]
+
+    @pytest.fixture
+    def db(self, tmp_path):
+        db = str(tmp_path / "test.db")
+        with Store(db, project_name="Agent") as store:
+            ep1 = store.record("Episode one", episode_type="observation")
+            ep2 = store.record("Episode two", episode_type="decision")
+            store.record_associations(direct_pairs={(ep1.id, ep2.id)})
+        return db
+
+    @staticmethod
+    def _run(cmd, fmt, db, out):
+        args = Namespace(db=db, project_name="Agent", json=False, format=fmt, output=str(out), min_strength=0.0)
+        (cmd_export if cmd == "export" else cmd_graph)(args)
+
+    @pytest.mark.parametrize("cmd,fmt", WRITERS)
+    def test_refuses_an_existing_output_and_leaves_it(self, db, tmp_path, capsys, cmd, fmt):
+        out = tmp_path / "keep.out"
+        out.write_bytes(b"previous export")
+        with pytest.raises(SystemExit) as exc:
+            self._run(cmd, fmt, db, out)
+        assert exc.value.code == 1
+        assert "never overwrites" in capsys.readouterr().err
+        assert out.read_bytes() == b"previous export"
+        assert not [p for p in tmp_path.iterdir() if ".export-tmp" in p.name]
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="symlinks need privileges on Windows")
+    @pytest.mark.parametrize("cmd,fmt", WRITERS)
+    def test_refuses_a_dangling_symlink_and_writes_nothing_through_it(self, db, tmp_path, capsys, cmd, fmt):
+        target = tmp_path / "elsewhere.out"
+        out = tmp_path / "link.out"
+        out.symlink_to(target)
+        with pytest.raises(SystemExit) as exc:
+            self._run(cmd, fmt, db, out)
+        assert exc.value.code == 1
+        assert "never overwrites" in capsys.readouterr().err
+        assert not target.exists()
+
+    @pytest.mark.parametrize("nolink", [False, True])
+    @pytest.mark.parametrize("cmd,fmt", WRITERS)
+    def test_writes_an_absent_output_and_leaves_no_temp(self, db, tmp_path, monkeypatch, cmd, fmt, nolink):
+        import errno
+        from anneal_memory import cli
+        if nolink:  # FAT/exFAT/SMB: the claim-and-replace publish
+            def _nolink(*a, **k):
+                raise OSError(errno.ENOTSUP, "no hard links here")
+            monkeypatch.setattr(cli.os, "link", _nolink)
+        out = tmp_path / "new.out"
+        self._run(cmd, fmt, db, out)
+        text = out.read_text(encoding="utf-8")
+        assert "Episode one" in text
+        if fmt == "json":
+            json.loads(text)
+        assert not [p for p in tmp_path.iterdir() if ".export-tmp" in p.name]
+
+    @pytest.mark.parametrize("cmd,fmt", WRITERS)
+    def test_a_missing_directory_is_an_error_and_leaves_nothing(self, db, tmp_path, capsys, cmd, fmt):
+        out = tmp_path / "absent" / "new.out"
+        with pytest.raises(SystemExit) as exc:
+            self._run(cmd, fmt, db, out)
+        assert exc.value.code == 1
+        assert "failed" in capsys.readouterr().err
+        assert not out.parent.exists()
+        assert not [p for p in tmp_path.iterdir() if ".export-tmp" in p.name]
+
+    @pytest.mark.parametrize("cmd,fmt", WRITERS)
+    def test_json_mode_reports_the_written_path(self, db, tmp_path, capsys, cmd, fmt):
+        out = tmp_path / "meta.out"
+        args = Namespace(db=db, project_name="Agent", json=True, format=fmt, output=str(out), min_strength=0.0)
+        (cmd_export if cmd == "export" else cmd_graph)(args)
+        meta = json.loads(capsys.readouterr().out)
+        assert meta["path"] == str(out) and meta["format"] == fmt
+        assert out.exists()
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="no FIFOs or /dev/null symlinks on Windows")
+    @pytest.mark.parametrize("cmd,fmt", WRITERS)
+    def test_a_fifo_or_device_is_written_in_place(self, db, tmp_path, cmd, fmt):
+        """L2 r1 (run): -o /dev/stdout and a named pipe worked before the refusal."""
+        import threading
+        fifo = tmp_path / "pipe"
+        os.mkfifo(fifo)
+        got = []
+        reader = threading.Thread(target=lambda: got.append(fifo.read_bytes()), daemon=True)
+        reader.start()
+        self._run(cmd, fmt, db, fifo)
+        reader.join(10)
+        assert got, f"the FIFO reader got nothing in 10 s (alive={reader.is_alive()})"
+        assert b"Episode one" in got[0]
+        devnull = tmp_path / "null.out"
+        devnull.symlink_to(os.devnull)
+        self._run(cmd, fmt, db, devnull)
+        assert devnull.is_symlink()
+        assert not [p for p in tmp_path.iterdir() if ".export-tmp" in p.name]
+
+    @pytest.mark.parametrize("nolink", [False, True])
+    @pytest.mark.parametrize("cmd,fmt", WRITERS)
+    def test_an_output_that_appears_during_the_write_is_not_overwritten(
+        self, db, tmp_path, monkeypatch, capsys, cmd, fmt, nolink
+    ):
+        import errno
+        from anneal_memory import cli
+        if nolink:  # the claim path's exclusive create meets the other file
+            def _nolink(*a, **k):
+                raise OSError(errno.ENOTSUP, "no hard links here")
+            monkeypatch.setattr(cli.os, "link", _nolink)
+        out = tmp_path / "race.out"
+        real_publish = cli._publish_no_clobber
+
+        def _racer(tmp, dst):
+            dst.write_bytes(b"theirs")
+            real_publish(tmp, dst)
+
+        monkeypatch.setattr(cli, "_publish_no_clobber", _racer)
+        with pytest.raises(SystemExit) as exc:
+            self._run(cmd, fmt, db, out)
+        assert exc.value.code == 1
+        assert "appeared during the export" in capsys.readouterr().err
+        assert out.read_bytes() == b"theirs"
+        assert not [p for p in tmp_path.iterdir() if ".export-tmp" in p.name]
+
+
+    @pytest.mark.skipif(os.name != "posix", reason="/dev/stdout is POSIX")
+    @pytest.mark.parametrize("cmd,fmt", WRITERS)
+    def test_dev_stdout_is_a_pipe_sink_and_a_redirected_file_is_refused(self, db, tmp_path, cmd, fmt):
+        """L2 r1: -o /dev/stdout must still write to a pipe. Redirected to a file it
+        is that file, refused as bash set -C and zsh noclobber refuse >/dev/stdout
+        (L3 r6: the own-stream exception it replaces clobbered through 1<> and
+        hard links)."""
+        argv = [sys.executable, "-m", "anneal_memory.cli", "--db", db, cmd, "--format", fmt, "--output", "/dev/stdout"]
+        piped = subprocess.run(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        assert piped.returncode == 0, piped.stderr
+        assert "Episode one" in piped.stdout
+        target = tmp_path / "redirected.out"
+        target.write_bytes(b"PRE\n")
+        with open(target, "r+b") as fh:  # 1<> : open without truncating
+            redirected = subprocess.run(argv, stdout=fh, stderr=subprocess.PIPE, text=True)
+        assert redirected.returncode == 1
+        assert "never overwrites" in redirected.stderr
+        assert target.read_bytes() == b"PRE\n"
+
+    @pytest.mark.parametrize("fmt", ["json", "dot"])
+    @pytest.mark.parametrize("min_strength", [0.0, 99.0])
+    def test_an_empty_graph_still_refuses_an_existing_output(self, tmp_path, capsys, fmt, min_strength):
+        """L3 r1 (codex): an empty store, or a threshold above every edge, returned
+        before the writer, so an existing --output was not refused."""
+        db = str(tmp_path / "g.db")
+        with Store(db, project_name="Agent") as store:
+            if min_strength:
+                a, b = store.record("one", episode_type="observation"), store.record("two", episode_type="decision")
+                store.record_associations(direct_pairs={(a.id, b.id)})
+        out = tmp_path / "keep.out"
+        out.write_bytes(b"previous")
+        args = Namespace(db=db, project_name="Agent", json=False, format=fmt, output=str(out), min_strength=min_strength)
+        with pytest.raises(SystemExit) as exc:
+            cmd_graph(args)
+        assert exc.value.code == 1
+        assert out.read_bytes() == b"previous"
+        new = tmp_path / "new.out"
+        args.output = str(new)
+        cmd_graph(args)
+        text = new.read_text(encoding="utf-8")
+        if fmt == "json":
+            assert json.loads(text) == {"nodes": [], "edges": []}
+        else:
+            assert text.startswith("graph associations {")
+
+    @pytest.mark.skipif(os.name != "posix", reason="directory symlinks need privileges on Windows")
+    @pytest.mark.parametrize("cmd,fmt", WRITERS + [("export", "sqlite")])
+    def test_a_parent_symlink_retargeted_mid_export_publishes_in_one_directory(
+        self, db, tmp_path, monkeypatch, cmd, fmt
+    ):
+        """L3 r1 (codex): the temp was made through the symlink and cleaned up
+        through it after a retarget, leaking a full copy in the old directory."""
+        from anneal_memory import cli
+        first, second = tmp_path / "first", tmp_path / "second"
+        first.mkdir()
+        second.mkdir()
+        current = tmp_path / "current"
+        current.symlink_to(first)
+        real_publish = cli._publish_no_clobber
+
+        def _retarget(tmp, dst):
+            current.unlink()
+            current.symlink_to(second)
+            real_publish(tmp, dst)
+
+        monkeypatch.setattr(cli, "_publish_no_clobber", _retarget)
+        self._run(cmd, fmt, db, current / "out.x")
+        assert (first / "out.x").exists()
+        assert not (second / "out.x").exists()
+        assert not [p for d in (first, second) for p in d.iterdir() if ".export-tmp" in p.name]
+
+
+    @pytest.mark.parametrize("kind", ["block", "raw-char"])
+    @pytest.mark.parametrize("cmd,fmt", WRITERS)
+    def test_a_disk_at_output_is_refused(self, db, tmp_path, monkeypatch, capsys, cmd, fmt, kind):
+        """L3 r2 (complement): a block device is a disk; L3 r3 (codex HIGH): so is
+        a macOS raw disk, a character device. Only a FIFO, the null device or a
+        terminal is written in place. No unprivileged test can make a device
+        node, so the existing file reports one through fstat (for its inode only)."""
+        import stat as stat_mod
+        from anneal_memory import cli
+        out = tmp_path / "disk"
+        out.write_bytes(b"sectors")
+        ino = out.stat().st_ino
+        real_fstat = cli.os.fstat
+        fake_mode = stat_mod.S_IFBLK if kind == "block" else stat_mod.S_IFCHR
+
+        def _disk(fd):
+            st = real_fstat(fd)
+            if st.st_ino != ino:
+                return st
+            fields = list(st)
+            fields[0] = fake_mode | 0o660
+            return os.stat_result(fields)  # no device number (None, or absent on Windows): not the null device
+
+        monkeypatch.setattr(cli.os, "fstat", _disk)
+        with pytest.raises(SystemExit) as exc:
+            self._run(cmd, fmt, db, out)
+        assert exc.value.code == 1
+        assert "never overwrites" in capsys.readouterr().err
+        assert out.read_bytes() == b"sectors"
+
+    @pytest.mark.skipif(os.name != "posix", reason="/dev/fd is POSIX")
+    @pytest.mark.parametrize(
+        "name", ["/dev/fd/2147483648", "/dev/fd/99999999999999999999", "/dev/fd/" + "9" * 4301, "/dev/fd/\u0661",
+                 "/dev/fd/" + "0" * 4301 + "1"]
+    )
+    def test_an_out_of_range_fd_name_is_a_clean_error(self, db, capsys, name):
+        """L3 r2: os.dup raised OverflowError; L3 r4: 4301 digits made int() raise
+        ValueError, and \\d took an Arabic-Indic one as fd 1. Each a traceback or a wrong write."""
+        with pytest.raises(SystemExit) as exc:
+            self._run("export", "json", db, Path(name))
+        assert exc.value.code == 1
+        captured = capsys.readouterr()
+        assert "Error: export to" in captured.err and "Traceback" not in captured.err
+        assert captured.out == ""  # L3 r5 (codex): a zero-padded name once wrote to stdout
+
+
 # -- cmd_prepare_wrap tests --
 
 class TestCmdPrepareWrap:

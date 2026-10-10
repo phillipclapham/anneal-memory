@@ -2155,7 +2155,9 @@ _PROTECTED_TEAM_EPISODES = (
 )
 
 
-def connect(path: str | Path, *, must_exist: bool = False, **kwargs: Any) -> sqlite3.Connection:
+def connect(
+    path: str | Path, *, must_exist: bool = False, read_only: bool = False, **kwargs: Any
+) -> sqlite3.Connection:
     """THE way this package opens SQLite: :func:`sqlite_path` first, then
     ``sqlite3.connect``. ``tests/test_store.py::test_every_sqlite_connect_goes_
     through_the_one_opener`` fails on any other ``sqlite3.connect`` call in the
@@ -2166,9 +2168,14 @@ def connect(path: str | Path, *, must_exist: bool = False, **kwargs: Any) -> sql
     ``sqlite3.OperationalError`` instead of being created empty at ``path``
     (walopen L3 r15, codex: an export whose source was removed recreated it). The
     URI is built here, from the path :func:`sqlite_path` already accepted, so a
-    caller still cannot hand SQLite a URI of its own."""
+    caller still cannot hand SQLite a URI of its own.
+
+    ``read_only=True`` is the same existing-only open in SQLite's ``mode=ro``
+    (it implies ``must_exist``: a read-only open cannot create the file)."""
+    if "uri" in kwargs:  # the URI is this function's to build (c-pull-label L3 r2)
+        raise TypeError("connect() builds its own URI; it does not accept uri=")
     target = sqlite_path(path)
-    if must_exist:
+    if must_exist or read_only:
         if target == ":memory:":
             raise StorePathError("':memory:' is not an existing database file")
         # Joined, never normalised: abspath collapses ``link/..`` by text, which
@@ -2192,12 +2199,12 @@ def connect(path: str | Path, *, must_exist: bool = False, **kwargs: Any) -> sql
                 f"Database path {target!r} is not valid UTF-8; it cannot be opened as an "
                 "existing-only database. Rename it to a UTF-8 name."
             ) from None
-        return sqlite3.connect(_existing_file_uri(full), uri=True, **kwargs)
+        return sqlite3.connect(_existing_file_uri(full, "ro" if read_only else "rw"), uri=True, **kwargs)
     return sqlite3.connect(target, **kwargs)
 
 
-def _existing_file_uri(abs_path: str) -> str:
-    """An SQLite ``mode=rw`` URI that names exactly ``abs_path``.
+def _existing_file_uri(abs_path: str, mode: str = "rw") -> str:
+    """An SQLite ``mode=rw`` (or ``mode=ro``) URI that names exactly ``abs_path``.
 
     Every byte of the filesystem-encoded path is percent-escaped, ``/`` and
     ``\\`` included, so the URI has no authority and SQLite decodes the very
@@ -2207,7 +2214,7 @@ def _existing_file_uri(abs_path: str) -> str:
     refused."""
     if "\0" in abs_path:
         raise StorePathError(f"Database path {abs_path!r} contains a NUL character")
-    return "file:" + urllib.parse.quote_from_bytes(os.fsencode(abs_path), safe="") + "?mode=rw"
+    return "file:" + urllib.parse.quote_from_bytes(os.fsencode(abs_path), safe="") + "?mode=" + mode
 
 
 class StorePathError(ValueError):

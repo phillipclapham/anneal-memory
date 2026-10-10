@@ -2895,6 +2895,88 @@ class TestGraphJsonOutput:
         assert len(graph["nodes"]) == 2
 
 
+
+class TestTextExportsNeverOverwrite:
+    """Ruled 10-10 (Phill, via the desk): export json/markdown and graph json/dot
+    refuse an existing --output exactly as export --format sqlite does."""
+
+    WRITERS = [("export", "json"), ("export", "markdown"), ("graph", "json"), ("graph", "dot")]
+
+    @pytest.fixture
+    def db(self, tmp_path):
+        db = str(tmp_path / "test.db")
+        with Store(db, project_name="Agent") as store:
+            ep1 = store.record("Episode one", episode_type="observation")
+            ep2 = store.record("Episode two", episode_type="decision")
+            store.record_associations(direct_pairs={(ep1.id, ep2.id)})
+        return db
+
+    @staticmethod
+    def _run(cmd, fmt, db, out):
+        args = Namespace(db=db, project_name="Agent", json=False, format=fmt, output=str(out), min_strength=0.0)
+        (cmd_export if cmd == "export" else cmd_graph)(args)
+
+    @pytest.mark.parametrize("cmd,fmt", WRITERS)
+    def test_refuses_an_existing_output_and_leaves_it(self, db, tmp_path, capsys, cmd, fmt):
+        out = tmp_path / "keep.out"
+        out.write_bytes(b"previous export")
+        with pytest.raises(SystemExit) as exc:
+            self._run(cmd, fmt, db, out)
+        assert exc.value.code == 1
+        assert "never overwrites" in capsys.readouterr().err
+        assert out.read_bytes() == b"previous export"
+        assert not [p for p in tmp_path.iterdir() if ".export-tmp" in p.name]
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="symlinks need privileges on Windows")
+    @pytest.mark.parametrize("cmd,fmt", WRITERS)
+    def test_refuses_a_dangling_symlink_and_writes_nothing_through_it(self, db, tmp_path, capsys, cmd, fmt):
+        target = tmp_path / "elsewhere.out"
+        out = tmp_path / "link.out"
+        out.symlink_to(target)
+        with pytest.raises(SystemExit) as exc:
+            self._run(cmd, fmt, db, out)
+        assert exc.value.code == 1
+        assert "never overwrites" in capsys.readouterr().err
+        assert not target.exists()
+
+    @pytest.mark.parametrize("nolink", [False, True])
+    @pytest.mark.parametrize("cmd,fmt", WRITERS)
+    def test_writes_an_absent_output_and_leaves_no_temp(self, db, tmp_path, monkeypatch, cmd, fmt, nolink):
+        import errno
+        from anneal_memory import cli
+        if nolink:  # FAT/exFAT/SMB: the claim-and-replace publish
+            def _nolink(*a, **k):
+                raise OSError(errno.ENOTSUP, "no hard links here")
+            monkeypatch.setattr(cli.os, "link", _nolink)
+        out = tmp_path / "new.out"
+        self._run(cmd, fmt, db, out)
+        text = out.read_text(encoding="utf-8")
+        assert "Episode one" in text
+        if fmt == "json":
+            json.loads(text)
+        assert not [p for p in tmp_path.iterdir() if ".export-tmp" in p.name]
+
+    @pytest.mark.parametrize("cmd,fmt", WRITERS)
+    def test_an_output_that_appears_during_the_write_is_not_overwritten(
+        self, db, tmp_path, monkeypatch, capsys, cmd, fmt
+    ):
+        from anneal_memory import cli
+        out = tmp_path / "race.out"
+        real_publish = cli._publish_no_clobber
+
+        def _racer(tmp, dst):
+            dst.write_bytes(b"theirs")
+            real_publish(tmp, dst)
+
+        monkeypatch.setattr(cli, "_publish_no_clobber", _racer)
+        with pytest.raises(SystemExit) as exc:
+            self._run(cmd, fmt, db, out)
+        assert exc.value.code == 1
+        assert "appeared during the export" in capsys.readouterr().err
+        assert out.read_bytes() == b"theirs"
+        assert not [p for p in tmp_path.iterdir() if ".export-tmp" in p.name]
+
+
 # -- cmd_prepare_wrap tests --
 
 class TestCmdPrepareWrap:

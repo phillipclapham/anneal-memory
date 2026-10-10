@@ -2207,6 +2207,43 @@ def _publish_by_claim(tmp: Path, out: Path) -> None:
         raise
 
 
+def _refuse_existing_output(out: Path) -> NoReturn:
+    """Exit 1: every export format refuses an existing --output the same way."""
+    print(
+        f"Error: {out} exists; export never overwrites a file. "
+        "Remove it or choose another --output.",
+        file=sys.stderr,
+    )
+    sys.exit(1)
+
+
+def _write_text_no_clobber(text: str, out: Path) -> None:
+    """Write ``text`` at ``out`` as the sqlite export publishes its copy.
+
+    Refuses an existing ``out`` (lexists, so a dangling symlink too); the text
+    goes to a private temp beside ``out`` and is published by
+    :func:`_publish_no_clobber`, so a failed write never leaves a partial file at
+    ``out`` (without hard links, an interrupted publish can leave its empty claim).
+    Text mode, as ``Path.write_text`` was: platform newlines, UTF-8.
+    """
+    if os.path.lexists(out):
+        _refuse_existing_output(out)
+    tmp = out.parent / f".{os.getpid()}-{uuid.uuid4().hex}.export-tmp"
+    try:
+        with open(tmp, "x", encoding="utf-8") as fh:
+            fh.write(text)
+        _publish_no_clobber(tmp, out)
+    except FileExistsError:
+        print(f"Error: {out} appeared during the export; nothing was overwritten", file=sys.stderr)
+        sys.exit(1)
+    except (ValueError, OSError) as exc:  # NUL in a path, unwritable dir…
+        print(f"Error: export to {out} failed: {exc}", file=sys.stderr)
+        sys.exit(1)
+    finally:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp)
+
+
 def cmd_export(args: argparse.Namespace) -> None:
     """Export store data."""
     fmt = args.format
@@ -2277,12 +2314,7 @@ def cmd_export(args: argparse.Namespace) -> None:
             # Export never writes into an existing path (as SQLite's VACUUM INTO
             # refuses a non-empty target): lexists also catches a dangling symlink.
             if os.path.lexists(out):
-                print(
-                    f"Error: {out} exists; export never overwrites a file. "
-                    "Remove it or choose another --output.",
-                    file=sys.stderr,
-                )
-                sys.exit(1)
+                _refuse_existing_output(out)
             # The copy is built in a private temp in --output's directory and
             # published without replacing a file, so a failed export leaves nothing
             # at --output and deletes only its own temp.
@@ -2390,7 +2422,7 @@ def cmd_export(args: argparse.Namespace) -> None:
             }
             if args.output:
                 out = Path(args.output)
-                out.write_text(json.dumps(export_data, indent=2, default=str), encoding="utf-8")
+                _write_text_no_clobber(json.dumps(export_data, indent=2, default=str), out)
                 if args.json:
                     _print_json({"format": "json", "path": str(out), "episodes": len(episodes)})
                 else:
@@ -2438,7 +2470,7 @@ def cmd_export(args: argparse.Namespace) -> None:
             text = "\n".join(lines)
             if args.output:
                 out = Path(args.output)
-                out.write_text(text, encoding="utf-8")
+                _write_text_no_clobber(text, out)
                 if args.json:
                     _print_json({"format": "markdown", "path": str(out), "episodes": len(episodes)})
                 else:
@@ -3207,7 +3239,7 @@ def cmd_graph(args: argparse.Namespace) -> None:
             }
             if args.output:
                 out = Path(args.output)
-                out.write_text(json.dumps(graph_data, indent=2), encoding="utf-8")
+                _write_text_no_clobber(json.dumps(graph_data, indent=2), out)
                 if args.json:
                     _print_json({"format": "json", "path": str(out), "nodes": len(nodes), "edges": len(pairs)})
                 else:
@@ -3250,7 +3282,7 @@ def cmd_graph(args: argparse.Namespace) -> None:
 
             if args.output:
                 out = Path(args.output)
-                out.write_text(text, encoding="utf-8")
+                _write_text_no_clobber(text, out)
                 if args.json:
                     _print_json({"format": "dot", "path": str(out), "nodes": len(nodes), "edges": len(pairs)})
                 else:

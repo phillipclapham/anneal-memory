@@ -21,8 +21,8 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
   hard links an interrupted publish can leave the empty claim, as below).
   An existing named pipe, the null device or a terminal is still written in place for the text formats, as the
   shell's noclobber allows: none is a file that can be overwritten. Any other existing device is refused (a disk can
-  be a block or, on macOS, a character device); where Python reports no device number (Windows), a character device
-  that is not a terminal is refused, since it cannot be matched to the null device. The rule is the name's, as the shells' noclobber has it:
+  be a block or, on macOS, a character device). Where Python reports no device number (Windows), a character
+  device is written in place only when it reports as a terminal; any other is refused. The rule is the name's, as the shells' noclobber has it:
   `--output /dev/stdout` writes to a terminal or a pipe, and is refused when stdout is redirected to a file (bash
   `set -C` and zsh refuse `>/dev/stdout` there too); leave out `--output` to write to stdout. `export --format sqlite`
   refuses all of these. A refusal's message goes to stderr wherever it points: if stderr is the `--output` file

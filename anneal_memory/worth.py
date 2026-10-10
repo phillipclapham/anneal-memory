@@ -84,6 +84,20 @@ FOLD_STATE_KEY = "surfaced_fold"
 DEFAULT_FOLD_SKEW_SECONDS = 60
 
 
+ADOPT_UNSUPPORTED = (
+    "adopt_unbound needs a file lock, which this platform does not provide; "
+    "nothing was written."
+)
+
+
+def adopt_supported() -> bool:
+    """Whether :meth:`OutcomeLog.adopt_unbound` can run here: it needs the POSIX file
+    lock (two stores adopting at once could otherwise both report success). A caller
+    that would WRITE anything before adopting (the CLI mints the store id) checks this
+    first, so the refusal really writes nothing."""
+    return fcntl is not None
+
+
 def outcome_log_path(db_path: str | os.PathLike[str]) -> Path:
     """The outcome log beside an episodic db: ``<stem>.outcomes.jsonl``."""
     p = Path(db_path)
@@ -310,13 +324,10 @@ class OutcomeLog:
         """
         if self.store_id is None:
             raise ValueError("adopt_unbound needs an OutcomeLog with a store_id.")
-        if fcntl is None:
+        if not adopt_supported():
             # Without a lock, two stores adopting at once could both report success
             # while only the first marker binds (L3 10-03, codex).
-            raise ValueError(
-                "adopt_unbound needs a file lock, which this platform does not "
-                "provide; nothing was written."
-            )
+            raise ValueError(ADOPT_UNSUPPORTED)
         when = (ts or datetime.now(timezone.utc)).astimezone(timezone.utc)
         marker: dict[str, Any] = {
             "v": OUTCOME_LOG_VERSION,

@@ -1,8 +1,12 @@
 """Tests for the SQLite episodic store."""
 
+from tests.prior_seed import seed_prior_levels
 import json
 import os
+import sqlite3
 import tempfile
+import threading
+import time
 import uuid
 from pathlib import Path
 
@@ -2503,6 +2507,7 @@ class TestValidatedSaveContinuity:
         ep2 = store.record("Chose caching to improve latency", EpisodeType.DECISION)
 
         # Mark wrap as in progress
+        seed_prior_levels(store, {'thought: database slow under load triggers caching': 1})
         prepare_wrap(store)
 
         # Build continuity with a real 2x citation so graduation fires. Co-cite
@@ -3099,6 +3104,7 @@ class TestValidatedSaveContinuityReturnContract:
             f"## Context\nPinned-date determinism test.\n"
         )
 
+        seed_prior_levels(store, {'thought: slow database impacts throughput': 1})
         prepare_wrap(store)
         result = validated_save_continuity(store, text, today=pinned_today)
 
@@ -3125,6 +3131,7 @@ class TestValidatedSaveContinuityReturnContract:
         )
 
         # No today= parameter → falls back to wall clock
+        seed_prior_levels(store, {"thought: fresh observation drives today's decision": 1})
         prepare_wrap(store)
         result = validated_save_continuity(store, text)
         assert result["graduations_validated"] >= 1
@@ -4349,16 +4356,20 @@ class TestTheWriterSchemaFunctionLetsABumpRefuseOpenWriters:
 
     def test_triggers_at_this_schema_let_this_release_write(self, tmp_path):
         # positive control: the same triggers with the stamp unchanged pass
-        from anneal_memory.store import _SCHEMA_VERSION
+        from anneal_memory.store import _SCHEMA_VERSION, _WRITER_SCHEMA_FUNCTION
 
         db = tmp_path / "m.db"
         store = Store(db)
         import sqlite3 as _sq
 
         fresh = _sq.connect(str(db))
+        # Schema 1's triggers are CAP-04's key-row cleanup and CAP-08's trust-row
+        # cleanup; neither calls the writer-schema function, so no bump guard
+        # exists before a bump.
         assert fresh.execute(
-            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger'"
-        ).fetchone()[0] == 0, "schema 1 installs no trigger; the first bump does"
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger' AND sql LIKE ?",
+            (f"%{_WRITER_SCHEMA_FUNCTION}%",),
+        ).fetchone()[0] == 0, "schema 1 installs no bump guard; the first bump does"
         fresh.close()
         self._bump(db, _SCHEMA_VERSION)
         store.record("same schema", episode_type="observation")
@@ -4381,3 +4392,87 @@ class TestTheWriterSchemaFunctionLetsABumpRefuseOpenWriters:
         with pytest.raises(sqlite3.OperationalError, match="no such function"):
             conn.execute("DELETE FROM episodes")
         conn.close()
+
+
+# --- WAL switch at open (moved from test_continuity_lock: not fcntl-gated, runs on Windows) ---
+
+
+def test_new_store_open_survives_a_peer_holding_the_file_at_the_wal_switch(tmp_path):
+    """`PRAGMA journal_mode=WAL` returns BUSY without consulting busy_timeout.
+
+    A peer holding a RESERVED lock on the brand-new file made Store() fail
+    "database is locked" at t=0 (4 racing openers, ~1 run in 10). The open
+    must retry the switch within the connection's busy budget instead.
+    """
+
+    db = tmp_path / "fresh.db"
+    holder = sqlite3.connect(str(db), isolation_level=None, check_same_thread=False)
+    holder.execute("CREATE TABLE peer (x)")  # a non-empty file takes real locks
+    # RESERVED (a writer mid-switch): the journal-mode pragma then returns
+    # BUSY at once, without consulting busy_timeout (a bare SHARED reader
+    # does get the handler, so it would not reproduce the bug).
+    holder.execute("BEGIN IMMEDIATE")
+
+    def release():
+        time.sleep(0.2)
+        holder.execute("COMMIT")
+
+    worker = threading.Thread(target=release, daemon=True)
+    started = time.monotonic()  # before the release clock starts (L3 r2 codex LOW)
+    worker.start()
+    try:
+        s = Store(db)
+        waited = time.monotonic() - started
+        s.close()
+    finally:
+        worker.join()
+        holder.close()
+    assert waited >= 0.15  # it really did wait out the competing lock
+    chk = sqlite3.connect(str(db))
+    try:
+        assert chk.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
+    finally:
+        chk.close()
+
+
+def test_a_switch_that_reports_a_non_wal_mode_is_refused():
+    """SQLite returns the OLD mode when WAL cannot be enabled (L3 r1 codex MED)."""
+    class _Row:
+        def __init__(self, v):
+            self.v = v
+        def fetchone(self):
+            return self.v
+        def fetchall(self):
+            return [self.v]
+
+    class _Conn:
+        def __init__(self, mode, file):
+            self.mode, self.file = mode, file
+
+        def execute(self, sql):
+            if "busy_timeout" in sql:
+                return _Row((5000,))
+            if "database_list" in sql:
+                return _Row((0, "main", self.file))
+            return _Row((self.mode,))
+
+    for mode in ("delete", "memory"):  # "memory": a disk db in MEMORY journal mode (r3)
+        fake = Store.__new__(Store)
+        fake._conn = _Conn(mode, "/tmp/real-file.db")
+        with pytest.raises(sqlite3.OperationalError, match="WAL was not enabled"):
+            fake._enable_wal_with_retry()
+    fake = Store.__new__(Store)
+    fake._conn = _Conn("delete", "")  # no file (in-memory / temp): accepted
+    fake._enable_wal_with_retry()
+
+
+
+def test_an_in_memory_store_still_opens(tmp_path):
+    """L3 r2 (codex reproduced): SQLite reports ``memory`` for ``:memory:``,
+    which can never be WAL; the non-wal refusal must not break it."""
+    s = Store(":memory:", audit=False)
+    try:
+        s.record("an in-memory episode", "observation")
+        assert s._conn.execute("PRAGMA journal_mode").fetchone()[0] == "memory"
+    finally:
+        s.close()

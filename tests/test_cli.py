@@ -54,6 +54,7 @@ from anneal_memory.cli import (
 )
 from anneal_memory.store import StoreError
 from anneal_memory.crystal import CrystalStore
+from anneal_memory.audit import _ManifestQuarantined
 
 
 # -- Fixtures --
@@ -168,16 +169,17 @@ class TestCmdInit:
 
 class TestCmdInitSchema:
     def test_default_when_no_schema_attr(self, base_args):
-        # Existing callers (no `schema` field) get the byte-compatible ops schema.
+        # Existing callers (no `schema` field) get the ops schema, with the
+        # optional Durable Facts section (B1).
         cmd_init(base_args)
         headings = [s["heading"] for s in Store(base_args.db).section_schema]
-        assert headings == ["State", "Patterns", "Decisions", "Context"]
+        assert headings == ["State", "Durable Facts", "Patterns", "Decisions", "Context"]
 
     def test_explicit_default(self, base_args):
         base_args.schema = "default"
         cmd_init(base_args)
         headings = [s["heading"] for s in Store(base_args.db).section_schema]
-        assert headings == ["State", "Patterns", "Decisions", "Context"]
+        assert headings == ["State", "Durable Facts", "Patterns", "Decisions", "Context"]
 
     def test_partnership_persists_flow_schema(self, base_args):
         # The load-bearing case: a partnership store must persist FLOW_SCHEMA so
@@ -187,7 +189,7 @@ class TestCmdInitSchema:
         schema = Store(base_args.db).section_schema
         headings = [s["heading"] for s in schema]
         assert headings == [
-            "State", "Active Threads", "Patterns", "Decisions",
+            "State", "Active Threads", "Durable Facts", "Patterns", "Decisions",
             "Context", "Understanding",
         ]
         # The felt layer is present and carries the narrative-timeless role the
@@ -292,7 +294,7 @@ class TestCmdSetSchema:
                              json=False, schema="default")
         cmd_set_schema(set_args)
         headings = [s["heading"] for s in Store(base_args.db).section_schema]
-        assert headings == ["State", "Patterns", "Decisions", "Context"]
+        assert headings == ["State", "Durable Facts", "Patterns", "Decisions", "Context"]
 
     def test_json_output(self, base_args, capsys):
         cmd_init(base_args)
@@ -401,7 +403,7 @@ class TestCmdStatus:
         cmd_status(base_args)
         data = json.loads(capsys.readouterr().out)
         assert data["schema"] == "default"
-        assert data["sections"] == ["State", "Patterns", "Decisions", "Context"]
+        assert data["sections"] == ["State", "Durable Facts", "Patterns", "Decisions", "Context"]
 
     def test_status_with_data(self, base_args_with_data, capsys):
         cmd_status(base_args_with_data)
@@ -3670,8 +3672,9 @@ class TestCrystalIndexAndRecallCLI:
             store.record(self._DRIFT_EPISODE, EpisodeType.DECISION, source="flow")
         self._crystallize(tmp_path, "structural_invariants_beat_discipline", 3,
                           "an invariant refuses; make the guard structurally unskippable")
+        # The episode tier fetches through Store.keyword_candidates (0.9.31).
         monkeypatch.setattr(
-            Store, "recall",
+            Store, "keyword_candidates",
             lambda *a, **k: (_ for _ in ()).throw(OSError("simulated episodic I/O fault")),
         )
         cmd_crystal_recall(self._recall_args(
@@ -4108,7 +4111,9 @@ class TestHybridAuditCli:
 
         db = self._two_sealed_weeks(tmp_path)
         (tmp_path / "m.audit.manifest.json").write_bytes(b"{not json")
-        AuditTrail(db).log("after", {})
+        # Ruling A (Phill 2026-10-08): the append that quarantines is refused.
+        with pytest.raises(_ManifestQuarantined):
+            AuditTrail(db).log("after", {})
 
         result = self._run("--db", str(db), "audit", "--json")
 
@@ -4136,7 +4141,9 @@ class TestHybridL3AuditCli:
 
         db = self._two_sealed_weeks(tmp_path)
         (tmp_path / "m.audit.manifest.json").write_bytes(b"{not json")
-        AuditTrail(db).log("quarantines", {})
+        # Ruling A (Phill 2026-10-08): the append that quarantines is refused.
+        with pytest.raises(_ManifestQuarantined):
+            AuditTrail(db).log("quarantines", {})
         return db
 
     @pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0, reason="root lists a mode-300 directory")
@@ -4197,7 +4204,9 @@ class TestHybridFixDiffAuditCliTrust:
 
         db = self._two_sealed_weeks(tmp_path)
         (tmp_path / "m.audit.manifest.json").write_bytes(b"{not json")
-        AuditTrail(db).log("quarantines", {})
+        # Ruling A (Phill 2026-10-08): the append that quarantines is refused.
+        with pytest.raises(_ManifestQuarantined):
+            AuditTrail(db).log("quarantines", {})
 
         result = self._run("--db", str(db), "audit", "--json")
 
@@ -4401,6 +4410,10 @@ def test_outcome_log_left_beside_a_replaced_store_is_not_adopted(tmp_path):
     for argv in (["outcome", "--exposure-id", "evB", "--item", "crystal:pB=ignored"],
                  ["outcome", "--adopt-unbound"]):
         result = run(*argv)
+        if sys.platform == "win32" and "--adopt-unbound" in argv:
+            # no file lock on Windows: adopt refuses before it reads the log (documented)
+            assert result.returncode == 1 and "needs a file lock" in result.stderr, result.stderr
+            continue
         assert result.returncode == 1 and a_id in result.stderr and data["store_id"] in result.stderr
     assert log.read_bytes() == before
 
@@ -4457,6 +4470,11 @@ def test_adopt_unbound_binds_records_written_before_store_ids(tmp_path):
 
     assert minted() is None  # worth wrote nothing
     adopt = run("outcome", "--adopt-unbound")
+    if sys.platform == "win32":
+        # no file lock on Windows: adopt refuses and writes nothing (documented)
+        assert adopt.returncode == 1 and "needs a file lock" in adopt.stderr, adopt.stderr
+        assert minted() is None and len(log.read_text().splitlines()) == 1
+        return
     sid = minted()
     assert sid
     assert adopt.returncode == 0 and "Adopted" in adopt.stdout
@@ -4468,6 +4486,34 @@ def test_adopt_unbound_binds_records_written_before_store_ids(tmp_path):
     data = json.loads(run("worth", "--json").stdout)
     assert (data["bound"], data["unbound"], data["exposures"], data["store_id"]) == (2, 0, 2, sid)
     assert len(log.read_text().splitlines()) == 3
+
+
+def test_adopt_without_a_file_lock_refuses_before_minting_the_store_id(tmp_path):
+    """Windows CI 10-03 (run 37159022302): on a platform with no file lock,
+    `outcome --adopt-unbound` said "nothing was written" after it had already
+    minted the store id. Simulated on every platform by removing fcntl from the
+    worth module inside the CLI process."""
+    db = tmp_path / "mem.db"
+    assert subprocess.run([sys.executable, "-m", "anneal_memory.cli", "--db", str(db), "init"],
+                          capture_output=True, text=True).returncode == 0
+    con = sqlite3.connect(db)
+    con.execute("DELETE FROM metadata WHERE key = 'store_id'")
+    con.commit()
+    con.close()
+    code = ("import sys, anneal_memory.worth as w, anneal_memory.cli as c\n"
+            "w.fcntl = None\n"
+            f"sys.argv = ['anneal-memory', '--db', {str(db)!r}, 'outcome', '--adopt-unbound']\n"
+            "c.main()\n")
+    result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True,
+                            cwd=str(Path(__file__).resolve().parent.parent))
+    assert result.returncode == 1 and "needs a file lock" in result.stderr, result.stderr
+    con = sqlite3.connect(db)
+    try:
+        row = con.execute("SELECT value FROM metadata WHERE key = 'store_id'").fetchone()
+    finally:
+        con.close()
+    assert row is None
+    assert not (tmp_path / "mem.outcomes.jsonl").exists()
 
 
 def test_store_id_proof_and_mint_refuse_what_l3_reproduced(tmp_path):
@@ -4583,3 +4629,56 @@ def test_audit_repair_names_a_missing_active_file_as_lost_not_moved(tmp_path):
     assert out.returncode == 0, out.stderr
     assert "Recorded the missing active audit file m.audit.jsonl" in out.stdout
     assert "Set aside sealed file" not in out.stdout
+
+    # KL-24 L3 r6 (codex 10, run on d3c408a): a rebuild from quarantine with
+    # sealed files printed no gap at all, and verify called the possible gap a
+    # definite one ("went missing with its entries").
+    db = tmp_path / "q" / "m.db"
+    db.parent.mkdir()
+    trail = AuditTrail(db)
+    trail.log("pre", {})
+    trail._last_week = "1999-W01"
+    trail.log("rot", {})
+    (db.parent / "m.audit.manifest.json").write_bytes(b"{not json")
+    (db.parent / "m.audit.jsonl").unlink()
+    with pytest.raises(_ManifestQuarantined):
+        AuditTrail(db).log("trigger", {})
+    out = subprocess.run(
+        [sys.executable, "-m", "anneal_memory.cli", "--db", str(db), "audit-repair"],
+        capture_output=True, text=True,
+    )
+    assert out.returncode == 0, out.stderr
+    assert "rebuilt from 1 sealed file(s)" in out.stdout
+    assert "Recorded a POSSIBLE gap for the active audit file m.audit.jsonl" in out.stdout
+    assert "entries are lost" not in out.stdout
+    verify = subprocess.run(
+        [sys.executable, "-m", "anneal_memory.cli", "--db", str(db), "verify"],
+        capture_output=True, text=True,
+    )
+    assert "POSSIBLE GAP: the active audit file m.audit.jsonl" in verify.stderr
+    assert "went missing" not in verify.stderr
+
+
+def test_possible_gap_names_the_preserved_attempt_files_on_every_surface(tmp_path):
+    """KL-24 (Phill 10-08, the declared augmentation exception): a person decides
+    whether a kept staged entry was a lost entry, so repair and both verify
+    surfaces print the file names. Run first on 7e406c2: repair printed none."""
+    from anneal_memory.audit import AuditTrail
+
+    db = tmp_path / "m.db"
+    AuditTrail(db).log("first", {})
+    (tmp_path / "m.audit.jsonl").unlink()
+    kept = "m.audit.jsonl.first.discarded-20261008T120000000000Z"
+    (tmp_path / kept).write_text('{"event": "attempt"}\n')
+    cli = [sys.executable, "-m", "anneal_memory.cli", "--db", str(db)]
+    out = subprocess.run(cli + ["audit-repair"], capture_output=True, text=True)
+    assert out.returncode == 0, out.stderr
+    assert "POSSIBLE gap" in out.stdout and kept in out.stdout
+    assert "as a gap" not in out.stderr, "the warning must not call it definite"
+    verify = subprocess.run(cli + ["verify"], capture_output=True, text=True)
+    assert "POSSIBLE GAP" in verify.stderr and kept in verify.stderr
+    server = subprocess.run(
+        [sys.executable, "-m", "anneal_memory.server", "--db", str(db), "--verify-audit"],
+        capture_output=True, text=True,
+    )
+    assert "POSSIBLE GAP" in server.stderr and kept in server.stderr

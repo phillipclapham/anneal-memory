@@ -142,14 +142,24 @@ from .store import (
     _is_write_lock_contention,
     StoreError,
     WrapInProgressError,
+    WrapCancelBoundError,
     WrapCancelGatedError,
     SupersessionError,
     WrapOwnershipError,
     _WRAP_TOKEN_RE,
     _SCHEMA_VERSION,
     _parse_format_version,
+    normalize_state_key,
 )
-from .types import AffectiveState, AssociationStats, EpisodeType, RelevantPattern
+from .types import (
+    DEFAULT_TRUST,
+    TRUST_LEVELS,
+    AffectiveState,
+    AssociationStats,
+    EpisodeType,
+    RelevantPattern,
+    trust_rank,
+)
 from .worth import (
     DEFAULT_FOLD_SKEW_SECONDS,
     FOLLOWED_VALUES,
@@ -158,9 +168,11 @@ from .worth import (
     PULL_EXPOSURE_PREFIX,
     ExposedRef,
     ExposureLabel,
+    ADOPT_UNSUPPORTED,
     OutcomeLog,
     OutcomeLogBusy,
     _build_record as _build_worth_record,
+    adopt_supported,
     compute_worth,
     fold_surfaced,
     load_receipts,
@@ -347,14 +359,16 @@ def _existing_db_path(args: argparse.Namespace, *, require_file: bool = False) -
     return db_path
 
 
-def _open_store(args: argparse.Namespace) -> Store:
-    """Open a Store from CLI args."""
+def _open_store(args: argparse.Namespace, *, trust_ceiling: str = DEFAULT_TRUST) -> Store:
+    """Open a Store from CLI args. ``trust_ceiling`` is ``"operator"`` only for a
+    command whose operator gate (:func:`_operator_ok`) said yes (CAP-08)."""
     db_path = _existing_db_path(args)
     try:
         return Store(
             path=db_path,
             project_name=getattr(args, "project_name", "Agent"),
             audit=True,
+            trust_ceiling=trust_ceiling,
         )
     except StoreDatabaseError as exc:
         # ⚠ THE OPERATOR'S FIRST MESSAGE, AND IT USED TO READ LIKE CORRUPTION.
@@ -855,7 +869,19 @@ def cmd_record(args: argparse.Namespace) -> None:
     else:
         content = args.content
 
-    with _open_store(args) as store:
+    trust = getattr(args, "trust", "agent")
+    via = None
+    if trust == "operator":
+        # Kept for the audit (codex r1 #8): which form of the gate vouched.
+        via = _operator_ok(
+            "Record this episode as the OPERATOR's own (trusted above the agent)?"
+        )
+        if via is None:
+            print("Error: --trust operator needs a yes on a terminal, or "
+                  "ANNEAL_OPERATOR=1. Nothing was recorded.", file=sys.stderr)
+            sys.exit(1)
+
+    with _open_store(args, trust_ceiling="operator" if via else DEFAULT_TRUST) as store:
         metadata = None
         if args.tags:
             metadata = {"tags": [t.strip() for t in args.tags.split(",")]}
@@ -867,9 +893,16 @@ def cmd_record(args: argparse.Namespace) -> None:
                 source=args.source,
                 metadata=metadata,
                 supersedes=getattr(args, "supersedes", None),
+                state_key=getattr(args, "state_key", None),
+                trust=trust,
+                trust_via=f"cli:operator-{via}" if via else None,
+                derived_from=getattr(args, "derived_from", None),
             )
-        except SupersessionError as exc:
+        except (SupersessionError, ValueError) as exc:
             print(f"Error: {exc}. Nothing was recorded.", file=sys.stderr)
+            sys.exit(1)
+        except ValueError as exc:  # a derived_from source that does not exist
+            print(f"Error: {exc}", file=sys.stderr)
             sys.exit(1)
 
         if args.json:
@@ -878,10 +911,63 @@ def cmd_record(args: argparse.Namespace) -> None:
                 "timestamp": episode.timestamp,
                 "type": episode.type.value,
                 "source": episode.source,
+                "trust": trust,
             })
             return
 
         print(f"Recorded episode {episode.id} ({episode.type.value})")
+
+
+def cmd_trust(args: argparse.Namespace) -> None:
+    """Show or change an episode's trust class (CAP-08). Lowering is open;
+    raising needs the operator (a yes on a terminal, or ANNEAL_OPERATOR=1)."""
+    args.episode_id = args.episode_id.strip().lower()
+    with _open_store(args) as store:
+        # One read snapshot, so stored and effective come from one state (L3 r2).
+        with store._db_boundary("trust_map"), store._read_snapshot():
+            found = store.get(args.episode_id) is not None
+            current = store.trust_map([args.episode_id]).get(args.episode_id, DEFAULT_TRUST)
+            effective = store.effective_trust_map([args.episode_id]).get(
+                args.episode_id, DEFAULT_TRUST)
+        if not found:
+            print(f"Error: no episode {args.episode_id!r}.", file=sys.stderr)
+            sys.exit(1)
+    if args.level is None:
+        # The class graduation and supersession judge by is the effective one; a
+        # summary derived from an external page printed its own "agent" (run,
+        # 1009+22). The stored class is what a change below sets and gates on.
+        if args.json:
+            _print_json({"id": args.episode_id, "trust": effective, "stored": current})
+        elif effective != current:
+            print(f"{args.episode_id}: {effective} (stored {current}; lowered by what "
+                  "it was derived from)")
+        else:
+            print(f"{args.episode_id}: {current}")
+        return
+    raising = trust_rank(args.level) > trust_rank(current)
+    via = None
+    if raising:
+        via = _operator_ok(f"Raise {args.episode_id} from {current} to {args.level}?")
+        if via is None:
+            print(f"Error: raising trust ({current} -> {args.level}) needs a yes on a "
+                  "terminal, or ANNEAL_OPERATOR=1. Unchanged.", file=sys.stderr)
+            sys.exit(1)
+    # The gate's yes is what opens the Store at operator; the actor says how the
+    # gate was passed, not more than that.
+    with _open_store(args, trust_ceiling="operator" if via else DEFAULT_TRUST) as store:
+        try:
+            # expect: the class the gate above was decided on; if another writer
+            # moved it since, the write refuses instead of applying a stale gate.
+            old = store.set_trust(args.episode_id, args.level,
+                                  actor=f"cli:operator-{via}" if via else "cli",
+                                  expect=current)
+        except ValueError as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            sys.exit(1)
+        if args.json:
+            _print_json({"id": args.episode_id, "from": old, "to": args.level})
+        else:
+            print(f"{args.episode_id}: {old} -> {args.level}")
 
 
 def cmd_search(args: argparse.Namespace) -> None:
@@ -921,11 +1007,58 @@ def cmd_search(args: argparse.Namespace) -> None:
             print()
 
 
+def _operator_ok(question: str) -> str | None:
+    """How the operator said yes to a CAP-08 trust claim an agent must not make:
+    ``"terminal"`` (a yes on a terminal), ``"env"`` (``ANNEAL_OPERATOR=1`` for one
+    command), or None. ⚠ The env form is a convenience, not a boundary: any
+    process that can run this CLI can set it, so it binds only where the agent
+    has no shell (MCP never offers it). The audit records which form was used."""
+    if os.environ.get("ANNEAL_OPERATOR") == "1":
+        return "env"
+    if sys.stdin.isatty() and sys.stderr.isatty():
+        print(f"{question} [y/N] ", end="", file=sys.stderr, flush=True)
+        try:
+            answer = sys.stdin.readline().strip().lower()
+        except (EOFError, OSError):
+            answer = ""
+        return "terminal" if answer in ("y", "yes") else None
+    return None
+
+
+def _team_override_ok(store: Any, args: argparse.Namespace) -> bool:
+    """For a link a team snapshot owns: True when this command may change it here
+    (ANNEAL_TEAM_OVERRIDE=1, or a yes on a terminal). Otherwise says so and exits."""
+    try:
+        owned = store.team_owned(old_id=args.old, new_id=args.new)
+    except SupersessionError as exc:
+        print(f"Error: {exc}. Nothing was recorded.", file=sys.stderr)
+        sys.exit(1)
+    if not owned:
+        return False
+    if os.environ.get("ANNEAL_TEAM_OVERRIDE") == "1":
+        return True
+    if sys.stdin.isatty() and sys.stderr.isatty():
+        print("This link mirrors the team ledger; change it in your store only? [y/N] ",
+              end="", file=sys.stderr, flush=True)
+        try:
+            answer = sys.stdin.readline().strip().lower()
+        except (EOFError, OSError):
+            answer = ""
+        if answer in ("y", "yes"):
+            return True
+    if args.func is cmd_supersede:
+        return False  # the link is already there: an idempotent supersede succeeds
+    print("Unchanged: this link mirrors the team ledger.", file=sys.stderr)
+    sys.exit(1)
+
+
 def cmd_supersede(args: argparse.Namespace) -> None:
     """Record a supersession link between two existing episodes."""
     with _open_store(args) as store:
+        override = _team_override_ok(store, args)
         try:
-            added = store.supersede(old_id=args.old, new_id=args.new, source="cli")
+            added = store.supersede(old_id=args.old, new_id=args.new, source="cli",
+                                    team_override=override)
         except SupersessionError as exc:
             print(f"Error: {exc}. Nothing was recorded.", file=sys.stderr)
             sys.exit(1)
@@ -938,8 +1071,10 @@ def cmd_supersede(args: argparse.Namespace) -> None:
 def cmd_unsupersede(args: argparse.Namespace) -> None:
     """Remove a supersession link."""
     with _open_store(args) as store:
+        override = _team_override_ok(store, args)
         try:
-            removed = store.unsupersede(old_id=args.old, new_id=args.new, source="cli")
+            removed = store.unsupersede(old_id=args.old, new_id=args.new, source="cli",
+                                        team_override=override)
         except SupersessionError as exc:
             print(f"Error: {exc}", file=sys.stderr)
             sys.exit(1)
@@ -948,6 +1083,75 @@ def cmd_unsupersede(args: argparse.Namespace) -> None:
     else:
         print(f"Removed: {args.new} no longer supersedes {args.old}" if removed
               else f"No link {args.old} by {args.new} was recorded.")
+
+
+def cmd_state(args: argparse.Namespace) -> None:
+    """List state keys (CAP-04) with each key's live holder and what it replaced,
+    or, with --set, put an existing episode into a key's slot."""
+    with _open_store(args) as store:
+        if args.unset:
+            if args.key is not None:
+                print("Error: --unset takes no KEY (an episode has one slot).", file=sys.stderr)
+                sys.exit(1)
+            try:
+                out = store.clear_state_key(args.unset, source="cli")
+            except (SupersessionError, ValueError) as exc:
+                print(f"Error: {exc}", file=sys.stderr)
+                sys.exit(1)
+            if args.json:
+                _print_json({"episode_id": args.unset, "key": out["key"],
+                             "removed": [{"old_id": o, "new_id": n} for o, n in out["removed"]],
+                             "added": [{"old_id": o, "new_id": n} for o, n in out["added"]],
+                             "left_live": [{"old_id": o, "new_id": n}
+                                           for o, n in out["left_live"]]})
+            elif out["key"] is None:
+                print(f"{args.unset} has no state key.")
+            else:
+                print(f"{args.unset} no longer fills {out['key']!r}")
+                for o, n in out["removed"]:
+                    print(f"  removed: {n} supersedes {o}")
+                for o, n in out["added"]:
+                    print(f"  re-formed: {n} supersedes {o}")
+                for o, n in out["left_live"]:
+                    print(f"  both live: {n} ranks below {o} in trust, so it cannot "
+                          f"replace it")
+            return
+        if args.set:
+            if args.key is None:
+                print("Error: --set needs a KEY.", file=sys.stderr)
+                sys.exit(1)
+            try:
+                links = store.set_state_key(args.set, args.key, source="cli")
+            except (SupersessionError, ValueError) as exc:
+                print(f"Error: {exc}. Nothing was recorded.", file=sys.stderr)
+                sys.exit(1)
+            canonical = normalize_state_key(args.key)
+            if args.json:
+                _print_json({"episode_id": args.set, "key": canonical,
+                             "links": [{"old_id": o, "new_id": n} for o, n in links]})
+            else:
+                print(f"{args.set} fills {canonical!r}")
+                for o, n in links:
+                    print(f"  {n} supersedes {o}")
+            return
+        try:
+            report = store.state_key_report(args.key)
+        except ValueError as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            sys.exit(1)
+    if args.json:
+        _print_json(report)
+        return
+    if not report:
+        print("No state keys." if args.key is None else f"No episode fills {args.key!r}.")
+        return
+    for entry in report:
+        print(entry["key"])
+        for label, items in (("current", entry["current"]), ("replaced", entry["replaced"])):
+            for item in items:
+                content = _truncate(item["content"].replace("\n", " "), 90)
+                print(f"  {label:<8} [{item['id']}] {_format_timestamp(item['timestamp'])}  {content}")
+    print("\nA wrong key hides a valid episode: take it out with `state --unset ID`.")
 
 
 def cmd_pattern_associations(args: argparse.Namespace) -> None:
@@ -1097,6 +1301,7 @@ def cmd_delete(args: argparse.Namespace) -> None:
             print(f"Episode {args.episode_id} not found.", file=sys.stderr)
             sys.exit(1)
 
+        confirmed = False
         if not args.force:
             print(f"Episode {episode.id} ({episode.type.value}):")
             print(f"  {_truncate(episode.content.replace(chr(10), ' '), 100)}")
@@ -1105,11 +1310,20 @@ def cmd_delete(args: argparse.Namespace) -> None:
             if confirm != "y":
                 print("Cancelled.")
                 return
-
-        store.delete(args.episode_id)
+            confirmed = sys.stdin.isatty()
+        # A team entry's removal is final (no v3 team import brings it back) only on
+        # the operator's own say: a yes on a terminal, or ANNEAL_TEAM_OVERRIDE=1.
+        operator = confirmed or os.environ.get("ANNEAL_TEAM_OVERRIDE") == "1"
+        store.delete(args.episode_id, team_operator=operator)
+        if episode.source.startswith("team:") and not operator:
+            print("Note: this team entry comes back at the next v3 team import while the "
+                  "ledger enforces it. To make it final, delete it without --force and "
+                  "confirm on a terminal, or set ANNEAL_TEAM_OVERRIDE=1.", file=sys.stderr)
 
         if args.json:
-            _print_json({"deleted": args.episode_id})
+            _print_json({"deleted": args.episode_id,
+                         **({"final": operator} if episode.source.startswith("team:")
+                            else {})})
         else:
             print(f"Deleted episode {args.episode_id}")
 
@@ -1214,32 +1428,49 @@ def cmd_audit_repair(args: argparse.Namespace) -> None:
             "chain_anchor_recovered": result.chain_anchor_recovered,
             "untracked": result.untracked,
             "set_aside": result.set_aside,
+            "staged_first_entry": result.staged_first_entry,
             "error": result.error,
         })
-    elif result.repaired and result.set_aside and not result.files:
+    elif result.repaired:
+        if result.staged_first_entry:
+            print(f"Staged first audit entry {result.staged_first_entry}")
+        if result.files or not (result.set_aside or result.staged_first_entry):
+            print(f"Audit manifest rebuilt from {len(result.files)} sealed file(s)")
+            if result.chain_anchor_recovered:
+                print(
+                    "  Chain anchor RECOVERED from the first sealed file: verify reports "
+                    "anchor_trusted=False, and entries before it cannot be verified"
+                )
+            if result.untracked:
+                print(f"  Left on disk, not in the manifest: {', '.join(result.untracked)}")
+        # Every returned record is printed, whatever else repair did (KL-24 L3
+        # r6, codex 10, run: a rebuild with sealed files printed none, and with
+        # none a possible gap read as definitely lost entries).
         for record in result.set_aside:
-            if record["set_aside_as"] == "":
+            if record.get("certainty") == "possible":
+                print(
+                    f"Recorded a POSSIBLE gap for the active audit file {record['filename']} "
+                    f"({record['period']}): it holds no entry, and whether it held entries "
+                    "before cannot be known. Writes continue, and verify reports it."
+                    + (
+                        " Set-aside staged entries to inspect (kept, never deleted): "
+                        + ", ".join(record["preserved_attempts"])
+                        if record.get("preserved_attempts") else ""
+                    )
+                )
+            elif record["set_aside_as"] == "":
                 print(
                     f"Recorded the missing active audit file {record['filename']} "
                     f"({record['period']}) as a gap ({record['cause']}); its entries are "
                     "lost. Writes continue past this gap, and verify reports it."
                 )
-                continue
-            print(
-                f"Set aside sealed file {record['filename']} as "
-                f"{record['set_aside_as']} ({record['cause']}); kept on disk and "
-                "recorded in the manifest. Writes continue past this gap, and "
-                "verify reports it. It can be renamed back only before the next write."
-            )
-    elif result.repaired:
-        print(f"Audit manifest rebuilt from {len(result.files)} sealed file(s)")
-        if result.chain_anchor_recovered:
-            print(
-                "  Chain anchor RECOVERED from the first sealed file: verify reports "
-                "anchor_trusted=False, and entries before it cannot be verified"
-            )
-        if result.untracked:
-            print(f"  Left on disk, not in the manifest: {', '.join(result.untracked)}")
+            else:
+                print(
+                    f"Set aside sealed file {record['filename']} as "
+                    f"{record['set_aside_as']} ({record['cause']}); kept on disk and "
+                    "recorded in the manifest. Writes continue past this gap, and "
+                    "verify reports it. It can be renamed back only before the next write."
+                )
     else:
         print(f"Audit repair refused: {result.error}", file=sys.stderr)
 
@@ -1479,6 +1710,7 @@ def cmd_save_continuity(args: argparse.Namespace) -> None:
                 "supersessions_rejected": result["supersessions_rejected"],
                 "sections": {name: c for name, c in sorted(sections.items())},
                 "stale_state": result.get("stale_state", []),
+                "level_capped": result.get("level_capped", []),
             })
             return
 
@@ -1503,6 +1735,9 @@ def cmd_save_continuity(args: argparse.Namespace) -> None:
             print(
                 f"Bare graduations demoted (no evidence): {result['bare_demoted']}"
             )
+        for cap in result.get("level_capped", []):
+            why = f" ({cap['reason']})" if cap.get("reason", "prior") != "prior" else ""
+            print(f"Level capped: {cap['name']} {cap['written_level']}x -> {cap['capped_to']}x{why}")
         if result["skipped_non_today"]:
             # Carried-forward graduations from prior sessions are
             # normal. A non-zero count with no new validations is
@@ -1541,11 +1776,13 @@ def cmd_wrap_status(args: argparse.Namespace) -> None:
     integrity failures with an actionable recovery hint (``wrap-cancel``).
     """
     with _open_store(args) as store:
-        started_at = store.get_wrap_started_at()
-
-        try:
-            snapshot = store.load_wrap_snapshot()
-        except StoreError as exc:
+        # One read transaction for every field below (codex L3 on 0.9.30: separate
+        # reads could pair one wrap's token with a replacement's gated/bound state).
+        status = store.wrap_status_snapshot()
+        started_at = status.started_at
+        snapshot = status.snapshot
+        if status.partial_error is not None:
+            exc = status.partial_error
             # Partial-state integrity failure (e.g. wrap_started_at set
             # but wrap_token empty). The operator surface exists
             # precisely for this case — print a clean diagnostic with
@@ -1595,16 +1832,21 @@ def cmd_wrap_status(args: argparse.Namespace) -> None:
                 "wrap_token": snapshot["token"],
                 "wrap_episode_count": len(snapshot["episode_ids"]),
                 "wrap_episode_ids": snapshot["episode_ids"],
-                "wrap_gated_session": store.wrap_gated_session(),
+                "wrap_gated_session": status.gated_session,
+                "wrap_token_bound": status.bound_token == snapshot["token"],
             })
             return
 
         print(f"wrap in progress since {started_at or '(unknown)'}")
         print(f"  token:    {snapshot['token']}")
-        gated_by = store.wrap_gated_session()
+        gated_by = status.gated_session
         if gated_by is not None:
             print(f"  prepared under the consolidate gate by session {gated_by!r}: only that")
             print("  session can complete it (library save_continuity with that session_id)")
+        bound = status.bound_token == snapshot["token"]
+        if bound:
+            print("  opened with a token its preparer holds: a cancel without that token")
+            print("  is refused")
         print(f"  episodes: {len(snapshot['episode_ids'])}")
         print()
         # The printed commands name this store and this wrap's token, so a copy-paste
@@ -1616,7 +1858,7 @@ def cmd_wrap_status(args: argparse.Namespace) -> None:
             db_arg = shlex.quote(str(Path(args.db).expanduser().resolve()))
             print(f"  complete: anneal-memory --db {db_arg} save-continuity "
                   f"--wrap-token {token} <file>")
-            if gated_by is None:
+            if gated_by is None and not bound:
                 print(f"  abandon:  anneal-memory --db {db_arg} wrap-cancel --wrap-token {token}")
 
 
@@ -1668,6 +1910,16 @@ def cmd_wrap_cancel(args: argparse.Namespace) -> None:
                 force=bool(getattr(args, "force", False)),
                 **({"expect_partial": True} if partial else {}),
             )
+        except WrapCancelBoundError:
+            # No recipe, as for the gated refusal below.
+            print(
+                "Refused: the wrap in progress was opened with a token its preparer "
+                "holds, and a cancel that names no token cannot end it. Cancelling "
+                "it discards that caller's compression, which is the operator's "
+                "decision. Nothing was changed.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
         except WrapCancelGatedError as exc:
             # No recipe in this text, on purpose: the reader of a refusal is the
             # caller the bound exists to stop. flow's own cancel learned the same.
@@ -1710,6 +1962,19 @@ def cmd_wrap_cancel(args: argparse.Namespace) -> None:
                     "Nothing to cancel: the wrap you named has already "
                     "completed or been cancelled, and no wrap is in progress "
                     "now. Nothing was changed.",
+                    file=sys.stderr,
+                )
+            elif exc.bound:
+                # A re-run without --wrap-token would hit WrapCancelBoundError, so no
+                # override is offered, and no recipe.
+                print(
+                    "Refused: the wrap in progress is NOT the one you named, and it "
+                    "was opened with a token its preparer holds. Cancelling it "
+                    "discards that caller's compression, which is the operator's "
+                    "decision. "
+                    + ("--force is ignored while --wrap-token is given. " if exc.force else "")
+                    + "Nothing was changed. Run `anneal-memory wrap-status` to see "
+                    "when it started.",
                     file=sys.stderr,
                 )
             elif exc.gated_session and exc.gated_session != exc.session_id and exc.force:
@@ -1851,6 +2116,22 @@ def cmd_export(args: argparse.Namespace) -> None:
         # delete), so an export carries them, marked, plus the links.
         result = store.recall(limit=100000, include_superseded=True)
         episodes = [_episode_dict(ep) for ep in result.episodes]
+        # CAP-08: the trust class rides along when it is not the default, so a
+        # JSON round trip does not turn an external episode into an agent one.
+        # It is the EFFECTIVE class (an agent summary of an external page exports
+        # as external), so a round trip never raises an episode's trust (codex r3
+        # #3). The derivation edges are written for the record only: import does
+        # not read them (a file cannot vouch, and a merged edge could; L3 r5).
+        export_trust = store.effective_trust_map(ep["id"] for ep in episodes)
+        export_edges = store.derived_edges(ep["id"] for ep in episodes)
+        for ep in episodes:
+            if ep["id"] in export_trust:
+                ep["trust"] = export_trust[ep["id"]]
+            if ep["id"] in export_edges:
+                ep["derived_from"] = [
+                    {"id": src, **({"gone_trust": gone} if gone is not None else {})}
+                    for src, gone in export_edges[ep["id"]]
+                ]
         supersessions = store.supersession_links()
         continuity = store.load_continuity()
         meta = store.load_meta()
@@ -2031,7 +2312,8 @@ def cmd_import(args: argparse.Namespace) -> None:
                         file=sys.stderr,
                     )
         if args.json:
-            _print_json({"imported": 0, "skipped": 0, "errors": 0})
+            _print_json({"imported": 0, "skipped": 0, "errors": 0, "trust_lowered": 0,
+                         "trust_capped": 0})
         else:
             print("No episodes to import.")
         return
@@ -2043,31 +2325,254 @@ def cmd_import(args: argparse.Namespace) -> None:
         skipped = 0
         errors = 0
 
+        lowered = 0
+        capped = 0
         for ep_data in episodes:
             try:
+                # CAP-08: an export file is plain JSON anyone can edit, so it can
+                # lower trust but never vouch: anything above agent comes in as
+                # agent, counted in the output so the cap is not silent (C#11).
+                # The Store is opened at agent, so it would refuse it anyway.
+                raw_trust = ep_data.get("trust")
+                ep_trust = raw_trust if raw_trust is not None else DEFAULT_TRUST
+                was_capped = trust_rank(ep_trust) > trust_rank(DEFAULT_TRUST)
+                if was_capped:
+                    ep_trust = DEFAULT_TRUST
+
                 # Check if episode already exists
                 existing = store.get(ep_data["id"])
                 if existing is not None:
+                    # An existing id still takes a LOWER trust from the file
+                    # (codex r1 #6), but only from a class the file states at or
+                    # below agent: a missing field, or an operator one the file
+                    # cannot vouch for, asserts nothing, so re-importing a store's
+                    # own export never demotes its operator episodes (codex +
+                    # complement r2).
+                    current = store.trust_map([existing.id]).get(existing.id, DEFAULT_TRUST)
+                    if (raw_trust is not None
+                            and trust_rank(raw_trust) <= trust_rank(DEFAULT_TRUST)
+                            and trust_rank(raw_trust) < trust_rank(current)):
+                        store.set_trust(existing.id, ep_trust, actor="cli:import")
+                        lowered += 1
                     skipped += 1
                     continue
 
-                store.record(
+                recorded = store.record(
                     content=ep_data["content"],
                     episode_type=ep_data["type"],
                     source=ep_data.get("source", "import"),
                     metadata=ep_data.get("metadata"),
                     timestamp=ep_data.get("timestamp"),
+                    trust=ep_trust,
                 )
                 imported += 1
+                capped += was_capped
             except Exception as e:
                 errors += 1
                 if not args.json:
                     print(f"  Error importing episode {ep_data.get('id', '?')}: {e}", file=sys.stderr)
 
         if args.json:
-            _print_json({"imported": imported, "skipped": skipped, "errors": errors})
+            _print_json({"imported": imported, "skipped": skipped, "errors": errors,
+                         "trust_lowered": lowered, "trust_capped": capped})
         else:
-            print(f"Import complete: {imported} imported, {skipped} skipped (already exist), {errors} errors")
+            print(f"Import complete: {imported} imported, {skipped} skipped (already exist), {errors} errors"
+                  + (f", trust lowered on {lowered} existing" if lowered else "")
+                  + (f", {capped} brought in as agent (the file cannot vouch for "
+                     "operator)" if capped else ""))
+
+
+def cmd_team_import(args: argparse.Namespace) -> None:
+    """Import a team ledger as provenance-carrying episodes (see anneal_memory.team).
+
+    Exit 0 when everything verified and imported; exit 3 when something was
+    refused or in conflict (everything verifiable was still imported, and the
+    report says what was not)."""
+    from .team import import_ledger, read_ledger_lines, read_stream_lines, stream_framing
+
+    sources = list(args.sources or [])
+    if not sources:
+        print("Error: pipe the ledger's exporter into '-' "
+              "(levain team export --jsonl | anneal-memory team-import -), "
+              "or give ledger file(s).", file=sys.stderr)
+        sys.exit(2)
+    chunks: list[list[str]] = []
+    for src in sources:
+        if src == "-":
+            try:
+                chunks.append(read_stream_lines(sys.stdin.buffer))
+            except ValueError as exc:
+                print(f"Error: {exc}", file=sys.stderr)
+                sys.exit(1)
+        else:
+            # read_ledger_lines names a missing file, a directory and an
+            # unexpandable ~user path itself, as a ValueError.
+            try:
+                chunks.append(read_ledger_lines([src]))
+            except ValueError as exc:
+                print(f"Error: {exc}", file=sys.stderr)
+                sys.exit(1)
+    lines = [ln for chunk in chunks for ln in chunk]
+    live = [c for c in chunks if any(ln.strip() for ln in c)]
+    if len(live) > 1 and any(stream_framing(c) != "none" for c in live):
+        print("Error: framed input (a header line, then envelopes) is one source; "
+              "do not combine it with other files or stdin.", file=sys.stderr)
+        sys.exit(2)
+    authority = [a.strip() for chunk in (args.link_authority or []) for a in chunk.split(",") if a.strip()]
+    owners = [a.strip() for chunk in (args.call_owner or []) for a in chunk.split(",") if a.strip()]
+    if (authority or owners) and any(stream_framing(c) == "v3" for c in live):
+        print("Error: --link-authority and --call-owner apply to v1/v2 input; a v3 stream "
+              "carries the exporter's verdict.", file=sys.stderr)
+        sys.exit(2)
+    with _open_store(args) as store:
+        report = import_ledger(store, lines, dry_run=args.dry_run, link_authority=authority,
+                               call_owners=owners)
+    data = report.to_dict()
+    if args.json:
+        _print_json(data)
+    else:
+        verb = "Would import" if args.dry_run else "Imported"
+        print(
+            f"{verb} {data['imported']} entries ({data['already_present']} already present, "
+            f"{data['already_removed']} pruned or deleted here earlier, "
+            f"{data['skipped_ack']} acks skipped); {data['links_made']} supersession links, "
+            f"{len(data['links_pending'])} pending"
+        )
+        # Every note goes before the findings: a caller showing only the last stderr line
+        # (levain's SessionStart seam) then shows a finding, not a note.
+        if data["links_unauthorized"]:
+            print("  note: a link is judged only on the import that first brings in either "
+                  "entry, so re-running with more authority will not make the links below; "
+                  "someone with authority can record a new entry that supersedes the target",
+                  file=sys.stderr)
+        if data["links_to_removed"]:
+            print(f"  note: {len(data['links_to_removed'])} link(s) name an entry pruned or "
+                  "deleted here; nothing is hidden", file=sys.stderr)
+        if data["framing"] == "none" and data["imported"] + data["already_present"]:
+            print("  note: unframed input; a second root inside one file is not detected "
+                  "(an exporter that frames its output closes this)", file=sys.stderr)
+        for item in data["cross_author_links"]:
+            print(f"  note: {item['by']} superseded {item['target']} (another author's entry)",
+                  file=sys.stderr)
+        if data["framing"] == "v3":
+            print(f"  team links: {data['snapshot']}; {len(data['links_added'])} added, "
+                  f"{len(data['links_added_legacy'])} added on first import, "
+                  f"{len(data['links_removed'])} removed to match the ledger, "
+                  f"{data['links_adopted']} adopted, "
+                  f"{len(data['overrides_recorded'])} operator removal(s) recorded, "
+                  f"{len(data['reimported'])} entr(ies) re-imported, "
+                  f"{len(data['rehashed'])} re-hashed (same text), "
+                  f"{len(data['replaced'])} replaced by a new episode, "
+                  f"{len(data['sanitised'])} sanitised",
+                  file=sys.stderr)
+            for item in data["unmappable"]:
+                print(f"  unmappable: {item['id']}: {item['reason']}", file=sys.stderr)
+            for note in data["snapshot_notes"]:
+                print(f"  note: {note}", file=sys.stderr)
+        for key in ("rejected", "chain_problems", "conflicts", "links_refused",
+                    "links_unauthorized"):
+            for item in data[key]:
+                print(f"  {key}: {item}", file=sys.stderr)
+    if not report.clean:
+        sys.exit(3)
+
+
+def cmd_team_status(args: argparse.Namespace) -> None:
+    """Show the team link snapshots in this store."""
+    with _open_store(args) as store:
+        data = store.team_snapshot_status()
+    if args.json:
+        _print_json(data)
+        return
+    unmanaged = (f"Rewired link rows no snapshot owns, hiding an imported team entry "
+                 f"(never adopted; remove by hand if wrong): {data['unmanaged_rewired']}")
+    if not data["keys"]:
+        print("No team snapshot (no v3 team-import has replaced links here).")
+        if data["unmanaged_rewired"]:
+            print(unmanaged)
+        return
+    for k in data["keys"]:
+        print(f"key {k['key']}  root {k['root']}  {'active' if k['active'] else 'inactive'}  "
+              f"epoch {k['epoch'][:12]} repin {k['repin_n']} pos {k['pos']} seq {k['seq']}  "
+              f"owns {k['owned']} link(s)")
+    print(f"Operator overrides: {data['overrides']}")
+    print(f"Team episodes retention keeps (enforced by an active key): "
+          f"{data['protected_episodes']}")
+    for n in data["notes"]:
+        print(f"  {n['kind']}: {n['entry_id']} ({n['detail']}) [key {n['key']}]")
+    if data["unmanaged_rewired"]:
+        print(unmanaged)
+
+
+def cmd_probe(args: argparse.Namespace) -> None:
+    """CAP-06 drift probes: declare what must survive consolidation, and read the
+    latest save's verdict on each."""
+    store = _open_store(args)
+    try:
+        if args.probe_command == "add":
+            pid = store.add_drift_probe(pattern=args.pattern, min_level=args.min_level,
+                                        fact=args.fact, section=args.section, note=args.note)
+            if args.json:
+                _print_json({"id": pid})
+            else:
+                print(f"Probe {pid} added; it is checked after every save.")
+        elif args.probe_command == "list":
+            rows = store.list_drift_probes(include_retired=args.all)
+            if args.json:
+                _print_json(rows)
+            elif not rows:
+                print("No drift probes.")
+            for r in rows if not args.json else ():
+                what = (f"pattern {r['name']} >= {r['min_level']}x" if r["kind"] == "pattern"
+                        else f"fact {r['text']!r}"
+                        + (f" in ## {r['section']}" if r["section"] else ""))
+                gone = f"  (retired {r['retired_at']})" if r["retired_at"] else ""
+                print(f"{r['id']:>4}  {what}{gone}")
+        elif args.probe_command == "retire":
+            ok = store.retire_drift_probe(args.id)
+            if args.json:
+                _print_json({"retired": ok})
+                if not ok:
+                    sys.exit(1)
+            elif ok:
+                print(f"Probe {args.id} retired.")
+            else:
+                print(f"No live probe {args.id}.", file=sys.stderr)
+                sys.exit(1)
+        else:  # status
+            data = store.drift_status()
+            if args.json:
+                _print_json(data)
+                return
+            if data["wrap_id"] is None:
+                print("No save yet.")
+                return
+            print(f"Drift probes at wrap {data['wrap_id']} ({data['wrapped_at']}):")
+            if not data["probes"]:
+                print("  (no probe was checked at this wrap)")
+            for r in data["probes"]:
+                since = f"  [since wrap {r['since_wrap']}]" if r["since_wrap"] else ""
+                print(f"  {r['status']:12s} {r['subject']}: {r['detail']}{since}")
+            if data["graduated"]:
+                print("Graduated with a validated citation at this wrap (review each for "
+                      "truth and for contradiction with your Proven patterns):")
+                for g in data["graduated"]:
+                    print(f"  {g['level']}x {g['name']}: {g['explanation']}")
+    except (ValueError, StoreError) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        sys.exit(1)
+    finally:
+        store.close()
+
+
+def cmd_team_forget_key(args: argparse.Namespace) -> None:
+    """Release a team snapshot key."""
+    with _open_store(args) as store:
+        n = store.team_forget_key(args.key)
+    if args.json:
+        _print_json({"key": args.key, "released": n})
+    else:
+        print(f"Released {args.key}: {n} link(s) no longer owned.")
 
 
 def _read_audit_entries(
@@ -2354,6 +2859,9 @@ def cmd_audit(args: argparse.Namespace) -> None:
             summary = f"episodes={data.get('episodes_compressed', '?')} chars={data.get('continuity_chars', '?')}"
         elif event == "continuity_saved":
             summary = f"chars={data.get('chars', '?')}"
+        elif event == "continuity_refused":
+            summary = (f"reason={data.get('reason', '?')} chars={data.get('chars', '?')} "
+                       f"bound={data.get('bound', '?')}")
         elif event == "associations_updated":
             summary = f"formed={data.get('formed', 0)} strengthened={data.get('strengthened', 0)}"
         elif event == "associations_decayed":
@@ -3575,6 +4083,10 @@ def cmd_outcome(args: argparse.Namespace) -> None:
         if not args.adopt_unbound:
             # The whole record is validated before the id is minted (L3 r2 10-03).
             _build_worth_record(args.exposure_id, items, args.outcome, exposed, None)
+        elif not adopt_supported():
+            # Refused before the mint below, so "nothing was written" holds (Windows
+            # CI 10-03: the id had been minted, then adopt refused).
+            raise ValueError(ADOPT_UNSUPPORTED)
         log = OutcomeLog(outcome_log_path(db_path), store_id=_outcome_store_id(db_path, mint=True))
     except (ValueError, OSError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
@@ -3639,6 +4151,36 @@ def cmd_crystal_fold_surfaced(args: argparse.Namespace) -> None:
         print(f"Skipped {result.duplicates_skipped} duplicate receipt(s) (same event_id)")
     if result.paths_missing:
         print(f"Not found (skipped): {', '.join(result.paths_missing)}", file=sys.stderr)
+
+
+def cmd_crystal_ground_evidence(args: argparse.Namespace) -> None:
+    """Fill empty crystal evidence from episodes naming the pattern (KL-09)."""
+    crystal_store = _open_crystal_store(args)
+    db_path = _existing_db_path(args, require_file=True)
+    try:
+        with Store(db_path, read_only=True) as store:
+            result = crystal_store.ground_empty_evidence(
+                store, limit=args.limit, dry_run=args.dry_run)
+    except (CrystalError, StoreError, ValueError, OSError) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        sys.exit(1)
+    if args.json:
+        _print_json({"dry_run": args.dry_run,
+                     "patterns": {n: r._asdict() for n, r in result.items()}})
+        return
+    if not result:
+        print("No live pattern is without evidence; nothing to ground.")
+        return
+    for name, r in result.items():
+        hubs = f" (skipped {r.hubs_skipped} episode(s) naming other patterns)" \
+            if r.hubs_skipped else ""
+        if r.status in ("grounded", "would_ground"):
+            verb = "Would ground" if r.status == "would_ground" else "Grounded"
+            print(f"{verb} {name}: {', '.join(r.evidence)}{hubs}")
+        elif r.status == "conflict":
+            print(f"Changed while running, left as it is: {name}")
+        else:
+            print(f"No episode names only {name}; left empty{hubs}")
 
 
 def cmd_worth(args: argparse.Namespace) -> None:
@@ -3993,7 +4535,11 @@ def build_parser() -> argparse.ArgumentParser:
         ("supersede", "Record that a newer episode replaces an older one (validated)"),
         ("unsupersede", "Remove a recorded supersession link (the undo for a wrong one)"),
     ):
-        sub = subparsers.add_parser(_verb, help=_help, parents=[json_parent])
+        sub = subparsers.add_parser(
+            _verb, help=_help, parents=[json_parent],
+            description=_help + ". A link that mirrors a team ledger (see team-status) is "
+            "changed only after a yes on a terminal, or with ANNEAL_TEAM_OVERRIDE=1 set "
+            "for one command; it is then yours, and no team import changes it again.")
         sub.add_argument("--old", required=True, metavar="ID", help="The replaced episode")
         sub.add_argument("--new", required=True, metavar="ID", help="The replacing episode")
         sub.set_defaults(func=cmd_supersede if _verb == "supersede" else cmd_unsupersede)
@@ -4061,7 +4607,50 @@ def build_parser() -> argparse.ArgumentParser:
         help="Id of an older episode this one replaces (repeatable). Validated like "
              "a citation; on refusal nothing is recorded. Recall then hides the old one.",
     )
+    sub.add_argument(
+        "--state-key", metavar="KEY", default=None,
+        help="The state slot this fact fills, e.g. user.home_city. A newer episode with "
+             "the same key replaces this one, and this one replaces older holders; "
+             "the key is your claim that the facts fill one slot (see `state`).",
+    )
+    sub.add_argument(
+        "--derived-from", action="append", metavar="ID", default=None,
+        help="Id of an episode this content was derived from (repeatable), e.g. a "
+             "summary of a page recorded as external. Each must exist. For graduation "
+             "the episode counts at most as trusted as its most trusted source.",
+    )
+    sub.add_argument(
+        "--trust", choices=list(TRUST_LEVELS), default=DEFAULT_TRUST,
+        help="Where the content came from (default: agent). tool = a relayed tool "
+             "result, external = a web page, document or another party; a pattern "
+             "grounded only in those does not graduate past 1x. operator needs a yes "
+             "on a terminal, or ANNEAL_OPERATOR=1.",
+    )
     sub.set_defaults(func=cmd_record)
+
+    # -- state (CAP-04 state keys) --
+    sub = subparsers.add_parser(
+        "state", help="List state keys and what each replaced, or --set one",
+        parents=[json_parent])
+    sub.add_argument("key", nargs="?", default=None, help="Only this key")
+    mode = sub.add_mutually_exclusive_group()
+    mode.add_argument("--set", metavar="EPISODE_ID", default=None,
+                      help="Put this existing episode into KEY's slot")
+    mode.add_argument("--unset", metavar="EPISODE_ID", default=None,
+                      help="Take this episode out of its slot (the undo for a wrong key)")
+    sub.set_defaults(func=cmd_state)
+
+    # -- trust --
+    sub = subparsers.add_parser(
+        "trust", help="Show or change an episode's trust class", parents=[json_parent]
+    )
+    sub.add_argument("episode_id", help="Episode id")
+    sub.add_argument(
+        "level", nargs="?", choices=list(TRUST_LEVELS), default=None,
+        help="New class. Lowering is open; raising needs a yes on a terminal, or "
+             "ANNEAL_OPERATOR=1. Omit to show the current class.",
+    )
+    sub.set_defaults(func=cmd_trust)
 
     # -- search (alias: recall) --
     # `recall` is the verb the library (Store.recall) and MCP tool expose, and
@@ -4142,7 +4731,8 @@ def build_parser() -> argparse.ArgumentParser:
         parents=[json_parent],
     )
     sub.add_argument("--max-chars", type=int, default=None,
-                     help="Max continuity size in chars. Omit for a schema-aware "
+                     help="Target continuity size in chars (a save is refused only above the "
+                          "schema's hard maximum, which this does not move). Omit for a schema-aware "
                           "default (20000 for the standard schema, larger for a "
                           "richer schema like FLOW_SCHEMA).")
     sub.add_argument("--staleness-days", type=int, default=7, help="Days before flagging stale patterns (default: 7)")
@@ -4239,7 +4829,8 @@ def build_parser() -> argparse.ArgumentParser:
             "refused WITHOUT changing anything if a peer replaced it or it "
             "already completed. Omit to cancel whatever is current, which is "
             "what you want when clearing a wrap you did not open (a gated wrap "
-            "also needs --session-id or --force)."
+            "also needs --session-id or --force; a wrap opened with a token its "
+            "preparer supplied needs --force)."
         ),
     )
     sub.add_argument(
@@ -4249,8 +4840,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sub.add_argument(
         "--force", action="store_true",
-        help="Cancel a gated wrap without its token or session (that session is "
-             "gone). Discards its compression.",
+        help="Cancel a gated or caller-token wrap without its token or session "
+             "(that session is gone). Discards its compression.",
     )
     sub.add_argument(
         "--partial", action="store_true",
@@ -4292,6 +4883,76 @@ def build_parser() -> argparse.ArgumentParser:
     sub = subparsers.add_parser("import", help="Import episodes from JSON export", parents=[json_parent])
     sub.add_argument("path", help="Path to JSON export file")
     sub.set_defaults(func=cmd_import)
+
+    # -- team-import --
+    sub = subparsers.add_parser(
+        "team-import",
+        help="Import a team decision ledger (JSONL, hash-chained) with provenance. "
+             "Pipe the ledger's exporter (levain team export --jsonl) into '-'. The input is "
+             "one trust unit the exporter vouches for: authors are self-declared and "
+             "authentication is the git host's job (branch protection, signed commits). "
+             "Framed input (a header line, then one envelope per ledger line) also checks "
+             "one root and one author per file; the first line of the input decides, and framed "
+             "input is read as the only source. "
+             "A directory is not read directly.",
+        parents=[json_parent],
+    )
+    sub.add_argument("sources", nargs="*", help="Ledger file(s); '-' reads stdin (the supported path)")
+    sub.add_argument("--dry-run", action="store_true", help="Verify and report; write nothing")
+    sub.add_argument(
+        "--link-authority", action="append", metavar="PATTERN",
+        help="Author handle (fnmatch pattern, comma-separated, repeatable) allowed to "
+             "supersede or retire ANOTHER author's entry, e.g. the team lead or 'pack:*'. "
+             "Without it (or --call-owner) only same-author supersession applies; other "
+             "links are reported and hide nothing. A link is judged once, on the import "
+             "that first brings in either entry: authority passed on a later import does "
+             "not link entries the store already holds.",
+    )
+    sub.add_argument(
+        "--call-owner", action="append", metavar="HANDLES",
+        help="Author handles (exact, comma-separated, repeatable; normally the team's "
+             "current members) who may supersede or retire ANOTHER author's entry whose "
+             "own owner of the call is that handle. An owner of 'lead' or 'client:...' "
+             "never matches here; name the team owner with --link-authority for those.",
+    )
+    sub.set_defaults(func=cmd_team_import)
+
+    # -- team-status / team-forget-key --
+    sub = subparsers.add_parser(
+        "team-status", parents=[json_parent],
+        help="Team link snapshots: each ledger clone's key, what it owns, operator overrides")
+    sub.set_defaults(func=cmd_team_status)
+    sub = subparsers.add_parser(
+        "team-forget-key", parents=[json_parent],
+        help="Release a team snapshot key whose clone is gone (or that holds a later view "
+             "than a live clone after a host rewrite); its links stay hidden and unowned until a first "
+             "import on a ledger root with no remaining key adopts them by their linker")
+    sub.add_argument("key", help="The key, as team-status lists it")
+    sub.set_defaults(func=cmd_team_forget_key)
+
+    # -- probe (CAP-06 drift probes) --
+    probe_parser = subparsers.add_parser(
+        "probe", help="Drift probes: what must survive consolidation, checked every save")
+    probe_sub = probe_parser.add_subparsers(dest="probe_command", required=True)
+    sub = probe_sub.add_parser(
+        "add", parents=[json_parent],
+        help="Declare a pattern (held at a level) or a fact (its words on one line)")
+    what = sub.add_mutually_exclusive_group(required=True)
+    what.add_argument("--pattern", help="A Proven pattern name that must stay in the file")
+    what.add_argument("--fact", help="A fact whose meaningful words must stay on one line")
+    sub.add_argument("--min-level", type=int, help="Pattern level it must hold (default 2)")
+    sub.add_argument("--section", help="Only look for the fact under this ## heading")
+    sub.add_argument("--note", help="Why this must survive (for the operator)")
+    sub.set_defaults(func=cmd_probe)
+    sub = probe_sub.add_parser("list", parents=[json_parent], help="List drift probes")
+    sub.add_argument("--all", action="store_true", help="Include retired probes")
+    sub.set_defaults(func=cmd_probe)
+    sub = probe_sub.add_parser("retire", parents=[json_parent], help="Stop checking a probe")
+    sub.add_argument("id", type=int)
+    sub.set_defaults(func=cmd_probe)
+    sub = probe_sub.add_parser("status", parents=[json_parent],
+                               help="The latest save's verdict on each probe")
+    sub.set_defaults(func=cmd_probe)
 
     # -- audit --
     sub = subparsers.add_parser("audit", help="Read and filter audit trail entries", parents=[json_parent])
@@ -4469,6 +5130,22 @@ def build_parser() -> argparse.ArgumentParser:
         parents=[json_parent],
     )
     cp.set_defaults(func=cmd_crystal_rewarm)
+
+    cp = crystal_sub.add_parser(
+        "ground-evidence",
+        help="Fill EMPTY pattern evidence from episodes that name the pattern",
+        description="For each live pattern with no evidence, record the OLDEST --limit "
+                    "live episodes that name the pattern as a whole word and name no other "
+                    "known pattern, as provisional evidence (the edge associative recall "
+                    "surfaces it through). Patterns that already have evidence are never "
+                    "touched. Lexical grounding only.",
+        parents=[json_parent],
+    )
+    cp.add_argument("--limit", type=int, default=4,
+                    help="Episodes recorded per pattern (default 4)")
+    cp.add_argument("--dry-run", action="store_true",
+                    help="Report what would be recorded; write nothing")
+    cp.set_defaults(func=cmd_crystal_ground_evidence)
 
     cp = crystal_sub.add_parser(
         "index",

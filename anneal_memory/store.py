@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import dataclasses
 import errno
+import fnmatch
 import inspect
 import hashlib
 import logging
@@ -18,9 +19,12 @@ import json
 import os
 import re
 import sqlite3
+import time
+import unicodedata
 import uuid
 import warnings
-from collections.abc import Iterator
+from collections import deque
+from collections.abc import Iterable, Iterator
 from contextlib import AbstractContextManager, contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -67,7 +71,7 @@ from .associations import (
     record_associations as _record_associations,
 )
 from .audit import AuditTrail
-from .graduation import _meaningful_words
+from .graduation import _meaningful_words, canonical_continuity_text
 
 #: SQLite's own write-lock message grammar, for the Python 3.10 fallback in
 #: :func:`_is_write_lock_contention` where no primary result code is available.
@@ -106,6 +110,13 @@ def _is_write_lock_contention(exc: StoreDatabaseError) -> bool:
     cause = exc.__cause__
     if not isinstance(cause, sqlite3.OperationalError):
         return False
+    return _sqlite_error_is_contention(cause)
+
+
+def _sqlite_error_is_contention(cause: sqlite3.OperationalError) -> bool:
+    """The one contention classifier: a raw ``OperationalError`` that is a
+    peer holding the database (BUSY/LOCKED), as :func:`_is_write_lock_contention`
+    reads it, so the WAL-switch retry at open uses the same rule."""
     # ⛔ CLASSIFY BY PRIMARY RESULT CODE, NOT BY A NAME ALLOWLIST.
     # This listed three extended names and returned False for every other
     # one — so SQLITE_BUSY_RECOVERY, SQLITE_LOCKED_SHAREDCACHE and friends
@@ -239,6 +250,8 @@ from .types import (
     AffectiveState,
     AssociationPair,
     AssociationStats,
+    DEFAULT_TRUST,
+    TRUST_LEVELS,
     Episode,
     EpisodeType,
     PatternAssociationPair,
@@ -250,6 +263,7 @@ from .types import (
     WrapRecord,
     WrapResult,
     WrapSnapshot,
+    trust_rank,
 )
 
 class AnnealMemoryError(Exception):
@@ -339,12 +353,26 @@ StoreOperation = Literal[
     "get",
     "delete",
     "recall",
+    "keyword_candidates",
+    "redirectable_ids",
+    "wrap_status_snapshot",
     "supersede",
     "unsupersede",
+    "import_team_entries",
+    "import_team_snapshot",
+    "drift_probes",
     "supersession_exists",
     "superseded_by_map",
+    # CAP-08 provenance trust
+    "trust_map",
+    "trust_counts",
+    "set_trust",
+    "derived_edges",
     "supersession_problem",
     "supersession_links",
+    "set_state_key",
+    "clear_state_key",
+    "state_key_report",
     "episodes_since_wrap",
     "store_id",
     # Row materialization (post-SQL): a corrupt/legacy/badly-imported row whose
@@ -360,6 +388,8 @@ StoreOperation = Literal[
     "consolidate_requires_baton",
     "wrap_gated_session",
     "wrap_derive_roots",
+    "wrap_bound_token",
+    "wrap_today",
     "set_consolidate_requires_baton",
     "get_wrap_history",
     "record_associations",
@@ -384,6 +414,10 @@ StoreOperation = Literal[
     "get_pattern_history",
     "upsert_pattern_history",
     "seed_pattern_max_level",
+    # The graduation bound's receiver record (1007+29)
+    "saved_pattern_levels",
+    # CAP-08 D2: the episodes that grounded each earned rung
+    "pattern_grounding",
     "prune",
     "schema_init",
     "batch_begin",
@@ -391,6 +425,12 @@ StoreOperation = Literal[
     "supersession_repair",
     "close",
 ]
+
+# The phase operations :meth:`Store._db_boundary` names in its docstring: a nested
+# boundary under one of these names keeps it, every other nested name becomes the
+# outer operation's.
+_PHASE_OPERATIONS: frozenset[str] = frozenset(
+    {"schema_init", "batch_commit", "batch_begin", "supersession_repair"})
 
 
 class StoreError(AnnealMemoryError):
@@ -746,8 +786,8 @@ class WrapInProgressError(AnnealMemoryError):
             f"a wrap is already in progress{when}. Either "
             f"{_WRAP_FINISH_PATHS}, or {_WRAP_CANCEL_PATHS}, "
             "before starting a new wrap. If it was prepared under the consolidate "
-            "gate, it is the preparing session's or the operator's to end, and a "
-            "plain cancel of it is refused."
+            "gate, or opened with a token its preparer holds, it is the preparer's "
+            "or the operator's to end, and a plain cancel of it is refused."
         )
 
     def __reduce__(self) -> "tuple[type[WrapInProgressError], tuple[str | None]]":
@@ -824,6 +864,7 @@ def _reconstruct_wrap_ownership_error(
     session_id: str | None = None,
     force: bool = False,
     expect_partial: bool = False,
+    bound: bool = False,
 ) -> "WrapOwnershipError":
     """Module-level reconstructor for pickling :class:`WrapOwnershipError`.
 
@@ -837,7 +878,7 @@ def _reconstruct_wrap_ownership_error(
     return WrapOwnershipError(
         expected=expected, actual=actual, partial_state=partial_state,
         gated_session=gated_session, session_id=session_id, force=force,
-        expect_partial=expect_partial,
+        expect_partial=expect_partial, bound=bound,
     )
 
 
@@ -868,6 +909,29 @@ class WrapWindowMovedError(AnnealMemoryError):
             f"wrap_started: a wrap completed since this window was read "
             f"(last wrap {expected} when read, {actual} now). Re-run prepare_wrap."
         )
+
+    def __reduce__(self) -> tuple:
+        # Two-argument __init__, so the default reduce (which passes self.args, the
+        # one message) cannot rebuild it.
+        return (type(self), (self.expected, self.actual))
+
+
+class WrapSchemaMovedError(AnnealMemoryError):
+    """Raised by ``wrap_started(section_schema=...)`` when the store's live section
+    schema is no longer the one the caller read: a ``set_section_schema`` committed
+    between the caller's read and ``wrap_started``. Nothing is written;
+    :func:`~anneal_memory.prepare_wrap` turns it into a "retry" result.
+    """
+
+    def __init__(
+        self,
+        message: str = (
+            "wrap_started: the section schema changed since prepare_wrap read it. "
+            "Re-run prepare_wrap."
+        ),
+    ) -> None:
+        # The message is the only argument, so pickle and copy rebuild it.
+        super().__init__(message)
 
 
 class WrapOwnershipError(AnnealMemoryError):
@@ -900,7 +964,8 @@ class WrapOwnershipError(AnnealMemoryError):
     **Omitting ``expect_token`` is the override** for an ungated wrap: an unproven
     cancel is a cancel with no claim. A wrap prepared under the consolidate gate
     also needs the preparing ``session_id`` or an explicit ``force`` (see
-    :class:`WrapCancelGatedError`).
+    :class:`WrapCancelGatedError`), and a wrap opened with a caller-supplied token
+    needs ``force`` (see :class:`WrapCancelBoundError`; ``bound`` is then True).
 
     ⛔ **THE STATE IS THREE-WAY AND THE THIRD ONE IS LOAD-BEARING:**
 
@@ -939,6 +1004,7 @@ class WrapOwnershipError(AnnealMemoryError):
         session_id: str | None = None,
         force: bool = False,
         expect_partial: bool = False,
+        bound: bool = False,
     ) -> None:
         self.expected = expected
         self.actual = actual
@@ -958,6 +1024,10 @@ class WrapOwnershipError(AnnealMemoryError):
         # Set only by the expect_partial=True refusal. ``expected`` cannot carry
         # this: a token is caller-chosen and could equal any marker string.
         self.expect_partial = expect_partial
+        # ``actual`` was opened with a caller-supplied token (prepare_wrap's
+        # ``wrap_token``), so a tokenless cancel of it raises WrapCancelBoundError
+        # and no override is offered in the text.
+        self.bound = bound
         if expect_partial:
             now = f"wrap {actual!r} is in progress" if actual else "it is idle"
             super().__init__(
@@ -980,6 +1050,17 @@ class WrapOwnershipError(AnnealMemoryError):
                 f"in progress — it already completed or was cancelled. Nothing "
                 f"was changed. Call without expect_token to clear whatever is "
                 f"current, or treat this as already-done."
+            )
+        elif bound:
+            # No recipe, as for a gated wrap: only the holder of the token, or the
+            # operator with force, may end it.
+            ignored = " force is ignored while expect_token is given." if force else ""
+            super().__init__(
+                f"wrap_cancelled: caller claims wrap {expected!r} but the store "
+                f"holds {actual!r}, opened with a token its preparer holds. "
+                f"Cancelling it discards that caller's compression, which is the "
+                f"operator's decision.{ignored} Nothing was changed. Check "
+                f"`status` for its start time."
             )
         elif gated_session and gated_session != session_id and force:
             super().__init__(
@@ -1028,6 +1109,7 @@ class WrapOwnershipError(AnnealMemoryError):
                 self.session_id,
                 self.force,
                 self.expect_partial,
+                self.bound,
             ),
         )
 
@@ -1073,6 +1155,71 @@ def _reconstruct_wrap_cancel_gated_error(
 ) -> "WrapCancelGatedError":
     """Pickle reconstructor for :class:`WrapCancelGatedError` (keyword-only init)."""
     return WrapCancelGatedError(gated_session=gated_session, session_id=session_id)
+
+
+class WrapCancelBoundError(AnnealMemoryError):
+    """Raised by ``wrap_cancelled()`` without ``expect_token`` (and without
+    ``force=True``) when the wrap in progress was opened with a caller-supplied
+    token (``prepare_wrap(wrap_token=...)``). Nothing is changed.
+
+    A caller that supplies its own token holds the wrap's identity before the wrap
+    exists, so every cancel it makes can be a compare-and-swap on that token, even
+    one made while ``prepare_wrap`` has not yet returned. This error closes the
+    other side: a cancel that names no token cannot end such a wrap, whatever
+    ``session_id`` it passes, because a tokenless cancel cannot tell that wrap from
+    a peer's. ``force=True`` still clears it (the holder is gone).
+
+    ⚠ Anti-reflex, like :class:`WrapCancelGatedError`: the token is readable by
+    anyone who can run ``wrap-status``, and ``force`` is open to any caller. The
+    refusal texts carry no recipe.
+
+    ⚠ The bound is on ``wrap_cancelled`` only. ``wrap_completed`` without its
+    token, ``wrap_started(allow_restart=True)``, a binary older than the bound
+    (which does not know the key), and a cancel of a bound wrap whose lifecycle
+    state is partial (no valid wrap left to protect) all end it as before.
+    """
+
+    def __init__(self, *, session_id: str | None = None) -> None:
+        self.session_id = session_id
+        super().__init__(
+            "wrap_cancelled: the wrap in progress was opened with a token its "
+            "preparer holds, and a cancel that names no token cannot end it. "
+            "Cancelling it discards that caller's compression, which is the "
+            "operator's decision. Nothing was changed."
+        )
+
+    def __reduce__(self) -> tuple:
+        return (_reconstruct_wrap_cancel_bound_error, (self.session_id,))
+
+
+def _reconstruct_wrap_cancel_bound_error(session_id: str | None) -> "WrapCancelBoundError":
+    """Pickle reconstructor for :class:`WrapCancelBoundError` (keyword-only init)."""
+    return WrapCancelBoundError(session_id=session_id)
+
+
+def _derived_trust(own: str, source_levels: Iterable[str]) -> str:
+    """CAP-08 D3's one rule: an episode's class is the lower of its own and the
+    highest class among its sources (no sources: its own).
+    :meth:`Store.effective_trust_map` applies it to a fixed point; ``record``
+    applies it to an episode not yet inserted."""
+    levels = list(source_levels)
+    if not levels:
+        return own
+    return min(own, max(levels, key=trust_rank), key=trust_rank)
+
+
+class ReplacedMatches(NamedTuple):
+    """What :meth:`Store.replaced_matches` found: the old episodes (``superseded_by`` set,
+    grouped by replacement, most current replacement first) and what its caps left out."""
+    episodes: list[Episode]
+    more_heads: int  # servable replacements beyond ``max_heads``
+    more_olds: int  # matches under the shown replacements beyond ``max_olds`` each
+    # The shown replacements themselves, read in the same snapshot as ``episodes``
+    # (a later ``get`` could find one deleted and render nothing, uncapped).
+    heads: dict[str, Episode]
+    # Effective trust of the shown heads and matches that is not ``agent``, read in
+    # the same snapshot, so a relayed head is labelled as one (L3 r1 1009+22).
+    trust: dict[str, str]
 
 
 class SupersessionError(AnnealMemoryError, ValueError):
@@ -1341,6 +1488,47 @@ CREATE INDEX IF NOT EXISTS idx_episodes_type ON episodes(type);
 CREATE INDEX IF NOT EXISTS idx_episodes_session ON episodes(session_id);
 CREATE INDEX IF NOT EXISTS idx_episodes_source ON episodes(source);
 
+-- CAP-08: an episode's trust class when it is not the default 'agent'
+-- (types.TRUST_LEVELS). Absence = 'agent', so every existing row reads as agent.
+CREATE TABLE IF NOT EXISTS episode_trust (
+    episode_id TEXT PRIMARY KEY,
+    -- The schema refuses a class trust_rank cannot rank (glm r1: a hand-edited
+    -- row crashed every reader with ValueError). Spelled out, not derived.
+    trust TEXT NOT NULL CHECK (trust IN ('external', 'tool', 'agent', 'operator'))
+);
+
+-- A trust row never outlives its episode, whatever path deletes it: episode
+-- ids are 8 hex characters, and a stale row would label the next episode that
+-- happened to get the same id.
+CREATE TRIGGER IF NOT EXISTS episode_trust_follows_delete
+AFTER DELETE ON episodes
+BEGIN
+    DELETE FROM episode_trust WHERE episode_id = OLD.id;
+END;
+
+-- CAP-08 D3 (C#11): the episodes an episode was derived from (an agent's
+-- summary of a page it fetched). For the graduation trust check an episode
+-- counts at most as trusted as the most trusted of its sources, so a summary of
+-- an external page cannot corroborate that page. Written with the episode, in
+-- its transaction; a row leaves with its derived episode. gone_trust is NULL
+-- while the source lives (its trust is then computed, never stored) and is set,
+-- for good, when the source is removed (episode_gone_marks_rows below; prune sets
+-- it first). Recording another episode under the source's id never clears it.
+CREATE TABLE IF NOT EXISTS episode_derived (
+    episode_id TEXT NOT NULL,
+    source_id TEXT NOT NULL,
+    gone_trust TEXT DEFAULT NULL
+        CHECK (gone_trust IS NULL
+               OR gone_trust IN ('external', 'tool', 'agent', 'operator')),
+    PRIMARY KEY (episode_id, source_id)
+);
+
+CREATE TRIGGER IF NOT EXISTS episode_derived_follows_delete
+AFTER DELETE ON episodes
+BEGIN
+    DELETE FROM episode_derived WHERE episode_id = OLD.id;
+END;
+
 CREATE TABLE IF NOT EXISTS tombstones (
     id TEXT PRIMARY KEY,
     timestamp TEXT NOT NULL,
@@ -1377,6 +1565,121 @@ CREATE TABLE IF NOT EXISTS supersessions (
 );
 CREATE INDEX IF NOT EXISTS idx_supersessions_new ON supersessions(new_id);
 
+-- CAP-04 state keys: the slot a fact fills ("user.home_city"), named by the writer.
+-- A newer episode in the same slot replaces the older one through an ordinary
+-- supersessions row, so hiding, unsupersede and delete rewiring all apply. Additive.
+CREATE TABLE IF NOT EXISTS state_keys (
+    episode_id TEXT PRIMARY KEY,
+    key TEXT NOT NULL,
+    set_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+);
+CREATE INDEX IF NOT EXISTS idx_state_keys_key ON state_keys(key);
+-- In the schema itself so an older binary's delete or prune fires it too: a key row
+-- never outlives its episode (a re-recorded id must not inherit a slot).
+CREATE TRIGGER IF NOT EXISTS state_keys_follow_episodes AFTER DELETE ON episodes
+BEGIN
+    DELETE FROM state_keys WHERE episode_id = OLD.id;
+END;
+
+-- CAP-06 drift probes: what the operator declared must survive consolidation, and
+-- each save's verdict on it. Additive; an older binary ignores both tables.
+CREATE TABLE IF NOT EXISTS drift_probes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    kind TEXT NOT NULL,
+    name TEXT,
+    text TEXT,
+    min_level INTEGER,
+    section TEXT,
+    note TEXT,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    retired_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS drift_results (
+    wrap_id INTEGER NOT NULL,
+    probe_id INTEGER NOT NULL,
+    status TEXT NOT NULL,
+    detail TEXT,
+    PRIMARY KEY (wrap_id, probe_id)
+);
+
+-- What each save graduated at 2x and up with a validated citation: the operator's
+-- review worklist for truth and contradiction (CAP-06). Additive.
+CREATE TABLE IF NOT EXISTS wrap_graduations (
+    wrap_id INTEGER NOT NULL,
+    name TEXT NOT NULL,
+    level INTEGER NOT NULL,
+    explanation TEXT,
+    PRIMARY KEY (wrap_id, name)
+);
+
+-- Team ledger entries this store imported (0.9.40): the ledger id and hash outlive
+-- the episode, so a whole-ledger re-import after a prune or delete does not bring
+-- the entry back. No content: both values are in the shared ledger already, so a
+-- delete keeps the row whatever keep_tombstones says. Additive: an older binary
+-- ignores the table.
+CREATE TABLE IF NOT EXISTS team_entries (
+    entry_id TEXT PRIMARY KEY,
+    hash TEXT NOT NULL,
+    episode_id TEXT NOT NULL
+);
+
+-- Team link snapshot (v3 team-import): each exporting clone ("key") of one ledger
+-- ("root") replaces the links it owns with its latest complete verdict. Additive.
+CREATE TABLE IF NOT EXISTS team_snapshot (
+    key TEXT PRIMARY KEY,
+    root TEXT NOT NULL,
+    epoch TEXT NOT NULL,
+    repin_n INTEGER NOT NULL,
+    pos INTEGER NOT NULL,
+    seq INTEGER NOT NULL,
+    active INTEGER NOT NULL
+);
+-- The supersessions rows a key's snapshot put there and still owns.
+CREATE TABLE IF NOT EXISTS team_snapshot_rows (
+    key TEXT NOT NULL,
+    old_id TEXT NOT NULL,
+    new_id TEXT NOT NULL,
+    PRIMARY KEY (key, old_id, new_id)
+);
+CREATE INDEX IF NOT EXISTS idx_team_snapshot_rows_pair ON team_snapshot_rows(old_id, new_id);
+CREATE INDEX IF NOT EXISTS idx_team_snapshot_rows_new ON team_snapshot_rows(new_id);
+-- The enforced entries of each key's last complete stream: retention never prunes
+-- a team episode an active key enforces.
+CREATE TABLE IF NOT EXISTS team_snapshot_enforced (
+    key TEXT NOT NULL,
+    entry_id TEXT NOT NULL,
+    hash TEXT NOT NULL,
+    PRIMARY KEY (key, entry_id, hash)
+);
+CREATE INDEX IF NOT EXISTS idx_team_snapshot_enforced_entry ON team_snapshot_enforced(entry_id);
+-- What each key's last complete stream could not mirror (an unmappable enforced
+-- line, a refused cycle, a target id held by several episodes): team-status counts it.
+CREATE TABLE IF NOT EXISTS team_snapshot_notes (
+    key TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    entry_id TEXT NOT NULL,
+    detail TEXT NOT NULL
+);
+-- Team links an operator took back: a snapshot never re-adds them.
+CREATE TABLE IF NOT EXISTS team_overrides (
+    old_id TEXT NOT NULL,
+    new_id TEXT NOT NULL,
+    PRIMARY KEY (old_id, new_id)
+);
+-- What a 'rewired' row (A -> C made when B was removed) stands in for: the pair
+-- (A, B) as LEDGER ids when both were team entries, and that pair's source (kept
+-- as a record; no rule reads it). It serves only the keep rule of a rewired row a
+-- snapshot already owns: rewired rows are never adopted and never take a key over.
+CREATE TABLE IF NOT EXISTS rewire_origin (
+    old_id TEXT NOT NULL,
+    new_id TEXT NOT NULL,
+    standin_old TEXT NOT NULL,
+    standin_new TEXT NOT NULL,
+    standin_source TEXT NOT NULL,
+    PRIMARY KEY (old_id, new_id, standin_old, standin_new)
+);
+
 -- Cross-session graduation history per pattern name. Closes the
 -- slow-drift sycophantic-accumulation gap surfaced by Bold Stand
 -- Phase 1b probe #1 (2026-05-21): without per-pattern history,
@@ -1410,6 +1713,66 @@ CREATE TABLE IF NOT EXISTS pattern_history (
     last_wrap_id INTEGER,
     FOREIGN KEY (last_wrap_id) REFERENCES wraps(id)
 );
+
+-- The level each pattern line held when this store last SAVED it (1007+29): the
+-- prior state the graduation bound measures a new continuity against, written by
+-- the save itself in the wrap's transaction. A named pattern dropped from the
+-- file keeps its row (its tombstone), so re-adding it returns to the level it was
+-- saved at, never to a high-water mark it was later demoted from. A freeform line
+-- has no identity across rewording, so its rows are replaced every save. One
+-- ('init', 'since') row marks that the store has saved under the bound, so an
+-- empty record is told apart from no record (codex + complement L3 r1).
+-- Additive: an older binary ignores the table.
+CREATE TABLE IF NOT EXISTS pattern_levels (
+    kind TEXT NOT NULL CHECK (kind IN ('name', 'text', 'init')),
+    key TEXT NOT NULL,
+    level INTEGER NOT NULL,
+    saved_at TEXT NOT NULL,
+    PRIMARY KEY (kind, key)
+);
+
+-- CAP-08 D2 (C#11): the episodes that grounded each rung a named pattern
+-- earned, written by the save in the wrap's transaction beside pattern_levels.
+-- When every episode recorded for a rung has since been lowered to tool or
+-- external, the graduation bound cuts the pattern's prior back below that rung
+-- at the next wrap. One group of rows per time a rung was earned (`earning`;
+-- earned_on is the wrap's day), each under the rule check 4 admitted it by: 'checked' (a quoted
+-- explanation named which citations ground it; revoked when ALL of them are now
+-- tool/external) or 'unchecked' (nothing did; revoked when ANY is). A rung stands
+-- while any of its groups does. A rung saved before the table has no rows and is
+-- never revoked. Additive.
+CREATE TABLE IF NOT EXISTS pattern_grounding (
+    name TEXT NOT NULL,
+    level INTEGER NOT NULL,
+    earned_on TEXT NOT NULL,
+    -- One earning: the wrap's token plus the line's ordinal in it. Two earnings
+    -- of the same rung on the same day stay two (codex r3 #5).
+    earning TEXT NOT NULL,
+    rule TEXT NOT NULL CHECK (rule IN ('checked', 'unchecked')),
+    episode_id TEXT NOT NULL,
+    -- As episode_derived.gone_trust: NULL while the episode lives, set for good
+    -- when it is removed. The grounding reads it when set, else the episode's
+    -- effective trust now.
+    gone_trust TEXT DEFAULT NULL
+        CHECK (gone_trust IS NULL
+               OR gone_trust IN ('external', 'tool', 'agent', 'operator')),
+    PRIMARY KEY (name, level, earning, rule, episode_id)
+);
+
+-- CAP-08 D3 R3: a removal leaves a sticky marker on every row that cited the id,
+-- whatever path removed it (raw SQL included): an unexplained removal is a
+-- failed ground (codex r3 #1). Store.prune sets the marker to the episode's
+-- effective trust first, so aging out is not a retraction. A row already marked
+-- keeps its marker, so a later episode under the same id never inherits a row
+-- written for the one before it.
+CREATE TRIGGER IF NOT EXISTS episode_gone_marks_rows
+AFTER DELETE ON episodes
+BEGIN
+    UPDATE episode_derived SET gone_trust = 'external'
+        WHERE source_id = OLD.id AND gone_trust IS NULL;
+    UPDATE pattern_grounding SET gone_trust = 'external'
+        WHERE episode_id = OLD.id AND gone_trust IS NULL;
+END;
 """
 
 # Appended separately so existing DBs get the new table via CREATE IF NOT EXISTS
@@ -1505,6 +1868,16 @@ _DEFAULT_METADATA = {
     # in a repo it was not written about.
     # Additive lifecycle key like wrap_gated_session, cleared on every terminal path.
     "wrap_derive_roots": "",
+    # The date prepare_wrap told the composer to stamp (``{today}`` in its
+    # instructions), so a save after midnight, or under another TZ, validates
+    # against that day (1007+29, codex L3 r1). Additive lifecycle key like
+    # wrap_gated_session, cleared on every terminal path.
+    "wrap_today": "",
+    # The wrap's token again when prepare_wrap was given a caller-supplied
+    # wrap_token, else empty. The wrap is token-bound only while this EQUALS
+    # wrap_token, so a value a binary that predates the key left behind can never
+    # bind a later wrap. Additive lifecycle key, cleared on every terminal path.
+    "wrap_bound_token": "",
 }
 
 
@@ -1536,6 +1909,78 @@ def _today_local() -> str:
 SUPERSEDE_MIN_OVERLAP_RATIO = 0.25
 
 
+STATE_KEY_MAX_LEN = 200
+
+
+def normalize_state_key(key: object) -> str:
+    """The canonical form of a CAP-04 state key: NFKC, whitespace collapsed,
+    case-folded. Two keys name the same slot exactly when their normal forms are equal;
+    punctuation counts (``home_city`` and ``home-city`` are two slots) and no other
+    structure is read (``subject.relation`` is a convention, not a rule).
+
+    Raises:
+        ValueError: not a string, empty after normalising, longer than
+            :data:`STATE_KEY_MAX_LEN`, or carrying a control or format character.
+    """
+    if not isinstance(key, str):
+        raise ValueError(f"state_key must be a string, not {type(key).__name__}")
+    # NFKC, case-fold, NFKC again: case-folding can produce text NFKC would change,
+    # and a stored key pasted back must name the same slot.
+    folded = unicodedata.normalize("NFKC", unicodedata.normalize("NFKC", key).casefold())
+    norm = " ".join(folded.split())
+    if not norm:
+        raise ValueError("state_key must not be empty")
+    if len(norm) > STATE_KEY_MAX_LEN:
+        raise ValueError(f"state_key is longer than {STATE_KEY_MAX_LEN} characters")
+    if any(unicodedata.category(c).startswith("C") for c in norm):
+        raise ValueError("state_key must not contain control or format characters")
+    return norm
+
+
+_ISO_INSTANT = re.compile(
+    r"(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})(?::(\d{2})(?:[.,](\d+))?)?"
+    r"(Z|[+-]\d{2}(?::?\d{2})?)?"
+)
+
+
+def _instant_key(ts: str, tiebreak: Any = "") -> tuple:
+    """A sort key for a stored timestamp by the instant it names: ISO 8601 with any
+    number of fraction digits, ``Z`` or an offset, naive read as UTC (parsed here, not by
+    ``datetime.fromisoformat``, whose accepted forms differ between Python 3.10 and
+    3.11). A timestamp that does not parse sorts after every one that does, by its text
+    (deterministic, never an error)."""
+    m = _ISO_INSTANT.fullmatch(ts) if isinstance(ts, str) else None
+    if m is None:
+        return (1, str(ts), tiebreak)
+    y, mo, d, h, mi, sec, frac, tz = m.groups()
+    try:
+        dt = datetime(int(y), int(mo), int(d), int(h), int(mi), int(sec or 0),
+                      int((frac or "0")[:6].ljust(6, "0")), tzinfo=timezone.utc)
+    except ValueError:
+        return (1, ts, tiebreak)
+    if tz and tz != "Z":
+        sign = 1 if tz[0] == "+" else -1
+        digits = tz[1:].replace(":", "")
+        try:
+            dt -= sign * timedelta(hours=int(digits[:2]), minutes=int(digits[2:4] or 0))
+        except OverflowError:
+            return (1, ts, tiebreak)
+    return (0, dt, tiebreak)
+
+
+def _canonical_utc(ts: str) -> str | None:
+    """``ts`` in the store's own timestamp form (UTC, microseconds, ``Z``), or None
+    when it does not parse. Keyed episodes are stored in this form so the string order
+    every SQL cutoff uses agrees with the instant order the key rule uses."""
+    m = _ISO_INSTANT.fullmatch(ts) if isinstance(ts, str) else None
+    if m is None or len(m.group(7) or "") > 6:
+        return None  # finer than a microsecond would be truncated and could tie or invert
+    key = _instant_key(ts)
+    if key[0] != 0:
+        return None
+    return key[1].strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+
+
 def _supersession_grounds(new_text: str, old_text: str) -> bool:
     """True when ``new_text`` shares at least one meaningful word with
     ``old_text`` and the shared words are at least
@@ -1545,15 +1990,53 @@ def _supersession_grounds(new_text: str, old_text: str) -> bool:
     return shared >= 1 and shared / max(1, min(len(a), len(b))) >= SUPERSEDE_MIN_OVERLAP_RATIO
 
 
+# recall's keyword match: LOWER(content) against a lower-cased pattern, so matching ignores
+# ASCII case whatever the SQLite build does with LIKE. Dropping LOWER was faster but relied
+# on LIKE's case setting, which a build can fix case-sensitive with no pragma to undo it
+# (codex, 0.9.31 review); it was reverted to this form.
+_KEYWORD_LIKE_SQL = "LOWER(content) LIKE ? ESCAPE '\\'"
+# Keywords per scan in Store.keyword_candidates; each adds two LIKE nodes and two bound
+# parameters, so 100 stays under the 999-parameter limit of SQLite before 3.32 with room
+# for the filter and supersession parameters.
+_KEYWORD_SCAN_GROUP = 100
+
+
+def _keyword_like_pattern(keyword: str) -> str:
+    escaped = keyword.lower().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    return f"%{escaped}%"
+
+
+def _team_entry_id_of(metadata: Any) -> str | None:
+    """The ledger entry id an episode's metadata carries, as the importer wrote it,
+    or None (unparseable metadata, no ``team`` object, or a non-string id)."""
+    try:
+        team = json.loads(metadata).get("team") if metadata else None
+    except (ValueError, TypeError, AttributeError):
+        return None
+    entry = team.get("entry_id") if isinstance(team, dict) else None
+    return entry if isinstance(entry, str) else None
+
+
+def _team_replaced_entry_of(metadata: Any) -> str | None:
+    """The ledger entry id a team row that entry left records (``team.replaced``)."""
+    try:
+        team = json.loads(metadata).get("team") if metadata else None
+    except (ValueError, TypeError, AttributeError):
+        return None
+    left = team.get("replaced") if isinstance(team, dict) else None
+    entry = left.get("entry_id") if isinstance(left, dict) else None
+    return entry if isinstance(entry, str) else None
+
+
 def _hidden_by_supersession_sql(until: str | None) -> tuple[str, list[str]]:
     """SQL selecting every episode id hidden by a supersession, and its params.
 
     An episode is hidden while ANY live episode is reachable down its chain of
     links (A -> B -> C hides A even after B is deleted), and, when ``until`` is
     given, only by replacements at or before it: a query for the state of the
-    store at a cutoff must not hide a fact replaced after that cutoff (flow's
-    per-turn hook excludes the last 45 minutes, and a just-updated fact vanished
-    from it entirely before this, reproduced in review)."""
+    store at a cutoff must not hide a fact replaced after that cutoff (a caller
+    excluding recent episodes lost a just-updated fact entirely before this,
+    reproduced in review)."""
     # A direct join is enough, and it runs on every recall (flow's hook calls
     # recall several times per prompt), so no recursive closure here. Two
     # invariants make it exact: delete()/prune() rewire links THROUGH a removed
@@ -1650,6 +2133,27 @@ def _normalize_explanation_for_dedup(explanation: str) -> str:
     return normalized
 
 
+class WrapStatusSnapshot(NamedTuple):
+    """What :meth:`Store.wrap_status_snapshot` read, in one transaction."""
+
+    started_at: str | None
+    snapshot: Any
+    partial_error: "StoreError | None"
+    gated_session: str | None
+    bound_token: str | None
+
+
+# Team episodes retention keeps: the copy (entry id AND hash) of an entry that an
+# ACTIVE snapshot key's last complete stream enforces (flow seam design §3b.7).
+_STALE_TWIN_MARK = ("[stale: the team ledger's current entry with this id could not be "
+                    "imported; see team-status] ")
+_PROTECTED_TEAM_EPISODES = (
+    "SELECT te.episode_id FROM team_entries te "
+    "JOIN team_snapshot_enforced se ON se.entry_id = te.entry_id AND se.hash = te.hash "
+    "JOIN team_snapshot ts ON ts.key = se.key AND ts.active = 1"
+)
+
+
 class Store:
     """SQLite-backed episodic store.
 
@@ -1691,7 +2195,8 @@ class Store:
         keep_tombstones: When pruning or deleting, preserve a tombstone row
             (episode ID, original timestamp, episode type, SHA-256 content hash)
             as an existence proof for the audit trail. Original text is erased.
-            Default True.
+            Default True. Either way, an imported team entry's ledger id and hash
+            stay in ``team_entries`` (see :meth:`import_team_entries`).
         project_name: Name for the continuity file header. Default "Agent".
         audit: Enable hash-chained JSONL audit trail. Default True.
         audit_retention_days: Auto-cleanup for rotated audit files. None = keep forever.
@@ -1704,6 +2209,14 @@ class Store:
             which contends with a concurrent single-writer wrap. Assumes the db
             already exists and is schema-current (a reader cannot migrate); audit is
             disabled. Default False (full read-write store).
+        trust_ceiling: The highest trust class (``types.TRUST_LEVELS``) a write
+            through this Store may carry: ``record(trust=)``, :meth:`set_trust`, and
+            so the CLI's JSON import. Above it a write is refused with ``ValueError``
+            before anything is written. Default ``"agent"``. The code that constructs
+            the Store is the host: only it sets the ceiling, and the labels it writes
+            (``trust``, ``trust_via``, ``actor``) are its statement, held by the
+            human who configured it. The MCP server opens at ``"agent"``; the CLI
+            opens at ``"operator"`` only after its operator gate.
     """
 
     def __init__(
@@ -1717,8 +2230,16 @@ class Store:
         audit_retention_days: int | None = None,
         on_audit_event: Callable | None = None,
         read_only: bool = False,
+        trust_ceiling: str = DEFAULT_TRUST,
     ) -> None:
         self._path = Path(path)
+        # CAP-08 (C#11): the highest trust class any write through this instance
+        # may carry. The code that constructs the Store is the host, so the host
+        # sets it; no call argument moves it (record, set_trust and the CLI's JSON
+        # import all go through it). Refused, never capped, above it: a capped
+        # label would read as the one the caller asked for.
+        trust_rank(trust_ceiling)
+        self._trust_ceiling: str = trust_ceiling
         # Read-only mode (per-turn recall consumers): the connection rejects writes and
         # the DB-setup branch below skips ALL init writes, so a per-prompt open can't
         # contend with a concurrent single-writer wrap. See the schema_init block.
@@ -1926,7 +2447,7 @@ class Store:
                     # read-only handle reports a permanently clean trail.
                     self._seed_audit_health()
                     return
-                self._conn.execute("PRAGMA journal_mode=WAL")
+                self._enable_wal_with_retry()
                 # synchronous=FULL makes commit() fsync the WAL so a
                 # successful COMMIT is durable at the block-device layer.
                 # Under the default synchronous=NORMAL (which WAL
@@ -2122,6 +2643,7 @@ class Store:
         # _warn_orphan_tmp_files (called later in __init__), so the orphan
         # classifier can query pair_id on a legacy store without faulting.
         self._migrate_wraps_recovery_columns(commit=False)
+        self._migrate_team_entries_removal(commit=False)
 
         # Insert default metadata (ignore if already exists)
         defaults = {**_DEFAULT_METADATA, "project_name": self._project_name}
@@ -2318,6 +2840,17 @@ class Store:
         if commit:
             self._conn.commit()
 
+    def _migrate_team_entries_removal(self, *, commit: bool = True) -> None:
+        """Add ``team_entries.removal``: NULL while held, or for a removal by a
+        version before the column; ``'auto'`` for a library/MCP delete or a prune;
+        ``'operator'`` for a delete the CLI confirmed. Only ``'operator'`` keeps an
+        entry a v3 stream enforces out of the store. Additive."""
+        cols = {row[1] for row in self._conn.execute("PRAGMA table_info(team_entries)")}
+        if "removal" not in cols:
+            self._conn.execute("ALTER TABLE team_entries ADD COLUMN removal TEXT")
+        if commit:
+            self._conn.commit()
+
     # -- Core API --
 
     def record(
@@ -2328,6 +2861,11 @@ class Store:
         metadata: dict[str, Any] | None = None,
         timestamp: str | None = None,
         supersedes: list[str] | tuple[str, ...] | None = None,
+        state_key: str | None = None,
+        trust: str = DEFAULT_TRUST,
+        *,
+        trust_via: str | None = None,
+        derived_from: list[str] | tuple[str, ...] | None = None,
     ) -> Episode:
         """Record a new episode.
 
@@ -2342,9 +2880,41 @@ class Store:
                 :class:`SupersessionError`); the episode and its links commit
                 together or not at all. Superseded episodes are kept and are
                 hidden from :meth:`recall` by default.
+            state_key: The slot this fact fills (CAP-04), e.g. ``"user.home_city"``.
+                A slot holds ONE value at a time: of its holders and this episode,
+                the newest replaces every other (a backdated episode goes into the
+                history). Newest means the instant ``timestamp`` names, so it should
+                be when the fact became true: pass ``timestamp=`` for a fact
+                recorded late. For a relation with several values (pets, languages)
+                put the value in the key (``user.pet/archie``) or do not key it.
+                The links are ordinary supersessions made without the lexical floor:
+                the shared key is the writer's claim that the facts fill one slot,
+                and anneal judges nothing semantic. See :func:`normalize_state_key`,
+                :meth:`set_state_key` and :meth:`clear_state_key`.
+            trust: Where the content came from (``types.TRUST_LEVELS``):
+                ``agent`` (default), ``tool`` (a tool result the agent relays),
+                ``external`` (a web page, a document, another party), or
+                ``operator``. A graduation whose grounding citations are all
+                ``tool``/``external`` does not climb (CAP-08). Stored with the
+                episode in one transaction; :meth:`set_trust` changes it later.
+                Refused above the Store's ``trust_ceiling``.
+            trust_via: How the host's gate vouched for ``trust`` (the CLI passes
+                ``cli:operator-terminal`` or ``cli:operator-env``). The host's
+                statement, recorded in the audit event as given; the library does
+                not check it.
+            derived_from: Ids of the episodes this content was derived from (an
+                agent's summary of a page it recorded as ``external``). Each must
+                exist; on refusal nothing is recorded. Stored with the episode in
+                one transaction. For the graduation trust check the episode counts
+                at most as trusted as its most trusted source
+                (:meth:`effective_trust_map`).
 
         Raises:
             SupersessionError: a ``supersedes`` link failed validation.
+            ValueError: ``state_key`` is not a valid key.
+            ValueError: ``trust`` is not a known trust class, or is above the
+                Store's ``trust_ceiling``, or a ``derived_from`` source does not
+                exist.
 
         Returns:
             The recorded Episode.
@@ -2361,9 +2931,29 @@ class Store:
         if isinstance(episode_type, str):
             episode_type = EpisodeType(episode_type)
 
+        self._check_trust_ceiling("record", trust)  # before anything is written
         ts = timestamp or _now_utc()
         meta_json = json.dumps(metadata) if metadata is not None else None
         old_ids = _normalize_supersedes(supersedes)
+        key = normalize_state_key(state_key) if state_key is not None else None
+        if key is not None:
+            canonical = _canonical_utc(ts)
+            if canonical is None:
+                raise ValueError(
+                    f"state_key needs an ISO 8601 timestamp of at most microsecond "
+                    f"precision; {ts!r} is not one")
+            ts = canonical
+        key_links: list[tuple[str, str]] = []
+        if derived_from is not None and not isinstance(derived_from, (list, tuple)):
+            raise ValueError(
+                f"derived_from must be a list of episode ids, not {type(derived_from).__name__}"
+            )
+        source_ids: list[str] = []
+        for raw in derived_from or ():
+            if not isinstance(raw, str) or not raw.strip():
+                raise ValueError(f"derived_from: {raw!r} is not an episode id")
+            if raw.strip().lower() not in source_ids:
+                source_ids.append(raw.strip().lower())
 
         # Retry with incrementing nonce on ID collision (birthday or duplicate content).
         # 10.5c.5 L3 Fix #17: batch-aware commit. If this method is
@@ -2404,12 +2994,25 @@ class Store:
             # Validated under the same write lock as the insert, so a target
             # cannot vanish between the check and the link. ⛔ The refusal is
             # raised AFTER this block (see _db_boundary's docstring).
+            missing_sources = [
+                sid for sid in source_ids
+                if self._conn.execute(
+                    "SELECT 1 FROM episodes WHERE id = ?", (sid,)
+                ).fetchone() is None
+            ]
+            # Judged by the effective class the episode will have once its
+            # derived_from edges exist (L3 r1 1009+22, run).
+            new_trust = self._proposed_trust(
+                trust, [sid for sid in source_ids if sid not in missing_sources])
             problem = next(
-                (p for p in (self._supersession_problem(o, None, content, ts)
-                             for o in old_ids) if p),
+                (p for p in (self._supersession_problem(
+                    o, None, content, ts, new_trust=new_trust) for o in old_ids) if p),
                 None,
             )
-            if problem is None:
+            if problem is None and not missing_sources:
+                # The key plan needs the inserted row (its rowid breaks a timestamp
+                # tie), so a refused key link is undone back to here.
+                self._conn.execute("SAVEPOINT record_state_key")
                 for nonce in range(max_retries):
                     ep_id = _episode_id(content, ts, nonce)
                     try:
@@ -2423,17 +3026,65 @@ class Store:
                         if nonce == max_retries - 1:
                             raise
                         continue
+                if trust != DEFAULT_TRUST:
+                    self._conn.execute(
+                        "INSERT OR REPLACE INTO episode_trust (episode_id, trust) VALUES (?, ?)",
+                        (ep_id, trust),
+                    )
                 for old_id in old_ids:
                     self._conn.execute(
                         "INSERT INTO supersessions (old_id, new_id, source) VALUES (?, ?, ?)",
                         (old_id, ep_id, source),
                     )
+                # No trust is stored with a live source: it is computed
+                # (effective_trust_map), and marked only when the source goes.
+                # Written before the key plan, so its check reads this episode's
+                # effective class.
+                self._conn.executemany(
+                    "INSERT OR IGNORE INTO episode_derived "
+                    "(episode_id, source_id) VALUES (?, ?)",
+                    [(ep_id, sid) for sid in source_ids],
+                )
+                if key is not None:
+                    # Every planned link points at the slot's newest holder, which is
+                    # a live chain end and so leads nowhere: no link can close a cycle.
+                    plan = self._state_key_plan(ep_id, ts, key)
+                    # ⛔ The same check set_state_key runs on each key link (CAP-08
+                    # x CAP-04 integration, run): without it a newer external
+                    # episode keyed into an operator fact's slot replaced it.
+                    # _insert_key_links runs it again and would skip the pair; here
+                    # a refusal refuses the write instead.
+                    problem = next(
+                        (p for p in (self._supersession_problem(
+                            o, n, "", "", check_grounds=False, check_order=False,
+                            key_link=True) for o, n in plan) if p),
+                        None,
+                    )
+                    if problem is None:
+                        key_links = self._apply_state_key(ep_id, key, plan, source)
+                    else:
+                        # No trailing period: the CLI appends ". Nothing was recorded."
+                        problem += (
+                            f". To unstick slot {key!r}: take that holder out with "
+                            "clear_state_key (CLI: anneal state --unset ID) or remove its "
+                            "link with unsupersede; if the holder is the lower-trust one, "
+                            "the operator can raise it with set_trust (CLI: anneal trust); "
+                            "or record this episode without state_key"
+                        )
+                if problem is not None:
+                    self._conn.execute("ROLLBACK TO record_state_key")
+                self._conn.execute("RELEASE record_state_key")
             # On a refusal this commits an empty transaction (releasing the
             # lock); inside a batch it leaves the batch's writes alone.
             if not self._defer_commit:
                 self._conn.commit()
         if problem:
             raise SupersessionError(problem)
+        if missing_sources:
+            raise ValueError(
+                f"derived_from: no episode {', '.join(map(repr, missing_sources))}. "
+                "Nothing was recorded."
+            )
 
         episode = Episode(
             id=ep_id,
@@ -2450,30 +3101,47 @@ class Store:
         # 2026-09-04: a bare emit raised a raw OSError with the episode already
         # persisted, so the caller was told record() failed and would write it
         # again — a duplicate-episode path.
-        self._audit_log_after_commit("record", {
+        record_event: dict[str, Any] = {
             "episode_id": ep_id,
             "type": episode_type.value,
             "content_hash": _content_hash(content),
             "source": source,
-        }, method="record", committed="the episode", actor=source)
+        }
+        if trust != DEFAULT_TRUST:
+            record_event["trust"] = trust  # absent = agent, as in the store
+        if trust_via is not None:
+            record_event["trust_via"] = trust_via
+        if source_ids:
+            record_event["derived_from"] = source_ids
+        self._audit_log_after_commit(
+            "record", record_event, method="record", committed="the episode", actor=source,
+        )
         for old_id in old_ids:
             self._audit_log_after_commit("supersede", {
                 "old_id": old_id,
                 "new_id": ep_id,
                 "source": source,
             }, method="record", committed="the supersession", actor=source)
+        self._audit_state_key_links(key, key_links, source, method="record")
 
         return episode
 
-    def supersede(self, *, old_id: str, new_id: str, source: str = "agent") -> bool:
+    def supersede(
+        self, *, old_id: str, new_id: str, source: str = "agent",
+        team_override: bool = False,
+    ) -> bool:
         """Record that episode ``new_id`` replaces the older episode ``old_id``.
 
         Validated like a citation (see :class:`SupersessionError`). Invalidate,
         never delete: both episodes stay, and :meth:`recall` hides ``old_id`` by
-        default. Recording a link that already exists changes nothing.
+        default. Recording a link that already exists changes nothing, and that
+        includes a link a team snapshot owns (:meth:`team_owned`); only
+        ``team_override=True`` takes such a link over: it is relabelled
+        ``'operator'`` (never a ``team:`` label, so no legacy adoption picks it up
+        again) and no snapshot manages it again.
 
         Returns:
-            True if the link was recorded, False if it already existed.
+            True if the link was recorded (or taken over), False if it already existed.
 
         Raises:
             SupersessionError: the link failed validation; nothing was written.
@@ -2500,16 +3168,35 @@ class Store:
                 problem = self._supersession_problem(
                     old_id, new_id, row["content"], row["timestamp"]
                 )
+            owned = self._team_owned(old_id, new_id)
+            if owned and not team_override and problem is None:
+                # A link a team snapshot owns, present or not: only an override
+                # changes it (codex L3 1006 r1: a missing owned row was re-inserted
+                # as the operator's, making a non-confirmed path final).
+                if not self._defer_commit:
+                    self._conn.commit()
+                return False
             if not exists and problem is None:
                 self._conn.execute(
                     "INSERT INTO supersessions (old_id, new_id, source) VALUES (?, ?, ?)",
-                    (old_id, new_id, source),
+                    (old_id, new_id, "operator" if owned else source),
                 )
+            took = exists and owned and team_override
+            if took:
+                self._conn.execute(
+                    "UPDATE supersessions SET source = 'operator' "
+                    "WHERE old_id = ? AND new_id = ?", (old_id, new_id))
+            if owned and (took or (not exists and problem is None)):
+                # The caller's link from now on: no snapshot adds or removes it again.
+                self._drop_ownership(old_id, new_id)
+                self._conn.execute(
+                    "INSERT OR IGNORE INTO team_overrides (old_id, new_id) VALUES (?, ?)",
+                    (old_id, new_id))
             if not self._defer_commit:
                 self._conn.commit()
         if problem:
             raise SupersessionError(problem)
-        if exists:
+        if exists and not took:
             return False
         self._audit_log_after_commit("supersede", {
             "old_id": old_id,
@@ -2518,15 +3205,32 @@ class Store:
         }, method="supersede", committed="the supersession", actor=source)
         return True
 
-    def unsupersede(self, *, old_id: str, new_id: str, source: str = "agent") -> bool:
+    def unsupersede(
+        self, *, old_id: str, new_id: str, source: str = "agent",
+        team_override: bool = False,
+    ) -> bool:
         """Remove a recorded link, the undo for a wrong one. Both episodes are
         untouched; ``old_id`` shows in recall again unless another link still
-        hides it. Returns False if no such link existed. Audited."""
+        hides it. Returns False if no such link existed, and also, changing
+        nothing, for a link a team snapshot owns (:meth:`team_owned`) unless
+        ``team_override=True``: then the link is removed and recorded as the
+        operator's, so no later snapshot adds it back. Audited."""
         old_id = _normalize_supersedes([old_id])[0]
         new_id = _normalize_supersedes([new_id])[0]
         with self._db_boundary("unsupersede"):
             if not self._has_supersessions_table():
                 return False
+            if not self._conn.in_transaction:
+                self._conn.execute("BEGIN IMMEDIATE")  # check and delete under one lock
+            if self._team_owned(old_id, new_id):
+                if not team_override:
+                    if not self._defer_commit:
+                        self._conn.commit()
+                    return False
+                self._conn.execute(
+                    "INSERT OR IGNORE INTO team_overrides (old_id, new_id) VALUES (?, ?)",
+                    (old_id, new_id))
+                self._drop_ownership(old_id, new_id)
             cur = self._conn.execute(
                 "DELETE FROM supersessions WHERE old_id = ? AND new_id = ?",
                 (old_id, new_id),
@@ -2541,6 +3245,1439 @@ class Store:
             "source": source,
         }, method="unsupersede", committed="the link removal", actor=source)
         return True
+
+    def _live_holders(self, key: str, exclude: str | None = None) -> list[Any]:
+        """The keyed episodes filling slot ``key`` that no link hides now, newest first
+        by the instant their timestamp names, then insertion order. Only keyed episodes
+        hold a slot: a keyed episode is replaced only through its key (see
+        :meth:`_supersession_problem`), so no outside link reaches into a slot. Runs
+        inside the caller's transaction."""
+        hide_sql, hide_params = _hidden_by_supersession_sql(None)
+        rows = self._conn.execute(
+            "SELECT e.rowid AS rn, e.id, e.timestamp FROM state_keys k JOIN episodes e "
+            f"ON e.id = k.episode_id WHERE k.key = ? AND e.id != ? AND e.id NOT IN ({hide_sql})",
+            [key, exclude or "", *hide_params],
+        ).fetchall()
+        return sorted(rows, key=lambda r: _instant_key(r["timestamp"], r["rn"]), reverse=True)
+
+    def _state_key_plan(self, ep_id: str, ts: str, key: str) -> list[tuple[str, str]]:
+        """The ``(old_id, new_id)`` links that put ``ep_id`` into slot ``key``: of the
+        slot's holders plus ``ep_id``, the newest (by the instant a timestamp names, then
+        insertion order, so a tie goes to the later write) replaces every other. A
+        backdated episode therefore goes under the newest holder, and a slot left with two
+        live holders (after an ``unsupersede``) is made whole again. Runs inside the
+        caller's write transaction."""
+        holders = self._live_holders(key, exclude=ep_id)
+        rn = self._conn.execute("SELECT rowid FROM episodes WHERE id = ?", (ep_id,)).fetchone()
+        mine = _instant_key(ts, rn[0] if rn else 0)
+        everyone = [(mine, ep_id)] + [(_instant_key(r["timestamp"], r["rn"]), r["id"])
+                                      for r in holders]
+        newest = max(everyone)[1]
+        return sorted((i, newest) for _, i in everyone if i != newest)
+
+    def _insert_key_links(
+        self, links: list[tuple[str, str]],
+    ) -> tuple[list[tuple[str, str]], list[tuple[str, str]]]:
+        """Insert key links with ``source='state_key'`` (the link's KIND; who asked is in
+        the audit event), skipping a pair a team snapshot owns. A wrap-proposed link the
+        key confirms is relabelled ``state_key`` (wrap links hide but never serve; a key
+        is the writer's claim, so it may).
+
+        ⛔ Every pair passes :meth:`_supersession_problem`'s key-link check here, the
+        one place all key links are written (``record``, ``set_state_key``,
+        ``clear_state_key``). A refused pair is skipped and both holders stay live (L3
+        r1 1009+22, run: ``clear_state_key`` re-formed a slot so an agent episode hid an
+        operator one). ``record`` and ``set_state_key`` refuse such a plan before they
+        get here; ``clear_state_key`` has already removed rows and cannot.
+        Returns ``(written or relabelled, refused)``."""
+        made = []
+        refused = []
+        for old_id, new_id in links:
+            if self._team_owned(old_id, new_id):
+                continue
+            if self._supersession_problem(
+                    old_id, new_id, "", "", check_grounds=False, check_order=False,
+                    key_link=True):
+                refused.append((old_id, new_id))
+                continue
+            cur = self._conn.execute(
+                "INSERT OR IGNORE INTO supersessions (old_id, new_id, source) "
+                "VALUES (?, ?, 'state_key')", (old_id, new_id))
+            if not cur.rowcount:
+                cur = self._conn.execute(
+                    "UPDATE supersessions SET source = 'state_key' "
+                    "WHERE old_id = ? AND new_id = ? AND source = 'wrap'", (old_id, new_id))
+            if cur.rowcount:
+                made.append((old_id, new_id))
+        return made, refused
+
+    def _apply_state_key(
+        self, ep_id: str, key: str, links: list[tuple[str, str]], source: str,
+    ) -> list[tuple[str, str]]:
+        """Write the key row and the planned links (inside the caller's transaction);
+        returns the links actually written."""
+        self._conn.execute(
+            "INSERT INTO state_keys (episode_id, key) VALUES (?, ?)", (ep_id, key))
+        return self._insert_key_links(links)[0]
+
+    def _audit_state_key_links(
+        self, key: str | None, links: list[tuple[str, str]], source: str, *, method: str,
+    ) -> None:
+        for old_id, new_id in links:
+            self._audit_log_after_commit("supersede", {
+                "old_id": old_id,
+                "new_id": new_id,
+                "source": source,
+                "state_key": key,
+            }, method=method, committed="the supersession", actor=source)
+
+    def set_state_key(
+        self, episode_id: str, key: str, *, source: str = "agent",
+    ) -> list[tuple[str, str]]:
+        """Put an existing episode into state slot ``key`` (CAP-04), with the same
+        linking rule as ``record(state_key=...)``. Setting the key an episode
+        already has changes nothing.
+
+        Returns:
+            The ``(old_id, new_id)`` links made (empty when nothing changed).
+
+        Raises:
+            ValueError: ``key`` is not a valid key.
+            SupersessionError: the episode does not exist, already has a different
+                key, or a planned link would close a cycle through links it already
+                has. Nothing was written.
+        """
+        key = normalize_state_key(key)
+        episode_id = _normalize_supersedes([episode_id])[0]
+        links: list[tuple[str, str]] = []
+        problem: str | None = None
+        with self._db_boundary("set_state_key"):
+            if not self._conn.in_transaction:
+                self._conn.execute("BEGIN IMMEDIATE")
+            # ⛔ No raise inside this boundary (see supersede()).
+            row = self._conn.execute(
+                "SELECT content, timestamp FROM episodes WHERE id = ?", (episode_id,)
+            ).fetchone()
+            have = self._conn.execute(
+                "SELECT key FROM state_keys WHERE episode_id = ?", (episode_id,)
+            ).fetchone()
+            if row is None:
+                problem = f"set_state_key: episode {episode_id!r} does not exist"
+            elif have is None and _canonical_utc(row["timestamp"]) != row["timestamp"]:
+                problem = (
+                    f"set_state_key: {episode_id!r} has timestamp {row['timestamp']!r}, not "
+                    "the store's UTC form; a keyed episode needs it so cutoffs and the key "
+                    "rule agree on order. Re-record it with state_key="
+                )
+            elif have is not None and have["key"] != key:
+                problem = (
+                    f"set_state_key: {episode_id!r} already fills {have['key']!r}; "
+                    "unsupersede its links and delete or re-record it to move it"
+                )
+            elif have is None and self._has_supersessions_table() and self._conn.execute(
+                f"SELECT 1 WHERE ? IN ({_hidden_by_supersession_sql(None)[0]})",
+                [episode_id, *_hidden_by_supersession_sql(None)[1]],
+            ).fetchone():
+                problem = (
+                    f"set_state_key: {episode_id!r} is already replaced by a newer episode; "
+                    "key the current one"
+                )
+            elif have is None:
+                links = self._state_key_plan(episode_id, row["timestamp"], key)
+                for old_id, new_id in links:
+                    # The key is the grounding and the plan fixed the order (by instant),
+                    # so only existence and cycles are checked here.
+                    problem = self._supersession_problem(
+                        old_id, new_id, "", "", check_grounds=False, check_order=False,
+                        key_link=True)
+                    if problem:
+                        links = []
+                        break
+                if problem is None:
+                    links = self._apply_state_key(episode_id, key, links, source)
+            if not self._defer_commit:
+                self._conn.commit()
+        if problem:
+            raise SupersessionError(problem)
+        self._audit_state_key_links(key, links, source, method="set_state_key")
+        return links
+
+    def clear_state_key(self, episode_id: str, *, source: str = "agent") -> dict[str, Any]:
+        """Take an episode OUT of its state slot (CAP-04), the undo for a wrong key:
+        its key row goes, every link a key made between it and another holder of the
+        same key goes (``source`` ``state_key``, or ``rewired`` through a deleted holder;
+        an explicit link and one a team snapshot owns are left), and the slot is
+        re-formed so its newest
+        live holder replaces the others again. ``unsupersede`` alone does not do this:
+        the key row stays, so the next keyed write in that slot hides the episode again.
+
+        A re-formed link the trust rule refuses (the newest holder ranks below an
+        older one) is not made: both stay live, listed in ``left_live``.
+
+        Returns:
+            ``{"key": <key or None>, "removed": [(old, new), ...], "added": [...],
+            "left_live": [...]}``; ``key`` is None (and nothing changed) when the
+            episode had no key.
+        """
+        episode_id = _normalize_supersedes([episode_id])[0]
+        out: dict[str, Any] = {"key": None, "removed": [], "added": [], "left_live": []}
+        with self._db_boundary("clear_state_key"):
+            if not self._conn.in_transaction:
+                self._conn.execute("BEGIN IMMEDIATE")
+            have = self._conn.execute(
+                "SELECT key FROM state_keys WHERE episode_id = ?", (episode_id,)
+            ).fetchone() if self._conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'state_keys'"
+            ).fetchone() else None
+            if have is not None:
+                key = have["key"]
+                out["key"] = key
+                for r in self._conn.execute(
+                    "SELECT s.old_id, s.new_id FROM supersessions s JOIN state_keys k "
+                    "ON k.episode_id = CASE WHEN s.old_id = ? THEN s.new_id ELSE s.old_id END "
+                    "WHERE (s.old_id = ? OR s.new_id = ?) AND k.key = ? "
+                    "AND s.source IN ('state_key', 'rewired')",
+                    (episode_id, episode_id, episode_id, key),
+                ).fetchall():
+                    if self._team_owned(r["old_id"], r["new_id"]):
+                        continue
+                    self._conn.execute(
+                        "DELETE FROM supersessions WHERE old_id = ? AND new_id = ?",
+                        (r["old_id"], r["new_id"]))
+                    out["removed"].append((r["old_id"], r["new_id"]))
+                self._conn.execute("DELETE FROM state_keys WHERE episode_id = ?", (episode_id,))
+                holders = self._live_holders(key)
+                if len(holders) > 1:
+                    out["added"], out["left_live"] = self._insert_key_links(
+                        [(r["id"], holders[0]["id"]) for r in holders[1:]])
+            if not self._defer_commit:
+                self._conn.commit()
+        for old_id, new_id in out["removed"]:
+            self._audit_log_after_commit("unsupersede", {
+                "old_id": old_id, "new_id": new_id, "source": source, "state_key": out["key"],
+            }, method="clear_state_key", committed="the link removal", actor=source)
+        self._audit_state_key_links(out["key"], out["added"], source, method="clear_state_key")
+        return out
+
+    def state_key_report(self, key: str | None = None) -> list[dict[str, Any]]:
+        """Each state key (or just ``key``) with its live holder(s) and the holders
+        it has replaced, newest first: the operator's view of what the writer
+        claimed (CAP-04). Normally one live holder per key; more than one means a
+        link was removed with :meth:`unsupersede`, and the next keyed write in that
+        slot replaces them all. Read-only; ``[]`` on a store with no keys."""
+        want = normalize_state_key(key) if key is not None else None
+        out: list[dict[str, Any]] = []
+        with self._db_boundary("state_key_report"), self._read_snapshot():
+            if self._conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'state_keys'"
+            ).fetchone() is None:
+                return []
+            keys = [r[0] for r in self._conn.execute(
+                "SELECT DISTINCT key FROM state_keys"
+                + (" WHERE key = ?" if want is not None else "") + " ORDER BY key",
+                [want] if want is not None else [])]
+            for k in keys:
+                current = [r["id"] for r in self._live_holders(k)]
+                keyed = self._conn.execute(
+                    "SELECT e.rowid AS rn, e.id, e.timestamp FROM state_keys s "
+                    "JOIN episodes e ON e.id = s.episode_id WHERE s.key = ?", (k,)).fetchall()
+                replaced = [r["id"] for r in sorted(
+                    keyed, key=lambda r: _instant_key(r["timestamp"], r["rn"]), reverse=True)
+                    if r["id"] not in current]
+                rows = {}
+                want_ids = current + replaced
+                for start in range(0, len(want_ids), 500):
+                    chunk = want_ids[start:start + 500]
+                    rows.update({r["id"]: r for r in self._conn.execute(
+                        "SELECT id, timestamp, content FROM episodes WHERE id IN "
+                        f"({','.join('?' * len(chunk))})", chunk)})
+                out.append({
+                    "key": k,
+                    "current": [dict(rows[i]) for i in current if i in rows],
+                    "replaced": [dict(rows[i]) for i in replaced if i in rows],
+                })
+        return out
+
+    def _remember_team_entries(self, items: Iterable[tuple[Any, Any, Any]]) -> None:
+        """Record ``(entry_id, hash, episode_id)`` in ``team_entries``. The first
+        hash recorded for an entry id is kept (the first importer of an id wins);
+        a later write with the same hash only moves ``episode_id``. Items whose
+        fields are not all strings are skipped. Runs inside the caller's
+        transaction."""
+        self._conn.executemany(
+            "INSERT INTO team_entries (entry_id, hash, episode_id) VALUES (?, ?, ?) "
+            "ON CONFLICT(entry_id) DO UPDATE SET episode_id = excluded.episode_id "
+            "WHERE team_entries.hash = excluded.hash "
+            "AND team_entries.episode_id != excluded.episode_id",
+            [t for t in items if all(isinstance(v, str) for v in t)],
+        )
+
+    def _remember_team_rows(self, rows: Iterable[sqlite3.Row], removal: str = "auto") -> None:
+        """Before episodes are removed: record the ledger id of each imported team
+        row among them, and how it went (``removal``: ``'operator'`` only for a
+        delete the CLI confirmed, else ``'auto'``). A v2 import never brings a
+        recorded entry back; a v3 replace brings back an entry its stream enforces
+        unless an operator removed it."""
+        items = []
+        for row in rows:
+            if not str(row["source"]).startswith("team:"):
+                continue
+            try:
+                team = json.loads(row["metadata"]).get("team")
+            except (TypeError, ValueError, AttributeError):
+                continue
+            if isinstance(team, dict):
+                items.append((team.get("entry_id"), team.get("hash"), row["id"]))
+        if items:
+            self._remember_team_entries(items)
+            # By entry id: the kind is read only once no stored copy of the entry
+            # remains, whichever copy team_entries.episode_id last named.
+            self._conn.executemany(
+                "UPDATE team_entries SET removal = CASE WHEN removal = 'operator' "
+                "THEN removal ELSE ? END WHERE entry_id = ?",
+                [(removal, t[0]) for t in items if all(isinstance(v, str) for v in t)])
+
+    def import_team_snapshot(
+        self,
+        records: list[dict[str, Any]],
+        *,
+        key: str,
+        root: str,
+        prev_root: str,
+        epoch: str,
+        repin_n: int,
+        pos: int,
+        seq: int,
+        judged: str,
+        complete: bool,
+        enforced: dict[str, list[str]],
+        honours: list[tuple[str, str]],
+        seen: Iterable[tuple[str, str]] = (),
+        unmappable: Iterable[dict[str, Any]] = (),
+        dry_run: bool = False,
+    ) -> dict[str, Any]:
+        """Import a v3 team stream (flow seam design §3b): the episodes, then, when
+        the stream is complete, ``judged == "full"`` and wins on order, REPLACE the
+        team state this ``key`` owns with the stream's verdict, in ONE write
+        transaction. ``enforced`` maps each enforced ledger id to its hash(es) (two
+        hashes = a live twin); ``honours`` lists the honoured pairs as ``(target,
+        linker)`` ledger ids; ``seen`` is ``(id, hash)`` of every verified line in any
+        envelope; ``unmappable`` the enforced lines the
+        reader refused.
+
+        - Order: a key new to the store, or whose ``repin_n`` differs from the one
+          stored (bumped, or lower: a restored state), replaces; so does a new
+          ``epoch``; otherwise ``(pos, seq)`` must exceed the key's own and the
+          ACTIVE key's of this root and epoch.
+        - A known key arriving with another ``root`` moves only when ``prev_root`` is
+          the root stored for it; any other root change is a key collision
+          (``partial_stream``, its rows untouched).
+        - Every replace takes over every other key of this root, and every key owning
+          a non-rewired row whose linker is a line of this stream by ``(entry_id, hash)``.
+        - Inside the replace: owned rows missing while both episodes exist become
+          operator overrides; then the episodes import (an enforced entry with no
+          episode comes back unless an operator removed it; a stored copy whose hash
+          no enforced line carries is replaced: its metadata when the text and
+          timestamp are the same (``rehashed``), else by a NEW episode linked
+          over it by a link this key owns (``replaced``)); then removals; then
+          additions (existence, cycle and trust checks).
+        - The first replace on a root with no snapshot adopts each unowned
+          ``team:`` row whose target is enforced and whose linker is a line of this
+          stream by ``(entry_id, hash)``; rewired rows are never adopted. Wanted
+          pairs with no row are added and reported as ``links_added_legacy``.
+        - wanted = honoured pairs whose linker is stored with an enforced hash and
+          whose target is the one stored episode with that id, minus overrides; an
+          owned row stays when wanted, when its target is not enforced, or when a
+          pair it stands in for is honoured. Operator rows are never touched.
+        """
+        if dry_run and self._defer_commit:
+            raise ValueError("import_team_snapshot: dry_run cannot run inside a batch")
+        seen = set(seen)
+        unmappable = list(unmappable)
+        rep: dict[str, Any] = {
+            "snapshot": "replaced", "links_added": [], "links_added_legacy": [],
+            "links_removed": [], "links_refused": [], "links_adopted": 0,
+            "overrides_recorded": [], "stream_problems": [], "stream_notes": [],
+            "unmappable": [],
+            "reimported": [], "rehashed": [], "replaced": [],
+        }
+        notes: list[tuple[str, str, str]] = []
+        with self._db_boundary("import_team_snapshot"):
+            if not self._conn.in_transaction:
+                self._conn.execute("BEGIN IMMEDIATE")
+            session_id = self._current_session_id()
+            mine = self._conn.execute(
+                "SELECT * FROM team_snapshot WHERE key = ?", (key,)).fetchone()
+            same_root = self._conn.execute(
+                "SELECT * FROM team_snapshot WHERE root = ? AND key != ?",
+                (root, key)).fetchall()
+            moved = mine is not None and mine["root"] != root
+            status = None
+            if not complete:
+                status = "incomplete_stream"
+            elif judged != "full":
+                status = "partial_stream"
+            elif moved and prev_root != mine["root"]:
+                status = "partial_stream"
+                rep["stream_problems"].append(
+                    f"key {key!r} is stored for another ledger root and this stream does "
+                    "not name that root as its previous one (a copied or reused state "
+                    "file); nothing was replaced")
+            elif not self._snapshot_is_newer(mine, same_root, epoch, repin_n, pos, seq):
+                status = "stale_stream"
+                blockers = [r["key"] for r in same_root if r["active"]
+                            and r["epoch"] == epoch and (pos, seq) <= (r["pos"], r["seq"])]
+                if blockers:
+                    rep["stream_notes"].append(
+                        f"not replaced: the active key {blockers[0]!r} holds a later view "
+                        f"of this ledger; if that clone is gone or behind a host rewrite, "
+                        f"`anneal-memory team-forget-key {blockers[0]}` releases it")
+            rep["snapshot"] = status or "replaced"
+            by_entry, gone = self._team_held()
+            if status is None:
+                takers = self._snapshot_takeover_keys(key, same_root, by_entry, seen)
+                rep["overrides_recorded"] = self._snapshot_operator_removals(
+                    [key, *takers] if mine is not None else takers)
+                final = {r[0] for r in self._conn.execute(
+                    "SELECT entry_id FROM team_entries WHERE removal = 'operator'")}
+                ins = self._insert_team_episodes(
+                    records, by_entry, gone, session_id, replace=enforced, final=final,
+                    root=root, takers=takers, blocked={u["id"] for u in unmappable})
+                rep["reimported"] = ins["reimported"]
+                rep["rehashed"] = ins["replaced"]
+                rep["replaced"] = [{k: item[k] for k in ("id", "old", "new", "revived")}
+                                   for item in ins["superseded"]]
+                for u in unmappable:
+                    twin = by_entry.get(u["id"])
+                    stale = twin is not None and u.get("verified", True) \
+                        and twin["hash"] != u["hash"] \
+                        and twin["hash"] not in enforced.get(u["id"], ()) \
+                        and not self._enforced_elsewhere(u["id"], twin["hash"], root, takers)
+                    rep["unmappable"].append({**u, **({"stale_twin": twin["ep"]}
+                                                      if stale and twin else {})})
+                    notes.append(("unmappable", u["id"], u["reason"][:200]))
+                    if stale and twin is not None:
+                        self._flag_stale_twin(twin)
+                self._snapshot_replace(
+                    rep, notes, by_entry, key,
+                    mine is None and not same_root, takers, enforced, honours,
+                    seen, {u["id"] for u in rep["unmappable"]})
+                self._conn.execute(
+                    "UPDATE team_snapshot SET active = 0 WHERE root = ?", (root,))
+                if takers:
+                    marks = ",".join("?" * len(takers))
+                    self._conn.execute(
+                        f"UPDATE team_snapshot SET active = 0 WHERE key IN ({marks})", takers)
+                    for table in ("team_snapshot_enforced", "team_snapshot_notes"):
+                        self._conn.execute(
+                            f"DELETE FROM {table} WHERE key IN ({marks})", takers)
+                self._conn.execute(
+                    "INSERT OR REPLACE INTO team_snapshot "
+                    "(key, root, epoch, repin_n, pos, seq, active) "
+                    "VALUES (?, ?, ?, ?, ?, ?, 1)",
+                    (key, root, epoch, repin_n, pos, seq),
+                )
+                self._conn.execute("DELETE FROM team_snapshot_enforced WHERE key = ?", (key,))
+                self._conn.executemany(
+                    "INSERT OR IGNORE INTO team_snapshot_enforced (key, entry_id, hash) "
+                    "VALUES (?, ?, ?)",
+                    [(key, e, h) for e, hs in enforced.items() for h in hs])
+                self._conn.execute("DELETE FROM team_snapshot_notes WHERE key = ?", (key,))
+                self._conn.executemany(
+                    "INSERT INTO team_snapshot_notes (key, kind, entry_id, detail) "
+                    "VALUES (?, ?, ?, ?)", [(key, *n) for n in notes])
+            else:
+                ins = self._insert_team_episodes(records, by_entry, gone, session_id)
+                rep["unmappable"] = [u for u in unmappable
+                                     if not (u["id"] in by_entry
+                                             and by_entry[u["id"]]["hash"] == u["hash"])]
+            if dry_run:
+                self._conn.rollback()
+            elif not self._defer_commit:
+                self._conn.commit()
+        if not dry_run:
+            for item in ins["imported"]:
+                self._audit_log_after_commit("record", {
+                    "episode_id": item["episode"], "type": item["type"],
+                    "content_hash": _content_hash(item["content"]),
+                    "source": item["source"],
+                }, method="import_team_snapshot", committed="the episode",
+                    actor=item["source"])
+            for item in ins["replaced_audit"]:
+                self._audit_log_after_commit("record", {
+                    "episode_id": item["episode"], "type": item["type"],
+                    "content_hash": _content_hash(item["content"]),
+                    "source": item["source"],
+                }, method="import_team_snapshot", committed="the new hash of an unchanged episode",
+                    actor=item["source"])
+            for item in ins["superseded"]:
+                self._audit_log_after_commit("record", {
+                    "episode_id": item["new"], "type": item["type"],
+                    "content_hash": _content_hash(item["content"]),
+                    "source": item["source"], "replaces_episode": item["old"],
+                    **({"revived": True} if item["revived"] else {}),
+                }, method="import_team_snapshot",
+                    committed="the entry's move to this episode", actor=item["source"])
+            for link in rep["links_added"] + rep["links_added_legacy"]:
+                self._audit_log_after_commit("supersede", {
+                    "old_id": link["old"], "new_id": link["new"], "source": link["source"],
+                }, method="import_team_snapshot", committed="the supersession",
+                    actor=link["source"])
+            for link in rep["links_removed"]:
+                self._audit_log_after_commit("unsupersede", {
+                    "old_id": link["old"], "new_id": link["new"],
+                    "source": "team-snapshot",
+                }, method="import_team_snapshot", committed="the link removal",
+                    actor="team-snapshot")
+        rep.update({"imported": ins["imported"], "already_present": ins["already"],
+                    "conflicts": ins["conflicts"], "already_removed": ins["removed"]})
+        return rep
+
+    @staticmethod
+    def _snapshot_is_newer(
+        mine: sqlite3.Row | None, others: list[sqlite3.Row],
+        epoch: str, repin_n: int, pos: int, seq: int,
+    ) -> bool:
+        """``others``: the OTHER keys stored for this stream's root."""
+        if mine is None or mine["repin_n"] != repin_n:
+            # A key's FIRST replace, a bumped repin_n (Phill's (a)), or a lower one
+            # (its state restored or copied): the clone that exists now takes over.
+            return True
+        if mine["epoch"] == epoch and (pos, seq) <= (mine["pos"], mine["seq"]):
+            return False  # this key already sent this view or a later one (codex L3 r1)
+        active = [r for r in others if r["active"]]
+        if mine["active"]:
+            active.append(mine)
+        if all(r["epoch"] != epoch for r in active):
+            return True  # a repin or distrust: the new epoch wins
+        # Inactive keys export nothing any more: their high-water mark blocks no one.
+        return all((pos, seq) > (r["pos"], r["seq"])
+                   for r in active if r["epoch"] == epoch and r["key"] != mine["key"])
+
+    def _snapshot_takeover_keys(
+        self, key: str, same_root: list[sqlite3.Row],
+        by_entry: dict[str, dict[str, Any]], seen: set[tuple[str, str]],
+    ) -> list[str]:
+        """Keys this replace takes over: every other key of the root, and every key
+        owning a NON-rewired row whose physical LINKER is a line of this stream by
+        ``(entry_id, hash)`` (a target alone proves nothing: rulings are copied
+        between ledgers). A rewired row never takes a key over (Phill 2026-10-06:
+        its provenance spiralled through three review rounds; deleted, not guarded)."""
+        out = {r["key"] for r in same_root}
+        line_of = {v["ep"]: (e, v["hash"]) for e, v in by_entry.items()}
+        for r in self._conn.execute(
+                "SELECT DISTINCT o.key, o.new_id FROM team_snapshot_rows o "
+                "JOIN supersessions s ON s.old_id = o.old_id AND s.new_id = o.new_id "
+                "WHERE o.key != ? AND s.source != 'rewired'", (key,)).fetchall():
+            if r["key"] not in out and line_of.get(r["new_id"]) in seen:
+                out.add(r["key"])
+        return sorted(out)
+
+    def _enforced_elsewhere(self, entry_id: str, hash_: Any, root: str,
+                            takers: list[str] | None = None) -> bool:
+        """True when an ACTIVE key of another ledger root, other than one this replace
+        takes over, enforces this exact copy: a stream must never rewrite or flag
+        another ledger's current entry."""
+        for r in self._conn.execute(
+            "SELECT se.key FROM team_snapshot_enforced se JOIN team_snapshot ts "
+            "ON ts.key = se.key AND ts.active = 1 AND ts.root != ? "
+            "WHERE se.entry_id = ? AND se.hash = ?", (root, entry_id, hash_)
+        ).fetchall():
+            if r[0] not in (takers or ()):
+                return True
+        return False
+
+    def _flag_stale_twin(self, twin: dict[str, Any]) -> None:
+        """A stored copy of an id whose enforced line cannot be mapped: say so in its
+        text, once, so it does not read as the ledger's current entry."""
+        mark = _STALE_TWIN_MARK
+        row = self._conn.execute(
+            "SELECT content FROM episodes WHERE id = ?", (twin["ep"],)).fetchone()
+        if row is not None and not str(row["content"]).startswith(mark):
+            self._conn.execute("UPDATE episodes SET content = ? WHERE id = ?",
+                               (mark + row["content"], twin["ep"]))
+
+    def _snapshot_operator_removals(self, owner_keys: list[str]) -> list[dict[str, str]]:
+        """Owned rows that no longer exist while both episodes still do were removed
+        by someone (any anneal version): record an override and drop ownership."""
+        if not owner_keys:
+            return []
+        marks = ",".join("?" * len(owner_keys))
+        gone_rows = self._conn.execute(
+            f"""SELECT DISTINCT o.old_id, o.new_id FROM team_snapshot_rows o
+                WHERE o.key IN ({marks})
+                AND NOT EXISTS (SELECT 1 FROM supersessions s
+                                WHERE s.old_id = o.old_id AND s.new_id = o.new_id)
+                AND EXISTS (SELECT 1 FROM episodes e WHERE e.id = o.old_id)
+                AND EXISTS (SELECT 1 FROM episodes e WHERE e.id = o.new_id)""",
+            owner_keys,
+        ).fetchall()
+        out = []
+        for r in gone_rows:
+            self._conn.execute(
+                "INSERT OR IGNORE INTO team_overrides (old_id, new_id) VALUES (?, ?)",
+                (r["old_id"], r["new_id"]))
+            self._drop_ownership(r["old_id"], r["new_id"])
+            out.append({"old": r["old_id"], "new": r["new_id"]})
+        return out
+
+    def _team_owned(self, old_id: str, new_id: str) -> bool:
+        try:
+            return self._conn.execute(
+                "SELECT 1 FROM team_snapshot_rows WHERE old_id = ? AND new_id = ?",
+                (old_id, new_id)).fetchone() is not None
+        except sqlite3.OperationalError:  # a read-only open of an older store
+            return False
+
+    def team_owned(self, *, old_id: str, new_id: str) -> bool:
+        """True when a team snapshot owns the link ``old_id`` <- ``new_id`` (it
+        mirrors the team ledger, and library supersede/unsupersede leave it alone)."""
+        old_id = _normalize_supersedes([old_id])[0]
+        new_id = _normalize_supersedes([new_id])[0]
+        with self._db_boundary("supersession_exists"):
+            return self._team_owned(old_id, new_id)
+
+    def team_snapshot_status(self) -> dict[str, Any]:
+        """The team snapshot keys and what they own; what each key's last stream
+        could not mirror (``notes``: unmappable lines, refused cycles, target ids held
+        by several episodes); how many team episodes retention keeps for an active
+        key; and 'rewired' rows hiding a team episode that no snapshot owns (never
+        adopted, so they stay as they are until removed by hand). Read-only."""
+        empty = {"keys": [], "overrides": 0, "unmanaged_rewired": 0, "notes": [],
+                 "protected_episodes": 0}
+        with self._db_boundary("status"), self._read_snapshot():
+            try:
+                keys = [dict(r) | {"owned": self._conn.execute(
+                    "SELECT COUNT(*) FROM team_snapshot_rows WHERE key = ?",
+                    (r["key"],)).fetchone()[0]}
+                    for r in self._conn.execute(
+                        "SELECT key, root, epoch, repin_n, pos, seq, active "
+                        "FROM team_snapshot ORDER BY root, key").fetchall()]
+                overrides = self._conn.execute(
+                    "SELECT COUNT(*) FROM team_overrides").fetchone()[0]
+                # Any unowned rewired row that hides a team entry, whatever its
+                # linker is (seam doc L3 1006, codex: A(team) -> C(local) was
+                # uncounted). A team entry is what the importer treats as one: a
+                # ``team:`` source AND metadata carrying a string ``team.entry_id``
+                # (L3 1007, codex: a label alone is not one). Checked here in Python,
+                # as ``_team_held`` does, so no JSON1 function can fail the query.
+                unmanaged = sum(
+                    1 for (meta,) in self._conn.execute(
+                        """SELECT e.metadata FROM supersessions s
+                           JOIN episodes e ON e.id = s.old_id
+                           WHERE s.source = 'rewired'
+                           AND e.source >= 'team:' AND e.source < 'team;'
+                           AND NOT EXISTS (SELECT 1 FROM team_snapshot_rows o
+                                           WHERE o.old_id = s.old_id
+                                           AND o.new_id = s.new_id)""")
+                    if _team_entry_id_of(meta) is not None)
+                notes = [dict(r) for r in self._conn.execute(
+                    "SELECT key, kind, entry_id, detail FROM team_snapshot_notes "
+                    "ORDER BY key, kind, entry_id").fetchall()]
+                protected = self._conn.execute(
+                    _PROTECTED_TEAM_EPISODES.replace("SELECT te.episode_id",
+                                                     "SELECT COUNT(DISTINCT te.episode_id)")
+                ).fetchone()[0]
+            except sqlite3.OperationalError:
+                return empty
+        return {"keys": keys, "overrides": overrides, "unmanaged_rewired": unmanaged,
+                "notes": notes, "protected_episodes": protected}
+
+    # --- CAP-06 drift probes (the operator's instrument; see anneal_memory.drift) ---
+
+    def add_drift_probe(
+        self,
+        *,
+        pattern: str | None = None,
+        min_level: int | None = None,
+        fact: str | None = None,
+        section: str | None = None,
+        note: str | None = None,
+    ) -> int:
+        """Declare something that must survive consolidation: a Proven ``pattern``
+        (held at ``min_level`` or above; default its level in the current continuity,
+        else 2) or a ``fact`` (every meaningful
+        word of it on one line, of ``section`` if given). Checked after every save;
+        never shown to the composer. Returns the probe id."""
+        if (pattern is None) == (fact is None):
+            raise ValueError("add_drift_probe: pass exactly one of pattern= or fact=")
+        if pattern is not None:
+            if not isinstance(pattern, str) or not pattern.strip() or section is not None:
+                raise ValueError("add_drift_probe: pattern must be a non-empty name "
+                                 "(section= applies to facts only)")
+            if min_level is not None and (isinstance(min_level, bool)
+                                          or not isinstance(min_level, int) or min_level < 2):
+                raise ValueError("add_drift_probe: min_level must be an int >= 2")
+            if min_level is None:  # the level it holds now (L2 1007), else 2
+                min_level = self._current_pattern_level(pattern.strip()) or 2
+            row: tuple[Any, ...] = ("pattern", pattern.strip(), None, min_level, None)
+        else:
+            from .drift import fact_has_words
+            if not isinstance(fact, str) or not fact_has_words(fact):
+                raise ValueError("add_drift_probe: a fact needs at least one meaningful word")
+            if min_level is not None:
+                raise ValueError("add_drift_probe: min_level applies to patterns only")
+            row = ("fact", None, fact.strip(), None, section.strip() if section else None)
+        with self._db_boundary("drift_probes"):
+            cur = self._conn.execute(
+                "INSERT INTO drift_probes (kind, name, text, min_level, section, note) "
+                "VALUES (?, ?, ?, ?, ?, ?)", (*row, note))
+            probe_id = int(cur.lastrowid or 0)
+            if not self._defer_commit:
+                self._conn.commit()
+        self._audit_log_after_commit(
+            "drift_probe_added",
+            {"probe_id": probe_id, "kind": row[0], "subject": row[1] or row[2],
+             "min_level": row[3], "section": row[4]},
+            method="add_drift_probe", committed="the probe")
+        return probe_id
+
+    def _current_pattern_level(self, name: str) -> int | None:
+        """The pattern's level in the graduating section(s) of the current continuity
+        (the parser a save uses; L3 1007, codex: a ``name | Nx`` mention in Context
+        must not set it), or None."""
+        from .continuity import _pattern_levels  # continuity imports store
+        try:
+            return _pattern_levels(self.load_continuity() or "",
+                                   self.section_schema).get(name)
+        except (OSError, StoreError, ValueError):
+            return None
+
+    def _record_wrap_graduations(self, rows: list[tuple[str, int, str]]) -> None:
+        """Write this save's validated Proven graduations against the wrap row just
+        inserted (inside the save batch): the operator's per-wrap review worklist."""
+        if not rows:
+            return
+        # A failed insert fails the whole save batch (L3 r3: swallowing it let a
+        # rolled-back transaction commit empty), as a StoreDatabaseError (L3 r4); the
+        # wrap-id read is inside the boundary too (L3 r5).
+        with self._db_boundary("drift_probes"):
+            wrap_id = self._conn.execute("SELECT MAX(id) FROM wraps").fetchone()[0]
+            self._conn.executemany(
+                "INSERT OR REPLACE INTO wrap_graduations (wrap_id, name, level, "
+                "explanation) VALUES (?, ?, ?, ?)",
+                [(wrap_id, n, lv, ex) for n, lv, ex in rows])
+
+    def list_drift_probes(self, *, include_retired: bool = False) -> list[dict[str, Any]]:
+        """Every drift probe (live only unless ``include_retired``), oldest first."""
+        where = "" if include_retired else " WHERE retired_at IS NULL"
+        with self._db_boundary("drift_probes"), self._read_snapshot():
+            try:
+                return [dict(r) for r in self._conn.execute(
+                    f"SELECT * FROM drift_probes{where} ORDER BY id").fetchall()]
+            except sqlite3.OperationalError as exc:
+                if "no such table" in str(exc):
+                    return []  # a read_only open of a store no writer has upgraded
+                raise
+
+    def retire_drift_probe(self, probe_id: int) -> bool:
+        """Stop checking a probe (its past results stay). False if no live probe has
+        that id."""
+        with self._db_boundary("drift_probes"):
+            n = self._conn.execute(
+                "UPDATE drift_probes SET retired_at = ? WHERE id = ? AND retired_at IS NULL",
+                (_now_utc(), probe_id)).rowcount
+            if not self._defer_commit:
+                self._conn.commit()
+        if n == 1:
+            self._audit_log_after_commit(
+                "drift_probe_retired", {"probe_id": probe_id},
+                method="retire_drift_probe", committed="the retirement")
+        return n == 1
+
+    def _live_drift_probes_in_txn(self) -> list[dict[str, Any]] | None:
+        """The live probes, read on the caller's open save batch (under its write lock,
+        so a probe added or retired concurrently is either in or out of this save as a
+        whole). None when the read failed (the caller warns; "no probes" and "could not
+        read" must stay distinct); a failed SELECT does not end the batch."""
+        try:
+            return [dict(r) for r in self._conn.execute(
+                "SELECT * FROM drift_probes WHERE retired_at IS NULL ORDER BY id")]
+        except sqlite3.Error:
+            return None
+
+    def _record_drift_results(self, results: list[dict[str, Any]]) -> None:
+        """Write a save's probe verdicts against the wrap row just inserted. Called
+        inside the save batch, after ``wrap_completed``, so both commit together."""
+        if not results:
+            return
+        # Fails the save, as a StoreDatabaseError (see _record_wrap_graduations).
+        with self._db_boundary("drift_probes"):
+            wrap_id = self._conn.execute("SELECT MAX(id) FROM wraps").fetchone()[0]
+            self._conn.executemany(
+                "INSERT OR REPLACE INTO drift_results (wrap_id, probe_id, status, detail) "
+                "VALUES (?, ?, ?, ?)",
+                [(wrap_id, r["probe_id"], r["status"], r["detail"]) for r in results
+                 if isinstance(r.get("probe_id"), int)])
+
+    def drift_status(self) -> dict[str, Any]:
+        """The latest save's probe verdicts, each with the first wrap since which it
+        has been continuously not ``held`` (``since_wrap``), plus that wrap's id and
+        time, and ``graduated``: the Proven lines that save graduated with a validated
+        citation, to review for truth and contradiction. Read-only."""
+        empty: dict[str, Any] = {"wrap_id": None, "wrapped_at": None, "probes": [],
+                                 "graduated": []}
+        with self._db_boundary("drift_probes"), self._read_snapshot():
+            try:
+                last = self._conn.execute(
+                    "SELECT MAX(id) FROM wraps").fetchone()[0]
+                if last is None:
+                    return empty
+                graduated = [dict(r) for r in self._conn.execute(
+                    "SELECT name, level, explanation FROM wrap_graduations "
+                    "WHERE wrap_id = ? ORDER BY level DESC, name", (last,)).fetchall()]
+                at = self._conn.execute(
+                    "SELECT wrapped_at FROM wraps WHERE id = ?", (last,)).fetchone()
+                rows = self._conn.execute(
+                    """SELECT p.id, p.kind, COALESCE(p.name, p.text) AS subject,
+                              r.status, r.detail
+                       FROM drift_results r JOIN drift_probes p ON p.id = r.probe_id
+                       WHERE r.wrap_id = ? AND p.retired_at IS NULL ORDER BY p.id""",
+                    (last,)).fetchall()
+                probes = []
+                for r in rows:
+                    since = None
+                    if r["status"] != "held":
+                        held = self._conn.execute(
+                            "SELECT MAX(wrap_id) FROM drift_results WHERE probe_id = ? "
+                            "AND status = 'held'", (r["id"],)).fetchone()[0]
+                        since = self._conn.execute(
+                            "SELECT MIN(wrap_id) FROM drift_results WHERE probe_id = ? "
+                            "AND wrap_id > ?", (r["id"], held or 0)).fetchone()[0]
+                    probes.append(dict(r) | {"since_wrap": since})
+            except sqlite3.OperationalError as exc:
+                if "no such table" in str(exc):
+                    return empty
+                raise
+        return {"wrap_id": last, "wrapped_at": at[0] if at else None, "probes": probes,
+                "graduated": graduated}
+
+    def team_forget_key(self, key: str) -> int:
+        """Release a snapshot key: its record and its ownership go; the links stay in
+        place, unowned, until another key of the same ledger adopts or drops them.
+        Returns how many rows it owned."""
+        with self._db_boundary("supersession_repair"):
+            if not self._conn.in_transaction:
+                self._conn.execute("BEGIN IMMEDIATE")
+            n = self._conn.execute(
+                "DELETE FROM team_snapshot_rows WHERE key = ?", (key,)).rowcount
+            for table in ("team_snapshot", "team_snapshot_enforced", "team_snapshot_notes"):
+                self._conn.execute(f"DELETE FROM {table} WHERE key = ?", (key,))
+            if not self._defer_commit:
+                self._conn.commit()
+        return n
+
+    def _drop_ownership(self, old_id: str, new_id: str) -> None:
+        self._conn.execute(
+            "DELETE FROM team_snapshot_rows WHERE old_id = ? AND new_id = ?",
+            (old_id, new_id))
+        self._conn.execute(
+            "DELETE FROM rewire_origin WHERE old_id = ? AND new_id = ?", (old_id, new_id))
+
+    def _released_reverse_hint(self, old: str, new: str) -> str:
+        """For a refused link ``old`` <- ``new`` between two texts of one entry: when
+        the reverse link ``new`` -> ``old`` exists, no key owns it (team-forget-key
+        leaves its links so; the operator holds them, the augmentation exception)
+        and removing it is what lets this link pass, the one command that ends the
+        refusal; else "". Measured, not inferred (L3 r4 1009+30): the removal is
+        tried inside a savepoint and rolled back."""
+        conn = self._conn
+        if not conn.execute("SELECT 1 FROM supersessions WHERE old_id = ? AND new_id = ?",
+                            (new, old)).fetchone() or self._team_owned(new, old):
+            return ""
+        # Undone on the normal path only. An exception propagates as it is: the
+        # caller's boundary rolls back the whole transaction, savepoint included,
+        # as record_state_key's does (L3 r5 codex, run: a ROLLBACK TO in a finally
+        # raised "no such savepoint" over the original error).
+        conn.execute("SAVEPOINT released_reverse")
+        conn.execute("DELETE FROM supersessions WHERE old_id = ? AND new_id = ?",
+                     (new, old))
+        content, ts = conn.execute("SELECT content, timestamp FROM episodes "
+                                   "WHERE id = ?", (new,)).fetchone()
+        clear = self._supersession_problem(old, new, content, ts,
+                                           check_grounds=False, check_order=False) is None
+        conn.execute("ROLLBACK TO released_reverse")
+        conn.execute("RELEASE released_reverse")
+        if not clear:
+            return ""
+        return (f"; the link {new} -> {old} is no key's, and removing it ends this: "
+                f"`anneal-memory unsupersede --old {new} --new {old}`")
+
+    def _snapshot_replace(
+        self, rep: dict[str, Any], notes: list[tuple[str, str, str]],
+        by_entry: dict[str, dict[str, Any]], key: str, legacy: bool,
+        takers: list[str], enforced: dict[str, list[str]],
+        honours: list[tuple[str, str]], seen: set[tuple[str, str]],
+        unmappable_ids: set[str],
+    ) -> None:
+        conn = self._conn
+        if takers:  # one active key per ledger: this key takes over their rows
+            marks = ",".join("?" * len(takers))
+            conn.execute(
+                f"INSERT OR IGNORE INTO team_snapshot_rows (key, old_id, new_id) "
+                f"SELECT ?, old_id, new_id FROM team_snapshot_rows WHERE key IN ({marks})",
+                [key, *takers])
+            conn.execute(f"DELETE FROM team_snapshot_rows WHERE key IN ({marks})", takers)
+        ep_entry = {v["ep"]: e for e, v in by_entry.items()}
+        line_of = {v["ep"]: (e, v["hash"]) for e, v in by_entry.items()}
+        # Rows an entry left for a later copy (slice (A), Phill 2026-10-09): each is
+        # hidden by the entry's current episode, derived on every replace like any
+        # honoured pair, so a refusal is re-checked and a re-imported head re-linked.
+        retired = self._team_retired()
+
+        if legacy:
+            adopt = set()
+            for r in conn.execute(
+                "SELECT s.old_id, s.new_id, s.source FROM supersessions s "
+                "WHERE NOT EXISTS (SELECT 1 FROM team_snapshot_rows o "
+                "WHERE o.old_id = s.old_id AND o.new_id = s.new_id)"
+            ).fetchall():
+                if ep_entry.get(r["old_id"]) not in enforced:
+                    continue
+                # Only a ``team:``-labelled row whose physical linker is a line of
+                # this stream by (entry_id, hash), enforced or not. A label alone is
+                # a name, not provenance, and an id alone matches a twin. A rewired
+                # row is never adopted: it stays unmanaged and team-status counts it.
+                if str(r["source"]).startswith("team:") \
+                        and line_of.get(r["new_id"]) in seen:
+                    adopt.add((r["old_id"], r["new_id"]))
+            conn.executemany(
+                "INSERT OR IGNORE INTO team_snapshot_rows (key, old_id, new_id) VALUES (?, ?, ?)",
+                [(key, o, n) for o, n in adopt])
+            rep["links_adopted"] = len(adopt)
+        overrides = {(r[0], r[1]) for r in conn.execute(
+            "SELECT old_id, new_id FROM team_overrides").fetchall()}
+        # The linker maps by (entry_id, hash); the target by id, whatever its hash
+        # (levain hides by id), unless several stored episodes carry that id. An id
+        # enforced with two hashes (a live twin) maps no linker: never pinned.
+        linker_ep = {e: v["ep"] for e, v in by_entry.items()
+                     if [v["hash"]] == enforced.get(e)}
+        honoured = set(honours)
+        wanted: dict[tuple[str, str], tuple[str, str]] = {}
+        for old_ep, entry in sorted(retired.items()):
+            head = linker_ep.get(entry)
+            if head is None:
+                if entry not in by_entry and not conn.execute(
+                        "SELECT 1 FROM supersessions WHERE old_id = ?", (old_ep,)).fetchone():
+                    notes.append(("retired_shown", entry,
+                                  f"{old_ep} is an earlier text of this entry, which this "
+                                  "store no longer holds; it shows in recall"))
+                continue
+            if by_entry[entry].get("n", 1) > 1:
+                notes.append(("several_episodes", entry, f"earlier text {old_ep} stays shown"))
+                continue
+            if (old_ep, head) not in overrides:
+                wanted[(old_ep, head)] = (entry, entry)
+        for target, linker in honours:
+            if linker not in linker_ep or target not in by_entry:
+                continue
+            if by_entry[target].get("n", 1) > 1:
+                notes.append(("several_episodes", target, f"honoured by {linker}"))
+                continue
+            pair = (by_entry[target]["ep"], linker_ep[linker])
+            if pair not in overrides:
+                wanted[pair] = (target, linker)
+        owned = {(r[0], r[1]) for r in conn.execute(
+            "SELECT old_id, new_id FROM team_snapshot_rows WHERE key = ?", (key,)).fetchall()}
+        for old, new in sorted(owned):
+            if (old, new) in wanted or (ep_entry.get(old) or retired.get(old)) not in enforced:
+                continue
+            if ({ep_entry.get(new)} | {r[0] for r in conn.execute(
+                    "SELECT standin_new FROM rewire_origin WHERE old_id = ? AND new_id = ?",
+                    (old, new)).fetchall()}) & unmappable_ids:
+                continue  # its linker's verdict cannot be read: rows it linked stay
+            if any((so, sn) in honoured for so, sn in conn.execute(
+                    "SELECT standin_old, standin_new FROM rewire_origin "
+                    "WHERE old_id = ? AND new_id = ?", (old, new)).fetchall()):
+                continue
+            conn.execute("DELETE FROM team_snapshot_rows WHERE key = ? AND old_id = ? "
+                         "AND new_id = ?", (key, old, new))
+            if conn.execute("SELECT 1 FROM team_snapshot_rows WHERE old_id = ? "
+                            "AND new_id = ?", (old, new)).fetchone():
+                continue  # another key still owns it
+            conn.execute("DELETE FROM supersessions WHERE old_id = ? AND new_id = ?",
+                         (old, new))
+            conn.execute("DELETE FROM rewire_origin WHERE old_id = ? AND new_id = ?",
+                         (old, new))
+            rep["links_removed"].append({"old": old, "new": new,
+                                         "target": ep_entry.get(old),
+                                         "linker": ep_entry.get(new)})
+        for (old, new), (target, linker) in sorted(wanted.items()):
+            if conn.execute(
+                    "SELECT 1 FROM team_snapshot_rows WHERE key = ? AND old_id = ? "
+                    "AND new_id = ?", (key, old, new)).fetchone():
+                continue  # owned and wanted: stays
+            row = conn.execute("SELECT 1 FROM supersessions WHERE old_id = ? AND new_id = ?",
+                               (old, new)).fetchone()
+            if row is not None:
+                if conn.execute("SELECT 1 FROM team_snapshot_rows WHERE old_id = ? "
+                                "AND new_id = ?", (old, new)).fetchone():
+                    conn.execute("INSERT OR IGNORE INTO team_snapshot_rows "
+                                 "(key, old_id, new_id) VALUES (?, ?, ?)", (key, old, new))
+                continue  # an operator's row: theirs
+            lk = by_entry[linker]
+            # v3 add-checks: existence and cycle only. levain's order is history
+            # order (no older-than check) and levain's may_link already ruled.
+            problem = self._supersession_problem(old, new, lk["content"], lk["ts"],
+                                                 check_grounds=False, check_order=False)
+            if problem:
+                hint = self._released_reverse_hint(old, new) if linker == target else ""
+                rep["links_refused"].append({"id": linker, "target": target,
+                                             "old": old, "new": new,
+                                             "reason": problem + hint})
+                notes.append(("refused", linker,
+                              f"over {target}: {problem}"[:max(0, 300 - len(hint))] + hint))
+                continue
+            conn.execute("INSERT INTO supersessions (old_id, new_id, source) VALUES (?, ?, ?)",
+                         (old, new, lk["source"]))
+            conn.execute("INSERT OR IGNORE INTO team_snapshot_rows (key, old_id, new_id) "
+                         "VALUES (?, ?, ?)", (key, old, new))
+            rep["links_added_legacy" if legacy else "links_added"].append(
+                {"id": linker, "target": target, "old": old, "new": new,
+                 "source": lk["source"]})
+
+    def _team_held(self) -> tuple[dict[str, dict[str, Any]], dict[str, str]]:
+        """Inside the caller's write transaction: ``(by_entry, gone)``. ``by_entry`` maps
+        each ledger id a stored ``team:`` episode carries to what the import needs of
+        it; ``gone`` maps each ledger id this store imported and no longer holds to its
+        first recorded hash. Back-fills ``team_entries`` for rows imported before it."""
+        # ';' is the character after ':', so this range is every 'team:*'
+        # source and uses idx_episodes_source.
+        by_entry: dict[str, dict[str, Any]] = {}
+        for row in self._conn.execute(
+            "SELECT id, source, timestamp, type, content, metadata FROM episodes "
+            "WHERE source >= 'team:' AND source < 'team;' ORDER BY timestamp, id"
+        ).fetchall():
+            try:
+                root = json.loads(row["metadata"])
+            except (TypeError, ValueError):
+                continue
+            team = root.get("team") if isinstance(root, dict) else None
+            if isinstance(team, dict) and isinstance(team.get("entry_id"), str):
+                kind = team.get("kind")
+                owner = team.get("owner")
+                n = by_entry.get(team["entry_id"], {}).get("n", 0) + 1
+                by_entry[team["entry_id"]] = {
+                    "n": n,
+                    "ep": row["id"], "hash": team.get("hash"),
+                    "kind": kind if isinstance(kind, str) else None,
+                    "owner": owner if isinstance(owner, str) else None,
+                    "retire": team.get("type") == "retire",
+                    "words": str(team.get("words") or "").strip(),
+                    "content": row["content"], "ts": row["timestamp"],
+                    "source": row["source"], "type": row["type"],
+                }
+        # Entries imported before 0.9.40 have no team_entries row yet.
+        self._remember_team_entries(
+            (eid, k["hash"], k["ep"]) for eid, k in by_entry.items()
+        )
+        # Imported once and no stored team row carries it now (pruned, deleted,
+        # or its row altered): ledger id -> first hash. Judged by entry id, never
+        # by episode id, which is 32 bits and can be reused by another episode.
+        gone: dict[str, str] = {
+            r["entry_id"]: r["hash"]
+            for r in self._conn.execute(
+                "SELECT entry_id, hash FROM team_entries"
+            ).fetchall()
+            if r["entry_id"] not in by_entry
+        }
+        return by_entry, gone
+
+    def _insert_team_episodes(
+        self, records: list[dict[str, Any]], by_entry: dict[str, dict[str, Any]],
+        gone: dict[str, str], session_id: str | None, *,
+        replace: dict[str, list[str]] | None = None, final: frozenset[str] | set[str] = frozenset(),
+        root: str = "", takers: list[str] | None = None, blocked: set[str] | None = None,
+    ) -> dict[str, Any]:
+        """Inside the caller's write transaction: insert each record not held, keyed by
+        ledger id (a held id with another hash is a conflict; a removed id stays
+        removed). Updates ``by_entry`` in place. Returns ``imported``, ``already``,
+        ``conflicts``, ``removed``, ``fresh`` (the ledger ids inserted), ``reimported``,
+        ``replaced`` (same text, new hash: the row's hash only), ``replaced_audit``
+        and ``superseded`` (changed text: a new episode, see below).
+
+        ``replace`` (a v3 replace: the enforced ids and their
+        hashes; every record is enforced): a removed id comes back unless it is in
+        ``final`` (an operator's delete), and a stored copy whose hash no enforced line
+        carries is replaced. While both copies are enforced (a live twin) the stored one
+        stays and the conflict is reported.
+
+        ⛔ An episode id names one text (it is derived from it), so a replace that
+        changes the text, timestamp, type or source never rewrites the stored row: the
+        enforced copy becomes another episode (:meth:`_supersede_team_episode`), which
+        :meth:`_snapshot_replace` links over the old one, and the old row keeps its id,
+        text, trust, derivations, grounding and links (Phill 2026-10-09, (A); codex L3
+        r2 1009+22, run: a save validated against the old text committed grounding on
+        an id the import had rewritten)."""
+        imported: list[dict[str, str]] = []
+        already: list[str] = []
+        conflicts: list[dict[str, str]] = []
+        removed: list[str] = []
+        fresh: set[str] = set()
+        reimported: list[str] = []
+        replaced: list[str] = []
+        replaced_audit: list[dict[str, Any]] = []
+        superseded: list[dict[str, Any]] = []
+        for rec in records:
+            known = by_entry.get(rec["entry_id"])
+            if known is not None:
+                if known["hash"] == rec["hash"]:
+                    already.append(rec["entry_id"])
+                    if replace is not None and known.get("n", 1) == 1 \
+                            and str(known["content"]).startswith(_STALE_TWIN_MARK):
+                        # the copy is current again: the stale-twin flag goes
+                        self._conn.execute("UPDATE episodes SET content = ? WHERE id = ?",
+                                           (rec["content"], known["ep"]))
+                        known["content"] = rec["content"]
+                elif (replace is not None and known.get("n", 1) == 1
+                      and replace.get(rec["entry_id"]) == [rec["hash"]]
+                      and rec["entry_id"] not in (blocked or ())
+                      and not self._enforced_elsewhere(rec["entry_id"], known["hash"], root,
+                                                       takers)):
+                    # one authoritative hash (no unmappable line names the id), and
+                    # no other ledger's active key enforces the stored copy
+                    text = str(known["content"])
+                    if text.startswith(_STALE_TWIN_MARK):
+                        text = text[len(_STALE_TWIN_MARK):]
+                    if (text, known["ts"], known["type"], known["source"]) == (
+                            rec["content"], rec["timestamp"], rec["type"], rec["source"]):
+                        self._rehash_team_episode(rec, known)
+                        replaced.append(rec["entry_id"])
+                        replaced_audit.append({"episode": known["ep"], "type": rec["type"],
+                                               "content": rec["content"],
+                                               "source": rec["source"]})
+                    else:
+                        superseded.append(self._supersede_team_episode(
+                            rec, known, session_id))
+                else:
+                    conflicts.append({
+                        "id": rec["entry_id"], "stored_hash": str(known["hash"]),
+                        "offered_hash": rec["hash"],
+                    })
+                continue
+            back = replace is not None and rec["entry_id"] in gone \
+                and rec["entry_id"] not in final
+            if rec["entry_id"] in gone and not back:
+                if gone[rec["entry_id"]] == rec["hash"]:
+                    if rec["entry_id"] not in removed:
+                        removed.append(rec["entry_id"])
+                else:
+                    conflicts.append({
+                        "id": rec["entry_id"], "stored_hash": gone[rec["entry_id"]],
+                        "offered_hash": rec["hash"],
+                    })
+                continue
+            ep_id, _ = self._store_team_copy(rec, session_id)
+            if back:
+                # Not an operator's removal, and the stream enforces it: it comes back.
+                self._conn.execute(
+                    "UPDATE team_entries SET hash = ?, episode_id = ?, removal = NULL "
+                    "WHERE entry_id = ?", (rec["hash"], ep_id, rec["entry_id"]))
+                reimported.append(rec["entry_id"])
+            else:
+                self._remember_team_entries([(rec["entry_id"], rec["hash"], ep_id)])
+            by_entry[rec["entry_id"]] = {"n": 1, **self._team_held_fields(rec, ep_id)}
+            fresh.add(rec["entry_id"])
+            imported.append({"id": rec["entry_id"], "episode": ep_id,
+                             "source": rec["source"], "type": rec["type"],
+                             "content": rec["content"]})
+        return {"imported": imported, "already": already, "conflicts": conflicts,
+                "removed": removed, "fresh": fresh, "reimported": reimported,
+                "replaced": replaced, "replaced_audit": replaced_audit,
+                "superseded": superseded}
+
+    @staticmethod
+    def _team_held_fields(rec: dict[str, Any], ep_id: str) -> dict[str, Any]:
+        """What ``by_entry`` keeps of an entry stored as episode ``ep_id``."""
+        team_meta = rec["metadata"].get("team") or {}
+        owner = team_meta.get("owner")
+        return {
+            "ep": ep_id, "hash": rec["hash"], "kind": team_meta.get("kind"),
+            "owner": owner if isinstance(owner, str) else None,
+            "retire": team_meta.get("type") == "retire",
+            "words": str(team_meta.get("words") or "").strip(),
+            "content": rec["content"], "ts": rec["timestamp"], "source": rec["source"],
+            "type": rec["type"],
+        }
+
+    def _insert_team_row(self, rec: dict[str, Any], session_id: str | None) -> str:
+        """Insert one team record as a new episode; returns its id."""
+        meta_json = json.dumps(rec["metadata"])
+        # The ledger id is part of the id input, so entries with identical
+        # text and timestamp still get distinct episode ids.
+        id_input = f"{rec['entry_id']}\0{rec['content']}"
+        for nonce in range(64):
+            ep_id = _episode_id(id_input, rec["timestamp"], nonce)
+            try:
+                self._conn.execute(
+                    "INSERT INTO episodes (id, timestamp, type, content, source, "
+                    "session_id, metadata) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (ep_id, rec["timestamp"], rec["type"], rec["content"],
+                     rec["source"], session_id, meta_json),
+                )
+                return ep_id
+            except sqlite3.IntegrityError:
+                if nonce == 63:
+                    raise
+        raise AssertionError("unreachable")  # the loop returns or raises
+
+    def _rehash_team_episode(self, rec: dict[str, Any], known: dict[str, Any]) -> None:
+        """The enforced copy has the stored row's text, timestamp, type and source
+        under a new hash: record the hash (and drop a stale-twin mark: the copy is
+        current again); the text, and so the id, is the same."""
+        self._conn.execute(
+            "UPDATE episodes SET content = ?, metadata = ? WHERE id = ?",
+            (rec["content"], json.dumps(rec["metadata"]), known["ep"]))
+        self._conn.execute(
+            "UPDATE team_entries SET hash = ?, episode_id = ?, removal = NULL "
+            "WHERE entry_id = ?", (rec["hash"], known["ep"], rec["entry_id"]))
+        known.update(self._team_held_fields(rec, known["ep"]))
+
+    def _supersede_team_episode(
+        self, rec: dict[str, Any], known: dict[str, Any], session_id: str | None,
+    ) -> dict[str, Any]:
+        """The enforced copy of a stored entry changes its text, timestamp, type or
+        source: store it as another episode and move the entry to it. That episode is
+        the stored row this entry once had with exactly this copy, if one is kept
+        (a flip back: its id is the one a store that never saw the flip derives),
+        else a new one. The row the entry leaves stops naming it (its metadata keeps
+        ``team.replaced``), so it is not a twin and removing it later records nothing
+        about the entry; nothing else on it changes. The link over it is not made
+        here: :meth:`_snapshot_replace` derives it on every replace, with every team
+        link's checks. Returns ``{id, old, new, revived}``."""
+        old = known["ep"]
+        new, revived = self._store_team_copy(rec, session_id)
+        self._retire_team_row(old, rec["entry_id"], known["hash"])
+        self._conn.execute(
+            "UPDATE team_entries SET hash = ?, episode_id = ?, removal = NULL "
+            "WHERE entry_id = ?", (rec["hash"], new, rec["entry_id"]))
+        known.clear()
+        known.update({"n": 1, **self._team_held_fields(rec, new)})
+        return {"id": rec["entry_id"], "old": old, "new": new, "revived": revived,
+                "type": rec["type"], "content": rec["content"], "source": rec["source"]}
+
+    def _store_team_copy(self, rec: dict[str, Any],
+                         session_id: str | None) -> tuple[str, bool]:
+        """Every team record that becomes an entry's episode comes through here: the
+        stored row this entry once had with exactly this copy, revived (its metadata
+        names the entry again), else a new episode. Returns ``(id, revived)``."""
+        kept = self._retired_copy(rec)
+        if kept is None:
+            return self._insert_team_row(rec, session_id), False
+        self._conn.execute("UPDATE episodes SET metadata = ? WHERE id = ?",
+                           (json.dumps(rec["metadata"]), kept))
+        return kept, True
+
+    def _retired_copy(self, rec: dict[str, Any]) -> str | None:
+        """The id of a stored row this entry left whose text, timestamp, type and
+        source are this record's, among every id a fresh import could have given it
+        (the lowest such slot)."""
+        id_input = f"{rec['entry_id']}\0{rec['content']}"
+        slots = [_episode_id(id_input, rec["timestamp"], nonce) for nonce in range(64)]
+        rows = {r["id"]: r for r in self._conn.execute(
+            f"SELECT id, timestamp, type, content, source, metadata FROM episodes "
+            f"WHERE id IN ({','.join('?' * len(slots))})", slots).fetchall()}
+        for ep_id in slots:
+            row = rows.get(ep_id)
+            if row is not None and (row["timestamp"], row["type"], row["content"],
+                                    row["source"]) == (
+                    rec["timestamp"], rec["type"], rec["content"], rec["source"]) \
+                    and _team_replaced_entry_of(row["metadata"]) == rec["entry_id"]:
+                return ep_id
+        return None
+
+    def _retire_team_row(self, ep_id: str, entry_id: str, hash_: Any) -> None:
+        row = self._conn.execute("SELECT metadata FROM episodes WHERE id = ?",
+                                 (ep_id,)).fetchone()
+        try:
+            meta = json.loads(row["metadata"]) if row is not None and row["metadata"] else {}
+        except (TypeError, ValueError):
+            meta = {}
+        team = meta.get("team") if isinstance(meta, dict) else None
+        if isinstance(team, dict):
+            team.pop("entry_id", None)
+            team["replaced"] = {"entry_id": entry_id, "hash": hash_}
+            self._conn.execute("UPDATE episodes SET metadata = ? WHERE id = ?",
+                               (json.dumps(meta), ep_id))
+
+    def _team_retired(self) -> dict[str, str]:
+        """Inside the caller's transaction: each stored ``team:`` row an entry left
+        (:meth:`_supersede_team_episode`) -> that entry's ledger id."""
+        out: dict[str, str] = {}
+        for row in self._conn.execute(
+            "SELECT id, metadata FROM episodes "
+            "WHERE source >= 'team:' AND source < 'team;'"
+        ).fetchall():
+            entry = _team_replaced_entry_of(row["metadata"])
+            if entry is not None and _team_entry_id_of(row["metadata"]) is None:
+                out[row["id"]] = entry
+        return out
+
+    def import_team_entries(
+        self,
+        records: list[dict[str, Any]],
+        *,
+        dry_run: bool = False,
+        link_authority: tuple[str, ...] = (),
+        call_owners: tuple[str, ...] = (),
+    ) -> dict[str, Any]:
+        """Import verified team-ledger entries as episodes, idempotently, in ONE
+        write transaction (so two concurrent imports cannot both insert an entry).
+
+        The caller (:mod:`anneal_memory.team`) has already verified the ledger's
+        hash chains and mapped each entry to a record dict with ``entry_id``,
+        ``hash``, ``type``, ``source``, ``timestamp``, ``content``, ``metadata``
+        (carrying ``metadata["team"]``) and ``supersedes`` (ledger entry ids).
+
+        - An entry id already in the store with the same hash is left alone; the
+          same id with a different hash is a CONFLICT, never overwritten.
+        - Links are made from the ledger's own ``supersedes`` ids, mapped to
+          episode ids through the stored entry ids, and only between team
+          entries. Existence, older-than and no-cycle are checked; the
+          word-overlap gate of :meth:`supersede` is skipped, because the ledger
+          already holds the decider's words and a replacing ruling need not
+          share wording.
+        - Every imported entry is recorded in ``team_entries`` (ledger id, hash,
+          episode id; no content), which outlives the episode. An entry whose episode
+          this store pruned or deleted is returned in ``already_removed`` and NOT
+          imported again; the same id offered with a different hash is a conflict.
+          :meth:`prune` and :meth:`delete` record a team episode's ledger id before
+          removing it. A link from an entry
+          imported by this call onto a removed entry is returned in
+          ``links_to_removed`` (nothing is hidden).
+        - A link from one author over ANOTHER author's entry is made only when the
+          linking author matches a ``link_authority`` pattern (``fnmatch``, on the
+          handle after ``team:``), or when the linking author's handle is EXACTLY in
+          ``call_owners`` AND equals the target entry's own ``owner`` (the owner of
+          the call). ``lead`` and any owner with a ``:`` (``client:...``; a member
+          handle never has one) never match ``call_owners``: they resolve to the team
+          owner, whom the caller names in ``link_authority``.
+          Otherwise the link is returned in ``links_unauthorized`` and nothing is
+          hidden.
+        - Links come ONLY from the ``supersedes`` of the verified ``records`` of this
+          call, never from stored rows, and only for pairs where the linking entry
+          or its target was imported by this call, so a link an operator removed
+          with :meth:`unsupersede` stays removed. A target not imported yet leaves
+          the link pending: a later call that carries the linking entry again (a
+          caller imports the whole ledger each time) evaluates it when the target
+          arrives.
+        - A ruling is superseded only by a ``retire`` or by an entry that carries the
+          decider's own words; anything else is returned in ``links_refused``.
+        - Stored rows give identity only (an entry id, its episode, source and
+          text). A local writer with :meth:`record` can plant a ``team:`` row that
+          claims an entry id: the real entry is then reported as already present or
+          in conflict, and a planted row's hash can become the one ``team_entries``
+          keeps. A stored team row whose metadata no longer names its entry is
+          treated as removed. The store belongs to the engineer, and that writer can
+          already delete from it.
+        - ``dry_run`` computes everything and writes nothing.
+        """
+        if dry_run and self._defer_commit:
+            raise ValueError("import_team_entries: dry_run cannot run inside a batch")
+        made: list[dict[str, str]] = []
+        pending: list[dict[str, str]] = []
+        refused: list[dict[str, str]] = []
+        unauthorized: list[dict[str, Any]] = []
+        to_removed: list[dict[str, str]] = []
+        to_removed_seen: set[tuple[str, str]] = set()
+        with self._db_boundary("import_team_entries"):
+            if not self._conn.in_transaction:
+                self._conn.execute("BEGIN IMMEDIATE")
+            session_id = self._current_session_id()
+            by_entry, gone = self._team_held()
+            ins = self._insert_team_episodes(records, by_entry, gone, session_id)
+            imported, already, conflicts = ins["imported"], ins["already"], ins["conflicts"]
+            removed, fresh = ins["removed"], ins["fresh"]
+            for rec in records:
+                entry_id = rec["entry_id"]
+                if entry_id in gone:
+                    continue  # removed here earlier; its links went with it
+                new = by_entry[entry_id]
+                if new["hash"] != rec["hash"]:
+                    continue  # a conflict: the stored entry is not this one
+                team_meta = rec["metadata"].get("team") or {}
+                for target in rec["supersedes"]:
+                    if entry_id not in fresh and target not in fresh:
+                        continue
+                    if target in gone:
+                        # nothing left to hide; reported so the ledger's link is not lost
+                        if (entry_id, target) not in to_removed_seen:
+                            to_removed_seen.add((entry_id, target))
+                            to_removed.append({"id": entry_id, "target": target})
+                        continue
+                    old = by_entry.get(target)
+                    if old is None:
+                        pending.append({"id": entry_id, "target": target})
+                        continue
+                    if self._conn.execute(
+                        "SELECT 1 FROM supersessions WHERE old_id = ? AND new_id = ?",
+                        (old["ep"], new["ep"]),
+                    ).fetchone():
+                        continue
+                    authority = "same_author"
+                    if old["source"] != new["source"]:
+                        who = str(new["source"])[len("team:"):]
+                        call = old.get("owner")
+                        if any(fnmatch.fnmatchcase(who, pat) for pat in link_authority):
+                            authority = "link_authority"
+                        elif (call is not None and call == who and who in call_owners
+                              and call != "lead" and ":" not in call):
+                            authority = "call_owner"
+                        else:
+                            unauthorized.append({
+                                "id": entry_id, "by": str(new["source"]),
+                                "target": target, "target_author": str(old["source"]),
+                                "target_owner": call,
+                                "target_text": str(old["content"])[:200],
+                            })
+                            continue
+                    problem = self._supersession_problem(
+                        old["ep"], new["ep"], new["content"], new["ts"],
+                        check_grounds=False,
+                    )
+                    if problem is None and old["kind"] == "ruling" and not (
+                        team_meta.get("type") == "retire"
+                        or str(team_meta.get("words") or "").strip()
+                    ):
+                        problem = (
+                            "a ruling is superseded only by a retire or by an entry "
+                            "that carries the decider's own words"
+                        )
+                    if problem:
+                        refused.append({"id": entry_id, "target": target,
+                                        "reason": problem})
+                        continue
+                    self._conn.execute(
+                        "INSERT INTO supersessions (old_id, new_id, source) VALUES (?, ?, ?)",
+                        (old["ep"], new["ep"], new["source"]),
+                    )
+                    made.append({"id": entry_id, "target": target, "old": old["ep"],
+                                 "new": new["ep"], "source": new["source"],
+                                 "cross_author": str(old["source"] != new["source"]).lower(),
+                                 "authority": authority})
+            if dry_run:
+                self._conn.rollback()
+            elif not self._defer_commit:
+                self._conn.commit()
+        if not dry_run:
+            for item in imported:
+                self._audit_log_after_commit("record", {
+                    "episode_id": item["episode"], "type": item["type"],
+                    "content_hash": _content_hash(item["content"]),
+                    "source": item["source"],
+                }, method="import_team_entries", committed="the episode",
+                    actor=item["source"])
+            for link in made:
+                self._audit_log_after_commit("supersede", {
+                    "old_id": link["old"], "new_id": link["new"],
+                    "source": link["source"],
+                }, method="import_team_entries", committed="the supersession",
+                    actor=link["source"])
+        return {"imported": imported, "already_present": already,
+                "conflicts": conflicts, "links_made": made,
+                "links_pending": pending, "links_refused": refused,
+                "links_unauthorized": unauthorized, "already_removed": removed,
+                "links_to_removed": to_removed}
 
     def supersession_problem(self, *, old_id: str, new_id: str) -> str | None:
         """Why a proposed link would be refused, or None if it would record.
@@ -2628,49 +4765,108 @@ class Store:
         for start in range(0, len(ids), 200):
             chunk = ids[start:start + 200]
             marks = ",".join("?" * len(chunk))
-            self._conn.execute(
-                f"""INSERT OR IGNORE INTO supersessions (old_id, new_id, source)
-                    WITH RECURSIVE r(start, cur) AS (
-                        SELECT old_id, new_id FROM supersessions
+            hops = self._conn.execute(
+                f"""WITH RECURSIVE r(start, first, cur) AS (
+                        SELECT old_id, new_id, new_id FROM supersessions
                         WHERE new_id IN ({marks}) AND old_id NOT IN ({marks})
                         UNION
-                        SELECT r.start, s.new_id FROM r
+                        SELECT r.start, r.first, s.new_id FROM r
                         JOIN supersessions s ON s.old_id = r.cur
                         WHERE r.cur IN ({marks})
                     )
-                    SELECT start, cur, 'rewired' FROM r WHERE cur NOT IN ({marks})""",
+                    SELECT DISTINCT start, first, cur FROM r WHERE cur NOT IN ({marks})""",
                 [*chunk, *chunk, *chunk, *chunk],
-            )
+            ).fetchall()
+            for hop in hops:
+                self._rewire_one(hop["start"], hop["first"], hop["cur"])
             removed += self._conn.execute(
                 f"DELETE FROM supersessions WHERE old_id IN ({marks}) OR new_id IN ({marks})",
                 [*chunk, *chunk],
             ).rowcount
+            # anneal's own removal is not an operator's: ownership just goes
+            for table in ("team_snapshot_rows", "rewire_origin"):
+                self._conn.execute(
+                    f"DELETE FROM {table} WHERE old_id IN ({marks}) OR new_id IN ({marks})",
+                    [*chunk, *chunk])
         return removed
+
+    def _team_entry_of(self, episode_id: str) -> str | None:
+        row = self._conn.execute(
+            "SELECT source, metadata FROM episodes WHERE id = ?", (episode_id,)).fetchone()
+        if row is None or not str(row["source"]).startswith("team:"):
+            return None
+        return _team_entry_id_of(row["metadata"])
+
+    def _rewire_one(self, start: str, first: str, cur: str) -> None:
+        """Link ``start`` past the removed ``first`` .. to ``cur`` (a 'rewired' row),
+        recording the pair it stands in for and carrying the team ownership of
+        ``(start, first)``. An existing row with no owner is an operator's: untouched."""
+        conn = self._conn
+        existed = conn.execute(
+            "SELECT 1 FROM supersessions WHERE old_id = ? AND new_id = ?",
+            (start, cur)).fetchone() is not None
+        owners = [r[0] for r in conn.execute(
+            "SELECT key FROM team_snapshot_rows WHERE old_id = ? AND new_id = ?",
+            (start, first)).fetchall()]
+        if existed and not conn.execute(
+                "SELECT 1 FROM team_snapshot_rows WHERE old_id = ? AND new_id = ?",
+                (start, cur)).fetchone():
+            # An operator's row, a non-team row, or an UNMANAGED rewired row already
+            # there: untouched. A rewired row is never adopted, this way included
+            # (seam doc L3 1006, complement: a later rewire made one owned).
+            return
+        if not existed:
+            conn.execute("INSERT INTO supersessions (old_id, new_id, source) "
+                         "VALUES (?, ?, 'rewired')", (start, cur))
+        origins = conn.execute(
+            "SELECT standin_old, standin_new, standin_source FROM rewire_origin "
+            "WHERE old_id = ? AND new_id = ?", (start, first)).fetchall()
+        if not origins:
+            src = conn.execute("SELECT source FROM supersessions WHERE old_id = ? "
+                               "AND new_id = ?", (start, first)).fetchone()
+            a, b = self._team_entry_of(start), self._team_entry_of(first)
+            origins = [(a or start, b or first, str(src[0]) if src else "")]
+        conn.executemany(
+            "INSERT OR IGNORE INTO rewire_origin "
+            "(old_id, new_id, standin_old, standin_new, standin_source) VALUES (?, ?, ?, ?, ?)",
+            [(start, cur, o[0], o[1], o[2]) for o in origins])
+        conn.executemany(
+            "INSERT OR IGNORE INTO team_snapshot_rows (key, old_id, new_id) VALUES (?, ?, ?)",
+            [(k, start, cur) for k in owners])
 
     def superseded_by_map(self, episode_ids: list[str]) -> dict[str, str]:
         """For each id hidden by a supersession, the latest live episode down
         its chain of links (the current one). Ids not hidden are absent."""
-        with self._db_boundary("superseded_by_map"):
+        with self._db_boundary("superseded_by_map"), self._read_snapshot():
             if not episode_ids or not self._has_supersessions_table():
                 return {}
             return self._live_replacements(list(episode_ids), None)
 
-    def _live_replacements(self, ids: list[str], until: str | None) -> dict[str, str]:
+    def _live_replacements(
+        self, ids: list[str], until: str | None, *, servable_only: bool = False,
+    ) -> dict[str, str]:
         """``old_id -> the latest live episode reachable down its chain``,
-        restricted to replacements at or before ``until``. Not on the per-turn
-        recall path (only ``include_superseded``, the wrap package, export)."""
+        restricted to replacements at or before ``until``. One recursive query per
+        500 ids. ``servable_only`` walks only links recall may serve (not
+        ``'wrap'``/``'rewired'``, as :meth:`redirectable_ids` does), so a newer
+        wrap-proposed fork off the same episode can't become the head a servable
+        path never reaches."""
         out: dict[str, str] = {}
         cut = " AND r.timestamp <= ?" if until else ""
         hide_sql, hide_params = _hidden_by_supersession_sql(until)
+        # Hiding (the ordering below) always counts every link; only the walk narrows.
+        s_only = " AND source NOT IN ('wrap', 'rewired')" if servable_only else ""
+        j_only = " AND s.source NOT IN ('wrap', 'rewired')" if servable_only else ""
         for start in range(0, len(ids), 500):
             chunk = ids[start:start + 500]
             marks = ",".join("?" * len(chunk))
             rows = self._conn.execute(
                 f"""WITH RECURSIVE chain(old_id, cur) AS (
-                        SELECT old_id, new_id FROM supersessions WHERE old_id IN ({marks})
+                        SELECT old_id, new_id FROM supersessions
+                        WHERE old_id IN ({marks}){s_only}
                         UNION
                         SELECT c.old_id, s.new_id FROM chain c
-                        JOIN supersessions s ON s.old_id = c.cur
+                        JOIN supersessions s ON s.old_id = c.cur{j_only}
                     )
                     SELECT c.old_id, c.cur FROM chain c
                     JOIN episodes r ON r.id = c.cur
@@ -2697,12 +4893,22 @@ class Store:
             ).fetchone() is not None
 
     def _supersession_problem(
-        self, old_id: str, new_id: str | None, new_content: str, new_ts: str
+        self, old_id: str, new_id: str | None, new_content: str, new_ts: str,
+        *, check_grounds: bool = True, check_order: bool = True,
+        key_link: bool = False,
+        new_trust: str | None = None,
     ) -> str | None:
         """Why one link fails validation, or None if it passes. Never raises a
         refusal (callers raise outside their ``_db_boundary``). Runs inside the
         caller's write transaction. ``new_id`` is None when the new episode is
-        not yet inserted (``record``)."""
+        not yet inserted (``record``), which then passes its ``new_trust``: the
+        effective class it will have (:meth:`_proposed_trust`). Both sides are
+        compared by effective trust (:meth:`effective_trust_map`).
+
+        ⛔ A NEWER EPISODE OF LOWER TRUST CANNOT SUPERSEDE (CAP-08, L1 + L2 r1,
+        run): an external episode recorded with ``supersedes=`` hid an operator
+        fact from recall and made it uncitable, so a page's text became the
+        live fact and the corroboration it needed was gone."""
         if new_id is not None and old_id == new_id:
             return f"supersede: {old_id!r} cannot supersede itself"
         row = self._conn.execute(
@@ -2710,8 +4916,20 @@ class Store:
         ).fetchone()
         if row is None:
             return f"supersede: the superseded episode {old_id!r} does not exist"
+        if not key_link:
+            # CAP-04 bound (L3 r3): a keyed episode is replaced only by the key planner,
+            # whatever the link's source or the new episode's key (as Graphiti and
+            # MemStrata invalidate only within one slot). A same-key explicit link was
+            # allowed in r2 and survived clear_state_key, leaving a keyed episode hidden
+            # by an unkeyed one, and a wrap-sourced one hid without serving.
+            old_key = self._state_key_of(old_id)
+            if old_key is not None:
+                return (
+                    f"supersede: {old_id!r} fills the state slot {old_key!r}; record its "
+                    f"replacement with state_key={old_key!r} instead of a link"
+                )
         # String order, the same notion ``recall`` sorts by.
-        if row["timestamp"] > new_ts:
+        if check_order and row["timestamp"] > new_ts:
             return (
                 f"supersede: {old_id!r} ({row['timestamp']}) is newer than the episode "
                 f"replacing it ({new_ts}); only a newer episode can supersede an older one"
@@ -2731,13 +4949,36 @@ class Store:
                 f"supersede: {new_id!r} already leads, through recorded links, to "
                 f"{old_id!r}; this link would close a cycle and hide every episode on it"
             )
-        if not _supersession_grounds(new_content, row["content"]):
+        # Effective trust, as graduation reads it (L3 r1 1009+22, run): compared on
+        # the stored class, an agent summary derived from an external page hid an
+        # agent fact while graduation counted the summary as external.
+        eff = self.effective_trust_map([old_id] if new_id is None else [old_id, new_id])
+        old_trust = eff.get(old_id, DEFAULT_TRUST)
+        if new_trust is None:
+            new_trust = eff.get(new_id or "", DEFAULT_TRUST)
+        if trust_rank(new_trust) < trust_rank(old_trust):
+            return (
+                f"supersede: {old_id!r} is {old_trust!r} and the replacing episode is "
+                f"{new_trust!r}; a lower-trust episode cannot supersede a higher-trust one"
+            )
+        if check_grounds and not _supersession_grounds(new_content, row["content"]):
             return (
                 f"supersede: the new text shares too little with {old_id!r} to ground as "
                 f"an update of it (needs {SUPERSEDE_MIN_OVERLAP_RATIO:.0%} of the shorter "
                 f"episode's meaningful words)"
             )
         return None
+
+    def _state_key_of(self, episode_id: str) -> str | None:
+        """The state key an episode fills, or None (no key, or no ``state_keys`` table
+        on a store an older binary created)."""
+        if self._conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'state_keys'"
+        ).fetchone() is None:
+            return None
+        row = self._conn.execute(
+            "SELECT key FROM state_keys WHERE episode_id = ?", (episode_id,)).fetchone()
+        return row[0] if row else None
 
     def _has_supersessions_table(self) -> bool:
         """A read_only Store skips schema init, so a database last opened by an
@@ -2746,6 +4987,387 @@ class Store:
         return self._conn.execute(
             "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'supersessions'"
         ).fetchone() is not None
+
+    def _has_trust_table(self) -> bool:
+        """As :meth:`_has_supersessions_table`, for ``episode_trust`` (CAP-08)."""
+        return self._conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'episode_trust'"
+        ).fetchone() is not None
+
+    def trust_map(self, episode_ids: Iterable[str]) -> dict[str, str]:
+        """Trust class of each listed episode that is NOT the default ``agent``.
+        Ids absent from the result are ``agent`` (or do not exist)."""
+        # Lowercased like set_trust (glm + complement r1): an id typed in
+        # capitals read as agent here while set_trust found its real class.
+        ids = sorted({str(i).strip().lower() for i in episode_ids})
+        with self._db_boundary("trust_map"), self._read_snapshot():
+            if not ids or not self._has_trust_table():
+                return {}
+            out: dict[str, str] = {}
+            for start in range(0, len(ids), 500):
+                chunk = ids[start:start + 500]
+                marks = ",".join("?" * len(chunk))
+                for row in self._conn.execute(
+                    f"SELECT episode_id, trust FROM episode_trust WHERE episode_id IN ({marks})",
+                    chunk,
+                ):
+                    out[row[0]] = row[1]
+            return out
+
+    def effective_trust_map(
+        self, episode_ids: Iterable[str], *, missing: str | None = None,
+        missing_for: Iterable[str] | None = None,
+    ) -> dict[str, str]:
+        """As :meth:`trust_map`, but each episode's class is the lower of its own
+        and the highest class among the episodes it was derived from
+        (``record(derived_from=)``), through every level of derivation (CAP-08
+        D3). An agent summary of an external page reads ``external``. Absent =
+        ``agent``.
+
+        ⛔ A FIXED POINT, NOT A WALK (D3 redesign R1, 1008+11). ``eff(e) =
+        min(own(e), max over sources s of src(e, s))``, where ``src`` is ``eff(s)``
+        while the source lives and the edge's ``gone_trust`` once it was removed
+        (an edge to a source that is absent with no marker reads ``external``).
+        Every episode reachable from the queried ids starts at its own class and is
+        only ever lowered, by a worklist, until nothing changes: the greatest fixed
+        point of a monotone function on a finite lattice, so the answer for an id
+        is the same whatever else was asked and whatever the visit order, and a
+        cycle gets the meet of its members' contributions. A depth-first walk that
+        skipped the source on its path answered by query set and id order, and
+        graduated a relayed claim (lane B, ``p1d.py``).
+
+        ``missing``: the class an id with NO episode reads as (default: the same
+        ``agent`` absence reads as), for the ids in ``missing_for`` (default: all
+        of them). A caller judging grounding passes ``"external"`` so a deleted
+        episode is a failed ground, not a default one (codex r3 #1)."""
+        wanted = {str(i).strip().lower() for i in episode_ids}
+        if not wanted:
+            return {}
+        # episode -> [(live source id, None) | (None, the class the edge fixes)]
+        sources: dict[str, list[tuple[str | None, str | None]]] = {}
+        closure: set[str] = set()
+        absent: set[str] = set()
+        with self._db_boundary("trust_map"), self._read_snapshot():
+            if missing is not None:
+                ordered = sorted(
+                    wanted if missing_for is None
+                    else wanted & {str(i).strip().lower() for i in missing_for}
+                )
+                for start in range(0, len(ordered), 500):
+                    chunk = ordered[start:start + 500]
+                    marks = ",".join("?" * len(chunk))
+                    live_ids = {r[0] for r in self._conn.execute(
+                        f"SELECT id FROM episodes WHERE id IN ({marks})", chunk)}
+                    absent.update(set(chunk) - live_ids)
+            closure = wanted - absent
+            has_derived = self._conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' "
+                "AND name = 'episode_derived'"
+            ).fetchone() is not None
+            frontier = sorted(closure) if has_derived else []
+            while frontier:
+                found: set[str] = set()
+                for start in range(0, len(frontier), 500):
+                    chunk = frontier[start:start + 500]
+                    marks = ",".join("?" * len(chunk))
+                    for ep_id, src, gone, live in self._conn.execute(
+                        f"SELECT d.episode_id, d.source_id, d.gone_trust, "
+                        f"e.id IS NOT NULL FROM episode_derived d "
+                        f"LEFT JOIN episodes e ON e.id = d.source_id "
+                        f"WHERE d.episode_id IN ({marks})", chunk,
+                    ):
+                        if gone is not None:
+                            sources.setdefault(ep_id, []).append((None, gone))
+                        elif live:
+                            sources.setdefault(ep_id, []).append((src, None))
+                            found.add(src)
+                        else:
+                            sources.setdefault(ep_id, []).append((None, "external"))
+                frontier = sorted(found - closure)
+                closure |= found
+            own = self.trust_map(closure)
+
+        val = {n: own.get(n, DEFAULT_TRUST) for n in closure}
+        dependents: dict[str, set[str]] = {}
+        for ep_id, srcs in sources.items():
+            for src, _fixed in srcs:
+                if src is not None:
+                    dependents.setdefault(src, set()).add(ep_id)
+        work = deque(sorted(sources))
+        queued = set(work)
+        while work:
+            node = work.popleft()
+            queued.discard(node)
+            new = _derived_trust(
+                val[node],
+                [val[src] if src is not None else (fixed or "external")
+                 for src, fixed in sources[node]],
+            )
+            if new != val[node]:
+                val[node] = new
+                for dep in sorted(dependents.get(node, ())):
+                    if dep not in queued:
+                        work.append(dep)
+                        queued.add(dep)
+
+        out: dict[str, str] = {}
+        for ep_id in wanted:
+            level = missing if ep_id in absent else val[ep_id]
+            if level is not None and level != DEFAULT_TRUST:
+                out[ep_id] = level
+        return out
+
+    def _proposed_trust(self, trust: str, source_ids: Iterable[str]) -> str:
+        """The effective class an episode not yet inserted will have, given its own
+        ``trust`` and its ``derived_from`` sources: :func:`_derived_trust` over the
+        sources' effective classes, as :meth:`effective_trust_map` will compute it
+        once the edges exist."""
+        ids = list(source_ids)
+        eff = self.effective_trust_map(ids)
+        return _derived_trust(trust, [eff.get(i, DEFAULT_TRUST) for i in ids])
+
+    def _derivation_descendants(self, episode_ids: Iterable[str]) -> set[str]:
+        """The listed episodes plus every live episode derived from them, at any
+        depth (the reverse derivation closure): the episodes whose effective trust a
+        change to theirs can move. Runs inside the caller's transaction."""
+        ids = {str(i).strip().lower() for i in episode_ids}
+        if not ids or self._conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'episode_derived'"
+        ).fetchone() is None:
+            return ids
+        out = set(ids)
+        frontier = sorted(ids)
+        while frontier:
+            found: set[str] = set()
+            for start in range(0, len(frontier), 500):
+                chunk = frontier[start:start + 500]
+                marks = ",".join("?" * len(chunk))
+                found.update(r[0] for r in self._conn.execute(
+                    f"SELECT episode_id FROM episode_derived WHERE source_id IN ({marks}) "
+                    f"AND gone_trust IS NULL", chunk))
+            frontier = sorted(found - out)
+            out |= found
+        return out
+
+    def ground_state(self, episode_ids: Iterable[str]) -> dict[str, tuple[bool, str]]:
+        """``{id: (exists, effective trust)}`` for each listed id, read in one
+        view: what a save judged its grounds on, and re-reads under its write lock
+        to see whether any of them moved (CAP-08 D3 R4: comparing trust alone
+        missed a ground that vanished while the save ran). An absent id reads
+        ``(False, "agent")``; the caller decides what absence means."""
+        ids = sorted({str(i).strip().lower() for i in episode_ids})
+        out: dict[str, tuple[bool, str]] = {}
+        with self._db_boundary("trust_map"), self._read_snapshot():
+            live: set[str] = set()
+            for start in range(0, len(ids), 500):
+                chunk = ids[start:start + 500]
+                marks = ",".join("?" * len(chunk))
+                live.update(r[0] for r in self._conn.execute(
+                    f"SELECT id FROM episodes WHERE id IN ({marks})", chunk))
+            eff = self.effective_trust_map(ids)
+        for i in ids:
+            out[i] = (i in live, eff.get(i, DEFAULT_TRUST))
+        return out
+
+    def derived_edges(
+        self, episode_ids: Iterable[str],
+    ) -> dict[str, list[tuple[str, str | None]]]:
+        """``{episode id: [(source id, gone_trust), ...]}`` for each listed episode
+        derived from others (``record(derived_from=)``). ``gone_trust`` is None
+        while the source lives, else the class the edge was marked with when the
+        source was removed. Read-only; what an export carries (codex r3 #3)."""
+        ids = sorted({str(i).strip().lower() for i in episode_ids})
+        out: dict[str, list[tuple[str, str | None]]] = {}
+        with self._db_boundary("derived_edges"), self._read_snapshot():
+            if not ids or self._conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' "
+                "AND name = 'episode_derived'"
+            ).fetchone() is None:
+                return out
+            for start in range(0, len(ids), 500):
+                chunk = ids[start:start + 500]
+                marks = ",".join("?" * len(chunk))
+                for ep_id, src, gone in self._conn.execute(
+                    f"SELECT episode_id, source_id, gone_trust FROM episode_derived "
+                    f"WHERE episode_id IN ({marks}) ORDER BY episode_id, source_id",
+                    chunk,
+                ):
+                    out.setdefault(ep_id, []).append((src, gone))
+        return out
+
+    def trust_counts(self) -> dict[str, int]:
+        """Number of live episodes in each trust class, every class listed."""
+        with self._db_boundary("trust_counts"), self._read_snapshot():
+            total = self._conn.execute("SELECT COUNT(*) FROM episodes").fetchone()[0]
+            counts = {t: 0 for t in reversed(TRUST_LEVELS)}
+            if self._has_trust_table():
+                for row in self._conn.execute(
+                    """SELECT t.trust, COUNT(*) FROM episode_trust t
+                       JOIN episodes e ON e.id = t.episode_id GROUP BY t.trust"""
+                ):
+                    counts[row[0]] = counts.get(row[0], 0) + row[1]
+            counts[DEFAULT_TRUST] = total - sum(
+                n for t, n in counts.items() if t != DEFAULT_TRUST
+            )
+            return counts
+
+    @property
+    def trust_ceiling(self) -> str:
+        """The highest trust class a write through this Store may carry, set by
+        whoever constructed it (CAP-08)."""
+        return self._trust_ceiling
+
+    def _ceiling_problem(self, operation: str, trust: str) -> str | None:
+        """The refusal text when ``trust`` is above the ceiling, else None."""
+        if trust_rank(trust) > trust_rank(self._trust_ceiling):
+            return (
+                f"{operation}: trust {trust!r} is above this store's ceiling "
+                f"{self._trust_ceiling!r}; only the code that opens the Store sets "
+                f"the ceiling (Store(..., trust_ceiling=...)). Nothing was written."
+            )
+        return None
+
+    def _check_trust_ceiling(self, operation: str, trust: str) -> int:
+        """Rank of ``trust``; ValueError when it is unknown or above the ceiling."""
+        rank = trust_rank(trust)
+        problem = self._ceiling_problem(operation, trust)
+        if problem:
+            raise ValueError(problem)
+        return rank
+
+    def set_trust(
+        self, episode_id: str, trust: str, *, actor: str = "agent",
+        expect: str | None = None,
+    ) -> str:
+        """Change an episode's trust class; returns the class it had.
+
+        Any class up to this Store's ``trust_ceiling`` may be set, lowering or
+        raising; above it is refused. So raising anything above ``agent`` needs
+        a Store the host opened with ``trust_ceiling="operator"`` (the CLI does
+        only after its operator gate; the MCP server never does). Setting the
+        class the episode already has writes nothing and succeeds, whatever the
+        ceiling. ``actor`` is the host's statement of who asked, recorded as
+        given. Audited as ``trust_set``. A supersession link the change makes
+        invalid (the replacing episode now ranks below the one it hides, by
+        effective trust, on this episode or anything derived from it) is
+        removed in the same transaction and named in the audit event, unless a
+        team snapshot owns it.
+
+        ``expect``: the class the caller read before deciding this change was
+        allowed. If the episode's class is no longer that one when the write
+        transaction reads it, nothing is changed and ``ValueError`` names the
+        conflict (a gate decided on a stale read must not be applied).
+
+        What was derived from this episode (``derived_from``) follows the change
+        with no pass of its own: its trust is computed from this one
+        (:meth:`effective_trust_map`), never stored while this episode lives.
+
+        Raises:
+            ValueError: unknown ``trust``, ``trust`` above the ceiling, no such
+                episode, or ``expect`` no longer matches.
+        """
+        trust_rank(trust)
+        if expect is not None:
+            trust_rank(expect)
+        episode_id = str(episode_id).strip().lower()
+        problem: str | None = None
+        old = DEFAULT_TRUST
+        removed: list[dict[str, str]] = []
+        team_left: list[dict[str, str]] = []
+        # Refusals are computed inside and raised after the block: the boundary
+        # rolls back on any exception, which inside a caller's batch would
+        # discard its earlier writes (see _db_boundary).
+        with self._db_boundary("set_trust"):
+            if not self._conn.in_transaction:
+                self._conn.execute("BEGIN IMMEDIATE")
+            if self._conn.execute(
+                "SELECT 1 FROM episodes WHERE id = ?", (episode_id,)
+            ).fetchone() is None:
+                problem = f"set_trust: no episode {episode_id!r}"
+            else:
+                row = self._conn.execute(
+                    "SELECT trust FROM episode_trust WHERE episode_id = ?", (episode_id,)
+                ).fetchone()
+                old = row[0] if row is not None else DEFAULT_TRUST
+                if expect is not None and old != expect:
+                    problem = (
+                        f"set_trust: {episode_id!r} is {old!r} now, not the "
+                        f"{expect!r} the change was decided on. Nothing was changed."
+                    )
+                elif old != trust and self._ceiling_problem("set_trust", trust):
+                    problem = self._ceiling_problem("set_trust", trust)
+                elif old != trust:
+                    if trust == DEFAULT_TRUST:
+                        self._conn.execute(
+                            "DELETE FROM episode_trust WHERE episode_id = ?",
+                            (episode_id,),
+                        )
+                    else:
+                        self._conn.execute(
+                            "INSERT OR REPLACE INTO episode_trust "
+                            "(episode_id, trust) VALUES (?, ?)",
+                            (episode_id, trust),
+                        )
+                    # Its derivation descendants' effective trust moved with it, so
+                    # their links are re-checked too (L3 r1 1009+22).
+                    removed, team_left = self._drop_links_trust_invalidated(
+                        self._derivation_descendants([episode_id]))
+            if not self._defer_commit:
+                self._conn.commit()
+        if problem:
+            raise ValueError(problem)
+        if old != trust:
+            event: dict[str, Any] = {"episode_id": episode_id, "from": old, "to": trust}
+            if removed:
+                event["supersessions_removed"] = removed
+            if team_left:
+                event["team_supersessions_left"] = team_left
+            self._audit_log_after_commit(
+                "trust_set", event, method="set_trust",
+                committed="the trust change", actor=actor,
+            )
+        return old
+
+    def _drop_links_trust_invalidated(
+        self, episode_ids: Iterable[str]
+    ) -> tuple[list[dict[str, str]], list[dict[str, str]]]:
+        """After a trust change, remove each link touching one of ``episode_ids`` in
+        which the replacing episode now ranks below the one it hides by effective
+        trust (codex r1 #5, run: lowering the newer episode to ``external`` left it
+        hiding an agent fact). Callers pass the changed episode's
+        :meth:`_derivation_descendants`, whose effective trust moved with it. The
+        rule is :meth:`_supersession_problem`'s, re-checked for links already on
+        record. A link a team snapshot owns stays: the ledger rules it, and the
+        caller hears it in the audit. Runs inside the caller's transaction.
+        Returns ``(removed, team_owned_left)``."""
+        removed: list[dict[str, str]] = []
+        team_left: list[dict[str, str]] = []
+        ids = sorted({str(i).strip().lower() for i in episode_ids})
+        if not ids or not self._has_supersessions_table():
+            return removed, team_left
+        pairs: set[tuple[str, str]] = set()
+        for start in range(0, len(ids), 500):
+            chunk = ids[start:start + 500]
+            marks = ",".join("?" * len(chunk))
+            pairs.update((r[0], r[1]) for r in self._conn.execute(
+                f"SELECT old_id, new_id FROM supersessions "
+                f"WHERE old_id IN ({marks}) OR new_id IN ({marks})", [*chunk, *chunk]))
+        eff = self.effective_trust_map({i for pair in pairs for i in pair})
+        for old_id, new_id in sorted(pairs):
+            if trust_rank(eff.get(new_id, DEFAULT_TRUST)) >= trust_rank(
+                eff.get(old_id, DEFAULT_TRUST)
+            ):
+                continue
+            link = {"old_id": old_id, "new_id": new_id}
+            if self._team_owned(old_id, new_id):
+                team_left.append(link)
+                continue
+            self._conn.execute(
+                "DELETE FROM supersessions WHERE old_id = ? AND new_id = ?",
+                (old_id, new_id),
+            )
+            removed.append(link)
+        return removed, team_left
 
     def get(self, episode_id: str) -> Episode | None:
         """Get a single episode by ID.
@@ -2764,7 +5386,7 @@ class Store:
             return None
         return self._row_to_episode(row)
 
-    def delete(self, episode_id: str) -> bool:
+    def delete(self, episode_id: str, *, team_operator: bool = False) -> bool:
         """Delete a single episode by ID.
 
         For corrections, mistakes, or privacy (right to erasure). The
@@ -2773,9 +5395,18 @@ class Store:
         inserted recording the episode ID, original timestamp, episode
         type, and SHA-256 content hash — the text itself is gone but the
         audit trail retains enough metadata to prove the episode existed.
+        An imported team entry's ledger id and hash stay in ``team_entries`` either
+        way, so a later v2 team import does not bring it back. A v3 replace brings
+        back an entry its stream enforces unless ``team_operator=True``: only the
+        CLI sets it, after a confirm on a terminal or with ANNEAL_TEAM_OVERRIDE=1.
+        Like ``supersede(team_override=)`` it is a TRUSTED flag, friction rather than
+        a boundary: a library or MCP caller that leaves it unset can never
+        permanently un-hide what the ledger hides; one that sets it is asserting
+        the operator's say.
 
         Args:
             episode_id: The 8-char hex episode ID.
+            team_operator: the removal is the operator's own (CLI only).
 
         Returns:
             True if the episode was found and deleted, False if not found.
@@ -2787,10 +5418,17 @@ class Store:
                 and logged; see :meth:`_audit_log_after_commit`.
         """
         with self._db_boundary("delete"):
+            # The write lock is taken before any read (L3 r3 1009+22, codex): the
+            # descendant set below must be the one the DELETE's trigger lowers, so
+            # no writer may record a new derivation from this episode in between.
+            if not self._conn.in_transaction:
+                self._conn.execute("BEGIN IMMEDIATE")
             row = self._conn.execute(
                 "SELECT * FROM episodes WHERE id = ?", (episode_id,)
             ).fetchone()
             if not row:
+                if not self._defer_commit:
+                    self._conn.commit()
                 return False
 
             if self._keep_tombstones:
@@ -2801,8 +5439,24 @@ class Store:
                     (row["id"], row["timestamp"], row["type"], _content_hash(row["content"])),
                 )
 
+            linker_of = self._conn.execute(
+                "SELECT COUNT(DISTINCT old_id) FROM team_snapshot_rows WHERE new_id = ?",
+                (row["id"],)).fetchone()[0]
+            if linker_of:
+                _LOG.warning(
+                    "anneal-memory: delete of %s removes the team link(s) it makes over "
+                    "%d entr(ies) the team ledger still hides; they show in recall again",
+                    row["id"], linker_of)
             links_removed = self._detach_supersessions([row["id"]])
+            self._remember_team_rows([row], "operator" if team_operator else "auto")
+            # Read before the DELETE: the trigger below stops the closure walk at it.
+            descendants = self._derivation_descendants([row["id"]]) - {row["id"]}
+            # The episode_gone_marks_rows trigger marks every row that cited it
+            # external: a deletion is a failed ground (CAP-08 D3 R3).
             self._conn.execute("DELETE FROM episodes WHERE id = ?", (episode_id,))
+            # That lowered its descendants' effective trust, so their links are
+            # re-checked after it, as set_trust does (L3 r2 1009+22).
+            trust_removed, team_left = self._drop_links_trust_invalidated(descendants)
             # 10.5c.5 L4 Fix: batch-aware commit for consistency with
             # record() and the other write-path methods. No current
             # caller invokes delete() inside a _batch(), but making it
@@ -2819,6 +5473,8 @@ class Store:
             "type": row["type"],
             "content_hash": _content_hash(row["content"]),
             **({"supersession_links_removed": links_removed} if links_removed else {}),
+            **({"supersessions_removed": trust_removed} if trust_removed else {}),
+            **({"team_supersessions_left": team_left} if team_left else {}),
         }, method="delete", committed="the deletion")
 
         return True
@@ -2851,46 +5507,26 @@ class Store:
         Returns:
             RecallResult with matching episodes and total count.
         """
-        conditions: list[str] = []
-        params: list[Any] = []
+        if episode_type is not None and isinstance(episode_type, str):
+            episode_type = EpisodeType(episode_type)
 
-        if since:
-            conditions.append("timestamp >= ?")
-            params.append(since)
-        if until:
-            conditions.append("timestamp <= ?")
-            params.append(until)
-        if episode_type is not None:
-            if isinstance(episode_type, str):
-                episode_type = EpisodeType(episode_type)
-            conditions.append("type = ?")
-            params.append(episode_type.value)
-        if source:
-            conditions.append("source = ?")
-            params.append(source)
-        if keyword:
-            # Escape LIKE wildcards so % and _ are treated as literals
-            # Case-insensitive via LOWER() — agents need to find episodes
-            # regardless of casing for citation during graduation
-            escaped = keyword.lower().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-            conditions.append("LOWER(content) LIKE ? ESCAPE '\\'")
-            params.append(f"%{escaped}%")
-
-        with self._db_boundary("recall"):
-            has_links = self._has_supersessions_table()
-            if has_links and not include_superseded:
-                hide_sql, hide_params = _hidden_by_supersession_sql(until)
-                conditions.append(f"id NOT IN ({hide_sql})")
-                params.extend(hide_params)
+        with self._db_boundary("recall"), self._read_snapshot():
+            conditions, params, has_links = self._recall_conditions(
+                since=since, until=until, episode_type=episode_type, source=source,
+                include_superseded=include_superseded,
+            )
+            if keyword:
+                conditions.append(_KEYWORD_LIKE_SQL)
+                params.append(_keyword_like_pattern(keyword))
             where = " AND ".join(conditions) if conditions else "1=1"
 
-            # Get total count
+            # The count and the page are read in one snapshot (_read_snapshot), so a
+            # concurrent writer cannot make total_matching disagree with the rows.
             count_row = self._conn.execute(
                 f"SELECT COUNT(*) FROM episodes WHERE {where}", params
             ).fetchone()
             total = count_row[0]
 
-            # Get episodes
             rows = self._conn.execute(
                 f"""SELECT * FROM episodes WHERE {where}
                     ORDER BY timestamp DESC LIMIT ? OFFSET ?""",
@@ -2930,6 +5566,280 @@ class Store:
             },
         )
 
+    @contextmanager
+    def _read_snapshot(self) -> Iterator[None]:
+        """Run the block's reads in one transaction, so they see one committed
+        state. Inside a caller's open transaction (a ``_batch``) it adds nothing:
+        that transaction already gives one view. Use inside ``_db_boundary``,
+        which reports a database error; this rolls back its own transaction on any
+        exception either way."""
+        if self._conn.in_transaction:
+            yield
+            return
+        self._conn.execute("BEGIN")
+        try:
+            yield
+        except BaseException:
+            if self._conn.in_transaction:
+                self._conn.rollback()
+            raise
+        if self._conn.in_transaction:
+            self._conn.execute("COMMIT")
+
+    def _recall_conditions(
+        self,
+        *,
+        since: str | None,
+        until: str | None,
+        episode_type: EpisodeType | None,
+        source: str | None,
+        include_superseded: bool,
+    ) -> tuple[list[str], list[Any], bool]:
+        """The WHERE conditions (and params) :meth:`recall`'s filters select, plus
+        whether the supersession table exists. Call inside ``_db_boundary``."""
+        conditions: list[str] = []
+        params: list[Any] = []
+        if since:
+            conditions.append("timestamp >= ?")
+            params.append(since)
+        if until:
+            conditions.append("timestamp <= ?")
+            params.append(until)
+        if episode_type is not None:
+            conditions.append("type = ?")
+            params.append(episode_type.value)
+        if source:
+            conditions.append("source = ?")
+            params.append(source)
+        has_links = self._has_supersessions_table()
+        if has_links and not include_superseded:
+            hide_sql, hide_params = _hidden_by_supersession_sql(until)
+            conditions.append(f"id NOT IN ({hide_sql})")
+            params.extend(hide_params)
+        return conditions, params, has_links
+
+    def keyword_candidates(
+        self,
+        keywords: list[str],
+        *,
+        limit_per_keyword: int,
+        since: str | None = None,
+        until: str | None = None,
+        episode_type: EpisodeType | str | None = None,
+        source: str | None = None,
+        include_superseded: bool = False,
+    ) -> tuple[dict[str, Episode], dict[str, int], int]:
+        """Several :meth:`recall` keyword queries answered by one scan.
+
+        Returns ``(episodes, doc_freq, corpus_n)``: the union of each keyword's
+        newest ``limit_per_keyword`` matches (by id), each keyword's
+        ``total_matching``, and the number of episodes the filters select with no
+        keyword. A keyword matches as in :meth:`recall`. All three are read in one
+        snapshot, so a concurrent writer cannot make the counts disagree with each
+        other or with the episodes.
+
+        Equal to ``recall(keyword=kw, limit=limit_per_keyword, ...)`` per keyword
+        plus ``recall(limit=0, ...)``, except that among episodes with an identical
+        timestamp at a keyword's cutoff the one kept may differ (SQL gives no
+        order there either).
+        """
+        if episode_type is not None and isinstance(episode_type, str):
+            episode_type = EpisodeType(episode_type)
+        if limit_per_keyword < 0:
+            raise ValueError("keyword_candidates: limit_per_keyword must be >= 0")
+        kws = list(dict.fromkeys(keywords))
+        with self._db_boundary("keyword_candidates"), self._read_snapshot():
+            conditions, params, has_links = self._recall_conditions(
+                since=since, until=until, episode_type=episode_type, source=source,
+                include_superseded=include_superseded,
+            )
+            base = " AND ".join(conditions) if conditions else "1=1"
+            corpus_n = self._conn.execute(
+                f"SELECT COUNT(*) FROM episodes WHERE {base}", params
+            ).fetchone()[0]
+            doc_freq = {kw: 0 for kw in kws}
+            kept: dict[str, str] = {}  # id -> timestamp, for the newest-first union
+            rows: list[Any] = []
+            # Keywords are scanned in groups: one OR chain of LIKEs per group keeps the
+            # expression under SQLite's depth limit for any number of keywords (one chain
+            # of 1,100 failed "Expression tree is too large" in review, 2026-10-04).
+            for g in range(0, len(kws), _KEYWORD_SCAN_GROUP):
+                group = kws[g:g + _KEYWORD_SCAN_GROUP]
+                patterns = [_keyword_like_pattern(kw) for kw in group]
+                flags = ", ".join(_KEYWORD_LIKE_SQL for _ in group)
+                any_kw = " OR ".join(_KEYWORD_LIKE_SQL for _ in group)
+                hits = self._conn.execute(
+                    f"""SELECT id, timestamp, {flags} FROM episodes
+                        WHERE {base} AND ({any_kw})
+                        ORDER BY timestamp DESC""",
+                    [*patterns, *params, *patterns],
+                )
+                for row in hits:
+                    for i, kw in enumerate(group):
+                        if row[2 + i]:
+                            doc_freq[kw] += 1
+                            if doc_freq[kw] <= limit_per_keyword:
+                                kept[row[0]] = row[1]
+            keep = dict.fromkeys(
+                sorted(kept, key=lambda i: kept[i], reverse=True)
+            )
+            if keep:
+                ids = list(keep)
+                for start in range(0, len(ids), 500):
+                    chunk = ids[start:start + 500]
+                    rows.extend(self._conn.execute(
+                        f"SELECT * FROM episodes WHERE id IN ({','.join('?' * len(chunk))})",
+                        chunk,
+                    ).fetchall())
+            replaced_by: dict[str, str] = {}
+            if has_links and include_superseded and rows:
+                replaced_by = self._live_replacements(
+                    [row["id"] for row in rows], until
+                )
+        by_id = {}
+        for row in rows:
+            ep = self._row_to_episode(row)
+            if ep.id in replaced_by:
+                ep = dataclasses.replace(ep, superseded_by=replaced_by[ep.id])
+            by_id[ep.id] = ep
+        return {i: by_id[i] for i in keep if i in by_id}, doc_freq, corpus_n
+
+    def has_supersessions(self) -> bool:
+        """True when this store has at least one supersession link (cheap; recall's
+        CAP-04 redirect runs only then)."""
+        with self._db_boundary("keyword_candidates"):
+            return self._has_supersessions_table() and self._conn.execute(
+                "SELECT 1 FROM supersessions LIMIT 1").fetchone() is not None
+
+    def redirectable_ids(
+        self, ids: Iterable[str], until: str | None = None,
+    ) -> dict[str, Episode]:
+        """``{replaced_id: the live head EPISODE recall may SERVE for it}`` (CAP-04): the head is
+        computed over the links a wrap did not propose (``source='wrap'``) and a delete did
+        not rewire (``'rewired'``, whose origin may have been a wrap link) ONLY, so every
+        serving path (recall's swap, :meth:`replaced_matches`) shares this one head. Those
+        links still hide (that ordering is :meth:`_live_replacements`' all-links one); they
+        never serve. An id with no servable path, or whose servable end is itself hidden
+        (a wrap link supersedes it), is absent. The head rows are read in the same snapshot
+        as the walk and the hidden test, so the head is chosen and read in one state and a
+        caller needs no second read (a later one could see a state the choice never did).
+        ``until`` is recall's cutoff
+        (``exclude_recent_minutes``): only replacements at or before it exist, for the head
+        and for the hidden test alike, so an excluded episode is never served. Among
+        equal-timestamp ends the greater id is the head (the walk orders by
+        ``timestamp, id`` and the last wins)."""
+        want = list(ids)
+        with self._db_boundary("redirectable_ids"), self._read_snapshot():
+            if not want or not self._has_supersessions_table():
+                return {}
+            heads = self._live_replacements(want, until, servable_only=True)
+            hide_sql, hide_params = _hidden_by_supersession_sql(until)
+            ends = sorted(set(heads.values()))
+            hidden: set[str] = set()
+            for start in range(0, len(ends), 500):
+                chunk = ends[start:start + 500]
+                hidden.update(r[0] for r in self._conn.execute(
+                    f"SELECT id FROM episodes WHERE id IN ({','.join('?' * len(chunk))}) "
+                    f"AND id IN ({hide_sql})", [*chunk, *hide_params]))
+            keep = sorted({h for h in heads.values() if h not in hidden})
+            rows: dict[str, Episode] = {}
+            for start in range(0, len(keep), 500):
+                chunk = keep[start:start + 500]
+                for r in self._conn.execute(
+                        f"SELECT * FROM episodes WHERE id IN ({','.join('?' * len(chunk))})",
+                        chunk):
+                    rows[r["id"]] = self._row_to_episode(r)
+            return {o: rows[h] for o, h in heads.items() if h in rows}
+
+    def replaced_matches(
+        self, phrase: str, *, max_heads: int, max_olds: int = 5,
+    ) -> "ReplacedMatches":
+        """Episodes a supersession hides whose content contains ``phrase`` (matched as
+        :meth:`recall` matches a keyword) and that :meth:`redirectable_ids` would serve a
+        replacement for, grouped by that live replacement (``superseded_by``).
+
+        Servability is a SQL predicate on the scan (the episode's own first link is not
+        wrap-proposed or rewired), so an unservable hidden match is never read or counted,
+        and the exact test (the head is reached through servable links only) runs per
+        page. The scan has NO row budget: it reads every servable candidate, which is the
+        work asked for. It returns the ``max_heads`` heads that are most current (newest
+        timestamp first), each with its newest ``max_olds`` matches, newest first; what
+        that cut leaves out is COUNTED in the result (``more_heads``, ``more_olds``) for
+        the caller to show (L3 r5: a row budget had dropped a valid redirect silently)."""
+        if max_heads < 1 or max_olds < 1:
+            raise ValueError("replaced_matches: max_heads and max_olds must be >= 1")
+        kept_by_head: dict[str, list[Any]] = {}
+        head_eps: dict[str, Episode] = {}
+        count_by_head: dict[str, int] = {}
+        with self._db_boundary("keyword_candidates"), self._read_snapshot():
+            if not phrase or not self._has_supersessions_table():
+                return ReplacedMatches([], 0, 0, {}, {})
+            hide_sql, hide_params = _hidden_by_supersession_sql(None)
+            pattern = _keyword_like_pattern(phrase)
+            page = 500
+            after: tuple[str, str] | None = None
+            while True:
+                cursor = "" if after is None else " AND (timestamp, id) < (?, ?)"
+                rows = self._conn.execute(
+                    f"SELECT * FROM episodes WHERE id IN ({hide_sql}) AND "
+                    f"{_KEYWORD_LIKE_SQL} AND EXISTS (SELECT 1 FROM supersessions q "
+                    f"WHERE q.old_id = episodes.id AND q.source NOT IN ('wrap', 'rewired')){cursor} "
+                    "ORDER BY timestamp DESC, id DESC LIMIT ?",
+                    [*hide_params, pattern, *(after or ()), page]).fetchall()
+                heads = self.redirectable_ids([r["id"] for r in rows])
+                for r in rows:
+                    head_ep = heads.get(r["id"])
+                    if head_ep is None:
+                        continue
+                    head = head_ep.id
+                    head_eps[head] = head_ep
+                    count_by_head[head] = count_by_head.get(head, 0) + 1
+                    if len(kept_by_head.setdefault(head, [])) < max_olds:
+                        kept_by_head[head].append(r)
+                if len(rows) < page:
+                    break
+                after = (rows[-1]["timestamp"], rows[-1]["id"])
+            order = sorted(count_by_head, key=lambda h: (head_eps[h].timestamp, h), reverse=True)
+            chosen = order[:max_heads]
+            head_rows = {h: head_eps[h] for h in chosen}
+            trust = self.effective_trust_map(
+                [*chosen, *(r["id"] for h in chosen for r in kept_by_head[h])])
+        out = [dataclasses.replace(self._row_to_episode(r), superseded_by=h)
+               for h in chosen for r in kept_by_head[h]]
+        return ReplacedMatches(
+            out, len(order) - len(chosen),
+            sum(count_by_head[h] - len(kept_by_head[h]) for h in chosen), head_rows, trust)
+
+    def _scan_containing_oldest(
+        self, keyword: str, visit: Callable[[Episode], bool], *, page: int = 500,
+    ) -> None:
+        """Visit live (not superseded) episodes whose content contains ``keyword``
+        (case-insensitive substring, as :meth:`recall` matches), OLDEST first, until
+        ``visit`` returns True. One read snapshot for the whole scan and keyset paging
+        on ``(timestamp, id)``, so a concurrent write can neither repeat nor skip a row
+        (L3 1007: per-page snapshots with OFFSET could)."""
+        with self._db_boundary("keyword_candidates"), self._read_snapshot():
+            conditions, params, _ = self._recall_conditions(
+                since=None, until=None, episode_type=None, source=None,
+                include_superseded=False,
+            )
+            base = " AND ".join(conditions) if conditions else "1=1"
+            pattern = _keyword_like_pattern(keyword)
+            after: tuple[str, str] | None = None
+            while True:
+                cursor = "" if after is None else " AND (timestamp, id) > (?, ?)"
+                rows = self._conn.execute(
+                    f"SELECT * FROM episodes WHERE {base} AND {_KEYWORD_LIKE_SQL}{cursor} "
+                    f"ORDER BY timestamp ASC, id ASC LIMIT ?",
+                    [*params, pattern, *(after or ()), page],
+                ).fetchall()
+                for r in rows:
+                    if visit(self._row_to_episode(r)):
+                        return
+                if len(rows) < page:
+                    return
+                after = (rows[-1]["timestamp"], rows[-1]["id"])
+
     def episodes_since_wrap(self) -> list[Episode]:
         """Get all episodes since the last completed wrap.
 
@@ -2939,7 +5849,7 @@ class Store:
         Uses session IDs (not timestamps) for precision — avoids
         same-second boundary issues.
         """
-        with self._db_boundary("episodes_since_wrap"):
+        with self._db_boundary("episodes_since_wrap"), self._read_snapshot():
             last_wrap = self._conn.execute(
                 "SELECT id FROM wraps ORDER BY id DESC LIMIT 1"
             ).fetchone()
@@ -2962,8 +5872,12 @@ class Store:
         return [self._row_to_episode(row) for row in rows]
 
     def status(self) -> StoreStatus:
-        """Get store status snapshot."""
-        with self._db_boundary("status"):
+        """Get store status snapshot. The database fields (counts, wrap and
+        audit-health metadata) are one snapshot; the continuity size and audit
+        stats come from files and are read after it."""
+        # One read snapshot: the counts below must describe one committed state,
+        # not one per statement (0.9.32 CHANGELOG has the measured failure).
+        with self._db_boundary("status"), self._read_snapshot():
             total = self._conn.execute("SELECT COUNT(*) FROM episodes").fetchone()[0]
             since_wrap = self._count_episodes_since_wrap()
             total_wraps = self._conn.execute("SELECT COUNT(*) FROM wraps").fetchone()[0]
@@ -2987,6 +5901,11 @@ class Store:
 
             # Association network metrics (also executes SQL)
             assoc_stats = _association_stats(self._conn, total)
+
+            # The health fields read metadata rows too: keep them in the snapshot.
+            audit_failures = self._current_audit_failures()
+            audit_last_failure = self._current_audit_last_failure()
+            requires_baton = self.consolidate_requires_baton()
 
         # Continuity file size — file read, outside the DB boundary.
         # AM-STATUS-HARDEN (spore-084): guard the read. A corrupt / non-UTF8
@@ -3053,12 +5972,12 @@ class Store:
             audit_log_path=audit_log_path,
             audit_entry_count=audit_entry_count,
             audit_retention_days=audit_retention_days,
-            audit_write_failures=self._current_audit_failures(),
-            audit_last_failure=self._current_audit_last_failure(),
+            audit_write_failures=audit_failures,
+            audit_last_failure=audit_last_failure,
             prune_failures=self._prune_failures,
             prune_last_failure=self._prune_last_failure,
             prune_behind=self._prune_behind,
-            consolidate_requires_baton=self.consolidate_requires_baton(),
+            consolidate_requires_baton=requires_baton,
         )
 
     # -- Wrap lifecycle --
@@ -3073,6 +5992,8 @@ class Store:
         gated_session_id: str | None = None,
         expect_last_wrap_id: int | None = None,
         derive_roots: dict[str | None, str] | None = None,
+        token_bound: bool = False,
+        today: str | None = None,
     ) -> None:
         """Mark that a wrap has been initiated (prepare_wrap called).
 
@@ -3109,7 +6030,8 @@ class Store:
         and closes ``prepare_wrap``'s own check→write window. Pass
         ``allow_restart=True`` to deliberately DISCARD the in-progress
         wrap and start fresh (equivalent to :meth:`wrap_cancelled` then
-        a new wrap, but without the separate cancel audit event).
+        a new wrap, but without the separate cancel audit event). It
+        discards a gated or token-bound wrap too: neither bound applies.
 
         Writes the ``wrap_started_at`` flag, the session-handshake
         token, the frozen episode-ID snapshot, and the frozen section
@@ -3145,6 +6067,10 @@ class Store:
                 meanwhile (spore-1282; read back with :meth:`wrap_derive_roots`).
                 ``prepare_wrap`` freezes :func:`anneal_memory.rederive.root_identities`.
                 ``None`` freezes nothing.
+            token_bound: The token was supplied by the caller
+                (``prepare_wrap(wrap_token=...)``), so :meth:`wrap_cancelled`
+                refuses to end this wrap without ``expect_token`` or ``force``
+                (:class:`WrapCancelBoundError`). Must be a bool.
 
         Raises:
             ValueError: If ``token`` is empty. The canonical pipeline
@@ -3168,6 +6094,10 @@ class Store:
                 this event. Also counted on ``status().audit_write_failures``
                 and logged; see :meth:`_audit_log_after_commit`.
         """
+        if not isinstance(token_bound, bool):  # "false" is truthy: never infer it
+            raise TypeError(
+                f"wrap_started: token_bound must be a bool, got {type(token_bound).__name__}"
+            )
         if not token:
             raise ValueError(
                 "wrap_started: token must be non-empty. The canonical "
@@ -3249,17 +6179,15 @@ class Store:
         # AM-SCHEMASNAPSHOT: freeze the section schema for the wrap's duration.
         # prepare_wrap passes the EXACT schema it read to build the package, so
         # the frozen value is byte-identical to what the agent compresses
-        # against; a direct caller that omits it freezes the current live schema
-        # (closes the common case, not the prepare-read→here micro-window). Both
-        # are validated + normalized before encoding. section_schema_for_wrap()
+        # against; a direct caller that omits it freezes the current live schema.
+        # A passed schema is compared with the live one under the write lock
+        # below, so a set_section_schema that committed after the caller's read
+        # refuses the wrap. An omitted schema is read under that same lock. section_schema_for_wrap()
         # returns this for the rest of the wrap so save cannot read a different
         # (concurrently-changed) live schema.
-        frozen_schema = (
-            validate_schema(section_schema)
-            if section_schema is not None
-            else self._load_section_schema(strict=True)
+        passed_schema = (
+            validate_schema(section_schema) if section_schema is not None else None
         )
-        frozen_schema_json = json.dumps(frozen_schema)
         # Batch the wrap-lifecycle metadata writes into a single commit so a
         # crash mid-write cannot leave the store with a partial
         # snapshot (e.g. timestamp set but token blank, which would
@@ -3337,6 +6265,11 @@ class Store:
                 actual = self._last_wrap_id()
                 if actual != expect_last_wrap_id:
                     raise WrapWindowMovedError(expect_last_wrap_id, actual)
+            live_schema = self._load_section_schema(strict=True)
+            if passed_schema is not None and live_schema != passed_schema:
+                raise WrapSchemaMovedError()
+            frozen_schema = live_schema
+            frozen_schema_json = json.dumps(frozen_schema)
             self._conn.execute(
                 "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
                 ("wrap_started_at", _now_utc()),
@@ -3360,6 +6293,14 @@ class Store:
             self._conn.execute(
                 "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
                 ("wrap_derive_roots", derive_roots_json),
+            )
+            self._conn.execute(
+                "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
+                ("wrap_bound_token", token if token_bound else ""),
+            )
+            self._conn.execute(
+                "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
+                ("wrap_today", today or ""),
             )
             self._conn.commit()
 
@@ -3407,6 +6348,8 @@ class Store:
                     # Who prepared the wrap under the consolidate gate (None when
                     # ungated): the chain of custody for who may commit it.
                     "wrap_gated_session": gated_session_id,
+                    # The token came from the caller, so a tokenless cancel is refused.
+                    "wrap_token_bound": token_bound,
                     # The root map the save will compare against (spore-1282).
                     "wrap_derive_roots": (
                         None if derive_roots is None
@@ -3446,7 +6389,9 @@ class Store:
                 happens inside this method's ``BEGIN IMMEDIATE``, so it is a
                 true compare-and-swap across connections. Omitting it keeps the
                 pre-0.9.9 behaviour (clear whatever is current) EXCEPT for a
-                gated wrap; see ``session_id`` and ``force``.
+                gated wrap (see ``session_id`` and ``force``) and a wrap opened
+                with a caller-supplied token, which raises
+                :class:`WrapCancelBoundError` unless ``force`` is set.
             session_id: The caller's session. Without ``expect_token``, a
                 coherent wrap prepared under the consolidate gate
                 (:meth:`wrap_gated_session`) is cleared only when this equals the
@@ -3556,6 +6501,7 @@ class Store:
             cancelled_schema_raw = self._get_metadata("wrap_section_schema")
             cancelled_gated_raw = self._get_metadata("wrap_gated_session")
             cancelled_roots_raw = self._get_metadata("wrap_derive_roots")
+            cancelled_bound_raw = self._get_metadata("wrap_bound_token")
 
             # ⚠ PARSE AND CLASSIFY BEFORE THE COMMIT, NOT AFTER. This ran
             # after the clear at first, and codex reproduced the consequence:
@@ -3597,6 +6543,9 @@ class Store:
                 cancelled_started_at and cancelled_token and episode_ids is not None
             )
             partial_state = had_any and not complete
+            # Bound only while the key equals the live token: a value an older
+            # binary's terminal path left behind never matches a later wrap.
+            bound = complete and bool(cancelled_bound_raw) and cancelled_bound_raw == cancelled_token
 
             # AM-WRAPCANCEL-CAS: compare INSIDE the write lock, so no peer can
             # replace the token between this check and the clear below. That is
@@ -3633,7 +6582,14 @@ class Store:
                     gated_session=(cancelled_gated_raw or None) if complete else None,
                     session_id=session_id,
                     force=force is True,
+                    bound=bound,
                 )
+
+            # A wrap opened with a caller-supplied token ends only by that token or
+            # by force, whatever session_id says: a tokenless cancel cannot tell it
+            # from a peer's wrap. Checked under the same write lock as the clear.
+            if expect_token is None and force is not True and bound:
+                raise WrapCancelBoundError(session_id=session_id)
 
             # spore-699 bound: a tokenless cancel may not end a coherent gated wrap
             # unless the caller is the session that prepared it, or forces it. Read
@@ -3669,6 +6625,14 @@ class Store:
             self._conn.execute(
                 "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
                 ("wrap_derive_roots", ""),
+            )
+            self._conn.execute(
+                "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
+                ("wrap_bound_token", ""),
+            )
+            self._conn.execute(
+                "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
+                ("wrap_today", ""),
             )
             # AM-SCHEMASNAPSHOT: clear the frozen schema alongside the rest of
             # the wrap-in-progress state so section_schema_for_wrap() falls back
@@ -3727,6 +6691,9 @@ class Store:
                 # SAME predicate the receipt reports, never a second one.
                 if partial_state:
                     payload["partial_state"] = True
+                # A bound wrap ended here was ended by its own token or by force.
+                if bound:
+                    payload["wrap_token_bound"] = True
                 # ⛔ THE FROZEN SCHEMA COUNTS TOWARD ``had_any`` AND WAS ABSENT
                 # HERE. A store carrying ONLY a stray ``wrap_section_schema``
                 # (a crash between wrap_started's schema INSERT and its token
@@ -3791,6 +6758,15 @@ class Store:
             started = self._get_metadata("wrap_started_at")
         return started if started else None
 
+    def wrap_today(self) -> str | None:
+        """The date (``YYYY-MM-DD``) prepare_wrap gave the composer for the wrap in
+        progress, or ``None`` when no wrap is in progress or it was started without
+        one (an earlier version, or a direct ``wrap_started``)."""
+        with self._db_boundary("wrap_today"):
+            if not self._get_metadata("wrap_started_at"):
+                return None
+            return self._get_metadata("wrap_today") or None
+
     def wrap_gated_session(self) -> str | None:
         """The ``session_id`` that prepared the wrap in progress under the consolidate
         gate, or ``None`` when no wrap is in progress or it was prepared ungated (no
@@ -3801,6 +6777,43 @@ class Store:
             if not self._get_metadata("wrap_started_at"):
                 return None
             return self._get_metadata("wrap_gated_session") or None
+
+    def wrap_status_snapshot(self) -> "WrapStatusSnapshot":
+        """The wrap lifecycle as one committed state: ``started_at``
+        (:meth:`get_wrap_started_at`), ``snapshot`` (:meth:`load_wrap_snapshot`, or
+        ``None`` with ``partial_error`` set when the state is partial), ``gated_session``
+        (:meth:`wrap_gated_session`) and ``bound_token`` (:meth:`wrap_bound_token`).
+        Read in one transaction, so a wrap that completes and is replaced meanwhile
+        cannot lend one wrap's fields to another's."""
+        with self._db_boundary("wrap_status_snapshot"), self._read_snapshot():
+            started_at = self.get_wrap_started_at()
+            partial_error: StoreError | None = None
+            try:
+                snapshot = self.load_wrap_snapshot()
+            except StoreDatabaseError:
+                raise
+            except StoreError as exc:
+                snapshot, partial_error = None, exc
+            gated = self.wrap_gated_session()
+            bound = self.wrap_bound_token()
+        return WrapStatusSnapshot(started_at, snapshot, partial_error, gated, bound)
+
+    def wrap_bound_token(self) -> str | None:
+        """The token of the wrap in progress when it was opened with a
+        caller-supplied token (``prepare_wrap(wrap_token=...)``), else ``None``
+        (idle, or the token was minted by anneal). Such a wrap is cancelled only
+        by that token or by ``force`` (:class:`WrapCancelBoundError`)."""
+        with self._db_boundary("wrap_bound_token"):
+            # One SELECT, so the three keys come from one committed state.
+            rows = self._conn.execute(
+                "SELECT key, value FROM metadata WHERE key IN (?, ?, ?)",
+                ("wrap_started_at", "wrap_token", "wrap_bound_token"),
+            ).fetchall()
+        meta = {row["key"]: row["value"] for row in rows}
+        bound = meta.get("wrap_bound_token") or ""
+        if meta.get("wrap_started_at") and bound and bound == meta.get("wrap_token"):
+            return bound
+        return None
 
     def wrap_derive_roots(self, *, expect_token: str | None = None) -> dict[str | None, str] | None:
         """The re-derive root map frozen by the in-progress wrap (spore-1282),
@@ -4372,6 +7385,14 @@ class Store:
                 "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
                 ("wrap_derive_roots", ""),
             )
+            self._conn.execute(
+                "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
+                ("wrap_bound_token", ""),
+            )
+            self._conn.execute(
+                "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
+                ("wrap_today", ""),
+            )
             # AM-SCHEMASNAPSHOT: clear the frozen wrap schema in the same
             # transaction as the other wrap-in-progress clears, so a completed
             # wrap leaves section_schema_for_wrap() reading the live schema again.
@@ -4555,6 +7576,134 @@ class Store:
     # here; the cross-session check at graduation time compares today's
     # explanation against this history to detect sycophantic vocabulary
     # reuse across sessions.
+
+    def pattern_history_names(self) -> list[str]:
+        """Every pattern name the store has a history row for (any pattern that ever
+        graduated with a citation), sorted. Read-only."""
+        with self._db_boundary("get_pattern_history"), self._read_snapshot():
+            try:
+                return [r[0] for r in self._conn.execute(
+                    "SELECT pattern_name FROM pattern_history ORDER BY pattern_name")]
+            except sqlite3.OperationalError as exc:
+                if "no such table" in str(exc):
+                    return []
+                raise
+
+    def saved_pattern_levels(self) -> dict[tuple[str, str], int] | None:
+        """The level each pattern line held when this store last saved it, keyed
+        ``(kind, key)`` as :func:`graduation.pattern_line_levels` keys a line
+        (``"name"`` and the operator name, or ``"text"`` and the normalised
+        freeform text). ``None`` when the store has not saved under the bound yet
+        (or a read-only store opened on an older schema); ``{}`` when it has and
+        recorded no lines. Read-only."""
+        with self._db_boundary("saved_pattern_levels"), self._read_snapshot():
+            if not self._has_pattern_levels_table():
+                return None
+            rows = self._conn.execute(
+                "SELECT kind, key, level FROM pattern_levels").fetchall()
+            if not any(row[0] == "init" for row in rows):
+                return None
+            return {(row[0], row[1]): int(row[2]) for row in rows if row[0] != "init"}
+
+    def pattern_grounding(self) -> dict[str, dict[int, list[dict[str, Any]]]]:
+        """CAP-08 D2: ``{pattern name: {level: [group, ...]}}``, one group per time
+        a save recorded the rung as earned: ``{"earned_on": day, "rule":
+        "checked" | "unchecked", "episodes": [ids]}`` (the rule check 4 admitted
+        it by). A group whose episodes include one since removed also carries
+        ``"gone": {id: class}``, the class its row was marked with (CAP-08 D3 R3);
+        the grounding reads that, not whatever episode now holds the id. Empty
+        when none were recorded (or on a read-only store from before the table).
+        Read-only."""
+        with self._db_boundary("pattern_grounding"), self._read_snapshot():
+            if self._conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' "
+                "AND name = 'pattern_grounding'"
+            ).fetchone() is None:
+                return {}
+            groups: dict[tuple[str, int, str], dict[str, Any]] = {}
+            for name, level, earned_on, earning, rule, ep_id, gone in self._conn.execute(
+                "SELECT name, level, earned_on, earning, rule, episode_id, gone_trust "
+                "FROM pattern_grounding "
+                "ORDER BY name, level, earned_on, rowid"
+            ):
+                grp = groups.setdefault(
+                    (name, int(level), earning),
+                    {"earned_on": earned_on, "rule": rule, "episodes": []},
+                )
+                grp["episodes"].append(ep_id)
+                if gone is not None:
+                    grp.setdefault("gone", {})[ep_id] = gone
+            out: dict[str, dict[int, list[dict[str, Any]]]] = {}
+            for (name, level, _earning), grp in groups.items():
+                grp["episodes"].sort()
+                out.setdefault(name, {}).setdefault(level, []).append(grp)
+            return out
+
+    def _record_pattern_grounding(
+        self, rungs: Iterable[tuple[str, int, str, Iterable[str]]], earned_on: str,
+        wrap_id: str | None = None,
+    ) -> None:
+        """Add the grounding episodes of each rung this save validated, as
+        ``(name, level, rule, ids)``. Each rung is one earning, identified by
+        ``wrap_id`` (the save's wrap token; random when not given) and its place
+        in ``rungs``. Runs inside the save's batch, like
+        :meth:`_record_pattern_levels`."""
+        wrap_id = wrap_id or uuid.uuid4().hex
+        self._conn.executemany(
+            "INSERT OR IGNORE INTO pattern_grounding "
+            "(name, level, earned_on, earning, rule, episode_id) VALUES (?, ?, ?, ?, ?, ?)",
+            [(name, int(level), earned_on, f"{wrap_id}:{n}", rule, str(cid).strip().lower())
+             for n, (name, level, rule, ids) in enumerate(rungs) for cid in ids],
+        )
+
+    def _has_pattern_levels_table(self) -> bool:
+        return self._conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'pattern_levels'"
+        ).fetchone() is not None
+
+    def _record_pattern_levels(
+        self,
+        levels: dict[tuple[str, str], int],
+        saved_at: str,
+        *,
+        lower_to: dict[tuple[str, str], int] | None = None,
+        first_tombstones: dict[tuple[str, str], int] | None = None,
+    ) -> None:
+        """Record the levels of the continuity being saved. Runs inside the save's
+        batch, so the record commits with the wrap or not at all. Named rows not in
+        ``levels`` stay as tombstones, each lowered to ``lower_to``'s level for it
+        when that is lower (the prior file's: an operator's hand demotion survives
+        a wrap that leaves the pattern out, codex L3 r1); freeform rows are
+        replaced. On the store's FIRST save under the bound, ``first_tombstones``
+        (the prior file's named levels) seed the record, so a pattern that
+        first save omits keeps its level; after that no caller-supplied level enters the record except
+        through a bounded save (complement + codex L3 r2)."""
+        first = self._conn.execute(
+            "SELECT 1 FROM pattern_levels WHERE kind = 'init'"
+        ).fetchone() is None
+        self._conn.execute(
+            "INSERT OR IGNORE INTO pattern_levels (kind, key, level, saved_at) "
+            "VALUES ('init', 'since', 0, ?)", (saved_at,),
+        )
+        if first and first_tombstones:
+            self._conn.executemany(
+                "INSERT OR IGNORE INTO pattern_levels (kind, key, level, saved_at) "
+                "VALUES (?, ?, ?, ?)",
+                [(kind, key, lv, saved_at) for (kind, key), lv in first_tombstones.items()
+                 if kind == "name" and (kind, key) not in levels],
+            )
+        self._conn.execute("DELETE FROM pattern_levels WHERE kind = 'text'")
+        self._conn.executemany(
+            "INSERT INTO pattern_levels (kind, key, level, saved_at) VALUES (?, ?, ?, ?) "
+            "ON CONFLICT(kind, key) DO UPDATE SET level = excluded.level, "
+            "saved_at = excluded.saved_at",
+            [(kind, key, level, saved_at) for (kind, key), level in levels.items()],
+        )
+        self._conn.executemany(
+            "UPDATE pattern_levels SET level = ? WHERE kind = ? AND key = ? AND level > ?",
+            [(lv, kind, key, lv) for (kind, key), lv in (lower_to or {}).items()
+             if kind == "name" and (kind, key) not in levels],
+        )
 
     def get_pattern_history(self, pattern_name: str) -> dict[str, Any] | None:
         """Look up the cross-session graduation history for a pattern.
@@ -4964,14 +8113,14 @@ class Store:
         Returns human-readable text describing which episodes have been
         thought about together before, or empty string if none.
         """
-        with self._db_boundary("get_association_context"):
+        with self._db_boundary("get_association_context"), self._read_snapshot():
             return _get_association_context(
                 self._conn, episode_ids, min_strength, limit
             )
 
     def association_stats(self) -> AssociationStats:
         """Get Hebbian association network health metrics."""
-        with self._db_boundary("association_stats"):
+        with self._db_boundary("association_stats"), self._read_snapshot():
             total = self._conn.execute("SELECT COUNT(*) FROM episodes").fetchone()[0]
             return _association_stats(self._conn, total)
 
@@ -5096,15 +8245,46 @@ class Store:
                 this event. Also counted on ``status().audit_write_failures``
                 and logged; see :meth:`_audit_log_after_commit`.
         target pair exists). Returns edges re-keyed."""
+        if old_name == new_name:
+            # Nothing to re-key, and the record update below would delete the
+            # name's own saved level (L3 r3, codex HIGH + complement, run).
+            return 0
         day = today or _today_local()
         with self._db_boundary("rename_pattern_association"):
+            # The bound's record follows the rename (complement L3 r2): the old
+            # name's level moves to the new one unless the new name already has
+            # its own, which stays (a rename never raises a level).
+            level_moved = False
+            if self._has_pattern_levels_table():
+                level_moved = self._conn.execute(
+                    "UPDATE OR IGNORE pattern_levels SET key = ? "
+                    "WHERE kind = 'name' AND key = ?", (new_name, old_name)).rowcount > 0
+                level_moved = self._conn.execute(
+                    "DELETE FROM pattern_levels WHERE kind = 'name' AND key = ?",
+                    (old_name,)).rowcount > 0 or level_moved
+            # So does its grounding record (CAP-08 D2), by the same rule as the level:
+            # the rungs the old name earned stay revocable under the new one, unless
+            # the new name already has a grounding record of its own, which stays
+            # unmerged (L3 r1 1009+22: a row-by-row merge let one name's standing
+            # group keep the other's revoked rung alive).
+            if self._conn.execute(
+                "SELECT 1 FROM pattern_grounding WHERE name = ? LIMIT 1", (new_name,)
+            ).fetchone() is None:
+                self._conn.execute(
+                    "UPDATE pattern_grounding SET name = ? WHERE name = ?",
+                    (new_name, old_name))
+            self._conn.execute(
+                "DELETE FROM pattern_grounding WHERE name = ?", (old_name,))
             rekeyed = _rename_pattern(
                 self._conn, old_name, new_name, day, commit=not self._defer_commit
             )
-        if rekeyed:
+        # A level record that moved or left is a change to the bound's prior, so it
+        # gets a receipt even when no edge moved (codex L3 r1 MED 4).
+        if rekeyed or level_moved:
             self._audit_log_after_commit(
                 "pattern_association_renamed",
-                {"old": old_name, "new": new_name, "rekeyed": rekeyed},
+                {"old": old_name, "new": new_name, "rekeyed": rekeyed,
+                 "level_moved": level_moved},
                 method="rename_pattern_association",
                 committed="the rename",
             )
@@ -5112,16 +8292,29 @@ class Store:
 
     def sever_pattern_concept(self, name: str, today: str | None = None) -> int:
         """Homonym guard: a pattern's concept left (composted/retired) → delete
-        its edges + bump its generation so a future homonym starts clean. Returns
+        its edges, delete its saved level (``pattern_levels``) and grounding record
+        (``pattern_grounding``), and bump its
+        generation, so a future homonym starts clean and enters the graduation
+        bound at 1x. Returns the number of edges severed. A wrap that composts a
+        name its own text still carries saves that line's bounded level again.
 
         Warns:
             UserWarning: if the audit event could not be written. The
                 operation still SUCCEEDED — the audit trail is missing
                 this event. Also counted on ``status().audit_write_failures``
-                and logged; see :meth:`_audit_log_after_commit`.
-        edges severed."""
+                and logged; see :meth:`_audit_log_after_commit`."""
         day = today or _today_local()
         with self._db_boundary("sever_pattern_concept"):
+            # The concept's earned level leaves with it (codex L3 r1 HIGH 2): a
+            # later homonym enters the bound as new, at 1x. Same transaction as
+            # the edge delete (committed by it, or by the enclosing batch).
+            if self._has_pattern_levels_table():
+                self._conn.execute(
+                    "DELETE FROM pattern_levels WHERE kind = 'name' AND key = ?",
+                    (name,))
+            # Its grounding record too (L3 r1 1009+22, run): a homonym inherited the
+            # old concept's groups, and a still-standing one kept its revoked rung.
+            self._conn.execute("DELETE FROM pattern_grounding WHERE name = ?", (name,))
             severed = _sever_pattern_concept(
                 self._conn, name, day, commit=not self._defer_commit
             )
@@ -5147,6 +8340,30 @@ class Store:
             return _get_projection_meta(self._conn)
 
     # -- Pruning --
+
+    def _mark_aged_out(self, episode_ids: list[str]) -> None:
+        """Before a prune deletes these episodes, mark every row that cited one
+        (``episode_derived`` as a source, ``pattern_grounding``) with its
+        effective trust now, where not marked already. Aging out is not a
+        retraction, so it must not read as the ``external`` the delete trigger
+        would otherwise write (CAP-08 D3 R3, complement r4 MED 1). Runs inside
+        the prune's transaction, before the deletes."""
+        if not episode_ids:
+            return
+        eff = self.effective_trust_map(episode_ids)
+        tables = [t for t in ("episode_derived", "pattern_grounding")
+                  if self._conn.execute(
+                      "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+                      (t,)).fetchone() is not None]
+        for table, column in (("episode_derived", "source_id"),
+                              ("pattern_grounding", "episode_id")):
+            if table not in tables:
+                continue
+            self._conn.executemany(
+                f"UPDATE {table} SET gone_trust = ? "
+                f"WHERE {column} = ? AND gone_trust IS NULL",
+                [(eff.get(i, DEFAULT_TRUST), i) for i in episode_ids],
+            )
 
     def prune(self, older_than_days: int | None = None) -> int:
         """Prune old episodes, optionally creating tombstones.
@@ -5182,18 +8399,30 @@ class Store:
         )
 
         with self._db_boundary("prune"):
-            # Find episodes to prune
+            # The write lock before the candidate read: a team import between them
+            # could make a candidate enforced (codex L3 r1).
+            began = not self._conn.in_transaction
+            if began:
+                self._conn.execute("BEGIN IMMEDIATE")
+            # A team episode an active snapshot key enforces mirrors a line levain
+            # enforces: retention keeps it, linker or target, owned or not (an
+            # explicit delete stays the operator's act).
             rows = self._conn.execute(
-                "SELECT * FROM episodes WHERE timestamp < ?", (cutoff,)
+                "SELECT * FROM episodes WHERE timestamp < ? AND id NOT IN "
+                f"({_PROTECTED_TEAM_EPISODES})", (cutoff,)
             ).fetchall()
 
             if not rows:
+                if began:
+                    self._conn.commit()
                 if covers_retention:
                     self._prune_behind = False
                 return 0
 
             links_removed = self._detach_supersessions([row["id"] for row in rows])
+            self._remember_team_rows(rows)
             pruned = 0
+            self._mark_aged_out([row["id"] for row in rows])
             for row in rows:
                 if self._keep_tombstones:
                     self._conn.execute(
@@ -5266,13 +8495,22 @@ class Store:
 
         Returns:
             The continuity text, or None if no continuity file exists.
+
+        The text is CANONICAL (``graduation.canonical_continuity_text``): this
+        is the one load point every reader goes through (the wrap's prepare
+        and save, re-derive, recall's durable facts, the CLI, the MCP server),
+        so a file written outside the gate (a raw ``save_continuity``, an older
+        anneal, a hand edit) is read in the same grammar the gate enforces
+        (Phill 2026-10-08 "(A)": nothing un-canonical enters; gradgate L3 r9
+        found prepare_wrap's own load parsed raw).
         """
         if not self.continuity_path.exists():
             return None
-        return self.continuity_path.read_text(encoding="utf-8")
+        return canonical_continuity_text(self.continuity_path.read_text(encoding="utf-8"))
 
     def save_continuity(self, text: str) -> str:
-        """Low-level continuity file write. **Bypasses the immune system.**
+        """Low-level continuity file write. **Bypasses the immune system** and the
+        hard maximum on size.
 
         This method writes the continuity text to its sidecar file with
         an atomic fsync-and-rename and logs a ``continuity_saved`` audit
@@ -5610,17 +8848,12 @@ class Store:
         ``wrap-cancel`` has not), this raises ``ValueError``. Set the schema
         before ``prepare_wrap``.
 
-        **Scope of that guarantee (honest):** the refusal closes the common
-        single-writer case. It does NOT, by itself, defend the narrow window
-        between ``prepare_wrap`` *reading* the live schema (via
-        :meth:`section_schema_for_wrap`) and its ``wrap_started()`` — a
-        concurrent/cross-process ``set_section_schema`` committing there leaves
-        the wrap's prepared instructions on the old schema while save reads the
-        new one. The wrap reads the live schema at both prepare and save rather
-        than a frozen snapshot, so the complete fix is to freeze the schema into
-        the wrap snapshot at ``wrap_started`` (tracked as AM-SCHEMASNAPSHOT,
-        mirroring the episode-id freeze). The single-writer consolidate model
-        does not exercise that window.
+        The open-wrap check runs inside this method's write transaction, and
+        ``wrap_started`` compares the schema ``prepare_wrap`` read with the live
+        one inside its own, so the two serialise on the write lock: a change that
+        commits first makes the wrap refuse (``WrapSchemaMovedError``, which
+        ``prepare_wrap`` reports as a retry), and a wrap that starts first makes
+        this refuse.
 
         Note: passing ``section_schema=`` to the ``Store`` constructor is also a
         write and is *authoritative* — reconstructing a store with an explicit
@@ -5638,26 +8871,35 @@ class Store:
                 this event. Also counted on ``status().audit_write_failures``
                 and logged; see :meth:`_audit_log_after_commit`.
         """
+        in_progress = (
+            "Cannot change the section schema while a wrap is in progress "
+            "(prepare_wrap has run but validated_save_continuity has not). "
+            "The schema is frozen for the wrap's duration so prepare and "
+            "save agree on routing. Complete or cancel the wrap first, or "
+            "set the schema before prepare_wrap."
+        )
         if self.get_wrap_started_at():
-            raise ValueError(
-                "Cannot change the section schema while a wrap is in progress "
-                "(prepare_wrap has run but validated_save_continuity has not). "
-                "The schema is frozen for the wrap's duration so prepare and "
-                "save agree on routing. Complete or cancel the wrap first, or "
-                "set the schema before prepare_wrap."
-            )
-        # Capture the prior schema for the audit record before overwriting it —
+            raise ValueError(in_progress)
+        # The prior schema is captured for the audit record under the lock below —
         # a schema migration changes which sections are required and whether the
         # felt-layer gate fires, so it belongs in the audit chain (without this,
         # a store that later fails to validate has no trail of when it flipped).
-        old_headings = [s["heading"] for s in self.section_schema]
         normalized = validate_schema(schema)
+        wrap_open = False
         with self._db_boundary("set_section_schema"):
-            self._conn.execute(
-                "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
-                ("section_schema", json.dumps(normalized)),
-            )
+            # The check above is a lock-free fast refusal; this one, under the
+            # write lock, is the one that decides.
+            self._conn.execute("BEGIN IMMEDIATE")
+            wrap_open = bool(self._get_metadata("wrap_started_at"))
+            old_headings = [s["heading"] for s in self._load_section_schema(strict=False)]
+            if not wrap_open:
+                self._conn.execute(
+                    "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
+                    ("section_schema", json.dumps(normalized)),
+                )
             self._conn.commit()
+        if wrap_open:
+            raise ValueError(in_progress)
         # ⛔ POST-COMMIT: the schema is persisted. This site had a bespoke guard
         # that was narrower than the policy on BOTH axes — it caught only
         # ``OSError`` (measured 2026-09-04: a RuntimeError from the sink
@@ -5698,7 +8940,7 @@ class Store:
 
     def count_episodes_since_wrap(self) -> int:
         """How many episodes are in the open compression window."""
-        with self._db_boundary("count_episodes_since_wrap"):
+        with self._db_boundary("count_episodes_since_wrap"), self._read_snapshot():
             return self._count_episodes_since_wrap()
 
     def last_wrap_id(self) -> int:
@@ -5740,6 +8982,55 @@ class Store:
     # and forward-looking rule live in the Store class docstring
     # ("Wrap-lifecycle invariants"). Do not reintroduce a single-key
     # helper inside wrap_started/wrap_cancelled/wrap_completed.
+
+    def _enable_wal_with_retry(self) -> None:
+        """``PRAGMA journal_mode=WAL``, retried while a peer holds the file.
+
+        SQLite returns BUSY on the journal-mode switch WITHOUT calling the
+        busy handler, so ``busy_timeout`` never applies to it: with four
+        processes opening a brand-new store at once, one failed
+        ``schema_init`` "database is locked" at t=0.00s in roughly 1 run in
+        10 (measured 2026-10-08: 3/20, 2/30, 6/40). Retry only that
+        statement, with short growing sleeps, for up to the connection's own
+        ``busy_timeout`` (read, never hard-coded), with one last attempt at
+        the deadline, then re-raise. The budget is for THIS statement; the
+        schema init after it has its own ``busy_timeout``.
+
+        A switch that succeeds but reports a mode other than ``wal`` (SQLite
+        returns the old mode when WAL cannot be enabled, e.g. a VFS without
+        shared memory) is refused: the store's concurrency assumes WAL
+        (L3 r1, codex MED; it was accepted silently before). A database with
+        no file (in-memory or temp) is accepted in whatever mode it reports.
+        """
+        budget = self._conn.execute("PRAGMA busy_timeout").fetchone()[0] / 1000.0
+        deadline = time.monotonic() + budget
+        delay = 0.005
+        while True:
+            try:
+                rows = self._conn.execute("PRAGMA journal_mode=WAL").fetchall()
+                break
+            except sqlite3.OperationalError as exc:
+                contended = _sqlite_error_is_contention(exc)
+                remaining = deadline - time.monotonic()
+                if not contended or remaining <= 0:
+                    raise
+                time.sleep(min(delay, remaining))
+                delay = min(delay * 2, 0.1)
+        mode = str(rows[0][0]).lower() if rows else ""
+        # A database with NO file (``:memory:``, a shared-cache memory URI, the
+        # private temp db of ``""``) has no peer to be concurrent with and can
+        # never be WAL (L3 r2: ``Store(":memory:")`` broke). Measured 1008+11:
+        # all three list main's filename as ``""``. Decided by the FILE, never by
+        # the mode word: a disk database already in MEMORY journal mode also
+        # reports ``memory`` when WAL is refused (L3 r3, codex MED).
+        main_file = next(
+            (r[2] for r in self._conn.execute("PRAGMA database_list").fetchall()
+             if r[1] == "main"), None)  # no main row: unknown, so refused (r4 LOW)
+        if mode != "wal" and main_file != "":
+            raise sqlite3.OperationalError(
+                f"journal_mode=WAL was not enabled (SQLite reports {mode!r}); "
+                "anneal-memory needs WAL, which this filesystem or VFS refused"
+            )
 
     def _refuse_a_newer_schema(self) -> None:
         """Refuse a store written by a NEWER anneal, the way the sidecars do.
@@ -6585,6 +9876,14 @@ class Store:
         raise ``sqlite3.OperationalError`` ("unable to commit") so it
         must sit inside the boundary, not after.
 
+        **Nesting.** A boundary entered inside another one (a public method
+        calling another) raises under the OUTERMOST operation, the method the
+        caller called, with the name of the boundary nested directly inside it
+        in the message (one level: a deeper name is not kept) and the same
+        SQLite ``__cause__``. The phase names in :data:`_PHASE_OPERATIONS` are
+        the exception: they keep their own name at any depth. A non-database
+        :class:`StoreError` keeps the name it was raised with.
+
         **Identifier naming.** Most operation values match the public
         method name verbatim (``record``, ``recall``, ``wrap_completed``,
         etc.) so grep lands on the raise site and the caller-facing
@@ -6629,6 +9928,25 @@ class Store:
             )
         try:
             yield
+        except StoreDatabaseError as exc:
+            # A boundary nested inside this one already wrapped the error under its
+            # own name. The caller called THIS method, so the error carries this
+            # operation, with the same SQLite cause (1010+14, run: a team import's
+            # failure inside the trust lookup read ``operation="trust_map"``). The
+            # phase names the docstring lists stay as raised: they name a part of
+            # this call that a caller can act on.
+            self._rollback_quietly()
+            cause = exc.__cause__
+            if (exc.operation == operation or exc.operation in _PHASE_OPERATIONS
+                    or not isinstance(cause, sqlite3.DatabaseError)):
+                raise
+            raise StoreDatabaseError(
+                f"SQLite {operation} failed on {exc.path or self._path} "
+                f"(in {exc.operation}): {cause}",
+                operation=operation,
+                path=exc.path or str(self._path),
+                cause_type_name=exc.cause_type_name,
+            ) from cause
         except sqlite3.DatabaseError as exc:
             # 10.5c.6 L2 #2: catch ``sqlite3.DatabaseError`` (the
             # runtime-failure root) rather than ``sqlite3.Error`` (the
@@ -6778,6 +10096,12 @@ class Store:
 
         - :meth:`record` (episode writes)
         - :meth:`supersede` / :meth:`unsupersede` (supersession links)
+        - :meth:`set_trust` (CAP-08 trust class)
+        - :meth:`import_team_entries` (``dry_run`` is refused inside a batch)
+        - :meth:`import_team_snapshot` (``dry_run`` is refused inside a batch)
+        - :meth:`team_forget_key`
+        - :meth:`add_drift_probe` / :meth:`retire_drift_probe` (CAP-06)
+        - :meth:`set_state_key` / :meth:`clear_state_key` (CAP-04 state slots)
         - :meth:`delete` (episode deletions)
         - :meth:`record_associations` / :meth:`decay_associations`
         - :meth:`wrap_completed`

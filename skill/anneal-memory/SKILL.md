@@ -14,7 +14,7 @@ This project uses **anneal-memory** for persistent memory across sessions. Work 
 
 - **Episodic** — raw observations you record during work. Cheap, plentiful.
 - **Continuity** — the compressed working memory episodes graduate into at wrap time. This is where identity lives.
-- **Hebbian associations** — links that form automatically between episodes you cite together in your patterns; they strengthen with repetition and decay with disuse.
+- **Hebbian associations** — links that form automatically between episodes you cite together in your patterns; a link gains strength when the same pair is cited together again and decays at every wrap it is not. Recall does not read them (since 0.9.26); they feed `status`, `associations`, the `graph` export and the association-health warnings.
 - **Affective** (the *limbic* layer in the CLS lineage this borrows from) — an optional affective tag on a wrap that modulates how strongly its associations form.
 
 You touch episodic (record) and continuity (wrap) directly. Hebbian and affective are byproducts of citing honestly and reflecting on your state — no extra bookkeeping.
@@ -90,9 +90,9 @@ Patterns graduate 1x → 2x → 3x → 4x → … with **no top rung** — the l
 
 Report findings naturally — "from prior sessions there was a tension between X and Y", not "the recall tool returned…". Don't narrate tool calls; just use them and share what's relevant. When continuity marks a pattern at 2x or above, trust it — it earned that level through validated evidence, and the level has no ceiling: a pattern re-earned many times keeps climbing.
 
-## Single-process invariant (load-bearing)
+## One store per entity (load-bearing)
 
-Only one process should operate against a given store at a time. The library is **not** thread-safe, task-safe, or reentrant. Multi-tenant deployments sharing a store break the hash-chained audit trail by construction. If you need multiple agents, give each its own store path.
+A store is one entity's memory: there is no tenant scoping inside it, so if you need multiple agents, give each its own store path. One `Store` object is **not** thread-safe, task-safe, or reentrant; use one per thread. Several processes of the same entity (a CLI beside an MCP server) may record into one store: SQLite serializes the episodes and the audit trail serializes its appends with a cross-process lock, provided every writer runs a version that takes that lock (an older anneal-memory writing alongside breaks the hash chain). Windows has no such lock, so keep to one writer at a time there.
 
 ## Affective layer (optional)
 
@@ -124,7 +124,7 @@ CLI and MCP forms of the same loop. Set `ANNEAL_MEMORY_DB` (or pass `--db`) for 
 
 If a wrap gets stuck — `prepare_wrap` ran but `save_continuity` never completed, so the store is locked `wrap_in_progress` — clear it with the `wrap_cancel` MCP tool or `anneal-memory wrap-cancel` (don't delete the store or force a duplicate wrap). **Over MCP, call `status` first:** it reports when the wrap started, and a wrap that began moments ago is probably a live peer session still compressing rather than a corpse — one server process runs per client session against a shared store, and cancelling throws away whatever that session has in flight. `anneal-memory wrap-status` shows the full snapshot but is CLI-only. A wrap prepared under the consolidate gate (`session_id`) can be completed only by that same `session_id`, and since 0.9.22 a cancel that names neither its token nor that session is refused; `wrap-status` shows which session prepared it. Ending another session's gated wrap discards its compression and is the operator's decision (`force`, documented on the tool).
 
-**If the wrap is yours, prove it instead of guessing.** Pass the `wrap_token` `prepare_wrap` gave you (`--wrap-token` on the CLI): the cancel then succeeds only if that wrap is still the one in progress, and is refused **without changing anything** if a peer replaced it or it already finished. The store compares inside the same transaction that clears, so a peer cannot swap the wrap in between — a real guard rather than advice. Omit the token to cancel whatever is current, which is what you want when clearing an ungated wrap you did **not** open (the original stuck-wrap case, where you have no token to offer); a gated wrap refuses that, as above. ⚠ Checking `status` is still the only thing available in that case: a lock or a timestamp cannot tell you who owns a wrap.
+**If the wrap is yours, prove it instead of guessing.** Pass the `wrap_token` `prepare_wrap` gave you (`--wrap-token` on the CLI): the cancel then succeeds only if that wrap is still the one in progress, and is refused **without changing anything** if a peer replaced it or it already finished. The store compares inside the same transaction that clears, so a peer cannot swap the wrap in between — a real guard rather than advice. Omit the token to cancel whatever is current, which is what you want when clearing an ungated wrap you did **not** open (the original stuck-wrap case, where you have no token to offer); a gated wrap refuses that, as above, and so does a wrap opened with a token its preparer supplied (`prepare_wrap(wrap_token=...)`, since 0.9.30), which only that token or `force` ends. ⚠ Checking `status` is still the only thing available in that case: a lock or a timestamp cannot tell you who owns a wrap.
 
 *(Before 0.9.8 this row read "— (CLI only)" and it was true: `wrap_cancel` had no MCP surface, so an agent that hit `WrapInProgressError` mid-session had no in-band way out. That is the defect 0.9.8 fixed.)*
 

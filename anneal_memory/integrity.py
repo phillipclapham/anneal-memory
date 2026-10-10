@@ -64,6 +64,19 @@ TOOLS: list[dict[str, Any]] = [
                     "description": "Agent or source attribution. Defaults to 'agent'.",
                     "default": "agent",
                 },
+                "trust": {
+                    "type": "string",
+                    "enum": ["agent", "tool", "external"],
+                    "description": (
+                        "Where the content came from. agent (default) = your own "
+                        "observation or decision; tool = a tool result you are "
+                        "relaying; external = a web page, document or another party. "
+                        "A pattern grounded only in tool/external episodes does not "
+                        "graduate past 1x until an agent episode also grounds it. "
+                        "Use tool/external whenever the content is someone else's claim."
+                    ),
+                    "default": "agent",
+                },
                 "metadata": {
                     "type": "object",
                     "description": "Optional JSON metadata to attach to the episode.",
@@ -79,6 +92,28 @@ TOOLS: list[dict[str, Any]] = [
                         "recall then hides the old episode by default."
                     ),
                 },
+                "state_key": {
+                    "type": "string",
+                    "description": (
+                        "The state slot this fact fills, e.g. 'user.home_city'. A newer "
+                        "episode with the same key replaces this one, and this one "
+                        "replaces older episodes with the key, with no word-overlap "
+                        "check: the shared key is your claim that the facts fill one "
+                        "slot. recall then hides the older episode and, for a keyword "
+                        "that matches it, names this one as its replacement. Case and "
+                        "spacing are ignored."
+                    ),
+                },
+                "derived_from": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "Ids of the episodes this content was derived from, e.g. your "
+                        "summary of a page you recorded as external. Each must exist. "
+                        "For graduation it then counts at most as trusted as its most "
+                        "trusted source, so a summary cannot corroborate its own source."
+                    ),
+                },
             },
             "required": ["content", "episode_type"],
         },
@@ -90,7 +125,18 @@ TOOLS: list[dict[str, Any]] = [
             "context before making decisions, to locate specific episodes for "
             "citation during graduation, or to review recent work. Returns "
             "matching episodes ordered by timestamp (newest first). Supports "
-            "time range, type, source, and keyword filters."
+            "time range, type, source, and keyword filters. The keyword is "
+            "matched as an exact phrase first; if no episode contains the whole "
+            "phrase and it has two or more distinctive words, the call falls "
+            "back to ranking episodes by how many of those words they contain "
+            "(the reply says so and names the words each episode matched), so a "
+            "multi-word query does not need to appear verbatim. A phrase of three "
+            "or more distinctive words with only one or two exact hits is followed "
+            "by a few word matches, listed "
+            "under 'Also matching by words'. A durable fact whose cue words appear in the "
+            "keyword (or two distinctive words of its text) is listed first, under "
+            "'Durable facts matching your words'. limit=0 returns nothing at all, "
+            "facts included."
         ),
         "inputSchema": {
             "type": "object",
@@ -121,11 +167,19 @@ TOOLS: list[dict[str, Any]] = [
                 },
                 "keyword": {
                     "type": "string",
-                    "description": "Search episode content for this keyword.",
+                    "description": (
+                        "Search episode content for this keyword or phrase. An exact "
+                        "phrase match is tried first; a multi-word phrase with no exact "
+                        "match is then matched word by word and ranked."
+                    ),
                 },
                 "limit": {
                     "type": "integer",
-                    "description": "Maximum episodes to return. Default 100.",
+                    "description": (
+                        "Maximum episodes to return. Default 100. When a multi-word "
+                        "keyword has no exact match and is ranked word by word, the "
+                        "default is 10 instead; pass a limit to see more."
+                    ),
                     "default": 100,
                 },
                 "offset": {
@@ -193,7 +247,10 @@ TOOLS: list[dict[str, Any]] = [
             "graduation citations against real episodes (cited IDs must exist), "
             "checks explanation overlap (evidence must reference actual episode "
             "content), detects citation gaming (suspicious reuse of single "
-            "episodes), and may demote ungrounded graduations. Also records "
+            "episodes), and may demote ungrounded graduations. Each pattern's "
+            "level is also capped against the level the store last saved for it: "
+            "a new pattern enters at 1x and a validated Nx becomes at most "
+            "(N+1)x, whatever the line's date says. Also records "
             "Hebbian associations between co-cited episodes (episodes cited "
             "together on the same pattern line form strong links; episodes cited "
             "in the same wrap form weaker links) and decays unreinforced "
@@ -314,7 +371,9 @@ TOOLS: list[dict[str, Any]] = [
             "which is what you want when recovering a wrap you did not open. "
             "Exception: a wrap prepared under the consolidate gate is cancelled "
             "without its token only when session_id is the session that prepared "
-            "it, or with force=true when that session is gone. PARTIAL "
+            "it, or with force=true when that session is gone; a wrap opened with "
+            "a token its preparer supplied is cancelled without that token only "
+            "with force=true. PARTIAL "
             "(corrupt) wrap state is cleared with partial=true, which refuses if "
             "a healthy wrap has replaced it."
         ),
@@ -331,7 +390,8 @@ TOOLS: list[dict[str, Any]] = [
                         "cannot swap the wrap in between. Refused with no "
                         "change if it does not match, including when the wrap "
                         "has already completed. Omit it to cancel whatever is "
-                        "in progress (a gated wrap also needs session_id or force)."
+                        "in progress (a gated wrap also needs session_id or force; "
+                        "a wrap opened with a caller-supplied token needs force)."
                     ),
                 },
                 "session_id": {
@@ -345,8 +405,9 @@ TOOLS: list[dict[str, Any]] = [
                 "force": {
                     "type": "boolean",
                     "description": (
-                        "Cancel a gated wrap without its token or session, when "
-                        "the session that prepared it is gone. Discards its "
+                        "Cancel a gated wrap without its token or session, or a "
+                        "wrap opened with a caller-supplied token without that "
+                        "token, when its preparer is gone. Discards its "
                         "compression."
                     ),
                 },
@@ -425,9 +486,13 @@ TOOLS: list[dict[str, Any]] = [
             "crystal_index, the always-on menu of what exists). Associative by "
             "default: a pattern grounded in an episode your query matched surfaces "
             "even with zero keyword overlap (the evidence edge). Returns scored "
-            "patterns (name, level, activation, explanation, tags); precision-biased "
-            "— a thin query or no match returns none, by design (surface nothing "
-            "rather than noise)."
+            "patterns (name, level, activation, explanation, tags). In the default "
+            "'prompt' mode it is precision-biased: a thin query or no match returns "
+            "none, by design (surface nothing rather than noise). Pass mode='query' "
+            "when you are asking explicitly. Durable facts whose cue words appear in the "
+            "query (or two distinctive words of its text) are listed first, under "
+            "'Durable facts matching your words'. max_patterns=0 returns nothing at "
+            "all, facts included."
         ),
         "inputSchema": {
             "type": "object",
@@ -455,6 +520,17 @@ TOOLS: list[dict[str, Any]] = [
                         "pure keyword scoring (the pre-0.8.0 path)."
                     ),
                     "default": True,
+                },
+                "mode": {
+                    "type": "string",
+                    "enum": ["prompt", "query"],
+                    "description": (
+                        "'query': for a question you are asking on purpose; one "
+                        "keyword is enough, and weaker matches come back too. "
+                        "'prompt' (default): strict, built for automatic per-turn "
+                        "injection; may return nothing."
+                    ),
+                    "default": "prompt",
                 },
             },
             "required": ["query"],

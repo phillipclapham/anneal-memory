@@ -13,11 +13,13 @@ Zero dependencies beyond Python stdlib.
 from __future__ import annotations
 
 import re
+import unicodedata
 from datetime import datetime as _datetime, date as _date
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Callable, NamedTuple
 
 from .schema import DEFAULT_GRADUATING
+from .types import DEFAULT_TRUST, trust_rank
 
 
 # Matches graduated patterns (2x AND UP) WITH [evidence: <id> "explanation"] citations.
@@ -65,29 +67,29 @@ from .schema import DEFAULT_GRADUATING
 # rewrites by level, so it cannot rewrite ``| 01x`` and the counters could report a
 # demotion while the displayed level never moved. Verified on disk before the fix.
 #
-# ⚠ KNOWN, DELIBERATE ASYMMETRY: ``_BARE_GRADUATION_RE`` below stays ``[23]``. Widening
-# it would make every today-dated 4x+ line WITHOUT evidence newly eligible for bare
-# demotion — a mass demotion of mature carried patterns the moment one is re-stamped,
-# a far larger blast radius than the defect being fixed. Carried lines are date-gated
-# out in the normal case. ⛔ THAT LAST CLAUSE READ "so the asymmetry is inert" AND IT
-# WAS MEASURED FALSE ON 2026-08-31, against flow's live neocortex: of its pattern lines
-# only THREE carry an [evidence:] tag, FOURTEEN are bare at level >= 4, and TEN of those
-# were dated to the wrap then in progress — i.e. today-dated bare 4x+ lines are the
-# HABIT, not the exception the date-gate assumption relies on. Ten such lines matched
-# neither regex at the most recent consolidate and were silently skipped.
-# ⚠ THE DEFERRAL STILL STANDS AND IS NOT WEAKENED BY THIS: the reason to keep [23] is
-# the blast radius above (widening puts fourteen mature carried patterns onto the
-# bare-demotion path at the next re-stamp), not the frequency. Only the stated
-# JUSTIFICATION was wrong, and a deferral resting on a false premise is one somebody
-# re-opens for the wrong reason. spore-676 holds the decision; it is gated on spore-675
-# and is NOT to be widened casually. Recorded here rather than left to be rediscovered.
+# A level is bounded at 9 digits (below 10**9): a longer digit run is a malformed marker,
+# never matched, so it neither validates nor reaches ``int()`` (a 4,301-digit run raised
+# ValueError) and no level can overflow a SQLite INTEGER.
+#
+# ``_BARE_GRADUATION_RE`` below uses the same "2 and up" atom (spore-676, 2026-10-07).
+# It stayed ``[23]`` until then for fear that widening would mass-demote mature carried
+# patterns. RUN on a copy of flow's real store before widening, every bare pattern line
+# re-stamped to today: AM-PRESERVE-BARE-PATH held all 11 warm lines at full level (up to
+# 29x), and the 4 cold ones dropped one level each, the rule a cited line already
+# follows. Under ``[23]`` a bare 4x+ line was neither validated nor demoted, at any level.
+# ONE level atom (L3 r5; overflow, 10+ digits, "02x" and non-ASCII digits each came back as
+# a new disagreement between parsers): ASCII, no leading zero, below 10**9. Every regex
+# that reads a level is built from it and writes its digits as [0-9], never \d. The
+# validators add the 2-and-up rule with a lookahead, not a second spelling.
+_LEVEL_ATOM = r"[1-9][0-9]{0,8}"
+_PROVEN_LEVEL = rf"(?!1x)({_LEVEL_ATOM})"  # 2 and up
 _GRADUATION_RE = re.compile(
-    r"\|\s*([2-9]|[1-9][0-9]+)x\s*\((\d{4}-\d{2}-\d{2})\)\s*\[evidence:\s*"
+    rf"\|\s*{_PROVEN_LEVEL}x\s*\(([0-9]{{4}}-[0-9]{{2}}-[0-9]{{2}})\)\s*\[evidence:\s*"
     r"([a-fA-F0-9][a-fA-F0-9, ]*)"  # one or more hex IDs
     r'(?:\s+"([^"]*)")?\s*\]'  # optional quoted explanation
 )
 
-# Matches bare graduations (2x or 3x) WITHOUT [evidence:] tags.
+# Matches bare graduations (2x AND UP) WITHOUT [evidence:] tags.
 # The negative lookahead runs BEFORE consuming trailing whitespace and spans the
 # optional space itself (``(?![ \t]*\[evidence:)``). The prior form
 # ``\s*(?!\[evidence:)`` could backtrack ``\s*`` to zero spaces so the zero-width
@@ -96,12 +98,75 @@ _GRADUATION_RE = re.compile(
 # _GRADUATION_RE rejects) as a BARE line, which the v0.5.0 hold would then
 # preserve. Checking ``[ \t]*\[evidence:`` atomically closes that (codex L3).
 _BARE_GRADUATION_RE = re.compile(
-    r"\|\s*([23])x\s*\((\d{4}-\d{2}-\d{2})\)(?![ \t]*\[evidence:)[ \t]*"
+    rf"\|\s*{_PROVEN_LEVEL}x\s*\(([0-9]{{4}}-[0-9]{{2}}-[0-9]{{2}})\)(?![ \t]*\[evidence:)[ \t]*"
 )
+
+# The one normalizer (see validate_graduations): any ``| <token>x`` marker. The token is any
+# run of characters other than space, ``|``, ``()`` and ``[]``, so numerals the ASCII atom
+# refuses (Unicode digits, ``²``, ``①``) are candidates; _cap() classifies them. Groups:
+# (1) pipe, (2) token, (3) optional date, (4) optional evidence tag (its body bounded, so a
+# line of unterminated tags cannot make the scan quadratic).
+_ANY_LEVEL_MARKER_RE = re.compile(
+    r"(\|\s*)([^\s|()\[\]]+?)x\b((?:\s*\([0-9]{4}-[0-9]{2}-[0-9]{2}\))?)"
+    r'(\s*\[evidence:(?:[^\]"]|"[^"]*"){0,4096}\])?'
+)
+_LEVEL_ATOM_RE = re.compile(_LEVEL_ATOM)
+
+# ONE LEXER FOR LEVELS (gradgate L3 r1, codex HIGH, run): the quoted explanation of a
+# well-formed ``[evidence: <ids> "..."]`` tag is an opaque span, the way a CommonMark code
+# span or a Python string literal is one token whose content no other rule parses. Every
+# unanchored level reader (the bound, the atom normalizer, and each ``.search`` of a level
+# regex) scans the MASKED line, so they all agree on which ``| Nx`` tokens exist; masking
+# the bound alone would let a ``.search`` reader believe a dated marker the bound skipped.
+# Line-anchored readers bind the first marker after the name, which a quote cannot precede.
+# The id run is ``_GRADUATION_RE``'s language (``[hex][hex, ]*`` then whitespace),
+# written so a space inside it must be followed by an id character: whitespace before
+# the quote then has one parse, not one per split point (quadratic on a long space run,
+# codex L3 r2 HIGH, run: 3.4 s for one call at 50,000 spaces).
+_EXPLANATION_SPAN_RE = re.compile(
+    r'\[evidence:\s*[a-fA-F0-9][a-fA-F0-9,]*(?: +[a-fA-F0-9,]+)*\s+"([^"]*)"\s*\]'
+)
+
+
+def _mask_explanations(line: str) -> str:
+    """``line`` with each evidence explanation's content blanked to ``_`` (same
+    length, quotes kept), so offsets into the mask are offsets into ``line``."""
+    parts: list[str] = []
+    last = 0
+    for m in _EXPLANATION_SPAN_RE.finditer(line):
+        start, end = m.span(1)
+        parts.append(line[last:start])
+        parts.append("_" * (end - start))
+        last = end
+    if not parts:
+        return line
+    parts.append(line[last:])
+    return "".join(parts)
+
+
+def mask_explanations_text(text: str) -> str:
+    """:func:`_mask_explanations` per line (a quote never spans lines here)."""
+    return "\n".join(_mask_explanations(line) for line in text.split("\n"))
+
+
+def _search_outside_explanations(
+    regex: "re.Pattern[str]", line: str
+) -> "re.Match[str] | None":
+    """``regex.search(line)`` that never starts a match inside an explanation; the
+    returned match is on ``line`` itself, so its groups carry the real text. A mask
+    changes only characters between a pair of quotes, which a level regex either
+    never reaches (no quote in its grammar) or reads as ``[^"]*``, so the same span
+    matches on ``line``. Were that ever false the masked match is returned: its
+    structure groups are the real ones and a blanked explanation grounds nothing,
+    so the line fails closed instead of being skipped (L1 r2)."""
+    m = regex.search(_mask_explanations(line))
+    if m is None:
+        return None
+    return regex.match(line, m.start()) or m
 
 # Matches any pattern with temporal marker (Nx)
 _PATTERN_RE = re.compile(
-    r"\|\s*(\d+)x\s*\((\d{4}-\d{2}-\d{2})\)"
+    rf"\|\s*({_LEVEL_ATOM})x\s*\(([0-9]{{4}}-[0-9]{{2}}-[0-9]{{2}})\)"
 )
 
 # Matches a pattern line at ANY level (1x and up) with an
@@ -115,7 +180,7 @@ _PATTERN_RE = re.compile(
 # explanation to compare against, defeating the cross-session
 # defense on initially-developing patterns.
 _PATTERN_LINE_WITH_EVIDENCE_RE = re.compile(
-    r"\|\s*(\d+)x\s*\((\d{4}-\d{2}-\d{2})\)\s*\[evidence:\s*"
+    rf"\|\s*({_LEVEL_ATOM})x\s*\(([0-9]{{4}}-[0-9]{{2}}-[0-9]{{2}})\)\s*\[evidence:\s*"
     r"([a-fA-F0-9][a-fA-F0-9, ]*)"
     r'(?:\s+"([^"]*)")?\s*\]'
 )
@@ -192,7 +257,7 @@ _NAMED_PATTERN_RE = re.compile(
     r")"
     r"(?:(?:!+|\?|✓|\*)[ \t]+)?"              # optional FlowScript marker prefix
     r"([A-Za-z][A-Za-z0-9_.\-]*)"               # operator-style identifier (ASCII)
-    r"[ \t]*\|[ \t]*(\d+)x"                     # graduation marker
+    rf"[ \t]*\|[ \t]*({_LEVEL_ATOM})x"                # graduation marker
 )
 
 # AM-PERNAME-LINEBIND (v0.4.6): the name AND its evidence tag captured in ONE
@@ -221,8 +286,8 @@ _NAMED_PATTERN_WITH_EVIDENCE_RE = re.compile(
     r")"
     r"(?:(?:!+|\?|✓|\*)[ \t]+)?"
     r"([A-Za-z][A-Za-z0-9_.\-]*)"               # (1) operator-style identifier
-    r"[ \t]*\|[ \t]*(\d+)x"                     # (2) level
-    r"[ \t]*\((\d{4}-\d{2}-\d{2})\)"            # (3) date
+    rf"[ \t]*\|[ \t]*({_LEVEL_ATOM})x"                # (2) level
+    r"[ \t]*\(([0-9]{4}-[0-9]{2}-[0-9]{2})\)"      # (3) date
     r"[ \t]*\[evidence:[ \t]*"
     r"([a-fA-F0-9][a-fA-F0-9, ]*)"              # (4) cited ids
     r'(?:[ \t]+"([^"]*)")?[ \t]*\]'             # (5) explanation (optional)
@@ -332,12 +397,30 @@ def _is_patterns_heading(line: str) -> bool:
     return _is_graduating_heading(line)
 
 
-# Stop words for explanation overlap checking
+# Stop words for explanation overlap checking (grounding: check 2, the preservation
+# novelty check, and the store's supersession floor).
 _STOP_WORDS = frozenset(
     "a an the is are was were be been being have has had do does did "
     "will would shall should may might can could this that these those "
     "it its he she they we you i me my our his her their in on at to "
     "for of by with from and or but not no nor so if as".split()
+)
+
+# KL-01 (2026-10-07): the cross-session-overlap check (check 3 and carryforward's guard)
+# also drops every other function word and the number words. With the grounding list
+# alone, "while"/"only"/"when"/"one" counted as shared vocabulary and real patterns were
+# demoted on them (flow's save audit). Grounding keeps the shorter list on purpose: an
+# explanation like "down again after restart" grounds on words such as "down" and "two",
+# and a longer list there demotes real citations (L2 1007, run).
+_SYCOPHANCY_STOP_WORDS = _STOP_WORDS | frozenset(
+    "having doing must itself him himself hers herself them themselves us ourselves "
+    "your yours yourself myself mine ours theirs what which who whom whose about "
+    "against between into through during before after above below up down out off "
+    "over under again further then once here there when where why how all any both "
+    "each few more most other some such because until while than too very only own "
+    "same just now also still even ever yet already much many another within without "
+    "upon across since though although whether unless via every one two three four "
+    "five six seven eight nine ten am".split()
 )
 
 
@@ -400,6 +483,77 @@ class GraduationResult:
     # (fresh evidence, today) this wrap. The recall-INDEPENDENT co-activation set
     # the cortical pattern-graph seeds weak links across (store.seed_pattern_co_graduation).
     graduated_names: list[str] = field(default_factory=list)
+    # The same graduations as (name, level, explanation) records, taken from the marker
+    # the validator itself matched and bound to the name (the CAP-06 review worklist
+    # reads these, not the text).
+    graduated_records: list[tuple[str, int, str]] = field(default_factory=list)
+    # Markers cut to 1x because their level was not exactly the level atom; already
+    # counted in ``demoted``, kept apart so they cannot read as lost citations.
+    atom_capped: int = 0
+    # The prior-state bound (1007+29): lines written above the level the prior
+    # saved continuity entitles them to, and the level each was cut to. Empty
+    # when ``prior_text`` was not supplied (the bound did not run).
+    level_capped: list["LevelCapped"] = field(default_factory=list)
+    # CAP-08 T3: graduations held back because every grounding citation is a
+    # tool/external episode. Empty unless the caller passed ``trust_of``.
+    uncorroborated: list["UncorroboratedGraduation"] = field(default_factory=list)
+    # CAP-08 T2: for each NAMED pattern that graduated today (the identifiers
+    # ``graduated_names`` holds; a free-text line has none), the highest trust
+    # among the citations that ground it. Empty unless the caller passed ``trust_of``.
+    pattern_trust: dict[str, str] = field(default_factory=dict)
+    # CAP-08 D2 (C#11): ``(name, level, rule, grounding ids)`` for each named
+    # line that validated and stands at 2x or above after the bound, so the store
+    # can record which episodes earned that rung (``Store.pattern_grounding``).
+    # The ids are check 4's grounding citations; ``rule`` is GROUNDING_CHECKED
+    # (the explanation named which citations ground it) or GROUNDING_UNCHECKED.
+    # Empty unless the caller passed ``trust_of``.
+    pattern_grounding: list[tuple[str, int, str, list[str]]] = field(default_factory=list)
+
+
+# The rule check 4 admitted a line by: with a checked explanation one trusted
+# grounding citation is enough; unchecked, every citation must be trusted.
+GROUNDING_CHECKED = "checked"
+GROUNDING_UNCHECKED = "unchecked"
+
+
+# The reason a LevelCapped line was cut. A revocation is a prior lowered because
+# every episode that grounded a rung is now tool/external (CAP-08 D2).
+CAP_REASON_PRIOR = "prior"
+CAP_REASON_REVOKED = "revoked: grounding lowered"
+
+
+@dataclass
+class LevelCapped:
+    """A pattern line cut down to the level the prior continuity entitles it to.
+
+    The contract is prepare_wrap's own: a new pattern enters at ``1x`` and a
+    validated ``Nx`` becomes ``(N+1)x``. The bound reads the levels the store
+    last SAVED (the receiver's record), never the line's own date, level or tag
+    shape, so a back-dated, bare, malformed or multi-rung line is held to it too.
+    """
+
+    name: str  # operator name, or the freeform text before the marker
+    written_level: int  # the highest level the line claimed
+    capped_to: int  # the level it was cut to
+    prior_level: int | None  # the level its prior record entitles (None = new)
+    validated: bool  # whether the line validated this wrap (+1 allowed)
+    # CAP_REASON_PRIOR, or CAP_REASON_REVOKED when the prior was cut back because
+    # the grounding of a rung it held was lowered to tool/external since.
+    reason: str = CAP_REASON_PRIOR
+
+
+@dataclass
+class UncorroboratedGraduation:
+    """A today-dated graduation whose grounding citations are all ``tool`` or
+    ``external`` episodes (CAP-08 T3): content the agent relayed, not content it
+    observed. It is written back at 1x marked ``(uncorroborated)``, whatever
+    level it claimed and whatever it held before, and forms no Hebbian link.
+    It climbs once an ``agent`` or ``operator`` episode also grounds it."""
+
+    name: str
+    level: int  # the level the line claimed; it is written back at 1x
+    citations: list[str]  # the grounding citations (all of them when unchecked)
+    trust: str  # the trust that decided it (below agent)
 
 
 @dataclass
@@ -464,7 +618,8 @@ class CarriedForward:
     line loses its evidence tag, it does NOT upsert pattern_history this wrap,
     so ``last_seen_at`` does not advance: a pattern that keeps failing to ground
     decays toward cold on its own and eventually ages out (the recency signal
-    IS the failing-streak signal — no separate tracking). Scope: the
+    IS the failing-streak signal — no separate tracking). That is the cited path; a
+    BARE line that goes cold is held and flagged instead (``cold``, below). Scope: the
     ungrounded-citation path ONLY. The ``(cross-session-overlap)`` immune
     demotion is never carried forward — that path is the anti-sycophancy
     defense, and protecting it would blunt it.
@@ -497,9 +652,16 @@ class CarriedForward:
     # AM-WARN does not fabricate a "citation resolved to zero" alarm — provenance
     # is inert to the namespace/Hebbian signal exactly like a bare carry.
     # Provenance silences the NOTICE only; it does NOT override the warmth/level
-    # hold gate (a cold mature pattern still ages out — graduate it OUT to a
-    # stable home rather than immortalizing it with a marker).
+    # hold gate: a cold cited line still demotes, and a cold bare line is held but
+    # flagged (``cold``) whatever it carries — graduate it OUT to a stable home
+    # rather than immortalizing it with a marker.
     provenance: bool = False
+    # spore-676 ruling (A), Phill 2026-10-07: a BARE line at or below its mark whose
+    # last grounding is older than ``carryforward_cold_days`` is HELD, dated back to
+    # that grounding, and surfaced for the operator to re-exercise, graduate out or
+    # retire. It is never eroded a level per re-stamp. Bare path only: a cited line
+    # that fails its citation still demotes (a failed citation is a real event).
+    cold: bool = False
 
 
 @dataclass
@@ -546,8 +708,24 @@ def validate_graduations(
     cross_session_overlap_threshold: int = 3,
     graduating_headings: frozenset[str] = DEFAULT_GRADUATING,
     carryforward_cold_days: int | None = 7,
+    prior_levels: dict[str, int] | None = None,
+    prior_text: str | None = None,
+    saved_levels: "dict[tuple[str, str], int] | None" = None,
+    trust_of: "Callable[[str], str] | None" = None,
+    revoked_levels: "dict[str, int] | None" = None,
 ) -> GraduationResult:
     """Validate evidence citations on graduated patterns.
+
+    ``prior_text`` (the continuity file as it stands before this save) switches
+    on the prior-state bound, which runs after every check below: each pattern
+    line is cut to ``max(1, prior level + 1 if it validated this wrap)``. The
+    prior level comes from ``saved_levels`` (the store's own record of the
+    levels it last saved, :meth:`Store.saved_pattern_levels`) when the store has
+    one: the file can only LOWER it (an operator's hand demotion stands), never
+    raise it, and a line in the file the store never saved counts as new.
+    With no record at all (a store's first save under this version) the file's level is the prior.
+    ``""`` means there is no prior file. ``None`` skips the bound (direct library
+    callers that do not wire it); the canonical save path always supplies it.
 
     Scans the ## Patterns section for Nx lines (N >= 2, NO ceiling — see
     ``_GRADUATION_RE``) with [evidence: <id> "explanation"]. It said "2x/3x lines"
@@ -569,6 +747,9 @@ def validate_graduations(
        Bold Stand Phase 1b probe #1 (2026-05-21). Evaluated whenever
        check 1 passes (a cited ID resolves), INDEPENDENT of check 2's
        explanation-grounding result — see AM-XSESSION-LINKGATE below.
+    4. If ``trust_of`` is provided (CAP-08), the line must be grounded by an
+       ``agent`` or ``operator`` episode; see ``trust_of`` below. A failure
+       writes the line back at 1x marked ``(uncorroborated)``.
 
     If check 1 fails (no cited ID resolves) the line demotes and marks
     ``(ungrounded)``. If check 2 fails (explanation doesn't reference any
@@ -604,10 +785,29 @@ def validate_graduations(
             sycophantic vocabulary reuse (5+ shared words) trips while
             normal cross-session graduations with distinct evidence
             (≤2 shared trope words) pass cleanly.
+        trust_of: Optional callable mapping a cited episode id to its trust
+            class (``types.TRUST_LEVELS``). When given (the canonical save
+            pipeline passes the store's), check 4 applies: a line that passes
+            checks 1-3 must have at least one ``agent`` or ``operator`` episode
+            among the citations that GROUND its explanation (or among all its
+            resolved citations when there is no explanation or no content map
+            to check it against). A line whose grounding is all ``tool`` /
+            ``external`` takes the ungrounded path marked ``(uncorroborated)``
+            and is listed in ``uncorroborated``. Counting grounding citations,
+            not every resolved one, is deliberate: an unrelated agent episode
+            stapled onto the line does not corroborate it. When None, no trust
+            check runs (library callers that predate it).
+        revoked_levels: Optional ``{pattern name: level}`` (CAP-08 D2): the
+            highest prior a named pattern may keep because a rung it earned is
+            now grounded only by tool/external episodes (see
+            :func:`revoked_pattern_levels`). Applied by the prior-state bound, so
+            it needs ``prior_text``; a line cut by it is reported in
+            ``level_capped`` with ``reason`` :data:`CAP_REASON_REVOKED`.
 
     Returns:
         GraduationResult with possibly modified text and validation counts.
     """
+    text = canonical_continuity_text(text)
     lines = text.split("\n")
     in_patterns = False
     validated = 0
@@ -622,6 +822,13 @@ def validate_graduations(
     # the cortical pattern-graph seeds weak links across. Re-derived from the line
     # at the validated site (not the conditionally-set ``pattern_name`` var).
     graduated_names: list[str] = []
+    name_line: list[int] = []  # the line each graduated name came from
+    graduated_records: list[tuple[str, int, str]] = []
+    record_line: list[int] = []  # the line each graduated record came from
+    uncorroborated: list[UncorroboratedGraduation] = []
+    pattern_trust: dict[str, str] = {}
+    # Line index -> (name, check 4's grounding ids, its rule), for D2's record.
+    rung_grounding: dict[int, tuple[str, list[str], str]] = {}
     # AM-WARN (v0.4.2): tracked independent of the cross-session immune gate
     # (see the field docstring on GraduationResult).
     any_citation_resolved = False
@@ -631,6 +838,70 @@ def validate_graduations(
     # [evidence:] tag NOT adjacent to their marker (so _GRADUATION_RE missed it) and
     # would otherwise be silently held as a bare carry, dropping the live evidence.
     malformed_evidence_carries: list[str] = []
+    # The prior-state bound reads these: which lines validated this wrap (one
+    # rung allowed), and which carried-forward record belongs to which line.
+    # line index -> start of the marker that validated (the +1 belongs to the
+    # line's identity only when that is the identity's own marker).
+    validated_lines: dict[int, int] = {}
+    carried_by_line: dict[int, CarriedForward] = {}
+
+    # The one normalizer (L3 r5): in a graduating section every ``| <digits>x`` marker whose
+    # digits are not exactly the level atom (leading zero, non-ASCII digits, 10+ digits,
+    # 0) becomes ``| 1x`` and its OWN adjacent evidence tag becomes ``(level-capped)``,
+    # before anything else reads the line. Left as written such a marker matched no
+    # validator regex yet parsed as a level elsewhere, so a fabricated line saved
+    # untouched and held a probe. Counted per marker in ``demoted`` (the public total)
+    # and in ``atom_capped`` (which the citation-resolution warning excludes).
+    atom_capped = 0
+    atom_capped_lines: set[int] = set()
+    # A cut of a line's OWN marker (its first) is also reported as a LevelCapped, with
+    # the bound's cuts, so the result and the after-commit warning name it; a cut of a
+    # later marker changes no level the line is read at, so it is only counted.
+    atom_caps: list[tuple[int, LevelCapped]] = []
+    capped_section = False
+
+    def _cap(m: "re.Match[str]") -> str | None:
+        nonlocal atom_capped
+        tok = m.group(2)
+        if _LEVEL_ATOM_RE.fullmatch(tok) or not tok.isnumeric():
+            return None  # canonical, or not a level token at all
+        atom_capped += 1
+        return f"{m.group(1)}1x{m.group(3)} (level-capped)"
+
+    def _cap_line(line: str) -> tuple[str, "re.Match[str] | None"]:
+        # Markers are found on the masked line (one lexer: an explanation is not
+        # parsed) and replaced in the real one; an untouched marker keeps its text.
+        parts: list[str] = []
+        last = 0
+        first = None
+        for m in _ANY_LEVEL_MARKER_RE.finditer(_mask_explanations(line)):
+            first = first or m
+            new = _cap(m)
+            if new is not None:
+                parts.append(line[last:m.start()])
+                parts.append(new)
+                last = m.end()
+        parts.append(line[last:])
+        return "".join(parts), first
+
+    for i, line in enumerate(lines):
+        if line.startswith("## "):
+            capped_section = _is_graduating_heading(line, graduating_headings)
+        elif capped_section:
+            before = atom_capped
+            lines[i], first = _cap_line(line)
+            if atom_capped != before:
+                atom_capped_lines.add(i)
+                tok = first.group(2) if first else ""
+                if first and not _LEVEL_ATOM_RE.fullmatch(tok) and tok.isnumeric():
+                    parsed = _line_levels(lines[i])
+                    atom_caps.append((i, LevelCapped(
+                        name=parsed[0][1] if parsed else "",
+                        written_level=(int(tok) if tok.isdecimal()
+                                       and len(tok) <= _MAX_LEVEL_DIGITS
+                                       else 10 ** _MAX_LEVEL_DIGITS),
+                        capped_to=1, prior_level=None, validated=False)))
+    demoted += atom_capped
 
     for i, line in enumerate(lines):
         # Track section boundaries
@@ -641,9 +912,10 @@ def validate_graduations(
             continue
 
         # Check for citations with evidence tags
-        match = _GRADUATION_RE.search(line)
+        match = _search_outside_explanations(_GRADUATION_RE, line)
         if match:
-            level = int(match.group(1))
+            # Bounded parse: ``int`` refuses more than 4300 digits (codex r2 #3).
+            level = _token_level(match)
             date_str = match.group(2)
             cited_raw = match.group(3)
             explanation = match.group(4)
@@ -655,6 +927,8 @@ def validate_graduations(
             # Finding #3 class — recurred 3x before the counter
             # was added). Increment ``skipped_non_today`` so callers
             # that care can assert on it; production ignores it.
+            # A non-today line skips the checks below, never the prior-state
+            # bound at the end, which caps it against the store's saved levels.
             if date_str != today:
                 skipped_non_today += 1
                 continue
@@ -910,7 +1184,8 @@ def validate_graduations(
                             best_overlap: set[str] = set()
                             best_prior = ""
                             for prior in prior_explanations:
-                                shared = _meaningful_word_overlap(explanation, prior)
+                                shared = _meaningful_word_overlap(
+                                    explanation, prior, stop=_SYCOPHANCY_STOP_WORDS)
                                 if len(shared) > len(best_overlap):
                                     best_overlap = shared
                                     best_prior = prior
@@ -942,8 +1217,55 @@ def validate_graduations(
             if valid_cited:
                 any_citation_resolved = True
 
-            if ids_valid and explanation_valid and not cross_session_overlap_words:
+            # CAP-08 T3 (check 4): who grounds this line. Computed only for a
+            # line that passed checks 1-3; see ``trust_of`` in the docstring.
+            grounding_trust: str | None = None
+            reported_trust: str | None = None
+            grounding_ids: list[str] = []
+            grounding_rule = GROUNDING_UNCHECKED
+            if (
+                trust_of is not None
+                and ids_valid and explanation_valid and not cross_session_overlap_words
+            ):
+                grounding_ids = valid_cited
+                if grounding_checked and node_content_map is not None:
+                    grounding_ids = [
+                        cid for cid in valid_cited
+                        if check_explanation_overlap(
+                            explanation, node_content_map.get(cid, "")
+                        )
+                    ]
+                if grounding_checked and grounding_ids:
+                    # One trusted witness among the citations that ground the
+                    # explanation is enough.
+                    grounding_rule = GROUNDING_CHECKED
+                    grounding_trust = max(
+                        (trust_of(cid) for cid in grounding_ids), key=trust_rank,
+                    )
+                    reported_trust = grounding_trust
+                else:
+                    # Nothing says which citation grounds the claim (no quoted
+                    # explanation, no content to check it against, or no single
+                    # citation grounding it alone: complement r1 #3), so one
+                    # tool/external citation makes the whole line relayed: an
+                    # agent id stapled on would otherwise vouch for it (L1 r1, run).
+                    grounding_ids = valid_cited
+                    cited_trusts = [trust_of(cid) for cid in valid_cited]
+                    grounding_trust = min(cited_trusts, key=trust_rank)
+                    # The admission is the minimum; what the audit reports for a
+                    # line that passes is the highest trust it cites (codex r1 #9).
+                    reported_trust = max(cited_trusts, key=trust_rank)
+            uncorroborated_line = (
+                grounding_trust is not None
+                and trust_rank(grounding_trust) < trust_rank(DEFAULT_TRUST)
+            )
+
+            if (
+                ids_valid and explanation_valid and not cross_session_overlap_words
+                and not uncorroborated_line
+            ):
                 validated += 1
+                validated_lines[i] = match.start()
                 # AM-LINKGATE-DECAY: a genuine graduation this wrap. Re-derive
                 # the name from the line with the same level-guarded binding the
                 # cross-session check uses (the ``pattern_name`` var is only set
@@ -951,6 +1273,43 @@ def validate_graduations(
                 grad_name_match = _NAMED_PATTERN_WITH_EVIDENCE_RE.match(line)
                 if grad_name_match is not None and grad_name_match.group(2) == str(level):
                     graduated_names.append(grad_name_match.group(1))
+                    name_line.append(i)
+                    graduated_records.append(
+                        (grad_name_match.group(1), level, explanation or ""))
+                    record_line.append(i)
+                    if trust_of is not None:
+                        rung_grounding[i] = (
+                            grad_name_match.group(1), list(grounding_ids), grounding_rule,
+                        )
+                    if reported_trust is not None:
+                        # The highest across the name's lines (codex r2: it was
+                        # last-line-wins).
+                        name_g = grad_name_match.group(1)
+                        pattern_trust[name_g] = max(
+                            reported_trust, pattern_trust.get(name_g, reported_trust),
+                            key=trust_rank,
+                        )
+            elif uncorroborated_line:
+                # ⛔ TO 1x, NOT ONE LEVEL DOWN, AND NEVER HELD (L1 + L2 r1, run):
+                # the claimed level is the composer's free text, so one level
+                # down left a claimed 9x at 8x; and the carry-forward hold kept
+                # an earned level while the line's text was the page's. A line
+                # that only relayed content grounds stands at 1x until an
+                # agent/operator episode grounds it.
+                name_m = _NAMED_PATTERN_WITH_EVIDENCE_RE.match(line)
+                demoted += 1
+                lines[i] = _demote_line(
+                    line, match, level, marker="(uncorroborated)", to_level=1,
+                )
+                uncorroborated.append(UncorroboratedGraduation(
+                    # A free-text line has no identifier: its text up to the marker.
+                    name=(name_m.group(1) if name_m is not None
+                          else line[:match.start()].strip().lstrip("-").strip()),
+                    level=level,
+                    citations=list(grounding_ids),
+                    # Set whenever uncorroborated_line is (no assert: -O-safe).
+                    trust=grounding_trust or DEFAULT_TRUST,
+                ))
             elif cross_session_overlap_words:
                 # Cross-session check fired: today's explanation reuses
                 # vocabulary from the pattern's prior-session
@@ -993,10 +1352,13 @@ def validate_graduations(
                     pattern_history_lookup=pattern_history_lookup,
                     carryforward_cold_days=carryforward_cold_days,
                     cross_session_overlap_threshold=cross_session_overlap_threshold,
+                    prior_levels=prior_levels,
                 )
                 if held is not None:
-                    lines[i] = _carryforward_line(line, match, level)
+                    lines[i] = _with_level(_carryforward_line(line, match, level),
+                                           match, held.held_level)
                     carried_forward.append(held)
+                    carried_by_line[i] = held
                 else:
                     demoted += 1
                     lines[i] = _demote_line(line, match, level)
@@ -1010,7 +1372,9 @@ def validate_graduations(
             # immune gate above still decides what graduates. Note this
             # block runs even on the demoted explanation path, so a real
             # but paraphrased co-citation keeps its link.
-            if ids_valid and not cross_session_overlap_words:
+            if ids_valid and not cross_session_overlap_words and not uncorroborated_line:
+                # CAP-08: an uncorroborated line links nothing, or relayed
+                # content would join the agent's own episodes in recall.
                 # codex L3 F2: a preservation-exempt line (byte-identical or
                 # warm+fresh-specific) SKIPPED the overlap demotion, but
                 # ``explanation_valid`` passes on ANY one grounding id — so linking
@@ -1027,6 +1391,15 @@ def validate_graduations(
                             explanation, node_content_map.get(cid, "")
                         )
                     )
+                if trust_of is not None:
+                    # codex r1 #7: a tool/external co-citation that does not
+                    # itself ground the explanation forms no link; one trusted
+                    # witness admits the line, not every id stapled beside it.
+                    link_ids = [
+                        cid for cid in link_ids
+                        if cid in grounding_ids
+                        or trust_rank(trust_of(cid)) >= trust_rank(DEFAULT_TRUST)
+                    ]
                 if len(link_ids) >= 2:
                     for idx_a in range(len(link_ids)):
                         for idx_b in range(idx_a + 1, len(link_ids)):
@@ -1041,7 +1414,7 @@ def validate_graduations(
         if not citations_seen:
             continue
 
-        bare_match = _BARE_GRADUATION_RE.search(line)
+        bare_match = _search_outside_explanations(_BARE_GRADUATION_RE, line)
         if not bare_match:
             continue
 
@@ -1094,10 +1467,15 @@ def validate_graduations(
             bare_match=bare_match,
             pattern_history_lookup=pattern_history_lookup,
             carryforward_cold_days=carryforward_cold_days,
+            prior_levels=prior_levels,
         )
         if bare_held is not None:
-            lines[i] = _bare_carryforward_line(line, bare_match)
+            lines[i] = _with_level(
+                _bare_cold_hold_line(line, bare_match, today, bare_held.days_since_grounded)
+                if bare_held.cold else _bare_carryforward_line(line, bare_match),
+                bare_match, bare_held.held_level)
             carried_forward.append(bare_held)
+            carried_by_line[i] = bare_held
             continue
 
         bare_demoted += 1
@@ -1122,6 +1500,80 @@ def validate_graduations(
         sep = " " if rest and not rest.startswith(" ") else ""
         lines[i] = f"{line[:bstart]}{new_marker} (needs-evidence){sep}{rest}"
 
+    level_capped: list[tuple[int, LevelCapped]] = []
+    ungraduated_lines: set[int] = set()
+    if prior_text is not None:
+        level_capped = _apply_prior_bound(
+            lines,
+            prior_text=prior_text,
+            saved_levels=saved_levels,
+            validated_lines=validated_lines,
+            carried_lines=set(carried_by_line),
+            atom_capped_lines=atom_capped_lines,
+            graduating_headings=graduating_headings,
+            revoked_levels=revoked_levels,
+        )
+        for c_line, cap in level_capped:
+            # A held line the bound then cut keeps its carry record at the cut
+            # level: AM-WARN counts cited carries, so dropping it would hide a
+            # dead-namespace alarm (complement r2 #3).
+            if c_line in carried_by_line:
+                carried_by_line[c_line].held_level = cap.capped_to
+            # A validated line that did not graduate must not count, seed
+            # co-GRADUATION (pattern-to-pattern) links, or name a graduation: cut to
+            # 1x (L1 r1, run), or validated only through a decoy marker (complement
+            # r2 #3). Its evidence still forms co-CITATION (episode-to-episode) links,
+            # by design (1007+29: the episodes were cited together; the level is what
+            # was not earned). Names drop by LINE, never by value: a same-name line
+            # elsewhere may have graduated (codex L3 r1 MED 3, run).
+            if c_line in validated_lines and (not cap.validated or cap.capped_to < 2):
+                validated -= 1
+                ungraduated_lines.add(c_line)
+        graduated_names = [n for n, ln in zip(graduated_names, name_line)
+                           if ln not in ungraduated_lines]
+    # The review worklist names what was SAVED: a record whose line the bound cut
+    # carries the cut level, and one cut below 2x (or validated only through a
+    # decoy marker) is not a graduation at all. (An atom cap never touches the
+    # record: a record comes only from a validated, canonical first marker.)
+    cut = {c_line: cap for c_line, cap in level_capped}
+    kept_records: list[tuple[str, int, str]] = []
+    for (name, level, expl), r_line in zip(graduated_records, record_line):
+        rcap = cut.get(r_line)
+        if rcap is not None:
+            if not rcap.validated or rcap.capped_to < 2:
+                continue
+            level = min(level, rcap.capped_to)
+        kept_records.append((name, level, expl))
+    graduated_records = kept_records
+    # The atom normalizer's cuts join the report after the bound's bookkeeping
+    # (they never validated, so they move no count). A line both cut is reported once,
+    # with the higher level it claimed.
+    atom_by_line = dict(atom_caps)
+    level_capped = sorted(
+        [(ln, replace(c, written_level=max(c.written_level, atom_by_line[ln].written_level))
+          if ln in atom_by_line else c) for ln, c in level_capped]
+        + [c for c in atom_caps if c[0] not in cut],
+        key=lambda c: c[0])
+
+    # Only a name that still graduated keeps its trust entry (codex r2: a line
+    # the bound cut to 1x reported operator grounding for no graduation).
+    pattern_trust = {n: t for n, t in pattern_trust.items() if n in graduated_names}
+
+    # CAP-08 D2: the rung each validated named line stands at after the bound,
+    # and the episodes that grounded it. A line the bound left below 2x, or one
+    # validated only through another marker on it, earned no rung.
+    pattern_grounding: list[tuple[str, int, str, list[str]]] = []
+    for gi, (g_name, g_ids, g_rule) in sorted(rung_grounding.items()):
+        parsed_g = _line_levels(lines[gi])
+        if parsed_g is None or parsed_g[0] != ("name", g_name) or not g_ids:
+            continue
+        own_g = parsed_g[1][0]
+        if validated_lines.get(gi) != own_g.start() or g_name not in graduated_names:
+            continue
+        g_level = _token_level(own_g)
+        if g_level >= 2:
+            pattern_grounding.append((g_name, g_level, g_rule, g_ids))
+
     reuse_max = max(citation_counts.values()) if citation_counts else 0
     gaming_suspects = detect_citation_gaming(citation_counts)
 
@@ -1141,28 +1593,314 @@ def validate_graduations(
         carried_forward=carried_forward,
         malformed_evidence_carries=malformed_evidence_carries,
         graduated_names=graduated_names,
+        graduated_records=graduated_records,
+        atom_capped=atom_capped,
+        level_capped=[cap for _, cap in level_capped],
+        uncorroborated=uncorroborated,
+        pattern_trust=pattern_trust,
+        pattern_grounding=pattern_grounding,
     )
 
 
-def _meaningful_word_overlap(text_a: str, text_b: str) -> set[str]:
+# ONE TEXT GRAMMAR BEFORE ANY READ (L3 r6-r7, 1008+11, run). The bound and every
+# reader must parse the same lines and the same markers; four rounds found four
+# ways they differed (identity r3, prose r4, in-marker whitespace r5, line
+# boundaries r6), so the FINAL text (after the durable carry-forward, r7) is made
+# canonical once, upstream, instead of each parser being widened to the next shape.
+# (1) Lines: every character ``str.splitlines()`` breaks on besides ``"\n"``
+# becomes ``"\n"`` (the CR of a CRLF pair is kept: a CRLF file saves as CRLF).
+# ``## Notes\r## Patterns\r- x | 999x`` was one non-graduating heading line to the
+# bound while a universal-newline read of the saved file got a graduating 999x;
+# normalised, the gate sees the section and bounds the line. Never a refusal: a
+# legacy durable line carrying a terminator must not make a store unsaveable.
+_LINE_TERMINATORS_RE = re.compile("\r(?!\n)|[\x0b\x0c\x1c\x1d\x1e\x85\u2028\u2029]")
+# (2) Spaces: every other Unicode space becomes an ASCII space, so ``[ \t]``
+# readers and ``\s`` readers agree on every position of every grammar (codex r7:
+# an NBSP before ``[evidence:`` split ``_GRADUATION_RE`` from the history reader).
+_EXOTIC_SPACE_RE = re.compile(r"[^\S \t\r\n]")
+# (3) Marker digits: ``| Nx`` and its ``(YYYY-MM-DD)`` written in non-ASCII decimal
+# digits become ASCII, so a ``[0-9]`` reader and a ``\d`` reader read one level.
+_MARKER_DIGITS_RE = re.compile(r"\|[ \t]*(\d+)x(?:[ \t]*\((\d{4})-(\d{2})-(\d{2})\))?")
+
+
+def _ascii_digits(digits: str) -> str:
+    return "".join(str(unicodedata.digit(c)) for c in digits)
+
+
+def _canonical_marker(m: "re.Match[str]") -> str:
+    whole = m.group(0)
+    if whole.isascii():
+        return whole
+    return "".join(_ascii_digits(c) if c.isdigit() and not c.isascii() else c for c in whole)
+
+
+def canonical_continuity_text(text: str) -> str:
+    """The one text grammar the graduation gate and every reader share.
+
+    Line terminators other than ``"\n"`` (a CRLF pair kept) become ``"\n"``, other
+    Unicode spaces become ``" "``, and non-ASCII digits in a level marker become
+    ASCII. Idempotent; never raises.
+    """
+    text = _LINE_TERMINATORS_RE.sub("\n", text)
+    text = _EXOTIC_SPACE_RE.sub(" ", text)
+    # Markers only outside explanations: a quoted ``| ١٠x`` is text and is saved as
+    # written, like a quoted ``| 10x`` (codex L3 r2 LOW).
+    out: list[str] = []
+    for line in text.split("\n"):
+        parts: list[str] = []
+        last = 0
+        for m in _MARKER_DIGITS_RE.finditer(_mask_explanations(line)):
+            new = _canonical_marker(_MARKER_DIGITS_RE.match(line, m.start()) or m)
+            parts.append(line[last:m.start()])
+            parts.append(new)
+            last = m.end()
+        parts.append(line[last:])
+        out.append("".join(parts))
+    return "\n".join(out)
+
+
+# The prior-state bound's own parser. A level token is ``| Nx`` with an optional
+# ``(YYYY-MM-DD)``, any digits (``int`` reads a zero-padded ``09`` as 9). The bound
+# must see each level a downstream reader will believe, whatever shape the line is
+# in, so its atoms are the WIDEST ones any reader uses: ``\s`` (Unicode whitespace)
+# and ``\d`` (Unicode decimal digits). A ``[ \t]`` atom here let ``|\u00a0999x``
+# pass the bound uncapped while ``_GRADUATION_RE`` read it as 999 (L3 r5, codex
+# HIGH, run); ``test_bound_grammar_covers_every_reader_whitespace`` holds it.
+_LEVEL_TOKEN_RE = re.compile(r"\|\s*(\d+)x(?:\s*\(\d{4}-\d{2}-\d{2}\))?")
+_LEVEL_CAPPED_MARK = "(level-capped)"
+_CARRIED_MARK = "(carried-forward)"
+_CARRIED_AFTER_TOKEN_RE = re.compile(r"\s*" + re.escape(_CARRIED_MARK))  # the carry writer keeps _GRADUATION_RE's \s
+_FREEFORM_PREFIX_RE = re.compile(r"^[ \t]*(?:-[ \t]+)?(?:(?:!+|\?|✓|\*)[ \t]+)?")
+# A level token longer than this is not a level anyone wrote; it reads as
+# "above any bound" (``int`` refuses more than 4300 digits: L1 r1, run).
+_MAX_LEVEL_DIGITS = 9
+
+
+def _token_level(m: re.Match) -> int:
+    digits = m.group(1)
+    return 10 ** _MAX_LEVEL_DIGITS if len(digits) > _MAX_LEVEL_DIGITS else int(digits)
+
+
+def _line_levels(line: str) -> tuple[tuple[str, str], list[re.Match]] | None:
+    """Return a graduating line's identity and the level tokens the bound governs.
+
+    Every level token on the line is governed. A named line (``_NAMED_PATTERN_RE``,
+    the grammar every per-name consumer reads) is keyed by its name; any other
+    line by its normalised text before its earliest level token, so rewording it
+    makes it new, and with no text there it is anonymous.
+    """
+    tokens = list(_LEVEL_TOKEN_RE.finditer(_mask_explanations(line)))
+    if not tokens:
+        return None
+    # ONE GRAMMAR RULE, GOVERNING EVERY TOKEN (L3 r3 + r4, codex HIGH, run): on a
+    # graduating line every ``| Nx`` token is governed, dated or not, wherever it
+    # sits. Keying on the first DATED token forged identities (r3), and a prose
+    # exemption for undated tokens let ``- multi word | 999x`` and a trailing
+    # undated ``| 999x`` on a named line keep their levels (r4): the exemption is
+    # DELETED, so prose in a graduating section that reads as a level is capped
+    # like any line.
+    named = _NAMED_PATTERN_RE.match(line)
+    if named:
+        return ("name", named.group(1)), tokens
+    head = _FREEFORM_PREFIX_RE.sub("", line[: tokens[0].start()])
+    key = " ".join(head.lower().split())
+    if not key:
+        # No identity at all (``- | 9x``): never recorded, always new.
+        return ("anon", ""), tokens
+    return ("text", key), tokens
+
+
+def pattern_line_levels(
+    text: str, graduating_headings: frozenset[str] = DEFAULT_GRADUATING
+) -> dict[tuple[str, str], int]:
+    """Highest level per line identity in the graduating sections of ``text``,
+    keyed as the prior-state bound keys lines (what the save records). A name on
+    several lines, or in several graduating sections, counts once at its highest,
+    which is how ``extract_pattern_names`` (and so every per-name reader) reads it."""
+    levels: dict[tuple[str, str], int] = {}
+    # The prior file keys the way the current text does.
+    text = canonical_continuity_text(text)
+    in_patterns = False
+    for line in text.split("\n"):
+        if line.startswith("## "):
+            in_patterns = _is_graduating_heading(line, graduating_headings)
+            continue
+        if not in_patterns:
+            continue
+        parsed = _line_levels(line)
+        if parsed is None or parsed[0][0] == "anon":
+            continue
+        key, marks = parsed
+        top = max(_token_level(m) for m in marks)
+        if top > levels.get(key, -1):
+            levels[key] = top
+    return levels
+
+
+def _prior_base(
+    key: tuple[str, str],
+    file_levels: dict[tuple[str, str], int],
+    saved_levels: dict[tuple[str, str], int] | None,
+) -> int | None:
+    """The level a line identity is entitled to start from, or None (new)."""
+    if key[0] == "anon":
+        return None
+    in_file = file_levels.get(key)
+    if saved_levels is not None:
+        saved = saved_levels.get(key)
+        if saved is not None:
+            # The store's record is the prior; the file may only lower it.
+            return saved if in_file is None else min(saved, in_file)
+        # In the file but never saved by the store: an out-of-band edit.
+        return None
+    if in_file is not None:
+        return in_file  # no record yet: this store's first save under the bound
+    return None
+
+
+def _apply_prior_bound(
+    lines: list[str],
+    *,
+    prior_text: str,
+    saved_levels: dict[tuple[str, str], int] | None,
+    validated_lines: dict[int, int],
+    carried_lines: set[int],
+    graduating_headings: frozenset[str],
+    atom_capped_lines: frozenset[int] | set[int] = frozenset(),
+    revoked_levels: dict[str, int] | None = None,
+) -> list[tuple[int, LevelCapped]]:
+    """Cut every graduating line to ``max(1, prior + 1 if validated)``, in place.
+
+    ``lines`` is the text AFTER validation and demotion, so the bound is the last
+    word on every level. A line the bound checks and does not cut loses a stale
+    ``(level-capped)`` mark, unless the level-atom normalizer cut a marker on it
+    in this same pass (``atom_capped_lines``: the mark is then this wrap's own word,
+    not a stale one); a carried line it cuts loses ``(carried-forward)``.
+    ``revoked_levels`` (CAP-08 D2) only ever lowers the prior ``_prior_base``
+    returns: a name's revoked level below it becomes the prior, never above.
+    Returns ``(line index, LevelCapped)`` per cut line.
+    """
+    file_levels = pattern_line_levels(prior_text, graduating_headings)
+    capped: list[tuple[int, LevelCapped]] = []
+    in_patterns = False
+    for i, line in enumerate(lines):
+        if line.startswith("## "):
+            in_patterns = _is_graduating_heading(line, graduating_headings)
+            continue
+        if not in_patterns:
+            continue
+        parsed = _line_levels(line)
+        if parsed is None:
+            continue
+        key, marks = parsed
+        written = max(_token_level(m) for m in marks)
+        prior_level = _prior_base(key, file_levels, saved_levels)
+        reason = CAP_REASON_PRIOR
+        revoked = (revoked_levels or {}).get(key[1]) if key[0] == "name" else None
+        if revoked is not None and prior_level is not None and revoked < prior_level:
+            prior_level = revoked
+            reason = CAP_REASON_REVOKED
+        # Credit only the identity's OWN marker (codex L3 r1, run): a decoy
+        # ``other | 2x (date) [evidence: ...]`` later on the line validated and
+        # the whole line, ``foo`` included, took its rung.
+        validated = validated_lines.get(i) == marks[0].start()
+        allowed = max(1, (prior_level or 0) + (1 if validated else 0))
+        if written <= allowed:
+            if i not in atom_capped_lines:
+                lines[i] = _drop_trailing_mark(line, _LEVEL_CAPPED_MARK)
+            continue
+        # The carry mark is the one _carryforward_line put where an evidence tag
+        # followed a marker; prose that says "(carried-forward)" elsewhere stays
+        # (codex L3 r1 MED 5, run). Edits go right to left so spans hold.
+        carry_at = None
+        if i in carried_lines:
+            carry_at = next((m.end() for m in marks
+                             if _CARRIED_AFTER_TOKEN_RE.match(line, m.end())), None)
+        new_line = line
+        for m in reversed(marks):
+            if m.end() == carry_at:
+                tail = _CARRIED_AFTER_TOKEN_RE.match(new_line, m.end())
+                assert tail is not None
+                new_line = new_line[:tail.start()] + new_line[tail.end():]
+            if _token_level(m) > allowed:
+                start, end = m.span(1)
+                new_line = new_line[:start] + str(allowed) + new_line[end:]
+        body = new_line.rstrip()
+        if not body.endswith(_LEVEL_CAPPED_MARK) and i not in atom_capped_lines:
+            new_line = body + " " + _LEVEL_CAPPED_MARK + new_line[len(body):]
+        lines[i] = new_line
+        capped.append((i, LevelCapped(
+            name=key[1], written_level=written, capped_to=allowed,
+            prior_level=prior_level, validated=validated, reason=reason,
+        )))
+    return capped
+
+
+def revoked_pattern_levels(
+    grounding: dict[str, dict[int, list[dict[str, Any]]]],
+    trust_of: Callable[[str], str],
+) -> dict[str, int]:
+    """CAP-08 D2: for each pattern, the highest prior it may keep under today's
+    trust. ``grounding`` is :meth:`Store.pattern_grounding`; an episode its group
+    marks ``gone`` reads that class, else ``trust_of``. Each time a rung was
+    earned is re-run under check 4's rule against today's trust: a
+    ``checked`` earning fails when ALL its grounding citations are now
+    ``tool``/``external``, an ``unchecked`` one when ANY is. A rung fails when
+    every earning of it fails; the rungs are walked lowest first, and at the
+    first failed rung the prior is cut to just below it. A pattern with no such
+    rung, or with no grounding record at all, is absent: no record, no basis to
+    revoke."""
+    agent = trust_rank(DEFAULT_TRUST)
+
+    def earning_fails(group: dict[str, Any]) -> bool:
+        gone = group.get("gone", {})
+        lowered = [trust_rank(gone.get(cid) or trust_of(cid)) < agent
+                   for cid in group["episodes"]]
+        if not lowered:
+            return False
+        return any(lowered) if group["rule"] == GROUNDING_UNCHECKED else all(lowered)
+
+    revoked: dict[str, int] = {}
+    for name, rungs in grounding.items():
+        for level in sorted(rungs):
+            if rungs[level] and all(earning_fails(g) for g in rungs[level]):
+                revoked[name] = level - 1
+                break
+    return revoked
+
+
+def _drop_trailing_mark(line: str, mark: str) -> str:
+    """Remove ``mark`` only where this code puts it, at the end of the line, so
+    the same text inside an explanation is never touched (codex r2 #4)."""
+    body = line.rstrip()
+    if not body.endswith(mark):
+        return line
+    return body[: -len(mark)].rstrip() + line[len(body):]
+
+
+def _meaningful_word_overlap(
+    text_a: str, text_b: str, *, stop: frozenset[str] = _STOP_WORDS
+) -> set[str]:
     """Return the set of meaningful words shared by two explanation texts.
 
-    Uses the same tokenization rule as :func:`check_explanation_overlap`:
+    Uses the same tokenization rule as :func:`check_explanation_overlap` with the
+    default ``stop`` (the grounding list); the cross-session sites pass
+    ``_SYCOPHANCY_STOP_WORDS``:
     split on non-alphanumeric, lowercase, drop stop words and tokens of
     length ≤2. Returning the actual set (not just a count) lets callers
     surface which specific words triggered a cross-session collision —
     valuable for the audit log and for operator review.
     """
-    return _meaningful_words(text_a) & _meaningful_words(text_b)
+    return _meaningful_words(text_a, stop=stop) & _meaningful_words(text_b, stop=stop)
 
 
-def _meaningful_words(text: str) -> set[str]:
+def _meaningful_words(text: str, *, stop: frozenset[str] = _STOP_WORDS) -> set[str]:
     """The meaningful-word set of a text: lowercased alnum tokens of length >2,
     minus stop words. Shared tokenizer for :func:`_meaningful_word_overlap` and
     the AM-PRESERVE fresh-specific-grounding novelty check (codex L3)."""
     return {
         w for w in re.split(r"[^a-zA-Z0-9]+", text.lower())
-        if len(w) > 2 and w not in _STOP_WORDS
+        if len(w) > 2 and w not in stop
     }
 
 
@@ -1300,11 +2038,11 @@ def detect_stale_patterns(
         if not in_patterns:
             continue
 
-        match = _PATTERN_RE.search(line)
+        match = _search_outside_explanations(_PATTERN_RE, line)
         if not match:
             continue
 
-        level = int(match.group(1))
+        level = _token_level(match)
         date_str = match.group(2)
 
         try:
@@ -1486,7 +2224,7 @@ _SCAFFOLD_TAG_RE = re.compile(
     r"|\[contradicts:[^\]]*\]?"
     r"|\[provenance:[^\]]*\]?"  # AM-PROVENANCE: mop the audit marker from the snippet
     r"|\[(?:no-contradicts|Proven|Developing|ungrounded|needs-evidence"
-    r"|cross-session-overlap|carried-forward)\]",
+    r"|cross-session-overlap|carried-forward|level-capped|uncorroborated)\]",
     re.IGNORECASE,
 )
 # A leading ``(YYYY-MM-DD)`` left over after the name|Nx marker is stripped.
@@ -1495,7 +2233,7 @@ _LEADING_DATE_RE = re.compile(r"^[ \t]*\(\d{4}-\d{2}-\d{2}\)")
 # annotations the wrap pipeline appends), so they don't pollute the summary.
 _STATE_PAREN_RE = re.compile(
     r"\((?:ungrounded|cross-session-overlap|carried-forward|needs-evidence|"
-    r"no-contradicts)\)",
+    r"no-contradicts|level-capped|uncorroborated)\)",
     re.IGNORECASE,
 )
 
@@ -1785,7 +2523,7 @@ def detect_proven_without_declaration(
             # Already recorded a line at this level or higher (first-wins
             # on ties) — keep the graduating line's coherent record.
             continue
-        date_match = _PATTERN_RE.search(line)
+        date_match = _search_outside_explanations(_PATTERN_RE, line)
         line_date = date_match.group(2) if date_match is not None else None
         # Contradiction stance on THIS line. Evidence-stripped so an
         # explanation that quotes "[no-contradicts]"/"[contradicts: X]"
@@ -1848,8 +2586,9 @@ def _demote_line(
     match: re.Match,
     level: int,
     marker: str = "(ungrounded)",
+    to_level: int | None = None,
 ) -> str:
-    """Demote a graduated pattern line BY ONE LEVEL and mark it.
+    """Demote a graduated pattern line BY ONE LEVEL (or to ``to_level``) and mark it.
 
     ⚠ NOT "3x->2x or 2x->1x" — that enumeration was written under the removed
     AM-LEVELCAP ceiling and survived it here, in the function that performs the
@@ -1887,7 +2626,7 @@ def _demote_line(
     # graduation markers elsewhere in the captured span.
     new_marker = re.sub(
         rf"\|\s*{level}x",
-        f"| {level - 1}x",
+        f"| {level - 1 if to_level is None else to_level}x",
         old_marker,
         count=1,
     )
@@ -1898,7 +2637,43 @@ def _demote_line(
     )
     # Positional replacement — immune to duplicate marker text elsewhere in line
     start, end = match.span()
-    return line[:start] + new_marker + line[end:]
+    return line[:start] + new_marker + _strip_own_evidence_tail(line[end:])
+
+
+# Any ``[evidence: ...]`` tag, quote-aware, with the whitespace before it.
+_ANY_EVIDENCE_TAG_RE = re.compile(r'[ \t]*\[evidence:(?:[^\]"]|"[^"]*")*\]')
+
+
+def _strip_own_evidence_tail(rest: str) -> str:
+    """Remove the further ``[evidence:]`` tags of a demoted or held marker.
+
+    ``rest`` is the line after the rewritten marker. Every tag before the next
+    level token belongs to that marker and is removed, so a two-tag line ends
+    like a one-tag one (1008+3, run: the second tag survived the strip). Tags
+    after the next level token belong to that marker and are left alone."""
+    cut = _next_level_token(rest)
+    return _ANY_EVIDENCE_TAG_RE.sub("", rest[:cut]) + rest[cut:]
+
+
+def _next_level_token(rest: str) -> int:
+    """Where the next level token (``| 2x``) starts in ``rest``, or its length.
+    A token inside a ``[...]`` tag (its quoted explanation may say ``| 2x``) is
+    text, not a marker (codex r3 #7); inside a tag a ``]`` within quotes does not
+    end it."""
+    i, n = 0, len(rest)
+    while i < n:
+        ch = rest[i]
+        if ch == "[":
+            i += 1
+            quoted = False
+            while i < n and (quoted or rest[i] != "]"):
+                if rest[i] == '"':
+                    quoted = not quoted
+                i += 1
+        elif ch == "|" and _LEVEL_TOKEN_RE.match(rest, i):
+            return i
+        i += 1
+    return n
 
 
 def _days_between(last_seen_at: Any, today: str) -> int | None:
@@ -1962,8 +2737,16 @@ def _carryforward_history_decision(
     *,
     cited: bool,
     provenance: bool = False,
+    prior_levels: dict[str, int] | None = None,
 ) -> CarriedForward | None:
     """The shared level+warmth core of the carryforward decision.
+
+    ``prior_levels`` (L3 1007, complement + codex): each pattern's level in the
+    continuity being replaced, when the caller has it (the save pipeline does). A hold
+    KEEPS a line, so its level is derived from that file, never from the composer: a
+    name not in it is a new claim (no hold), and a held line is set to its prior
+    level when the composer wrote more. ``None`` (library callers) keeps the
+    claimed level.
 
     Given a NAME already bound to its own graduation marker and that pattern's
     ``pattern_history`` row, decide HOLD (return a :class:`CarriedForward`) vs
@@ -1988,6 +2771,9 @@ def _carryforward_history_decision(
     if level > max_level:
         # Never earned this level — don't protect an un-earned rung.
         return None
+    held_level = _held_level(name, level, prior_levels)
+    if held_level is None:
+        return None
     days = _days_between(history.get("last_seen_at"), today)
     if days is None or days < -1 or days > carryforward_cold_days:
         # No recency signal, a clearly-FUTURE last_seen_at (more than one day
@@ -2001,7 +2787,7 @@ def _carryforward_history_decision(
         return None
     return CarriedForward(
         name=name,
-        held_level=level,
+        held_level=held_level,
         max_level_reached=max_level,
         # Clamp the reported recency to >= 0: the decision tolerates a -1 UTC/
         # local skew, but a negative "days since grounded" would read oddly in
@@ -2019,6 +2805,7 @@ def _carryforward_decision(
     pattern_history_lookup: Callable[[str], dict[str, Any] | None] | None,
     carryforward_cold_days: int | None,
     cross_session_overlap_threshold: int = 3,
+    prior_levels: dict[str, int] | None = None,
 ) -> CarriedForward | None:
     """Decide whether an ungrounded Proven-tier line should be HELD instead of
     demoted (AM-CARRYFORWARD, v0.4.6). Returns a :class:`CarriedForward`
@@ -2116,7 +2903,9 @@ def _carryforward_decision(
             history.get("last_seen_at"), today, carryforward_cold_days
         ):
             for prior in priors:
-                if len(_meaningful_word_overlap(explanation, prior)) >= cross_session_overlap_threshold:
+                if len(_meaningful_word_overlap(
+                        explanation, prior, stop=_SYCOPHANCY_STOP_WORDS,
+                )) >= cross_session_overlap_threshold:
                     return None
     # AM-PROVENANCE (Slice A, L1 MED-2): thread provenance through the CITED path
     # too, symmetric with the bare path. A warm at-peak line whose fresh
@@ -2133,7 +2922,7 @@ def _carryforward_decision(
     # so AM-WARN's cited_graduations count still surfaces a dead-namespace bug.
     return _carryforward_history_decision(
         name, level, history, today, carryforward_cold_days,
-        cited=True, provenance=has_provenance,
+        cited=True, provenance=has_provenance, prior_levels=prior_levels,
     )
 
 
@@ -2144,8 +2933,9 @@ def _bare_carryforward_decision(
     bare_match: re.Match,
     pattern_history_lookup: Callable[[str], dict[str, Any] | None] | None,
     carryforward_cold_days: int | None,
+    prior_levels: dict[str, int] | None = None,
 ) -> CarriedForward | None:
-    """Decide whether a BARE 2x/3x graduation (no ``[evidence:]`` tag) should be
+    """Decide whether a BARE graduation (2x and up, no ``[evidence:]`` tag) should be
     HELD instead of sunset-demoted (AM-PRESERVE-BARE-PATH, v0.5.0) — the
     bare-path analogue of :func:`_carryforward_decision`.
 
@@ -2213,10 +3003,24 @@ def _bare_carryforward_decision(
     # carryforward_cold_days narrowed to int by the early-return guard above. The
     # bare path carried NO citation -> cited=False so AM-WARN does NOT fabricate a
     # "citation resolved to zero episodes" alarm on a wrap that has no citations.
-    return _carryforward_history_decision(
+    held = _carryforward_history_decision(
         name, level, history, today, carryforward_cold_days,
-        cited=False, provenance=has_provenance,
+        cited=False, provenance=has_provenance, prior_levels=prior_levels,
     )
+    if held is not None:
+        return held
+    # Ruling (A): at or below the mark but COLD is held and flagged, not eroded.
+    # No history (above) and above-mark lines still fall through to the sunset.
+    max_level = history.get("max_level_reached")
+    days = _days_between(history.get("last_seen_at"), today)
+    held_level = _held_level(name, level, prior_levels)
+    if isinstance(max_level, int) and level <= max_level and days is not None \
+            and days > carryforward_cold_days and held_level is not None:
+        return CarriedForward(
+            name=name, held_level=held_level, max_level_reached=max_level,
+            days_since_grounded=days, cited=False, provenance=has_provenance, cold=True,
+        )
+    return None
 
 
 def _carryforward_line(line: str, match: re.Match, level: int) -> str:
@@ -2238,7 +3042,38 @@ def _carryforward_line(line: str, match: re.Match, level: int) -> str:
         old_marker,
     )
     start, end = match.span()
-    return line[:start] + new_marker + line[end:]
+    return line[:start] + new_marker + _strip_own_evidence_tail(line[end:])
+
+
+def _held_level(name: str, level: int, prior_levels: dict[str, int] | None) -> int | None:
+    """The level a hold keeps: the claimed one with no prior file; else the line's level
+    in the prior file (never above the claim), or None when the name was not in it."""
+    if prior_levels is None:
+        return level
+    if name not in prior_levels:
+        return None
+    return min(level, prior_levels[name])
+
+
+def _with_level(line: str, match: re.Match, level: int) -> str:
+    """``line`` with the level digits of ``match``'s marker set to ``level``. Every
+    other rewrite of a held line happens after that span, so it is still valid."""
+    l0, l1 = match.span(1)
+    if line[l0:l1] == str(level):
+        return line
+    return line[:l0] + str(level) + line[l1:]
+
+
+def _bare_cold_hold_line(line: str, match: re.Match, today: str, days: int) -> str:
+    """Hold a COLD bare line at its level, its date set back to its last grounding
+    (``today`` minus ``days``) and marked ``(carried-forward)``: the date stops
+    claiming the pattern was exercised today, and the staleness scan sees its real
+    age (spore-676 ruling (A))."""
+    from datetime import datetime as _dt, timedelta as _td
+    prior = (_dt.strptime(today, "%Y-%m-%d") - _td(days=days)).strftime("%Y-%m-%d")
+    held = _bare_carryforward_line(line, match)
+    d0, d1 = match.span(2)
+    return held[:d0] + prior + held[d1:]
 
 
 def _bare_carryforward_line(line: str, match: re.Match) -> str:

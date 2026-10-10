@@ -62,6 +62,40 @@ _LOCK_UNAVAILABLE_ERRNOS = frozenset(
     ) if e is not None
 )
 
+# ``flock(LOCK_NB)`` raising one of these means "another holder has it".
+_LOCK_HELD_ERRNOS = frozenset({errno.EWOULDBLOCK, errno.EAGAIN})
+
+# How long an append waits for another holder of the append lock before the
+# append is refused and counted as a dropped audit write (see
+# AuditTrail._append_lock). A healthy holder keeps it for one append, or for a
+# week's rotation; this bounds a stopped or hung one.
+_APPEND_LOCK_TIMEOUT_SECONDS = 30.0
+# How long ``stats()`` waits on a peer's append lock when only a staged first
+# entry makes the trail look unknown (a first append stages it for an instant).
+_STATS_STAGED_WAIT_SECONDS = 2.0
+
+
+def _week_of_ts(ts: str) -> str:
+    """``YYYY-WNN`` of an entry timestamp, or ``""`` when it does not parse."""
+    try:
+        iso = datetime.fromisoformat(ts.replace("Z", "+00:00")).isocalendar()
+    except (ValueError, AttributeError):
+        return ""
+    return f"{iso[0]}-W{iso[1]:02d}"
+
+
+def _unlock_and_close(fd: int) -> None:
+    """Release a ``flock`` explicitly, then close. A close alone leaves the lock
+    held while a forked child still has a copy of the descriptor."""
+    try:
+        if fcntl is not None:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+    except OSError:
+        pass
+    finally:
+        os.close(fd)
+
+
 # The module's logger, used as logging registered it: never re-classed or
 # wrapped, so an application's logger class, levels, filters and handlers on it
 # behave as the application set them up. From "anneal-memory", its parent,
@@ -226,9 +260,11 @@ class _AuditLockError(OSError):
 
 
 class _ManifestUnavailable(OSError):
-    """The manifest cannot be used right now. Writers that need it skip their
-    step; appending to the active file does not need it. A plain instance is
-    transient (a read error) and callers retry; see ``_ManifestQuarantined``."""
+    """The manifest cannot be used right now. Maintenance steps that need it
+    (rotation, retention) skip; an append that needs it to record or check the
+    active file's first entry is refused (Phill 2026-10-08, "A"). A plain
+    instance is transient (a read error) and callers retry; see
+    ``_ManifestQuarantined``."""
 
 
 class _ManifestQuarantined(_ManifestUnavailable):
@@ -278,6 +314,44 @@ _SET_ASIDE_KEYS = ("filename", "set_aside_as", "period", "cause", "at")
 # The reason ``audit-repair`` sets an unreadable or corrupt sealed file aside
 # under: ``<sealed name>.unreadable-<UTC stamp>`` (see ``_set_aside``).
 _UNREADABLE_REASON = "unreadable"
+# The reason a staged first entry that did not commit is set aside under:
+# ``<active>.first.discarded-<UTC stamp>`` (KL-24 L3 r6: staged bytes are never
+# deleted).
+_DISCARDED_REASON = "discarded"
+# ``certainty`` on a set-aside record that may not be a gap at all: a manifest
+# rebuilt from quarantine over an active file with no entry cannot know whether
+# it ever held one. A record without the field is a definite gap.
+_POSSIBLE = "possible"
+
+
+def _discarded_name_pattern(stem: str) -> "re.Pattern[str]":
+    """The exact ASCII name of a set-aside staged entry of ``stem``'s trail:
+    ``<stem>.audit.jsonl.first.discarded-<UTC stamp>[-n]``; group 1 is the stamp."""
+    return re.compile(
+        re.escape(f"{stem}.audit.jsonl.first.{_DISCARDED_REASON}-")
+        + r"([0-9]{8}T[0-9]{12}Z)(?:-[1-9][0-9]*)?",
+        re.ASCII,
+    )
+
+
+def _canonical_stamp(stamp: str) -> bool:
+    """True when ``stamp`` is a UTC stamp ``_set_aside`` could have written: it
+    parses and formats back to the same text."""
+    try:
+        return datetime.strptime(stamp, "%Y%m%dT%H%M%S%fZ").strftime(
+            "%Y%m%dT%H%M%S%fZ"
+        ) == stamp
+    except ValueError:
+        return False
+
+
+def _discarded_name_ok(stem: str, name: str) -> bool:
+    """``name`` is exactly a set-aside staged-entry name of ``stem``'s trail."""
+    match = _discarded_name_pattern(stem).fullmatch(name)
+    return match is not None and _canonical_stamp(match[1])
+
+
+_NOTHING_TO_REPAIR = "The manifest is valid; there is nothing to repair."
 # The manifest's ``active_begun`` record: the week of the active file's first
 # entry, that entry's hash, and the ``prev_hash`` it chained from, saved once per
 # active file by ``log()``. Cleared by the seal that moves the file into
@@ -390,6 +464,34 @@ def _parse_manifest_bytes(raw: bytes, stem: str) -> dict[str, Any]:
         for r in set_aside
     ):
         raise TypeError("manifest field 'set_aside' is not a list of set-aside records")
+    # ``certainty`` is written only on the rebuild's active-file record (KL-24
+    # L3 r7, codex LOW): anything else would silently read as a definite gap.
+    rated = [r for r in set_aside if "certainty" in r]
+    # No limit on their number: each repair of a loss in the same week records
+    # its own (measured: a cap made the second repair's manifest invalid).
+    if not all(
+        r["certainty"] == _POSSIBLE and r["set_aside_as"] == ""
+        and r["filename"] == f"{stem}.audit.jsonl"
+        for r in rated
+    ):
+        raise TypeError("manifest field 'set_aside' holds an invalid 'certainty'")
+    # ``preserved_attempts``: names of kept staged entries, on a POSSIBLE
+    # active-file record only (a definite record naming them would read as a
+    # loss with evidence attached; KL-24 r11, codex LOW).
+    if not all(
+        "preserved_attempts" not in r or (
+            r.get("certainty") == _POSSIBLE
+            and r["set_aside_as"] == ""
+            and r["filename"] == f"{stem}.audit.jsonl"
+            and isinstance(r["preserved_attempts"], list)
+            and all(
+                isinstance(n, str) and _discarded_name_ok(stem, n)
+                for n in r["preserved_attempts"]
+            )
+        )
+        for r in set_aside
+    ):
+        raise TypeError("manifest field 'set_aside' holds an invalid 'preserved_attempts'")
     begun = manifest.get("active_begun")
     if begun is not None and not (
         isinstance(begun, dict)
@@ -482,6 +584,10 @@ class AuditRepairResult:
     # Unreadable or corrupt sealed files this repair set aside and recorded in
     # the manifest (the same dicts as ``AuditVerifyResult.set_aside``).
     set_aside: list[dict[str, str]] = field(default_factory=list)
+    # What repair did with a staged first entry (``<active>.first``) it found,
+    # before anything else: "finished: ..." or "set aside: ..." (KL-24 L3 r6).
+    # None when there was none.
+    staged_first_entry: str | None = None
 
 
 @dataclass
@@ -505,10 +611,13 @@ class AuditTrail:
     the SQLite episodic store. Each entry includes the SHA-256 hash
     of the previous entry, creating a cryptographic chain.
 
-    **Single-writer requirement:** Only one AuditTrail instance should
-    write to a given db_path at a time. Concurrent writers will corrupt
-    the hash chain (interleaved entries with incompatible prev_hash values).
-    The MCP server's single-threaded model enforces this naturally.
+    **Concurrent writers:** several instances, in one process or several, may
+    write to one db_path. Each append holds a cross-process lock
+    (:meth:`_append_lock`) and first re-reads the chain's tip from disk
+    (:meth:`_resync_with_disk`), so every entry chains from the one before
+    it on disk. Where advisory locks do not exist (Windows, or a filesystem
+    without ``flock``), appends are not serialized and only one instance may
+    write at a time; sequential writers stay chained through the re-sync.
 
     **No fork support:** do not fork a process while an AuditTrail in it is
     in use; a child must open its own AuditTrail. A child forked while the
@@ -608,6 +717,19 @@ class AuditTrail:
         # writing past a file that vanished under it (L3 r1 10-03, codex HIGH +
         # complement, run).
         self._active_has_entry = False
+        # Threads inside :meth:`log`'s append-lock span (KL-24): a nested
+        # ``log()`` on one of them is refused rather than deadlocked.
+        self._append_threads: set[int] = set()
+        # Where the entry this instance's chain state was taken from sits in the
+        # active file: ``(st_dev, st_ino, offset, length, line_hash)``, where
+        # ``line_hash`` is that entry's own hash. None whenever the tip is not
+        # in the active file (``_active_has_entry`` False: a fresh file, a seed
+        # from the manifest, a seal). ``_resync_with_disk`` checks those bytes
+        # still hash to ``line_hash`` before trusting anything after them (L2
+        # r1: a reused inode made a size check unsound).
+        self._tip: tuple[int, int, int, int, str] | None = None
+        # The ISO week of the tip entry's own timestamp (see _lost_active).
+        self._tip_week = ""
 
     # -- Public API --
 
@@ -633,7 +755,7 @@ class AuditTrail:
                    Wrap lifecycle:
                      wrap_started, wrap_cancelled, wrap_completed
                    Continuity:
-                     continuity_saved, section_schema_set
+                     continuity_saved, continuity_refused, section_schema_set
                    Consolidate policy:
                      consolidate_policy_set
                    Hebbian (episode-level) associations:
@@ -665,12 +787,55 @@ class AuditTrail:
         # HIGH): _operation_span's own refusal runs only when this call needs a
         # span, and a refused rotation advances _last_week before its warning,
         # so a handler's nested log() needed none and appended while the outer
-        # operation held the manifest lock.
-        if threading.get_ident() in self._span_threads:
+        # operation held the manifest lock. It also runs before the append lock
+        # is taken: a nested log() would open its own descriptor and block on
+        # this thread's own lock forever (KL-24).
+        me = threading.get_ident()
+        if me in self._span_threads or me in self._append_threads:
             raise RuntimeError(
                 "an audit operation is already in progress on this thread; "
                 "the trail is not reentrant (e.g. from a logging handler)"
             )
+
+        try:
+            # Inside the ``try``: an interrupt between the add and a ``try`` would
+            # leave this thread marked for good, and every later append refused
+            # as reentrant (L3 r1, codex).
+            self._append_threads.add(me)
+            with self._append_lock():
+                entry = self._log_locked(event, data, actor)
+        finally:
+            self._append_threads.discard(me)
+
+        # Fire callback after successful write, outside every lock (the
+        # ``_manifest_lock`` invariant: no user callback inside a locked span).
+        if self._on_event is not None:
+            try:
+                self._on_event(entry)
+            except Exception:
+                _log(logging.WARNING, "on_event callback failed for seq %d", entry["seq"], exc_info=True)
+
+        return entry
+
+    def _log_locked(
+        self,
+        event: str,
+        data: dict[str, Any] | None,
+        actor: str,
+    ) -> dict[str, Any]:
+        """:meth:`log` from the re-sync on: the caller holds the append lock
+        (:meth:`_append_lock`) and has validated ``event`` and ``data``."""
+        # Quarantine first (KL-24 L3 r6, codex 5): run the other way round, the
+        # staged-entry recovery read a quarantined manifest as absent and
+        # discarded a staged entry its record still named.
+        self._refuse_while_quarantined()
+        self._finish_first_entry()
+        # ⛔ RE-SYNC WITH DISK FIRST (KL-24, run 2026-10-07 on 8542f49: three
+        # writer processes, ``verify()`` valid=False, ``status()`` counting no
+        # audit failure). Another process may have appended, rotated or replaced the
+        # active file since this instance last touched it, so the cached
+        # ``seq``/``prev_hash`` may be a tip that is no longer the chain's.
+        self._resync_with_disk()
 
         # ⛔ ONE MANIFEST-LOCK SPAN FOR EVERYTHING THIS CALL DOES TO THE MANIFEST
         # (Phill, 10-03, item 2; reproduced with a real second process first):
@@ -678,13 +843,24 @@ class AuditTrail:
         # quarantined manifest, an ``audit-repair`` in another process rebuilt
         # it in between, and the seed refused this write on adoption's stale
         # "did not complete" while naming the repair that had just succeeded.
-        # Taken only when this call initializes or rotates; released before
-        # the append and before ``on_event``, which must never run under it.
-        if not self._initialized or _iso_week_now() != self._last_week:
-            with self._operation_span():
+        # Taken by EVERY append, and released before the append and before
+        # ``on_event``, which must never run under it. Taken only when a call
+        # initialized or rotated, an initialized same-week writer appended with
+        # the lock file unopenable and never found out (KL-24 L3 r6, codex 3,
+        # run): the span is the preflight, and costs no manifest read when
+        # nothing else needs one.
+        reinit = not self._initialized or _iso_week_now() != self._last_week
+        with self._operation_span():
+            self._refuse_without_manifest_lock()
+            if reinit:
                 if not self._initialized:
                     self._initialize()
                 self._rotate_if_needed()
+        if reinit:
+            # The span may have just found and quarantined an invalid manifest;
+            # the append that found it is refused too (ruling A, lane run: it
+            # was accepted while only the next one was refused).
+            self._refuse_while_quarantined()
 
         ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
 
@@ -755,14 +931,20 @@ class AuditTrail:
         # So: remember the pre-append size and roll the file back to it if the
         # append does not fully complete. Disk is then made to agree with the
         # in-memory state — nothing landed — which is what makes the caller's
-        # retry sound. Safe because this class is single-writer by contract
-        # (see the module docstring); truncating a file a peer was appending to
-        # would not be.
+        # retry sound. Safe because the caller holds the append lock, so no
+        # peer appends between ``resume_at`` and the truncate; where locking is
+        # unavailable (see :meth:`_append_lock`) the trail is single-writer by
+        # contract, and truncating a file a peer was appending to would not be.
         active = self._active_path
         active.parent.mkdir(parents=True, exist_ok=True)
         resume_at = active.stat().st_size if active.exists() else 0
         if resume_at == 0 and self._active_has_entry:
-            # ⛔ THE FILE THIS INSTANCE WAS APPENDING TO IS GONE. Appending would
+            # ⛔ THE FILE THIS INSTANCE WAS APPENDING TO IS GONE. A file already
+            # gone at ``_resync_with_disk`` was refused (or followed, when
+            # another writer sealed its week) there, so this fires only when it
+            # went between that re-sync and here: removed by something that
+            # takes no append lock (a hand, an anneal from before the lock), or
+            # with no lock held at all (see _append_lock). Appending would
             # chain from its lost tip into a new file and overwrite the
             # manifest's record of it; verify then reports a hash break that
             # audit-repair cannot see (L3 r1 10-03, run). Re-init on the next
@@ -848,11 +1030,39 @@ class AuditTrail:
             self._dropped_since_last,
         )
         saved_has_entry = self._active_has_entry  # L3 r2 10-03, codex MED
+        saved_tip = self._tip
+        # ⛔ WRITE-AHEAD: THE FIRST ENTRY'S RECORD IS DURABLE BEFORE THE ENTRY
+        # (KL-24 L3 r4, codex HIGH). Saved after the write and best-effort, a
+        # failed save left only this process's memory knowing the file had
+        # entries: delete the file and, after one refusal, the next append
+        # seeded from genesis and verify() read valid; a restart read a healthy
+        # 0. Now a save that fails refuses this append, with nothing written.
+        # The first entry of an active file is not appended: it is staged in a
+        # temp file with any bytes already there, fsynced, its record saved, and
+        # then renamed into place (KL-24 L3 r5, codex + complement: saved first
+        # and appended after, a crash between the two left a record naming an
+        # entry never written, and repair then recorded a false permanent gap).
+        # The temp is what recovery finishes (:meth:`_finish_first_entry`); the
+        # same order as LevelDB publishing a new MANIFEST through CURRENT.
+        first_tmp: Path | None = None
+        if not had_entry:
+            first_tmp = self._stage_first_entry(
+                active, payload, new_prev_hash, saved_chain_state[0]
+            )
         try:
-            with open(active, "a", encoding="utf-8") as f:
-                f.write(payload)
-                f.flush()
-                os.fsync(f.fileno())
+            if first_tmp is not None:
+                os.replace(first_tmp, active)
+                _fsync_dir(active.parent)
+            else:
+                # ``newline=""``: the bytes written are the payload's own, so the
+                # tip recorded below names this entry on Windows too. Text mode
+                # wrote a torn tail's boundary ``\n`` as ``\r\n`` there, and the
+                # tip at ``resume_at + 1`` named the LF (KL-24 CI-fix L3 r1,
+                # codex, run 37973885945).
+                with open(active, "a", encoding="utf-8", newline="") as f:
+                    f.write(payload)
+                    f.flush()
+                    os.fsync(f.fileno())
             # Update chain state
             self._prev_hash = new_prev_hash
             self._seq += 1
@@ -1074,11 +1284,18 @@ class AuditTrail:
             # still restored on both paths. Nothing was retired.
             self._initialized = False
             truncated = True
+            # A staged first entry still on disk under its own name was never
+            # renamed in, so the active file was not touched and there is
+            # nothing to truncate (KL-24 L3 r6, codex 8 + complement 2, run: the
+            # truncate's open failed on an absent active file, the temp and its
+            # record stayed, and the next append committed this failed entry).
+            not_renamed = first_tmp is not None and os.path.lexists(first_tmp)
             try:
-                with open(active, "r+b") as f_trunc:
-                    f_trunc.truncate(resume_at)
-                    f_trunc.flush()
-                    os.fsync(f_trunc.fileno())
+                if not not_renamed:
+                    with open(active, "r+b") as f_trunc:
+                        f_trunc.truncate(resume_at)
+                        f_trunc.flush()
+                        os.fsync(f_trunc.fileno())
             except Exception:
                 # ⛔ NOT A BARE ``pass``. This module logs the far more
                 # benign ``on_event`` and orphan-adoption failures, and this
@@ -1138,7 +1355,14 @@ class AuditTrail:
                     self._dropped_since_last,
                 ) = saved_chain_state
                 self._active_has_entry = saved_has_entry
+                self._tip = saved_tip
                 self._initialized = True
+                if not had_entry:
+                    # The record names an entry that is not on disk. A staged
+                    # temp that was not renamed in is set aside, never deleted.
+                    if not_renamed and first_tmp is not None:
+                        _set_aside(first_tmp, _DISCARDED_REASON)
+                    self._withdraw_active_begun(new_prev_hash)
             else:
                 # Disk is the authority now — see the block above.
                 # (``_initialized`` was already cleared in the except above,
@@ -1156,23 +1380,26 @@ class AuditTrail:
                 self._dropped_since_last = saved_chain_state[2]
             raise
 
-        # ⛔ THE ACTIVE FILE'S FIRST ENTRY IS RECORDED IN THE MANIFEST, so a
-        # restart can tell a deleted active file from an empty one (see
-        # ``_refuse_vanished_active``). Once per active file: only the append
-        # into a file that held no valid entry (absent, empty, or only a torn
-        # fragment: L3 r1 10-03, codex + glm, run). The append itself holds no lock,
-        # so the save takes the span here. A failure is logged and never fails
-        # this write (the entry is already on disk); that week is then not
-        # protected, as in degrade mode, where the span cannot save at all.
-        if not had_entry:
-            self._record_active_begun(new_prev_hash, saved_chain_state[0])
-
-        # Fire callback after successful write
-        if self._on_event is not None:
-            try:
-                self._on_event(entry)
-            except Exception:
-                _log(logging.WARNING, "on_event callback failed for seq %d", entry["seq"], exc_info=True)
+        # The new tip is where THIS entry was written, computed from the append
+        # itself, not from a stat of the file afterwards: a stat would also take
+        # in anything an unlocked writer appended since, and the next re-sync
+        # would skip it (L2 r1, run). The stat is for the file's identity only.
+        # A failed stat cannot say which file this is, so the next call
+        # re-derives everything from disk instead.
+        try:
+            st_after = os.stat(active)
+        except OSError:
+            self._tip = None
+            self._initialized = False
+        else:
+            self._tip = (
+                st_after.st_dev,
+                st_after.st_ino,
+                resume_at + (1 if needs_boundary else 0),
+                len(json_line.encode("utf-8")),
+                new_prev_hash,
+            )
+            self._tip_week = _week_of_ts(ts)
 
         return entry
 
@@ -1229,10 +1456,28 @@ class AuditTrail:
     def stats(self) -> dict[str, Any]:
         """Return a cheap health snapshot of the audit trail.
 
-        Lazy-initializes the trail if it hasn't been touched yet so
-        ``entry_count`` reflects the true count on disk (including any
-        entries recovered from a prior active file). Does NOT walk the
-        full hash chain — for integrity verification, call :meth:`verify`.
+        ``entry_count`` is read from disk on every call: the active file's last
+        valid entry's ``seq`` + 1, or 0 when it holds none (``seq`` restarts in
+        each week's file), so it includes what other writers appended. Does NOT
+        walk the full hash chain — for integrity verification, call
+        :meth:`verify`. A read error (other than no file) propagates as
+        ``OSError``.
+
+        ⛔ READ-ONLY, AND THAT IS THE FIX (L3 r1 on KL-24, codex + complement):
+        a status read used to re-sync or initialise this instance's chain
+        state. Done without the append lock it could adopt an entry a peer then
+        rolled back (a false "is gone" at the next append); told not to touch a
+        lost file it stayed stale for good; and initialising took the manifest
+        lock, on which a writer holding the append lock could wait until other
+        writers' waits ran out. It takes no lock and changes nothing now.
+        An active file with no valid entry that the manifest says once held
+        some raises ``OSError`` (see :meth:`_raise_if_active_lost`) rather than
+        reading as 0 entries. So do a quarantined manifest, a staged first entry
+        waiting to be resolved, and a directory that cannot be listed to rule
+        those out, whatever the active file holds and whether or not a manifest
+        is present (KL-24 L3 r6, codex 6, run: an active file with entries
+        beside a quarantine marker read as a normal count, and a staged entry
+        beside a manifest with no record as a healthy 0).
 
         Returns:
             Dict with keys ``log_path`` (str), ``entry_count`` (int),
@@ -1240,14 +1485,104 @@ class AuditTrail:
             about the enabled/disabled distinction should check for
             ``None`` at the ``Store._audit`` level before calling this.
         """
-        if not self._initialized:
-            with self._operation_span():  # initializing adopts and seeds: one span
-                self._initialize()
+        audit_dir, stem = self._db_path.parent, self._db_path.stem
+        try:
+            names = [p.name for p in audit_dir.iterdir()]
+        except FileNotFoundError:
+            names = []
+        except OSError as e:
+            raise OSError(f"the audit directory cannot be listed: {e}") from e
+        if self._first_entry_path().name in names:
+            names = self._names_after_staged_window(audit_dir, stem, names)
+        if _markers_in(names, stem):
+            raise OSError("the audit manifest is quarantined; run `anneal-memory audit-repair`")
+        if self._first_entry_path().name in names:
+            raise OSError(
+                "a staged first audit entry is waiting to be finished or set aside "
+                "by the next append or `anneal-memory audit-repair`"
+            )
+        try:
+            with _open_regular(self._active_path) as f:
+                last_line = _last_valid_entry_in(f, 0)[0]
+        except FileNotFoundError:
+            last_line = ""
+        if not last_line:
+            self._raise_if_active_lost(names)
+        entry_count = json.loads(last_line)["seq"] + 1 if last_line else 0
         return {
             "log_path": str(self._active_path),
-            "entry_count": self._seq,
+            "entry_count": entry_count,
             "retention_days": self._retention_days,
         }
+
+    def _names_after_staged_window(
+        self, audit_dir: Path, stem: str, names: list[str]
+    ) -> list[str]:
+        """For :meth:`stats` when a staged first entry is on disk: a peer's first
+        append of the week stages it for an instant, holding the append lock. Wait
+        for that lock (bounded, ``_STATS_STAGED_WAIT_SECONDS``), then list again;
+        the staged file still there with no holder is the crash case and stays
+        unknown (KL-24 L3 r7, complement MED 1). Writes nothing but the lock file
+        the append already uses. Without advisory locks, or on a lock error, the
+        original names stand."""
+        if fcntl is None:
+            return names
+        try:
+            fd = self._open_and_flock(
+                audit_dir / f"{stem}.audit-append.lock",
+                "audit append lock",
+                "a staged first entry cannot be told from a crashed one",
+                timeout=_STATS_STAGED_WAIT_SECONDS,
+            )
+        except OSError:
+            return names
+        if fd is not None:
+            _unlock_and_close(fd)
+        try:
+            return [p.name for p in audit_dir.iterdir()]
+        except OSError as e:
+            raise OSError(f"the audit directory cannot be listed: {e}") from e
+
+    def _raise_if_active_lost(self, names: list[str]) -> None:
+        """For :meth:`stats` when the active file holds no valid entry: raise
+        ``OSError`` if the manifest (``vanished_active_week``) or this instance
+        says it once did, so ``Store.status()`` reports the counts as
+        unknown instead of a healthy 0 (KL-24 L3 r2, codex MED). Read-only: no
+        lock, no quarantine, nothing written. The same reading holds for the
+        instant inside a peer's rotation between the rename and the manifest
+        save, which reads as unknown, never as healthy."""
+        manifest_path = self._db_path.parent / f"{self._db_path.stem}.audit.manifest.json"
+        try:
+            manifest = _parse_manifest_bytes(
+                _read_regular_bytes(manifest_path), self._db_path.stem
+            )
+        except FileNotFoundError:
+            manifest = {}
+            stem = self._db_path.stem
+            # Sealed weeks with no manifest: the trail is not empty, and nothing
+            # here can say what it holds (L3 r4 complement LOW). ``names`` is
+            # :meth:`stats`'s one listing, which has already refused a marker or
+            # a staged entry. Names are matched exactly, never globbed (a stem
+            # may hold glob characters: r5 complement LOW).
+            sealed_re = re.compile(re.escape(f"{stem}.audit.") + r"\d{4}-W\d{2}\.jsonl(?:\.gz)?")
+            if any(sealed_re.fullmatch(n) for n in names):
+                raise OSError("the audit manifest is missing beside sealed audit files")
+        except _CORRUPT_MANIFEST + (AttributeError,) as e:
+            # Every way a manifest fails to parse reads as unknown, never as a
+            # crash of the status call (L3 r3 ``[]``: TypeError; r4: RecursionError).
+            raise OSError(f"the audit manifest cannot be read: {e}") from e
+        try:
+            begun = vanished_active_week(manifest)
+        except (TypeError, KeyError, AttributeError) as e:
+            raise OSError(f"the audit manifest cannot be read: {e}") from e
+        if begun is not None or self._active_has_entry:
+            # The manifest's record is best-effort; this instance's own
+            # knowledge that the file held an entry counts too (L3 r3, codex
+            # MED: with no record the lost trail read as a healthy 0).
+            raise OSError(
+                "the active audit file held entries and is gone or empty; run "
+                "`anneal-memory audit-repair`"
+            )
 
     @classmethod
     def verify(cls, db_path: str | Path) -> AuditVerifyResult:
@@ -1679,15 +2014,25 @@ class AuditTrail:
         ``chain_anchor_recovered: true``, and :meth:`verify` then reports
         ``anchor_trusted=False``.
 
-        Holds the manifest lock (``_manifest_lock``) from its first listing to
-        its return, so a writer in another process cannot quarantine the
-        rebuilt manifest while repair runs, or after it from bytes it read
-        before (spore-1030). Where the lock cannot be taken for any reason
-        other than the platform having none, repair refuses.
+        Holds the append lock and then the manifest lock (``_append_lock``,
+        ``_manifest_lock``, the documented order) from its first listing to its
+        return, so no append runs while it decides, and a writer in another
+        process cannot quarantine the rebuilt manifest while repair runs, or
+        after it from bytes it read before (spore-1030). Where a lock cannot be
+        taken for any reason other than the platform having none, repair
+        refuses.
+
+        A staged first entry (``<active>.first``, left by an append that
+        stopped between saving its record and renaming it in) is resolved
+        first, by the rule the next append would apply: a valid manifest whose
+        record names it, with the active file still holding no entry, finishes
+        the rename; otherwise it is set aside, never deleted (KL-24 L3 r6,
+        complement 1 + codex 1, run: repair recorded a permanent gap over it and
+        the next append deleted it). What was done is ``staged_first_entry``.
         """
         trail = cls(Path(db_path))
         try:
-            with trail._manifest_lock():
+            with trail._append_lock(), trail._manifest_lock():
                 return cls._repair_locked(trail, set_aside_unreadable)
         except _AuditLockError as e:
             return AuditRepairResult(repaired=False, error=f"{e}; nothing was written.")
@@ -1713,6 +2058,7 @@ class AuditTrail:
                 error=f"Cannot list the audit directory: {e}; nothing was written.",
             )
 
+        current: dict[str, Any] | None = None
         if not markers and trail._manifest_path.exists():
             try:
                 current = trail._load_manifest()
@@ -1731,11 +2077,41 @@ class AuditTrail:
                 )
             except _ManifestUnavailable as e:
                 return AuditRepairResult(repaired=False, error=str(e))
-            else:
-                return cls._set_aside_unreadable_locked(
-                    trail, current, set_aside_unreadable
-                )
 
+        # Before any vanished-file or possible-gap decision: a staged first
+        # entry is finished or set aside under the manifest repair holds (None
+        # when it is quarantined or absent: then it is set aside).
+        try:
+            staged = trail._resolve_staged_entry(current)
+        except OSError as e:
+            return AuditRepairResult(
+                repaired=False,
+                error=f"Could not resolve the staged first audit entry: {e}; {nothing}",
+            )
+        if current is not None:
+            result = cls._set_aside_unreadable_locked(trail, current, set_aside_unreadable)
+        else:
+            result = cls._rebuild_locked(trail, markers, nothing)
+        if staged is None:
+            return result
+        if not result.repaired and result.error == _NOTHING_TO_REPAIR:
+            return AuditRepairResult(repaired=True, staged_first_entry=staged)
+        return replace(
+            result,
+            staged_first_entry=staged,
+            error=(f"{result.error} (Before that, the staged first entry was {staged}.)"
+                   if result.error else None),
+        )
+
+    @classmethod
+    def _rebuild_locked(
+        cls, trail: "AuditTrail", markers: list[str], nothing: str
+    ) -> AuditRepairResult:
+        """:meth:`_repair_locked`'s rebuild of a quarantined or missing manifest
+        from the sealed files on disk; the caller holds both locks."""
+        db_path = trail._db_path
+        stem = db_path.stem
+        audit_dir = db_path.parent
         try:
             by_period: dict[str, list[Path]] = {}
             for p in audit_dir.iterdir():
@@ -1836,6 +2212,53 @@ class AuditTrail:
             return AuditRepairResult(
                 repaired=False, error=f"Cannot list the audit directory: {e}; {nothing}"
             )
+        # ⛔ A REBUILD CANNOT VOUCH FOR AN EMPTY ACTIVE FILE (Phill 2026-10-08,
+        # "A"; run first: the active file deleted while the manifest was
+        # quarantined, and after this rebuild verify read VALID with that week's
+        # entries gone and no gap). The record that would say the file once held
+        # entries was in the quarantined manifest. With no usable entry in the
+        # active file the rebuild records an UNKNOWN gap: loud, and possibly a
+        # false one when the file really never held an entry.
+        try:
+            active_holds_entry = _first_valid_line(trail._active_path) is not None
+        except FileNotFoundError:
+            active_holds_entry = False
+        except OSError as e:
+            return AuditRepairResult(
+                repaired=False,
+                error=f"Could not read the active audit file: {e}; {nothing}",
+            )
+        possible_gap: list[dict[str, Any]] = []
+        if not active_holds_entry:
+            period = _iso_week_now()
+            # The begun record is in the quarantined manifest and is not readable
+            # here: POSSIBLE, naming EVERY preserved attempt file of this trail
+            # (the ruled KL-24 exception; the names come from the grammar-checked,
+            # lstat'd directory selection, never from a status string).
+            try:
+                preserved = trail._preserved_attempt_names()
+            except OSError as e:
+                return AuditRepairResult(
+                    repaired=False,
+                    error=f"Cannot list the audit directory: {e}; {nothing}",
+                )
+            possible_gap = [{
+                "filename": trail._active_path.name,
+                "set_aside_as": "",
+                # Explicit, so no reader infers it from the cause text (KL-24 L3
+                # r6, codex 10, run: the CLI and verify printed it as a definite
+                # GAP, "went missing with its entries").
+                "certainty": _POSSIBLE,
+                "period": period,
+                "cause": (
+                    "the manifest was rebuilt from quarantine and the active file holds "
+                    "no entry; whether it held entries before cannot be known, so this "
+                    "is recorded as a possible gap"
+                ),
+                "at": datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ"),
+                **({"preserved_attempts": preserved} if preserved else {}),
+            }]
+            carried = list(carried or []) + possible_gap
         if carried:
             manifest["set_aside"] = carried
         try:
@@ -1892,6 +2315,9 @@ class AuditTrail:
             files=[r["path"].name for r in records],
             chain_anchor_recovered=recovered,
             untracked=untracked,
+            # The possible gap is reported to whoever ran the repair, not only
+            # recorded where a later verify finds it.
+            set_aside=possible_gap,
         )
 
     @classmethod
@@ -1996,7 +2422,7 @@ class AuditTrail:
                         "it aside. verify reports it. Nothing was written."
                     ),
                 )
-        vanished: dict[str, str] | None = None
+        vanished: dict[str, Any] | None = None
         begun = vanished_active_week(manifest)
         if (
             begun is not None
@@ -2022,6 +2448,41 @@ class AuditTrail:
             # the week, a manifest rebuilt with no sealed files, a chain of orphan
             # weeks); those need outside damage, and the CHANGELOG names them.
             begun = None
+        stale_cleared = False
+        if begun is not None:
+            # A record of a file that IS sealed and manifested (an older release
+            # sealed it and left the field set): matched by the sealed file's
+            # first entry, never by period alone (KL-24 L3 r4, codex MED: repair
+            # recorded a false, permanent gap for entries still in the chain).
+            for f in manifest.get("files", []):
+                if f.get("period") != begun["period"]:
+                    continue
+                path = audit_dir / str(f.get("filename", ""))
+                # Absent, not a regular file, and unreadable are three answers
+                # (KL-24 L3 r6, codex 9, run: ``is_file()`` read a directory at
+                # the sealed name as absent, and repair recorded a permanent gap
+                # instead of refusing). Only absent is a mismatch.
+                try:
+                    st = os.lstat(path)
+                    if not stat.S_ISREG(st.st_mode):
+                        raise OSError(errno.EINVAL, "not a regular file", str(path))
+                    first = _first_valid_line(path)
+                except FileNotFoundError:
+                    first = None
+                except OSError as e:
+                    # Unreadable is not a mismatch (L3 r5, codex MED): reading
+                    # it as one recorded a false permanent gap.
+                    return AuditRepairResult(
+                        repaired=False,
+                        error=(f"Cannot read the sealed week {path.name} to check it "
+                               f"against the manifest's active-file record: {e}; "
+                               "nothing was written."),
+                    )
+                if first is not None and AuditTrail._compute_hash(first) == begun["first_hash"]:
+                    manifest["active_begun"] = None
+                    begun = None
+                    stale_cleared = True
+                    break
         if begun is not None and any(r["period"] == begun["period"] for r in new):
             # The same, unreadable: setting it aside records the gap, and a second
             # record would count it twice. Only the week the record names: an
@@ -2040,7 +2501,19 @@ class AuditTrail:
                     error=f"Cannot inspect the active audit file: {e}; nothing was written.",
                 )
             if not active_entry:
-                # ``set_aside_as`` "" marks it: there is no file to move.
+                # ``set_aside_as`` "" marks it: there is no file to move. Phill's 10-08
+                # exception, as ruled ((b), 10-09): only in the crash window (the begun
+                # record still set AND a staged attempt preserved as
+                # ``.first.discarded-*``) can anneal not tell from disk whether the first
+                # entry committed, so the gap is POSSIBLE and names EVERY preserved file
+                # for a person to inspect. With none preserved it is a definite gap.
+                try:
+                    preserved = trail._preserved_attempt_names()
+                except OSError as e:
+                    return AuditRepairResult(
+                        repaired=False,
+                        error=f"Cannot list the audit directory: {e}; nothing was written.",
+                    )
                 vanished = {
                     "filename": trail._active_path.name,
                     "set_aside_as": "",
@@ -2051,10 +2524,17 @@ class AuditTrail:
                     ),
                     "at": stamp,
                 }
-        if not new and vanished is None:
-            return AuditRepairResult(
-                repaired=False, error="The manifest is valid; there is nothing to repair."
-            )
+                if preserved:
+                    vanished["cause"] = (
+                        "the active file was deleted or emptied after its first entry "
+                        f"(hash {begun['first_hash']}) was recorded; whether that entry "
+                        "committed cannot be told from disk, so this is a possible "
+                        "gap: inspect the preserved attempt files"
+                    )
+                    vanished["certainty"] = _POSSIBLE
+                    vanished["preserved_attempts"] = preserved
+        if not new and vanished is None and not stale_cleared:
+            return AuditRepairResult(repaired=False, error=_NOTHING_TO_REPAIR)
         taken = [r["set_aside_as"] for r in new if os.path.lexists(audit_dir / r["set_aside_as"])]
         if taken:
             # os.rename replaces an existing file on POSIX; recovery never does.
@@ -2104,7 +2584,8 @@ class AuditTrail:
         if vanished:
             _emit_warning(
                 f"Recorded the missing active audit file {vanished['filename']} "
-                f"({vanished['period']}) as a gap"
+                f"({vanished['period']}) as a "
+                + ("POSSIBLE gap" if vanished.get("certainty") == _POSSIBLE else "gap")
             )
         return AuditRepairResult(
             repaired=True, set_aside=new + ([vanished] if vanished else [])
@@ -2153,9 +2634,11 @@ class AuditTrail:
         existed. Forking while a trail is in use is unsupported (see the class
         docstring). Any other failure to open or lock raises
         ``_AuditLockError``. Who takes it: each public operation, ONCE, for
-        everything it does to the manifest (10-03): ``log()`` and ``stats()``
-        through ``_operation_span`` when they initialize or rotate, and
-        ``repair_manifest``. Saves, quarantines, adoption, rotation and
+        everything it does to the manifest (10-03): ``log()`` through
+        ``_operation_span`` on every append (KL-24 L3 r6: the preflight; it was
+        only when initializing or rotating), the first-entry record save and its
+        withdrawal in their own spans, and ``repair_manifest`` (inside the append
+        lock). ``stats()`` takes no lock. Saves, quarantines, adoption, rotation and
         retention require it (``_require_lock``) and never take it, so it is
         held from an operation's first load to its last save, before any
         irreversible step, and never nested (a nested take raises
@@ -2182,7 +2665,7 @@ class AuditTrail:
                 self._lock_owner = None
                 self._lock_fd = None
                 if fd is not None:
-                    os.close(fd)
+                    _unlock_and_close(fd)
 
     @contextmanager
     def _operation_span(self) -> Iterator[None]:
@@ -2233,12 +2716,196 @@ class AuditTrail:
             "(log(), repair_manifest()) or _manifest_lock() before this call"
         )
 
-    def _open_and_flock(self) -> int | None:
+    @contextmanager
+    def _append_lock(self) -> Iterator[None]:
+        """Hold the cross-process lock that serializes appends to this trail
+        (KL-24): ``log()`` holds it from its re-sync to its last manifest save.
+
+        ⛔ WHY (KL-24, run 2026-10-07): three processes, each with its own
+        ``Store(audit=True)`` on one database, recorded 600 episodes; every
+        episode landed, ``verify()`` returned valid=False with a hash mismatch,
+        and ``status()`` reported 0 audit write failures. Each instance chained
+        from its own cached tip, so its entries skipped every peer entry
+        written since its previous one.
+
+        The lock file is ``<stem>.audit-append.lock``, beside the manifest lock
+        and like it outside ``<stem>.audit.*``. ⛔ LOCK ORDER: this lock is
+        taken FIRST and the manifest lock, when an operation needs it, inside
+        it. Nothing that holds the manifest lock takes this one;
+        ``repair_manifest`` takes this one first and then the manifest lock
+        (KL-24 L3 r6, so no append races its staged-entry and gap decisions),
+        so the two never wait on each other in opposite orders. Not reentrant: ``log()`` refuses a nested
+        call on the same thread before taking it, and two instances for one
+        database must not nest it in one thread (the inner one waits on the
+        outer, as with the manifest lock).
+
+        What a failure does, which is NOT what the manifest lock's does:
+        - advisory locks unavailable: no ``fcntl`` (Windows, silently, as the
+          README's Windows section says), or ``flock`` raising an errno in
+          ``_LOCK_UNAVAILABLE_ERRNOS`` (warned on stderr once per lock path).
+          Not held, and appends are as unserialized as they were before it
+          existed;
+        - the lock file cannot be opened or is not a regular file, or another
+          holder keeps it past ``_APPEND_LOCK_TIMEOUT_SECONDS`` (a stopped or
+          hung process): ``_AuditLockError``, so the append is REFUSED. The
+          store counts it as a dropped audit write (``audit_write_failures``,
+          ``dropped_before`` on the next entry), so a wedged lock is loud and
+          bounded rather than an unserialized append or a hang.
+        Released with ``LOCK_UN`` before the close, so a child forked while it
+        was held does not keep it (L2 r1, run: another writer waited out the
+        child's whole lifetime).
+        """
+        fd = None
+        try:
+            if fcntl is not None:
+                try:
+                    fd = self._open_and_flock(
+                        self._db_path.parent / f"{self._db_path.stem}.audit-append.lock",
+                        "audit append lock",
+                        "concurrent audit writers are not serialized and can break the hash chain",
+                        timeout=_APPEND_LOCK_TIMEOUT_SECONDS,
+                    )
+                except BaseException:
+                    # Without the lock this call never re-synced, so the cached
+                    # tip says nothing about where the dropped entry belonged:
+                    # cleared, ``note_write_failure`` reports the location as
+                    # unknown rather than a seq another writer already used
+                    # (L3 r1, codex), and the next call re-derives from disk.
+                    # ``BaseException`` (L3 r2, codex MED): an interrupt while
+                    # polling for the lock is the same case. Only acquisition
+                    # is inside this handler; the protected body is not.
+                    self._initialized = False
+                    raise
+            yield
+        finally:
+            if fd is not None:
+                _unlock_and_close(fd)
+
+    def _resync_with_disk(self) -> None:
+        """Bring the cached chain tip up to date with the active file.
+
+        :meth:`log` calls it under :meth:`_append_lock`; nothing else does.
+
+        With a tip in the active file (``self._tip``): if that file is still
+        the same one AND the tip's bytes still hash to the hash recorded with
+        the tip AND that is ``_prev_hash``, the chain continues from the last
+        valid entry after the tip (another writer's), or from the tip itself
+        when nothing valid follows. No file, another inode, a file shorter
+        than the tip, or other bytes at the tip is a lost file (below). The
+        tip intact while ``_prev_hash`` moved past it is this instance's own
+        interrupted update: ``_initialized`` is cleared and the caller
+        re-derives everything through :meth:`_initialize`.
+        Without a tip (the chain's tip is in the manifest or a sealed file):
+        any valid entry now in the active file was written by someone else,
+        so the same full re-derivation runs.
+
+        ⛔ A LOST ACTIVE FILE IS REFUSED HERE, NOT ONLY BY THE MANIFEST (L1 r1,
+        run): when the file holding the tip is gone, emptied below the tip, or
+        replaced, this raises ``_ManifestUnavailable`` once, whether a peer
+        sealed it or it was lost (see :meth:`_lost_active`). The manifest's
+        ``active_begun`` record refuses a loss too, but that record is
+        best-effort, and without it the re-derivation continued the chain over
+        the lost entries with nothing counted.
+
+        ⛔ THE BYTES ARE CHECKED, NOT A (dev, inode, size) SIGNATURE (L2 r1,
+        run with a simulated inode): a rotation frees the inode, the new
+        active file can get the same number back (ext4, xfs), and a size that
+        happens to be larger sent the read to an offset in a different file.
+        """
+        if not self._initialized:
+            return  # _initialize reads the file itself
+        active = self._active_path
+        try:
+            f_cm = _open_regular(active)
+        except FileNotFoundError:
+            if self._tip is not None:
+                self._lost_active("deleted")
+            return
+        with f_cm as f:
+            if self._tip is None:
+                if _last_valid_entry_in(f, 0)[0]:
+                    self._initialized = False
+                return
+            dev, ino, at, length, tip_hash = self._tip
+            st = os.fstat(f.fileno())
+            if (st.st_dev, st.st_ino) != (dev, ino):
+                self._lost_active("replaced")
+                return
+            if st.st_size < at + length:
+                self._lost_active("emptied or truncated")
+                return
+            f.seek(at)
+            try:
+                tip_line = f.read(length).decode("utf-8").strip()
+            except UnicodeDecodeError:
+                tip_line = ""
+            if not tip_line or self._compute_hash(tip_line) != tip_hash:
+                # Not the entry this instance recorded: the file was replaced
+                # even though the inode number came back (KL-24 CI, Linux,
+                # run 37968093093: ext4 handed a peer's rotated-in file the
+                # sealed file's inode, and this check read it as the case
+                # below, so a lost file was followed silently).
+                self._lost_active("replaced")
+                return
+            if tip_hash != self._prev_hash:
+                # The tip is intact but ``_prev_hash`` moved past it: this
+                # instance's own update was interrupted between the two (see
+                # the order note below). Re-derive from disk.
+                self._initialized = False
+                return
+            last_line, last_at, last_len = _last_valid_entry_in(f, at + length)
+        if last_line:
+            last_entry = json.loads(last_line)  # Guaranteed valid by helper
+            # ⛔ ``_seq``, THEN ``_prev_hash``, THEN ``_tip`` (L1 r1, run). An
+            # interrupt after ``_seq`` alone leaves the old tip still hashing to
+            # the old ``_prev_hash``, so the next call adopts the same entry
+            # again, and ``note_write_failure`` meanwhile reports the right next
+            # seq. After ``_prev_hash`` too, the old tip no longer hashes to it,
+            # so the next call re-derives from disk. The reverse order left
+            # ``_seq`` stale, and a dropped write was located at a seq already
+            # on disk.
+            self._seq = last_entry["seq"] + 1
+            self._prev_hash = self._compute_hash(last_line)
+            self._tip_week = _week_of_ts(last_entry["ts"]) or self._tip_week
+            self._tip = (dev, ino, last_at, last_len, self._prev_hash)
+
+    def _lost_active(self, what: str) -> None:
+        """The active file holding this instance's tip was ``what``: refuse
+        once, and re-derive from disk on the next call (see
+        :meth:`_resync_with_disk`).
+
+        ⛔ EVERY LOST FILE IS REFUSED, A PEER'S ROTATION INCLUDED (KL-24 L3 r2,
+        ruled by Phill 2026-10-08, option (b)). This used to return quietly when
+        a sealed file, its ``.gz`` or a ``.gz.tmp`` for the tip's week existed,
+        reading a filename as proof that another writer sealed this file. A
+        stale same-week orphan or temp then hid a deleted active file (codex
+        HIGH), and retention removing a just-sealed week produced a false "is
+        gone" (complement MED). Deleted, not repaired: a peer's rotation now
+        costs this instance one refused, counted append, and a real loss is
+        never followed silently."""
+        self._initialized = False
+        raise _ManifestUnavailable(
+            f"the active audit file {self._active_path.name} this process was "
+            f"appending to is gone ({what}; another process may have sealed its "
+            f"week {self._tip_week or self._last_week or '?'}); not continuing the "
+            "chain past it. The next write re-reads the trail from disk. If the "
+            "file was lost rather than sealed, put it back and retry, or run "
+            "`anneal-memory audit-repair` to record the week as a gap"
+        )
+
+    def _open_and_flock(
+        self,
+        lock_path: Path | None = None,
+        label: str = "audit manifest lock",
+        consequence: str = "audit manifest changes are not serialized across processes",
+        timeout: float | None = None,
+    ) -> int | None:
         """Open the lock file and take ``LOCK_EX`` on it; ``None`` when advisory
         locks are unavailable here (warned on stderr once per lock path). See
-        :meth:`_manifest_lock`."""
+        :meth:`_manifest_lock` (the default lock) and :meth:`_append_lock`."""
         assert fcntl is not None
-        lock_path = self._db_path.parent / f"{self._db_path.stem}.audit-manifest.lock"
+        if lock_path is None:
+            lock_path = self._db_path.parent / f"{self._db_path.stem}.audit-manifest.lock"
         # O_RDWR first: on Linux NFS an exclusive lock needs a descriptor open for
         # writing (L3: complement + codex). O_RDONLY is the fallback for a lock
         # file this user may not write (another user's, or 0444 under a umask),
@@ -2255,25 +2922,40 @@ class AuditTrail:
                 fd = os.open(lock_path, os.O_RDONLY | flags, 0o644)
         except OSError as e:
             raise _AuditLockError(
-                f"cannot open the audit manifest lock {lock_path}: {e}"
+                f"cannot open the {label} {lock_path}: {e}"
             ) from e
         try:
             if not stat.S_ISREG(os.fstat(fd).st_mode):
                 raise _AuditLockError(
-                    f"the audit manifest lock {lock_path} is not a regular file"
+                    f"the {label} {lock_path} is not a regular file"
                 )
             # ENOLCK is also what a lock table out of records returns, which is
             # transient; Linux NFS without lock support returns it for good. A
             # few short retries separate the two before degrading (L3: codex).
-            for attempt in range(_ENOLCK_RETRIES + 1):
+            # With a ``timeout`` the wait is polled (LOCK_NB) and bounded; a
+            # holder past it raises ``_AuditLockError`` (see _append_lock).
+            op = fcntl.LOCK_EX if timeout is None else fcntl.LOCK_EX | fcntl.LOCK_NB
+            deadline = None if timeout is None else time.monotonic() + timeout
+            enolck_retries = 0
+            delay = 0.002
+            while True:
                 try:
-                    fcntl.flock(fd, fcntl.LOCK_EX)
+                    fcntl.flock(fd, op)
                     return fd
                 except OSError as e:
-                    if e.errno != errno.ENOLCK or attempt == _ENOLCK_RETRIES:
+                    if deadline is not None and e.errno in _LOCK_HELD_ERRNOS:
+                        if time.monotonic() >= deadline:
+                            raise _AuditLockError(
+                                f"timed out after {timeout:g}s waiting for the {label} "
+                                f"{lock_path.name}: another process holds it"
+                            ) from e
+                        time.sleep(delay)
+                        delay = min(delay * 2, 0.05)
+                        continue
+                    if e.errno != errno.ENOLCK or enolck_retries == _ENOLCK_RETRIES:
                         raise
+                    enolck_retries += 1
                     time.sleep(_ENOLCK_RETRY_SECONDS)
-            raise AssertionError("unreachable")  # pragma: no cover
         except BaseException as e:
             # Any exception, an interrupt included, closes the descriptor.
             os.close(fd)
@@ -2281,7 +2963,7 @@ class AuditTrail:
                 raise
             if e.errno not in _LOCK_UNAVAILABLE_ERRNOS:
                 raise _AuditLockError(
-                    f"cannot lock the audit manifest lock {lock_path.name}: {e}"
+                    f"cannot lock the {label} {lock_path.name}: {e}"
                 ) from e
         # ⛔ STDERR, NOT ONLY THE LOGGER (L2 MED "silent degrade", ruled 10-03:
         # degrade with a stderr warning). Reproduced: an application that sends
@@ -2294,9 +2976,8 @@ class AuditTrail:
         if str(lock_path) not in _lock_degrade_warned:
             _lock_degrade_warned.add(str(lock_path))
             message = (
-                f"Advisory locks are unavailable for {lock_path}; the audit manifest "
-                "lock is NOT held, so audit manifest changes are not serialized "
-                "across processes."
+                f"Advisory locks are unavailable for {lock_path}; the {label} "
+                f"is NOT held, so {consequence}."
             )
             _emit_warning(message, stderr=True)
         return None
@@ -2337,13 +3018,17 @@ class AuditTrail:
             return
 
         # Recover from existing active file — find last valid JSON entry
-        last_line = _read_last_valid_entry(active)
+        with _open_regular(active) as f_scan:
+            st_scan = os.fstat(f_scan.fileno())
+            last_line, last_at, last_len = _last_valid_entry_in(f_scan, 0)
         if last_line:
             last_entry = json.loads(last_line)  # Guaranteed valid by helper
             self._seq = last_entry.get("seq", 0) + 1
             self._active_has_entry = True
             # Hash the line from disk, not a re-serialization
             self._prev_hash = self._compute_hash(last_line)
+            self._tip = (st_scan.st_dev, st_scan.st_ino, last_at, last_len, self._prev_hash)
+            self._tip_week = _week_of_ts(last_entry.get("ts", ""))
             # Recover week from last entry timestamp
             ts = last_entry.get("ts", "")
             if ts:
@@ -2445,8 +3130,10 @@ class AuditTrail:
         ⛔ HYBRID (Phill, 2026-09-13): an INVALID manifest no longer degrades
         to genesis. :meth:`_load_manifest` quarantines it, and this seeds from
         the newest sealed file's last entry instead — the value rotation would
-        have recorded — so appending continues on the true chain. If there is
-        no readable sealed tail, it refuses (raises); genesis would be a guess.
+        have recorded. If there is no readable sealed tail, it refuses (raises);
+        genesis would be a guess. Since 2026-10-08 ("A") :meth:`log` refuses
+        every append while a quarantine is unresolved, so a log() does not
+        continue past this seed until ``audit-repair`` has run.
 
         ``adopted`` is False when orphan adoption did not finish its scan; then
         a chain anchor read from the manifest is refused (see
@@ -2458,6 +3145,7 @@ class AuditTrail:
         self._prev_hash = GENESIS_HASH
         self._seq = 0
         self._active_has_entry = False
+        self._tip = None
         try:
             manifest = self._load_manifest()  # absent -> fresh (genesis)
         except _ManifestQuarantined:
@@ -2516,23 +3204,255 @@ class AuditTrail:
                 "a deletion of it will not be detected", exc_info=True,
             )
 
+    def _refuse_without_manifest_lock(self) -> None:
+        """Inside an operation span: refuse the append when the span could not
+        take the manifest lock (Phill 2026-10-08, "A": an append that cannot
+        record or check the manifest leaves a window in which a deleted active
+        file goes undetected, so it fails closed; the store counts the drop)."""
+        failure = self._lock_failures.get(threading.get_ident())
+        if failure is not None:
+            raise _ManifestUnavailable(
+                f"audit append refused: the audit manifest lock cannot be taken "
+                f"({failure}); fix the lock file, then retry. Until then audit "
+                "writes are counted as dropped (status: audit_write_failures)"
+            )
+
+    def _refuse_while_quarantined(self) -> None:
+        """Refuse every append while a quarantined manifest is unresolved (Phill
+        2026-10-08, "A", superseding the 09-13 hybrid; run first: with the
+        manifest quarantined and the active file deleted, appends seeded from
+        the sealed tail, and after audit-repair verify read VALID with the
+        deleted week's entries gone and no gap). A directory that cannot be
+        listed cannot rule a quarantine out, so it refuses too (KL-24 L3 r6,
+        codex 2, run: with a marker on disk and the directory at mode 0300 an
+        initialized writer appended; ruling A supersedes round 10b's "writes in
+        an unlistable directory must not block")."""
+        try:
+            markers = _quarantine_markers(self._db_path.parent, self._db_path.stem)
+        except OSError as e:
+            raise _ManifestUnavailable(
+                f"audit append refused: the audit directory cannot be listed to "
+                f"rule out a quarantined manifest ({e}); fix its permissions, then "
+                "retry. Until then audit writes are counted as dropped (status: "
+                "audit_write_failures)"
+            ) from e
+        if markers:
+            raise _ManifestQuarantined(
+                f"audit append refused: the audit manifest is quarantined "
+                f"({markers[-1]}); run `anneal-memory audit-repair`, then writes "
+                "resume. Until then audit writes are counted as dropped (status: "
+                "audit_write_failures)"
+            )
+
+    def _first_entry_path(self) -> Path:
+        return self._active_path.with_name(self._active_path.name + ".first")
+
+    def _stage_first_entry(
+        self, active: Path, payload: str, first_hash: str, first_prev_hash: str
+    ) -> Path:
+        """Write the active file's current bytes (none, or a torn fragment kept
+        as evidence) plus ``payload`` to the staging temp, fsynced, then save
+        its record (:meth:`_record_active_begun`). Any failure sets the temp
+        aside (never deletes it: KL-24 L3 r6, ruled by the desk), withdraws a
+        record it may have saved, and raises, so nothing is committed.
+
+        The temp is created exclusively (``O_CREAT | O_EXCL``): whatever is
+        already at its name, a symlink included, is never followed, truncated or
+        replaced, and the append is refused instead. ``O_NOFOLLOW`` is not
+        needed for that and is absent on Windows (KL-24 L3 r6, codex 4, run:
+        every first-entry append raised ``AttributeError`` without it). The
+        write loops until every byte is down: ``os.write`` may write fewer bytes
+        than asked without raising (codex 7, run: half an entry was renamed in
+        and reported as written)."""
+        tmp = self._first_entry_path()
+        try:
+            existing = _read_regular_bytes(active)
+        except FileNotFoundError:
+            existing = b""
+        fd = os.open(
+            tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0), 0o644
+        )
+        try:
+            data = memoryview(existing + payload.encode("utf-8"))
+            while data:
+                written = os.write(fd, data)
+                if written <= 0:
+                    raise OSError(errno.EIO, "no progress writing the staged audit entry")
+                data = data[written:]
+            os.fsync(fd)
+        except BaseException:
+            os.close(fd)
+            _set_aside(tmp, _DISCARDED_REASON)
+            raise
+        os.close(fd)
+        try:
+            self._record_active_begun(first_hash, first_prev_hash)
+        except BaseException:
+            _set_aside(tmp, _DISCARDED_REASON)
+            # The save may have landed before the failure that raised.
+            self._withdraw_active_begun(first_hash)
+            raise
+        return tmp
+
+    def _staged_entry_commits(self, manifest: dict[str, Any] | None) -> bool:
+        """Whether the staged first entry is the one ``manifest`` records as the
+        active file's first entry, with the active file holding no entry yet:
+        the rule both recovery (:meth:`_finish_first_entry`) and
+        ``audit-repair`` apply. ``None`` (no readable manifest) never commits."""
+        begun = manifest.get("active_begun") if isinstance(manifest, dict) else None
+        if not isinstance(begun, dict):
+            return False
+        # Never a symlink or anything but a regular file: it would be renamed
+        # into the active file's place as it is.
+        if not stat.S_ISREG(os.lstat(self._first_entry_path()).st_mode):
+            return False
+        with _open_regular(self._first_entry_path()) as f:
+            staged = _last_valid_entry_in(f, 0)[0]
+        try:
+            active_holds_entry = _first_valid_line(self._active_path) is not None
+        except FileNotFoundError:
+            active_holds_entry = False
+        return bool(
+            staged and self._compute_hash(staged) == begun.get("first_hash")
+            and not active_holds_entry
+        )
+
+    def _preserved_attempt_names(self) -> list[str]:
+        """Names of EVERY set-aside staged entry beside the active file
+        (``<active>.first.discarded-<stamp>[-n]``), sorted: regular files only
+        (``lstat``), exact ASCII name grammar with a canonical stamp. No time
+        window, no id, no content match: the ruled KL-24 exception names them
+        all for a person to inspect. Never renamed or deleted. A listing error
+        propagates; a file that vanishes before its ``lstat`` is skipped."""
+        pattern = _discarded_name_pattern(self._db_path.stem)
+        names = []
+        for p in self._active_path.parent.iterdir():
+            match = pattern.fullmatch(p.name)
+            if not (match and _canonical_stamp(match[1])):
+                continue
+            try:
+                is_file = stat.S_ISREG(os.lstat(p).st_mode)
+            except FileNotFoundError:
+                continue
+            if is_file:
+                names.append(p.name)
+        return sorted(names)
+
+    def _resolve_staged_entry(self, manifest: dict[str, Any] | None) -> str | None:
+        """Finish or set aside a staged first entry under ``manifest`` (see
+        :meth:`_staged_entry_commits`); ``None`` when there is none. Returns what
+        was done, for a report. Never deletes it: a staged entry that does not
+        commit is renamed to ``<name>.discarded-<UTC stamp>`` and kept."""
+        tmp = self._first_entry_path()
+        if not os.path.lexists(tmp):
+            return None
+        if self._staged_entry_commits(manifest):
+            os.replace(tmp, self._active_path)
+            _fsync_dir(self._active_path.parent)
+            return f"finished: {tmp.name} renamed into place as {self._active_path.name}"
+        kept = _set_aside(tmp, _DISCARDED_REASON)
+        if kept is None:
+            raise OSError(f"the staged first entry {tmp.name} did not commit and could not be set aside")
+        return f"set aside: {tmp.name} did not commit and is kept as {kept}"
+
+    def _finish_first_entry(self) -> None:
+        """Recovery for a staged first entry left by a process that stopped
+        between saving its record and the rename (see :meth:`_log_locked`). Under
+        the append lock, after the quarantine check. The record names the staged
+        entry: the rename is finished. No record names it: the append never
+        committed and the temp is set aside (KL-24 L3 r6: never deleted). The
+        manifest cannot be read, or is absent beside a quarantine marker (its
+        record is in the marker) or a directory that cannot be listed: refused,
+        nothing decided (codex 5, glm 1, run: the staged entry was deleted and
+        the append refused only afterwards)."""
+        tmp = self._first_entry_path()
+        if not os.path.lexists(tmp):
+            return
+        self._initialized = False  # whatever happens here, re-derive from disk
+        manifest_path = self._db_path.parent / f"{self._db_path.stem}.audit.manifest.json"
+        undecided = (
+            f"a staged first audit entry ({tmp.name}) is waiting and the manifest "
+            "cannot be read to decide it"
+        )
+        manifest: dict[str, Any] | None
+        try:
+            manifest = _parse_manifest_bytes(
+                _read_regular_bytes(manifest_path), self._db_path.stem
+            )
+        except FileNotFoundError:
+            try:
+                markers = _quarantine_markers(self._db_path.parent, self._db_path.stem)
+            except OSError as e:
+                raise _ManifestUnavailable(f"{undecided}: {e}") from e
+            if markers:
+                raise _ManifestQuarantined(
+                    f"{undecided}: it is quarantined as {markers[-1]}; run "
+                    "`anneal-memory audit-repair`",
+                    markers,
+                )
+            manifest = None  # no manifest, no record
+        except _CORRUPT_MANIFEST + (AttributeError,) as e:
+            raise _ManifestUnavailable(f"{undecided}: {e}") from e
+        try:
+            self._resolve_staged_entry(manifest)
+        except _ManifestUnavailable:
+            raise
+        except OSError as e:
+            # A refusal that counts as a dropped write, not a bare OSError (KL-24
+            # L3 r7, complement LOW 2).
+            raise _ManifestUnavailable(f"{undecided}: {e}") from e
+
     def _record_active_begun(self, first_hash: str, first_prev_hash: str) -> None:
-        """Save ``active_begun`` for the active file this call just started."""
+        """Save ``active_begun`` for the active file this call is about to
+        start, BEFORE its first entry is written (see :meth:`_log_locked`), so a
+        restart can tell a deleted active file from an empty one (see
+        ``_refuse_vanished_active``). Once per active file: only the append into
+        a file that holds no valid entry (absent, empty, or only a torn fragment:
+        L3 r1 10-03, codex + glm, run). The append holds the append lock but not
+        the manifest lock, so the save takes the span here.
+
+        Raises ``_ManifestUnavailable`` when it cannot be saved, refusing the
+        append (KL-24 L3 r4: best-effort, a failure left the week unprotected),
+        including when the manifest lock cannot be taken or the manifest is
+        quarantined (Phill 2026-10-08, "A": fail closed, superseding the 10-03
+        degrade and the 09-13 hybrid). Where advisory locks do not exist at all
+        the span holds no lock and the save still runs."""
         try:
             with self._operation_span():
-                if self._lock_failures.get(threading.get_ident()) is not None:
-                    return  # degrade: no manifest save without the lock
+                self._refuse_without_manifest_lock()
                 manifest = self._load_manifest()
                 manifest["active_begun"] = {
                     "period": self._last_week, "first_hash": first_hash,
                     "first_prev_hash": first_prev_hash,
                 }
                 self._save_manifest(manifest)
+        except _ManifestUnavailable:
+            raise
+        except Exception as e:
+            raise _ManifestUnavailable(
+                "cannot record the active audit file's first entry in the "
+                f"manifest, so this append is refused: {e}"
+            ) from e
+
+    def _withdraw_active_begun(self, first_hash: str) -> None:
+        """Best-effort: clear ``active_begun`` when it still names ``first_hash``,
+        an entry whose write was rolled back. Left in place, a restart would read
+        the empty file as a deleted one and refuse until ``audit-repair`` (a loud
+        false loss, never a silent one)."""
+        try:
+            with self._operation_span():
+                if self._lock_failures.get(threading.get_ident()) is not None:
+                    return
+                manifest = self._load_manifest()
+                begun = manifest.get("active_begun")
+                if isinstance(begun, dict) and begun.get("first_hash") == first_hash:
+                    manifest["active_begun"] = None
+                    self._save_manifest(manifest)
         except Exception:
             _log(logging.WARNING,
-                "could not record the active audit file's first entry in the "
-                "manifest; a deletion of this week's active file will not be "
-                "detected", exc_info=True,
+                "could not withdraw the manifest's record of a rolled-back first "
+                "audit entry; the next open may report the empty file as lost "
+                "until audit-repair", exc_info=True,
             )
 
     def _refuse_vanished_active(self, manifest: dict[str, Any]) -> None:
@@ -2544,9 +3464,9 @@ class AuditTrail:
         this: three entries deleted, reopen, one append, ``verify()`` valid with
         no gap). Within a week nothing on disk but the active file said it had
         entries. ``active_begun`` is that record, and it survives a restart.
-        Not refused: a week that is now sealed (``files`` has its period; a
-        rotation or adoption took it) or one ``audit-repair`` already recorded
-        as a gap."""
+        Not refused once the record is cleared: by a seal or adoption of that
+        file, or by ``audit-repair`` (a gap, or a sealed week whose first entry is
+        the recorded one)."""
         begun = vanished_active_week(manifest)
         if begun is None:
             return
@@ -3078,6 +3998,9 @@ class AuditTrail:
             with open(tmp_gz_path, "wb") as raw:
                 with gzip.GzipFile(fileobj=raw, mode="wb") as f_out:
                     active.rename(sealed_path)
+                    # From here this instance's tip is in the sealed file, not
+                    # the active one, whatever happens next (L3 r3, codex MED).
+                    self._tip = None
                     _fsync_dir(sealed_path.parent)
                     with _open_regular(sealed_path) as f_in:
                         for line in f_in:
@@ -3111,6 +4034,12 @@ class AuditTrail:
                 raw.flush()
                 os.fsync(raw.fileno())
         except BaseException:
+            if sealed_path.exists():
+                # This instance renamed the file holding its own tip: re-derive
+                # at the next append (which adopts the orphan) instead of
+                # refusing it as lost. Its own act, not a filename read as a
+                # peer's seal (see _lost_active).
+                self._initialized = False
             # The temp was created before the rename. If the rename never
             # happened it holds no audit data, and left behind it would read
             # as a rotation in flight until the next open.
@@ -3121,6 +4050,24 @@ class AuditTrail:
                     pass
             raise
 
+        try:
+            self._seal_after_rename(
+                manifest, tmp_gz_path, sealed_gz_path, sealed_path, current_week,
+                entry_count, first_ts, last_ts, file_hash,
+            )
+        except BaseException:
+            # The rename happened; a failure in any later step leaves this
+            # instance's cached chain state unproven (L3 r3, codex MED: a failed
+            # replace refused the next committed append as a lost file).
+            self._initialized = False
+            raise
+
+    def _seal_after_rename(
+        self, manifest: dict[str, Any], tmp_gz_path: Path, sealed_gz_path: Path,
+        sealed_path: Path, current_week: str, entry_count: int, first_ts: str,
+        last_ts: str, file_hash: Any,
+    ) -> None:
+        """Steps 3-5 of :meth:`_rotate_locked`, after the rename."""
         tmp_gz_path.replace(sealed_gz_path)
         _fsync_dir(sealed_gz_path.parent)
 
@@ -3142,6 +4089,7 @@ class AuditTrail:
         # pre-rotation value.
         self._seq = 0
         self._active_has_entry = False
+        self._tip = None
         manifest["active_last_seq"] = self._seq
         self._save_manifest(manifest)
 
@@ -3340,9 +4288,9 @@ class AuditTrail:
             raise _ManifestUnavailable(f"could not quarantine the invalid audit manifest: {e}") from e
         _fsync_dir(path.parent)
         _log(logging.WARNING,
-            "Quarantined an invalid audit manifest as %s. Appending continues; "
-            "rotation, orphan adoption and retention are paused until "
-            "`anneal-memory audit-repair` rebuilds it.", target.name,
+            "Quarantined an invalid audit manifest as %s. Audit appends are refused "
+            "(counted as dropped writes), and rotation, orphan adoption and retention "
+            "are paused, until `anneal-memory audit-repair` rebuilds it.", target.name,
         )
         return target.name
 
@@ -3429,8 +4377,9 @@ def _read_last_valid_entry(path: Path) -> str:
     direction. Behaviour is identical, which is why it survived.
 
     Memory-safe: only keeps the last valid line in memory at a time.
+    The scan itself is :func:`_last_valid_entry_in`, which the append's
+    re-sync also uses, so the two can never disagree about what is valid.
     """
-    last_valid = ""
     # ⛔ READ ERRORS PROPAGATE — THEY USED TO BE SWALLOWED, AND THAT MADE A
     # FAILED SCAN INDISTINGUISHABLE FROM AN EMPTY ONE. ``except (OSError,
     # UnicodeDecodeError): pass`` returned whatever had been found before the
@@ -3454,19 +4403,36 @@ def _read_last_valid_entry(path: Path) -> str:
     # decoding per line puts the tear back where the rest of this loop
     # already handles it: skipped, like a partial ``json.loads``.
     with _open_regular(path) as f:
-        for raw in f:
-            try:
-                stripped = raw.decode("utf-8").strip()
-            except UnicodeDecodeError:
-                continue  # Torn line — skip, same as a partial write
-            if not stripped:
-                continue
-            try:
-                _require_entry_dict(json.loads(stripped))
-                last_valid = stripped
-            except _UNPARSEABLE_JSON:
-                pass  # Partial write, or valid JSON that isn't an entry — skip
-    return last_valid
+        return _last_valid_entry_in(f, 0)[0]
+
+
+def _last_valid_entry_in(f: Any, start: int) -> tuple[str, int, int]:
+    """The last valid entry in an open binary audit file from ``start`` to its
+    end, as ``(line, offset, length)``: the stripped line the chain hashes, the
+    offset its bytes start at, and their length without the newline.
+    ``("", -1, 0)`` when there is none. Torn lines, undecodable bytes and
+    JSON that is not an entry are skipped; read errors propagate (the reasons
+    are in :func:`_read_last_valid_entry`)."""
+    best: tuple[str, int, int] = ("", -1, 0)
+    if start:
+        f.seek(start)
+    pos = start
+    # Iterated, not looped on ``readline()``: the read-failure tests inject
+    # their error at iteration.
+    for raw in f:
+        here, pos = pos, pos + len(raw)
+        try:
+            stripped = raw.decode("utf-8").strip()
+        except UnicodeDecodeError:
+            continue  # Torn line — skip, same as a partial write
+        if not stripped:
+            continue
+        try:
+            _require_entry_dict(json.loads(stripped))
+        except _UNPARSEABLE_JSON:
+            continue  # Partial write, or valid JSON that isn't an entry — skip
+        best = (stripped, here, len(raw) - (1 if raw.endswith(b"\n") else 0))
+    return best
 
 
 _O_NONBLOCK = getattr(os, "O_NONBLOCK", 0)
@@ -3794,18 +4760,20 @@ def _week_of(name: str, prefix: str) -> str:
 
 
 def vanished_active_week(manifest: dict[str, Any]) -> dict[str, str] | None:
-    """The manifest's ``active_begun`` record unless its week is sealed (a
-    ``files`` record has that period: the fallback for a seal by a release that
-    keeps the field but does not clear it; this release's seal and adoption clear
-    it). ``audit-repair`` clears the record in the same save that records the
-    gap, so a later deletion in the same week is seen again. The caller
-    establishes that the active file holds no usable entry; this says only that
-    it once did."""
+    """The manifest's ``active_begun`` record. A seal and an adoption clear it;
+    ``audit-repair`` clears it in the same save that records the gap, or when a
+    readable sealed week's first entry is the recorded file's first entry, so a
+    later deletion in the same week is seen again. The caller establishes that
+    the active file holds no usable entry; this says only that it once did.
+
+    ⛔ A ``files`` record with the same PERIOD no longer clears it (KL-24 L3 r3,
+    codex HIGH, reasoned trace): after a clock rollback a new active file began
+    in a week already sealed, and deleting it read as sealed, so the chain went
+    on with its entries silently missing. A seal by an older release that kept
+    the field set now reads as a vanished file until ``audit-repair`` matches
+    its first entry."""
     begun = manifest.get("active_begun")
     if not begun:
-        return None
-    period = begun["period"]
-    if any(f.get("period") == period for f in manifest.get("files", [])):
         return None
     return dict(begun)
 
@@ -3816,6 +4784,12 @@ def set_aside_report_lines(
     """One line per ``AuditVerifyResult.set_aside`` record, for every surface
     that prints a verify verdict (the CLI and ``server.py --verify-audit``), so
     they cannot drift apart. A record whose set-aside file is on disk is a GAP.
+    A record marked ``certainty: possible`` (a manifest rebuilt from quarantine
+    over an active file with no entry) is a POSSIBLE GAP: whether that file
+    ever held entries cannot be known (KL-24 L3 r6, codex 10). A vanished active
+    file with an unwithdrawn begun record AND at least one preserved attempt is a
+    POSSIBLE gap naming every preserved ``.first.discarded-*`` file (the ruled
+    KL-24 exception); with none preserved it is a definite GAP.
     One whose file is missing is reported as such, not as a gap: the week was
     renamed back (adopted if before any write; after one it stays unmanifested
     and must be renamed to its set-aside name again), or a repair stopped
@@ -3823,7 +4797,16 @@ def set_aside_report_lines(
     audit_dir = Path(db_path).expanduser().parent
     lines = []
     for record in records:
-        if record["set_aside_as"] == "":
+        if record.get("certainty") == _POSSIBLE:
+            kept = record.get("preserved_attempts")
+            lines.append(
+                f"POSSIBLE GAP: the active audit file {record['filename']} "
+                f"({record['period']}) had no valid entry on disk when audit-repair "
+                f"recorded the gap at {record['at']}; whether it held entries before cannot "
+                f"be known: {record['cause']}"
+                + (f"; set-aside staged entries to inspect: {', '.join(kept)}" if kept else "")
+            )
+        elif record["set_aside_as"] == "":
             lines.append(
                 f"GAP: the active audit file {record['filename']} ({record['period']}) "
                 f"went missing with its entries; audit-repair recorded it at "
@@ -3869,9 +4852,10 @@ def _set_aside_records_on_disk(audit_dir: Path, stem: str) -> list[dict[str, str
     return records
 
 
-def _set_aside(path: Path, reason: str) -> None:
+def _set_aside(path: Path, reason: str) -> str | None:
     """Rename ``path`` to ``<name>.<reason>-<UTC stamp>`` in the same
-    directory — the only way recovery takes a file off its name.
+    directory — the only way recovery takes a file off its name. Returns the
+    new name, or None when it could not be moved.
 
     Never replaces an existing file and never deletes. A failure is logged,
     not raised, and writes continue: the file stays under its own name and
@@ -3893,9 +4877,10 @@ def _set_aside(path: Path, reason: str) -> None:
             "Could not set aside audit file %s; it stays under its own name",
             path.name, exc_info=True,
         )
-        return
+        return None
     _fsync_dir(path.parent)
     _log(logging.WARNING, "Set aside audit file %s as %s", path.name, target.name)
+    return target.name
 
 
 def _guarded_lines(path: Path, errors: list[OSError]):

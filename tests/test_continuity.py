@@ -27,6 +27,8 @@ from anneal_memory.continuity import (
 from anneal_memory.store import Store, StoreError
 from anneal_memory.types import Episode, EpisodeType
 
+from tests.prior_seed import seed_prior_levels as _seed_prior_levels
+
 
 # -- Test data --
 
@@ -436,6 +438,9 @@ class TestTypedDictReturnShapes:
                 # this wrap instead of demoted (at/below earned high-water mark
                 # AND warm). Audit signal; empty when nothing was held.
                 "carried_forward",
+                # CAP-08: graduations held back for tool/external-only
+                # grounding, and each graduated pattern's grounding trust.
+                "uncorroborated", "pattern_trust",
                 "associations_formed",
                 "associations_strengthened", "associations_decayed",
                 # AM-WARN (v0.4.2): dead-Hebbian-graph mis-wire warning
@@ -451,8 +456,12 @@ class TestTypedDictReturnShapes:
                 # proposed, recorded and rejected (with reasons).
                 "supersessions_recorded", "supersessions_rejected",
                 "sections", "wrap_result",
+                # B1 (0.9.27): present when the schema has a durable section,
+                # as a fresh store's default schema does; empty here.
+                "durable_warnings",
             }
             assert set(result.keys()) == expected
+            assert result["durable_warnings"] == []
         finally:
             store.close()
 
@@ -1019,6 +1028,7 @@ class TestCrossTransportParity:
         from datetime import date as _date
 
         store = Store(db_path, project_name="ParityTest")
+        _seed_prior_levels(store, {'thought: parity claim about the testing framework': 1})
         ep1 = store.record(
             "testing framework parity assertion",
             EpisodeType.OBSERVATION,
@@ -3902,6 +3912,7 @@ class TestPatternOmissionAudit:
         db = tmp_path / "store.db"
         store = Store(db, project_name="OmissionTest")
         try:
+            _seed_prior_levels(store, {'alpha_proven': 1, 'beta_proven': 1})
             s1_text = (
                 "## State\nsession 1.\n\n"
                 "## Patterns\n"
@@ -3939,6 +3950,7 @@ class TestPatternOmissionAudit:
         db = tmp_path / "store.db"
         store = Store(db, project_name="OmissionTest")
         try:
+            _seed_prior_levels(store, {'alpha_proven': 2})
             s1_text = (
                 "## State\nsession 1.\n\n"
                 "## Patterns\n"
@@ -3967,9 +3979,9 @@ class TestPatternOmissionAudit:
         ]
         saved_events = [
             e for e in events if e.get("event") == "continuity_saved"
-        ]
+        ][1:]  # the first is _seed_prior_levels' raw save
         assert len(saved_events) == 2
-        # First save has no prior continuity -> no omission key
+        # First save drops nothing from the seeded prior -> no omission key
         assert "omitted_patterns" not in saved_events[0]["data"]
         # Second save dropped alpha_proven (3x) -> audit captures it
         assert saved_events[1]["data"]["omitted_patterns"] == [
@@ -4012,6 +4024,7 @@ class TestMove4LibraryLayerIntegration:
         db = tmp_path / "store.db"
         store = Store(db, project_name="Move4Plumbing")
         try:
+            _seed_prior_levels(store, {'alpha_proven': 1, 'beta_proven': 1})
             ep_ids = self._record_episodes(store)
             # Session 1: graduate two Provens with explicit no-contradicts
             # declarations so the discipline is satisfied
@@ -4057,6 +4070,7 @@ class TestMove4LibraryLayerIntegration:
         db = tmp_path / "store.db"
         store = Store(db, project_name="ScanEmit")
         try:
+            _seed_prior_levels(store, {'alpha_proven': 1, 'beta_proven': 1})
             ep_ids = self._record_episodes(store)
             s1 = self._render(
                 "## State\nseed.\n\n## Patterns\n"
@@ -4097,6 +4111,7 @@ class TestMove4LibraryLayerIntegration:
         db = tmp_path / "store.db"
         store = Store(db, project_name="OneSource")
         try:
+            _seed_prior_levels(store, {'alpha_proven': 1, 'beta_proven': 1})
             ep_ids = self._record_episodes(store)
             s1 = self._render(
                 "## State\nseed.\n\n## Patterns\n"
@@ -4131,6 +4146,7 @@ class TestMove4LibraryLayerIntegration:
         db = tmp_path / "store.db"
         store = Store(db, project_name="Move4Plumbing")
         try:
+            _seed_prior_levels(store, {'new_proven_no_declaration': 1})
             ep_ids = self._record_episodes(store)
             s1 = self._render(
                 "## State\nfirst session.\n\n"
@@ -4162,6 +4178,7 @@ class TestMove4LibraryLayerIntegration:
         db = tmp_path / "store.db"
         store = Store(db, project_name="Move4Plumbing")
         try:
+            _seed_prior_levels(store, {'audit_test_proven': 2})
             ep_ids = self._record_episodes(store)
             s1 = self._render(
                 "## State\nfirst.\n\n"
@@ -4188,7 +4205,7 @@ class TestMove4LibraryLayerIntegration:
         ]
         saved_events = [
             e for e in events if e.get("event") == "continuity_saved"
-        ]
+        ][1:]  # the first is _seed_prior_levels' raw save
         assert len(saved_events) == 1
         # The new Proven graduated without contradiction-stance declaration —
         # audit chain captures it for Diogenes operator-review layer
@@ -4589,6 +4606,43 @@ class TestCatastrophicShrinkGate:
         finally:
             store.close()
 
+    @staticmethod
+    def _saved_events(store):
+        import json as _json
+        path = store._audit._active_path
+        return [e for e in (_json.loads(x) for x in path.read_text(encoding="utf-8")
+                            .splitlines() if x.strip())
+                if e["event"] == "continuity_saved"]
+
+    def test_pipeline_allow_shrink_override_is_audited_kl14(self, tmp_path):
+        """KL-14: an override of the shrink gate leaves a trace naming the refusal
+        it suppressed."""
+        from anneal_memory import Store, FLOW_SCHEMA
+        store = Store(tmp_path / "s.db", project_name="flow")
+        store.set_section_schema(FLOW_SCHEMA)
+        try:
+            self._wrap(store, self._flow_prior(), "2026-05-30")
+            assert self._saved_events(store)[-1]["data"]["allow_shrink"] == {
+                "requested": False}
+            self._wrap(store, self._flow_collapsed(), "2026-05-31", allow_shrink=True)
+            trace = self._saved_events(store)[-1]["data"]["allow_shrink"]
+            assert trace["requested"] is True and trace["refusal_suppressed"] is True
+            assert "collapses protected memory" in trace["refusal"]
+        finally:
+            store.close()
+
+    def test_pipeline_allow_shrink_with_nothing_to_override_says_so_kl14(self, tmp_path):
+        from anneal_memory import Store, FLOW_SCHEMA
+        store = Store(tmp_path / "s.db", project_name="flow")
+        store.set_section_schema(FLOW_SCHEMA)
+        try:
+            self._wrap(store, self._flow_prior(), "2026-05-30")
+            self._wrap(store, self._flow_prior(), "2026-05-31", allow_shrink=True)
+            assert self._saved_events(store)[-1]["data"]["allow_shrink"] == {
+                "requested": True, "refusal_suppressed": False}
+        finally:
+            store.close()
+
     def test_pipeline_flow_healthy_growth_saves(self, tmp_path):
         from anneal_memory import Store, FLOW_SCHEMA
         store = Store(tmp_path / "s.db", project_name="flow")
@@ -4873,10 +4927,12 @@ class TestAmWarn:
 
     TODAY = "2026-06-02"
 
-    def _save(self, tmp_path, template, n_episodes=2, **save_kwargs):
+    def _save(self, tmp_path, template, n_episodes=2, seed=None, **save_kwargs):
         """Record n real episodes, substitute {epN} with their ids, save."""
         from anneal_memory import prepare_wrap, validated_save_continuity
         store = Store(tmp_path / "amwarn.db", project_name="AmWarn")
+        if seed:
+            _seed_prior_levels(store, seed)
         ep_ids = []
         for i in range(n_episodes):
             ep = store.record(
@@ -4958,7 +5014,7 @@ class TestAmWarn:
         import warnings as _w
         with _w.catch_warnings(record=True) as caught:
             _w.simplefilter("always")
-            result = self._save(tmp_path, text, n_episodes=1)
+            result = self._save(tmp_path, text, n_episodes=1, seed={'solo_pattern': 1})
         assert not [w for w in caught if issubclass(w.category, UserWarning)]
         assert result["association_warning"] is None
         assert result["associations_formed"] == 0
@@ -4980,7 +5036,7 @@ class TestAmWarn:
         import warnings as _w
         with _w.catch_warnings(record=True) as caught:
             _w.simplefilter("always")
-            result = self._save(tmp_path, text, n_episodes=2)
+            result = self._save(tmp_path, text, n_episodes=2, seed={'single_cited': 1})
         assert not [w for w in caught if issubclass(w.category, UserWarning)]
         assert result["association_warning"] is None
         assert result["associations_formed"] == 0
@@ -5023,6 +5079,7 @@ class TestAmWarn:
         from anneal_memory import prepare_wrap, validated_save_continuity
         import warnings as _w
         store = Store(tmp_path / "xsession.db", project_name="AmWarn")
+        _seed_prior_levels(store, {'recurring': 1})
         try:
             VOCAB = "standup consensus decision agreement architectural rotation"
             # Wrap 1: first graduation of `recurring` — validates and seeds
@@ -5104,7 +5161,7 @@ class TestAmWarn:
         import warnings as _w
         with _w.catch_warnings(record=True) as caught:
             _w.simplefilter("always")  # any AM-WARN warning is recorded
-            result = self._save(tmp_path, text, n_episodes=2)
+            result = self._save(tmp_path, text, n_episodes=2, seed={'pattern_a': 1, 'pattern_b': 1})
         assert not [w for w in caught if issubclass(w.category, UserWarning)]
         assert result["association_warning"] is None
         assert result["associations_formed"] >= 1
@@ -5292,6 +5349,7 @@ class TestAmLinkgateRemoved:
     def _prepared(self, tmp_path, n_episodes=2):
         from anneal_memory import prepare_wrap
         store = Store(tmp_path / "linkgate.db", project_name="Linkgate")
+        _seed_prior_levels(store, {'pattern_a': 1, 'pattern_b': 1})
         ids = [
             store.record(
                 f"substrate observation about discipline rotation memory topic {i}",
@@ -5406,6 +5464,7 @@ class TestBulletlessUpsertIntegration:
         from anneal_memory import prepare_wrap, validated_save_continuity
         store = Store(tmp_path / "bulletless.db", project_name="Bulletless")
         try:
+            _seed_prior_levels(store, {'verify_before_acting': 1})
             VOCAB = "substrate observation discipline rotation memory"
             ep = store.record(f"{VOCAB} seeded in the store",
                               EpisodeType.OBSERVATION)
@@ -5434,6 +5493,7 @@ class TestBulletlessUpsertIntegration:
         from anneal_memory import prepare_wrap, validated_save_continuity
         store = Store(tmp_path / "xsession_bulletless.db",
                       project_name="XSession")
+        _seed_prior_levels(store, {'recurring_claim': 1})
         try:
             VOCAB = "standup consensus decision agreement architectural rotation"
             # Wrap 1: first graduation of a bullet-less member seeds history.
@@ -5481,6 +5541,7 @@ class TestCarryforwardEndToEnd:
         store.record("An observation", EpisodeType.OBSERVATION)
         # Seed a warm (today) high-water mark of 3 for `name`.
         store.seed_pattern_max_level(name, 3, last_seen_at="2026-06-04T00:00:00Z")
+        _seed_prior_levels(store, {name: 3})  # a carried line is in the prior file
         text = (
             "# CF — Memory (v1)\n\n## State\nActive.\n\n## Patterns\n"
             f'- {name} | 3x (2026-06-05) [evidence: {cited} "{expl}"]\n\n'
@@ -5563,6 +5624,7 @@ class TestCarryforwardEndToEnd:
         # HEALTHY hold — the namespace is correct, so AM-WARN Signal A must stay
         # SILENT (association_warning is None) even though the line was held.
         store = Store(str(tmp_path / "cf_healthy.db"), project_name="CF")
+        _seed_prior_levels(store, {'alpha': 3})
         try:
             ep = store.record("the cat sat quietly on a warm rug", EpisodeType.OBSERVATION)
             real_id = ep.id[:8].lower()
@@ -5696,6 +5758,7 @@ class TestWarmRewordedPreservationEndToEnd:
         populates pattern_history (max_level 3, explanation_corpus=EXPL1,
         last_seen 2026-06-04) through the real pipeline."""
         store = Store(str(tmp_path / db), project_name="WR")
+        _seed_prior_levels(store, {"verify_invariant": 2})
         ep = store.record(
             "Phill pushed past a done claim asking to verify against ground "
             "truth not the cached story while reviewing",
@@ -5796,6 +5859,7 @@ class TestBarePreserveEndToEnd:
         store.save_meta(meta)
         # ... with a deterministic warm/cold high-water mark for `name`.
         store.seed_pattern_max_level(name, max_level, last_seen_at=last_seen)
+        _seed_prior_levels(store, {name: max_level})  # carried: in the prior file
         # An (unrelated) episode so prepare_wrap has something to compress.
         store.record("a second-session observation", EpisodeType.OBSERVATION)
         return store
@@ -5874,17 +5938,25 @@ class TestBarePreserveEndToEnd:
         finally:
             store.close()
 
-    def test_cold_bare_ages_out_through_save(self, tmp_path):
-        # Seeded high-water 3 but COLD (last_seen far past) -> sunset, not held.
+    def test_cold_bare_is_held_and_flagged_through_save(self, tmp_path):
+        # spore-676 ruling (A), Phill 2026-10-07: seeded high-water 3 but COLD ->
+        # HELD, dated back to its last grounding, and the operator is told.
         store = self._prime(tmp_path, "bare_cold.db", "verify", 3, "2026-05-01T00:00:00Z")
         try:
             text = self._text("  verify | 3x (2026-06-05) — stale, long unseen")
             prepare_wrap(store)
-            r = validated_save_continuity(store, text, today="2026-06-05")
-            assert r["bare_demoted"] == 1
-            assert r["carried_forward"] == []
+            with pytest.warns(UserWarning) as caught:
+                r = validated_save_continuity(store, text, today="2026-06-05")
+            msgs = [str(w.message) for w in caught]
+            assert any("re-exercise it with fresh evidence" in m and "verify (" in m
+                       for m in msgs)
+            # L1 1007 (mutant Mg survived): a cold hold is not ALSO in the graduate-out notice
+            assert not any("graduate OUT to a stable home (e.g. partnership.md)" in m
+                           for m in msgs)
+            assert r["bare_demoted"] == 0
+            assert [c["cold"] for c in r["carried_forward"]] == [True]
             with open(r["path"]) as f:
-                assert "(needs-evidence)" in f.read()
+                assert "verify | 3x (2026-05-01) (carried-forward)" in f.read()
         finally:
             store.close()
 
@@ -5909,6 +5981,7 @@ class TestProvenanceEndToEnd:
         meta["citations_seen"] = True
         store.save_meta(meta)
         store.seed_pattern_max_level(name, max_level, last_seen_at=last_seen)
+        _seed_prior_levels(store, {name: max_level})  # carried: in the prior file
         store.record("a second-session observation", EpisodeType.OBSERVATION)
         return store
 
@@ -5975,10 +6048,10 @@ class TestProvenanceEndToEnd:
         finally:
             store.close()
 
-    def test_cold_provenance_still_ages_out(self, tmp_path):
-        # Provenance silences the NOTICE; it does NOT override the warmth gate. A
-        # COLD mature pattern with provenance still sunsets — provenance cannot
-        # immortalize a pattern that has decayed past the cold threshold.
+    def test_cold_provenance_is_held_and_flagged(self, tmp_path):
+        # spore-676 ruling (A), Phill 2026-10-07: a COLD bare line at its mark is held
+        # and flagged whatever it carries. Provenance does not silence the COLD notice,
+        # so nothing is immortalized quietly: the operator decides.
         store = self._prime(
             tmp_path, "prov_cold.db", "platform_security", 3, "2026-05-01T00:00:00Z"
         )
@@ -5987,11 +6060,12 @@ class TestProvenanceEndToEnd:
                 "  platform_security | 3x (2026-06-05) [provenance: a1b2c3d4, e5f6a7b8]"
             )
             prepare_wrap(store)
-            r = validated_save_continuity(store, text, today="2026-06-05")
-            assert r["bare_demoted"] == 1
-            assert r["carried_forward"] == []
+            with pytest.warns(UserWarning, match="platform_security"):
+                r = validated_save_continuity(store, text, today="2026-06-05")
+            assert r["bare_demoted"] == 0
+            assert [c["cold"] for c in r["carried_forward"]] == [True]
             with open(r["path"]) as f:
-                assert "(needs-evidence)" in f.read()
+                assert "platform_security | 3x (2026-05-01) (carried-forward)" in f.read()
         finally:
             store.close()
 
@@ -6003,6 +6077,7 @@ class TestProvenanceEndToEnd:
         # AM-WARN's namespace alarm STILL fires (cited=True; provenance does not
         # mask the real dead-id bug — the masking-hazard guard is preserved).
         store = Store(str(tmp_path / "prov_cited.db"), project_name="PROVCF")
+        _seed_prior_levels(store, {'platform_security': 3})
         store.record("an observation", EpisodeType.OBSERVATION)
         store.seed_pattern_max_level(
             "platform_security", 3, last_seen_at="2026-06-04T00:00:00Z"
@@ -6200,6 +6275,7 @@ class TestCompostSever:
 
         store = Store(str(tmp_path / "g.db"), project_name="G")
         try:
+            _seed_prior_levels(store, {'alpha': 1, 'beta': 1, 'gamma': 1})
             e1 = store.record("wiring guard fires late in prepare", EpisodeType.OBSERVATION)
             e2 = store.record("wiring guard fires late on save", EpisodeType.OBSERVATION)
             token = prepare_wrap(store)["wrap_token"]

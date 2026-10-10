@@ -22,6 +22,28 @@ class EpisodeType(str, Enum):
     CONTEXT = "context"  # Environmental/state information
 
 
+# Where an episode came from, lowest trust first (CAP-08). ``agent`` is the
+# default and is never stored, so a store with no trust rows reads as all-agent.
+# ``tool`` and ``external`` are content the agent relayed from a tool result or
+# an outside source; a graduation grounded only in them does not climb.
+TRUST_LEVELS: tuple[str, ...] = ("external", "tool", "agent", "operator")
+DEFAULT_TRUST = "agent"
+
+
+def trust_rank(trust: str) -> int:
+    """Position of ``trust`` in :data:`TRUST_LEVELS` (higher = more trusted).
+
+    Raises:
+        ValueError: ``trust`` is not one of :data:`TRUST_LEVELS`.
+    """
+    try:
+        return TRUST_LEVELS.index(trust)
+    except ValueError:
+        raise ValueError(
+            f"unknown trust {trust!r}; expected one of {', '.join(TRUST_LEVELS)}"
+        ) from None
+
+
 @dataclass(frozen=True)
 class Episode:
     """A single episodic memory entry."""
@@ -367,6 +389,56 @@ class ScoredEpisode:
     source: str
     content: str
     score: float
+    # CAP-04: the replaced episodes whose keyword hit this one stands in for (a query
+    # that reached an old fact is served the fact that replaced it, in the old one's
+    # place). Empty for an ordinary hit.
+    replaces: tuple["ReplacedEpisode", ...] = ()
+    # CAP-08 D3: the episode's effective trust class (``TRUST_LEVELS``). A
+    # ``tool``/``external`` one is content relayed from a tool or an outside
+    # source: data, not instructions. Last, so positional construction from before
+    # it existed still means what it did.
+    trust: str = DEFAULT_TRUST
+
+
+@dataclass(frozen=True)
+class ReplacedEpisode:
+    """An episode a :class:`ScoredEpisode` replaced: what the reader needs to treat
+    the served fact as an UPDATE (the old claim and when it was recorded).
+    ``content`` is cut to :data:`REPLACED_CONTENT_MAX` characters. ``trust`` is the
+    old episode's effective trust class, as on :class:`ScoredEpisode`: its text is
+    relayed content too when that is ``tool``/``external``."""
+
+    id: str
+    timestamp: str
+    content: str
+    trust: str = DEFAULT_TRUST
+
+
+REPLACED_CONTENT_MAX = 300
+
+
+@dataclass(frozen=True)
+class RelevantFact:
+    """A durable fact (a line of the continuity's ``## Durable Facts`` section) that
+    the query cued.
+
+    ``fact`` is the fact text without its cue list, ``line`` the raw ``- `` line as
+    written (cues included). ``cue_matched`` holds the cue words that matched and
+    ``fact_matched`` the distinctive words of the fact text that matched (a cue match is
+    the primary path; the fact text alone needs two words); ``matched`` is their union,
+    cue words first. ``source`` is ``"cue"`` when at least one cue matched and ``"fact"``
+    when only the fact text did.
+
+    A harness hook renders one as ``Durable fact (cue: restaurant): tree nut allergy``,
+    built from ``.fact`` and the first of ``.cue_matched`` (``matches`` and
+    ``.fact_matched`` when ``source`` is ``"fact"``)."""
+
+    fact: str
+    line: str
+    matched: tuple[str, ...]
+    source: str = "cue"
+    cue_matched: tuple[str, ...] = ()
+    fact_matched: tuple[str, ...] = ()
 
 
 @dataclass
@@ -383,6 +455,9 @@ class RelevantResult:
     patterns: list[RelevantPattern]
     episodes: list[ScoredEpisode]
     query_keywords: list[str] = field(default_factory=list)
+    # Durable facts the query cued (at most MAX_DURABLE_FACTS). Additive: empty unless
+    # the store's continuity has a durable section and a fact matched.
+    facts: list[RelevantFact] = field(default_factory=list)
 
 
 # -- TypedDict return shapes for the canonical pipeline --
@@ -618,6 +693,17 @@ class _SaveContinuityOptional(TypedDict, total=False):
     # hold at save (stale, or not derived within the load budget). The save
     # committed; these lines are the agent's to fix next wrap.
     stale_state: list[str]
+    # Present ONLY when the store's schema has a durable section: every
+    # durable-facts warning text this save emitted (also delivered as
+    # UserWarnings), empty when there were none.
+    durable_warnings: list[str]
+    # Present ONLY when the store has live CAP-06 drift probes: ``counts`` per status
+    # (held / weakened / crystallized / lost) and every probe not ``held``.
+    drift: dict[str, Any]
+    # Present ONLY when the prior-state bound cut a pattern line (1007+29):
+    # ``{"name", "written_level", "capped_to", "prior_level", "validated"}`` per
+    # line, also delivered as a UserWarning and recorded in the audit chain.
+    level_capped: list[dict[str, Any]]
 
 
 class SaveContinuityResult(_SaveContinuityOptional):
@@ -697,7 +783,9 @@ class SaveContinuityResult(_SaveContinuityOptional):
     # Because a held line does not upsert pattern_history, its warmth decays on
     # its own — a pattern that keeps failing to ground ages out. Each entry:
     # ``{"name": str, "held_level": int, "max_level_reached": int,
-    #  "days_since_grounded": int, "cited": bool, "provenance": bool}``
+    #  "days_since_grounded": int, "cited": bool, "provenance": bool, "cold": bool}``
+    # (``cold``: spore-676 ruling (A), 2026-10-07 — a bare line held although not
+    # grounded within ``carryforward_cold_days``; dated back and flagged, never eroded)
     # (``cited``: v0.5.0 — did the carry hold a citation that failed to resolve
     # [True] vs no citation at all [bare, False]; ``provenance``: Slice A — did the
     # carry record a ``[provenance: ...]`` audit marker, which EXCLUDES it from the
@@ -705,6 +793,13 @@ class SaveContinuityResult(_SaveContinuityOptional):
     # WITHOUT provenance also emit a "graduate OUT to partnership.md or retire"
     # ``UserWarning`` (assisted, not silent-loss).
     carried_forward: list[dict[str, Any]]
+    # CAP-08 T3: graduations held back because every citation grounding them
+    # is a tool/external episode (``graduation.UncorroboratedGraduation`` as a
+    # dict). Empty when none.
+    uncorroborated: list[dict[str, Any]]
+    # CAP-08 T2: pattern name -> the highest trust among the citations that
+    # grounded its graduation this wrap.
+    pattern_trust: dict[str, str]
     associations_formed: int
     associations_strengthened: int
     associations_decayed: int

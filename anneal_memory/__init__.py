@@ -1,6 +1,6 @@
 """anneal-memory: Living memory for AI agents. Episodes compress into identity."""
 
-__version__ = "0.9.27.dev0"
+__version__ = "0.9.42.dev0"
 
 from .store import (
     AnnealMemoryError,
@@ -11,13 +11,17 @@ from .store import (
     StoreError,
     StoreOperation,
     WrapInProgressError,
+    WrapCancelBoundError,
     WrapCancelGatedError,
     SupersessionError,
     WrapOwnershipError,
+    WrapSchemaMovedError,
     WrapWindowMovedError,
     continuity_lock,
 )
 from .types import (
+    DEFAULT_TRUST,
+    TRUST_LEVELS,
     AffectiveState,
     AssociationPair,
     AssociationStats,
@@ -26,9 +30,11 @@ from .types import (
     FeltCurrency,
     PrepareWrapResult,
     RecallResult,
+    RelevantFact,
     RelevantPattern,
     RelevantResult,
     SaveContinuityResult,
+    ReplacedEpisode,
     ScoredEpisode,
     StalePatternDict,
     StoreStatus,
@@ -36,6 +42,7 @@ from .types import (
     WrapPackageDict,
     WrapRecord,
     WrapResult,
+    trust_rank,
 )
 from .audit import AuditRepairResult, AuditTrail, AuditVerifyResult
 from .schema import (
@@ -62,7 +69,9 @@ from .rederive import (
     rederive_continuity,
     revoke_store,
 )
+from .durable import DurableFact, parse_durable_facts
 from .continuity import (
+    ContinuityValidationError,
     felt_currency,
     format_wrap_package_text,
     prepare_wrap,
@@ -123,7 +132,13 @@ from .crystal import (
     activation_tier,
     parse_crystal_decisions,
 )
-from .retrieval import extract_keywords, retrieve_patterns, retrieve_relevant
+from .retrieval import (
+    EpisodeMatch,
+    extract_keywords,
+    retrieve_patterns,
+    retrieve_relevant,
+    search_episodes,
+)
 from .server import Server
 
 __all__ = [
@@ -135,9 +150,12 @@ __all__ = [
     "StoreError",
     "StoreOperation",
     "WrapInProgressError",
+    "ContinuityValidationError",
+    "WrapCancelBoundError",
     "WrapCancelGatedError",
     "SupersessionError",
     "WrapOwnershipError",
+    "WrapSchemaMovedError",
     "WrapWindowMovedError",
     "continuity_lock",
     "Server",
@@ -149,6 +167,9 @@ __all__ = [
     "AssociationStats",
     "Episode",
     "EpisodeType",
+    "TRUST_LEVELS",
+    "DEFAULT_TRUST",
+    "trust_rank",
     "FeltCurrency",
     "PrepareWrapResult",
     "RecallResult",
@@ -181,6 +202,8 @@ __all__ = [
     "sections_by_role",
     "schema_role_warning",
     "heading_marker",
+    "DurableFact",
+    "parse_durable_facts",
     "validate_structure",
     "prepare_wrap",
     "felt_currency",
@@ -237,8 +260,12 @@ __all__ = [
     "RETIRE_KINDS",
     "retrieve_relevant",
     "retrieve_patterns",
+    "search_episodes",
+    "EpisodeMatch",
     "extract_keywords",
     "RelevantResult",
     "RelevantPattern",
+    "RelevantFact",
+    "ReplacedEpisode",
     "ScoredEpisode",
 ]

@@ -74,7 +74,8 @@ class TestNamedSchemas:
         got = schema_by_name("partnership")
         got.append({"heading": "Injected", "role": "narrative"})
         got[0]["heading"] = "MUTATED"
-        assert len(FLOW_SCHEMA) == 6
+        assert [s["heading"] for s in FLOW_SCHEMA][-1] == "Understanding"
+        assert all(s["heading"] != "Injected" for s in FLOW_SCHEMA)
         assert FLOW_SCHEMA[0]["heading"] == "State"
 
     def test_name_for_schema_roundtrip(self):
@@ -194,6 +195,9 @@ class TestSchemaSnapshot:
         # freeze, not leave the old wrap's schema stranded.
         store = Store(tmp_path / "s.db", section_schema=FLOW_SCHEMA)
         store.wrap_started(token="a" * 32, episode_ids=[], section_schema=FLOW_SCHEMA)
+        # wrap_started refuses a passed schema that is not the live one (0.9.29), so
+        # the live schema moves first; the restart must then freeze the new one.
+        self._raw_set_live_schema(store, DEFAULT_SCHEMA)
         store.wrap_started(token="b" * 32, episode_ids=[],
                            section_schema=DEFAULT_SCHEMA, allow_restart=True)
         assert [s["heading"] for s in store.section_schema_for_wrap()] == \
@@ -244,8 +248,16 @@ class TestSchemaModule:
         # The runtime _VALID_ROLES set must stay in sync with the Literal.
         assert set(get_args(SectionRole)) == S._VALID_ROLES
 
-    def test_default_schema_is_the_historical_four_sections(self):
+    def test_default_schema_is_the_historical_four_plus_optional_durable(self):
         assert [s["heading"] for s in DEFAULT_SCHEMA] == [
+            "State",
+            "Durable Facts",
+            "Patterns",
+            "Decisions",
+            "Context",
+        ]
+        # The historical four stay the REQUIRED sections.
+        assert required_headings(DEFAULT_SCHEMA) == [
             "State",
             "Patterns",
             "Decisions",

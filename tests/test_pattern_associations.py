@@ -13,6 +13,7 @@ rename (re-key + merge + self-pair drop), the homonym sever + generation bump,
 reads/telemetry, the Store wrappers, and the end-to-end wrap-pipeline seeding.
 """
 
+from tests.prior_seed import seed_prior_levels
 import math
 import sqlite3
 
@@ -406,6 +407,7 @@ class TestWrapPipelineSeeding:
             "\n## Decisions\n\nnone.\n"
             "\n## Context\n\nwrap.\n"
         )
+        seed_prior_levels(s, {'alpha_mechanism_pattern': 1, 'beta_mechanism_pattern': 1})
         prep = prepare_wrap(s)
         validated_save_continuity(s, text, today=today, wrap_token=prep["wrap_token"])
         # both graduated this wrap → a co-graduation seed links them

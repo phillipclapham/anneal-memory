@@ -3051,12 +3051,13 @@ class TestBareCarryforward:
         # Level was NOT decremented.
         assert "| 2x" not in r.text and "| 1x" not in r.text
 
-    def test_cold_bare_ages_out(self):
+    def test_cold_bare_is_held_dated_back_and_flagged(self):
+        # spore-676 ruling (A), Phill 2026-10-07 (replaced 0.5.0's cold sunset): a cold
+        # bare line at or below its mark holds, dated back to its last grounding.
         r = self._run(self._text(3), self._lookup(3, "2026-05-01T10:00:00Z"))
-        assert r.bare_demoted == 1
-        assert r.carried_forward == []
-        assert "| 2x (2026-06-04) (needs-evidence)" in self._line(r)
-        assert "(carried-forward)" not in r.text
+        assert r.bare_demoted == 0
+        assert [(c.held_level, c.cold) for c in r.carried_forward] == [(3, True)]
+        assert "| 3x (2026-05-01) (carried-forward)" in self._line(r)
 
     def test_unearned_bare_demotes(self):
         # Bare 3x but high-water mark is only 2 -- never earned 3x (inflation
@@ -3131,7 +3132,7 @@ class TestBareCarryforward:
         assert r.carried_forward[0].days_since_grounded == 0  # clamped, not -1
 
     def test_cold_boundary_inclusive_bare(self):
-        # Exactly cold_days (7) -> warm (held); cold_days+1 -> aged out.
+        # Exactly cold_days (7) -> warm (held); cold_days+1 -> held COLD (ruling (A)).
         def text(d):
             return (
                 "## State\n.\n## Patterns\n"
@@ -3151,7 +3152,10 @@ class TestBareCarryforward:
             pattern_history_lookup=self._lookup(3, "2026-06-01T00:00:00Z"),
             carryforward_cold_days=7,
         )
-        assert aged.bare_demoted == 1 and aged.carried_forward == []
+        # ruling (A): one day past cold_days is no longer demoted; it holds as COLD
+        assert aged.bare_demoted == 0 and [c.cold for c in aged.carried_forward] == [True]
+        assert held.carried_forward[0].cold is False
+        assert "alpha | 3x (2026-06-01) (carried-forward)" in aged.text
 
     def test_non_today_bare_skipped_not_held(self):
         # A bare line whose date != today is a legitimately carried-forward

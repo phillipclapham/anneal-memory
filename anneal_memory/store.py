@@ -337,6 +337,11 @@ class AnnealMemoryError(Exception):
 # MUST add their identifier to the Literal before raising. If growth
 # makes the alias brittle, promote it to an ``Enum``.
 StoreOperation = Literal[
+    # Episode origin keys (P(2), 0.9.43)
+    "get_by_origin_key",
+    "read_episode_versioned",
+    "origin_key_status",
+    "delete_by_origin_key",
     # File-write + integrity surfaces (10.5c.3 / 10.5c.4 / 10.5c.5)
     "save_continuity",
     "save_meta",
@@ -10598,7 +10603,7 @@ class Store:
         - :meth:`team_forget_key`
         - :meth:`add_drift_probe` / :meth:`retire_drift_probe` (CAP-06)
         - :meth:`set_state_key` / :meth:`clear_state_key` (CAP-04 state slots)
-        - :meth:`delete` (episode deletions)
+        - :meth:`delete` / :meth:`delete_by_origin_key` (episode deletions)
         - :meth:`record_associations` / :meth:`decay_associations`
         - :meth:`wrap_completed`
         - :meth:`seed_pattern_co_graduation`

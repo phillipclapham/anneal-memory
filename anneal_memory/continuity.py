@@ -736,6 +736,16 @@ def _wrap_started_extras(store: Store, token_bound: bool, today: str) -> dict[st
     return extras
 
 
+def _continuity_check_extra(store: Store, existing: str | None) -> dict[str, Any]:
+    """The continuity check for ``wrap_started`` (design r6 §12.3): the text this
+    wrap composes from, so a :meth:`Store.replace_section` that landed since
+    refuses the start. Skipped for an override that predates the argument."""
+    if "expect_continuity_sha256" not in inspect.signature(store.wrap_started).parameters:
+        return {}
+    return {"expect_continuity_sha256": hashlib.sha256(
+        (existing or "").encode("utf-8")).hexdigest()}
+
+
 def _wrap_local_date(store: Store) -> str:
     """The local date the wrap in progress was PREPARED on, else today.
 
@@ -2154,14 +2164,11 @@ def prepare_wrap(
             token=wrap_token,
             episode_ids=episode_ids,
             section_schema=schema,
-            # The text this wrap composes from: a replace_section that landed
-            # since refuses the start (design r6 §12.3).
-            expect_continuity_sha256=hashlib.sha256(
-                (existing or "").encode("utf-8")).hexdigest(),
             gated_session_id=session_id,
             expect_last_wrap_id=window_last_wrap_id,
             derive_roots=frozen_identities,
             **_wrap_started_extras(store, token_bound, package["today"]),
+            **_continuity_check_extra(store, existing),
         )
     except WrapWindowMovedError:
         return _downgraded_empty(

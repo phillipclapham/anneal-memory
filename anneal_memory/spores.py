@@ -290,7 +290,7 @@ def _check_expected_version(
     if expected_version is None:
         return
     # A copy: the callback must not be able to change what this transaction saves.
-    found = version_of(cast("SporeDict", copy.deepcopy(item)))
+    found = version_of(copy.deepcopy(item))
     if not isinstance(found, str):
         raise TypeError(f"version_of must return a str (got {type(found).__name__}).")
     if found != expected_version:

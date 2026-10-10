@@ -77,6 +77,7 @@ try:  # POSIX advisory locking; absent on Windows (see SporeStore._transaction).
 except ImportError:  # pragma: no cover - exercised only on non-POSIX platforms
     fcntl = None  # type: ignore[assignment]
 
+from .origin import _BIDI_CONTROLS, strip_hidden_controls  # noqa: F401 (re-exported)
 from .store import AnnealMemoryError
 
 SPORE_SCHEMA_VERSION = 1
@@ -273,21 +274,6 @@ def germination_tier(spore: SporeDict, today: date | None = None) -> Germination
 # ``origin_key`` never changes once set, so its backfill must not stale a read.
 SPORE_VERSION_EXCLUDED: frozenset[str] = frozenset({"seen", "origin_key"})
 
-# Format characters that reorder displayed text (the "Trojan Source" class): the
-# embeddings, overrides and isolates, and the implicit marks.
-_BIDI_CONTROLS = frozenset(
-    "\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069\u200e\u200f\u061c"
-)
-
-
-def strip_hidden_controls(value: str) -> str:
-    """Remove bidi controls, lone surrogates, the tag block (U+E0000-E007F) and
-    every control character but ``\n`` and ``\t``. The one filter the spore
-    fields and :func:`anneal_memory.origin.canonical_section_markdown` share."""
-    return "".join(
-        ch for ch in value
-        if ch in "\n\t" or (ch not in _BIDI_CONTROLS and not "\U000e0000" <= ch <= "\U000e007f" and unicodedata.category(ch) not in ("Cc", "Cs"))
-    )
 
 
 def normalize_spore_field(value: str) -> str:

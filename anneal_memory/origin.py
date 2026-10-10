@@ -15,13 +15,13 @@ import re
 import unicodedata
 
 from .graduation import _LINE_TERMINATORS_RE, canonical_continuity_text
-from .spores import strip_hidden_controls
 
 __all__ = [
     "ORIGIN_KEY_CHECK_SQL",
     "ORIGIN_KEY_MAX_LEN",
     "canonical_section_markdown",
     "origin_key_usable",
+    "strip_hidden_controls",
     "validate_origin_key",
 ]
 
@@ -37,6 +37,23 @@ ORIGIN_KEY_CHECK_SQL = (
     f"AND length(origin_key) BETWEEN 1 AND {ORIGIN_KEY_MAX_LEN} "
     "AND origin_key NOT GLOB '*[^-0-9A-Za-z._:]*')"
 )
+
+
+# Format characters that reorder displayed text (the "Trojan Source" class): the
+# embeddings, overrides and isolates, and the implicit marks.
+_BIDI_CONTROLS = frozenset(
+    "\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069\u200e\u200f\u061c"
+)
+
+
+def strip_hidden_controls(value: str) -> str:
+    """Remove bidi controls, lone surrogates, the tag block (U+E0000-E007F) and
+    every control character but ``\\n`` and ``\\t``. The one filter the spore
+    fields (:func:`~anneal_memory.spores.normalize_spore_field`) and :func:`canonical_section_markdown` share."""
+    return "".join(
+        ch for ch in value
+        if ch in "\n\t" or (ch not in _BIDI_CONTROLS and not "\U000e0000" <= ch <= "\U000e007f" and unicodedata.category(ch) not in ("Cc", "Cs"))
+    )
 
 
 def origin_key_usable(key: object) -> bool:
@@ -59,7 +76,7 @@ def canonical_section_markdown(text: str) -> str:
     In order: every line terminator becomes ``\\n`` (CRLF included, before any
     removal, so a ``\\x85`` or ``\\x0b`` ends a line here as it does in
     :func:`~anneal_memory.graduation.canonical_continuity_text`); the hidden
-    controls are removed (:func:`~anneal_memory.spores.strip_hidden_controls`);
+    controls are removed (:func:`strip_hidden_controls`);
     then ``canonical_continuity_text``; then trailing whitespace on each line and at
     the end; then NFC. The removals run before the continuity grammar, so a marker
     that a removal joins is canonicalised in the same pass. The section's trailing

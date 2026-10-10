@@ -73,6 +73,7 @@ from .associations import (
 )
 from .audit import AuditTrail
 from .graduation import _meaningful_words, canonical_continuity_text
+from .origin import ORIGIN_KEY_CHECK_SQL, validate_origin_key
 
 #: SQLite's own write-lock message grammar, for the Python 3.10 fallback in
 #: :func:`_is_write_lock_contention` where no primary result code is available.
@@ -432,6 +433,29 @@ StoreOperation = Literal[
 # outer operation's.
 _PHASE_OPERATIONS: frozenset[str] = frozenset(
     {"schema_init", "batch_commit", "batch_begin", "supersession_repair"})
+
+
+
+# P(2) origin keys (design ``episode_origin_key_design_1010.md`` r5 §2, §11.5 item 8).
+# Bump the generation when any body below changes; see
+# ``Store._migrate_episode_origin_key``.
+_ORIGIN_TRIGGER_GEN = 1
+_ORIGIN_TRIGGERS: dict[str, str] = {
+    # "AND origin_key IS NULL": a second mint trigger left by another build updates
+    # zero rows, so a row never gets two keys.
+    "episode_origin_key_mint": """CREATE TRIGGER IF NOT EXISTS episode_origin_key_mint
+        AFTER INSERT ON episodes WHEN NEW.origin_key IS NULL BEGIN
+        UPDATE episodes SET origin_key = lower(hex(randomblob(16)))
+            WHERE rowid = NEW.rowid AND origin_key IS NULL; END""",
+    "episode_origin_key_immutable": """CREATE TRIGGER IF NOT EXISTS episode_origin_key_immutable
+        BEFORE UPDATE OF origin_key ON episodes
+        WHEN OLD.origin_key IS NOT NULL AND NEW.origin_key IS NOT OLD.origin_key BEGIN
+        SELECT RAISE(ABORT, 'anneal: an episode origin_key is immutable'); END""",
+    "episode_origin_key_retire": """CREATE TRIGGER IF NOT EXISTS episode_origin_key_retire
+        AFTER DELETE ON episodes WHEN OLD.origin_key IS NOT NULL BEGIN
+        INSERT OR IGNORE INTO retired_origin_keys (origin_key, episode_id)
+            VALUES (OLD.origin_key, OLD.id); END""",
+}
 
 
 class StoreError(AnnealMemoryError):
@@ -1221,6 +1245,13 @@ class ReplacedMatches(NamedTuple):
     # Effective trust of the shown heads and matches that is not ``agent``, read in
     # the same snapshot, so a relayed head is labelled as one (L3 r1 1009+22).
     trust: dict[str, str]
+
+
+class OriginKeyConflict(AnnealMemoryError, ValueError):
+    """Raised by ``record(origin_key=...)`` when the key is stored on an episode
+    whose ``content``, ``type`` or ``source`` differ from the call's. A key names
+    one payload, as an idempotency key does: a retry returns the stored episode,
+    a different payload is refused. Nothing was written."""
 
 
 class SupersessionError(AnnealMemoryError, ValueError):
@@ -2735,6 +2766,7 @@ class Store:
         # classifier can query pair_id on a legacy store without faulting.
         self._migrate_wraps_recovery_columns(commit=False)
         self._migrate_team_entries_removal(commit=False)
+        self._migrate_episode_origin_key(commit=False)
 
         # Insert default metadata (ignore if already exists)
         defaults = {**_DEFAULT_METADATA, "project_name": self._project_name}
@@ -2942,6 +2974,58 @@ class Store:
         if commit:
             self._conn.commit()
 
+    def _migrate_episode_origin_key(self, *, commit: bool = True) -> None:
+        """Give every episode an immutable ``origin_key`` (P(2), design
+        ``episode_origin_key_design_1010.md`` r5). Additive, no schema bump: the
+        mint and retire triggers keep an older anneal's inserts and deletes keyed.
+        The column check is re-read here, under :meth:`_init_schema`'s lock.
+
+        The triggers have STABLE names. :data:`_ORIGIN_TRIGGER_GEN` versions their
+        bodies: a build whose generation is above the stored one drops and recreates
+        them; an older build only re-creates a missing one (``IF NOT EXISTS``), so it
+        never puts back an old body. A body change must therefore stay correct for
+        every older writer, which inserts without a key and deletes plainly.
+        ``retired_origin_keys.episode_id`` is historical (the id the deleted row had;
+        a re-recorded episode can reuse it): nothing may join on it."""
+        cols = {row[1] for row in self._conn.execute("PRAGMA table_info(episodes)")}
+        if "origin_key" not in cols:
+            self._conn.execute(
+                f"ALTER TABLE episodes ADD COLUMN origin_key TEXT CHECK ({ORIGIN_KEY_CHECK_SQL})"
+            )
+        self._conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_episodes_origin_key ON episodes(origin_key)"
+        )
+        self._conn.execute(
+            """CREATE TABLE IF NOT EXISTS retired_origin_keys (
+                origin_key TEXT PRIMARY KEY NOT NULL,
+                episode_id TEXT NOT NULL,
+                effect_id TEXT,
+                retired_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')))"""
+        )
+        row = self._conn.execute(
+            "SELECT value FROM metadata WHERE key = 'origin_trigger_gen'"
+        ).fetchone()
+        try:
+            stored_gen = int(row[0]) if row else 0
+        except (TypeError, ValueError):
+            stored_gen = 0
+        if stored_gen < _ORIGIN_TRIGGER_GEN:
+            for name in _ORIGIN_TRIGGERS:
+                self._conn.execute(f"DROP TRIGGER IF EXISTS {name}")
+            self._conn.execute(
+                "INSERT OR REPLACE INTO metadata (key, value) VALUES ('origin_trigger_gen', ?)",
+                (str(_ORIGIN_TRIGGER_GEN),),
+            )
+        for statement in _ORIGIN_TRIGGERS.values():
+            self._conn.execute(statement)
+        # Backfill: keys for rows written before the column, or by a raw writer
+        # that bypassed the mint trigger. Index-backed; a no-op once filled.
+        self._conn.execute(
+            "UPDATE episodes SET origin_key = lower(hex(randomblob(16))) WHERE origin_key IS NULL"
+        )
+        if commit:
+            self._conn.commit()
+
     # -- Core API --
 
     def record(
@@ -2957,6 +3041,7 @@ class Store:
         *,
         trust_via: str | None = None,
         derived_from: list[str] | tuple[str, ...] | None = None,
+        origin_key: str | None = None,
     ) -> Episode:
         """Record a new episode.
 
@@ -2999,9 +3084,18 @@ class Store:
                 one transaction. For the graduation trust check the episode counts
                 at most as trusted as its most trusted source
                 (:meth:`effective_trust_map`).
+            origin_key: The episode's immutable key (:mod:`anneal_memory.origin`
+                grammar). Omitted, the store mints one. Given and already stored, the
+                stored episode is returned and nothing is written, provided
+                ``content``, ``type`` and ``source`` match; ``supersedes``, ``trust``,
+                ``metadata`` and ``derived_from`` are not compared, so a retry must
+                carry them unchanged. The key is checked before any other validation.
 
         Raises:
             SupersessionError: a ``supersedes`` link failed validation.
+            OriginKeyConflict: ``origin_key`` is stored with another payload.
+            ValueError: ``origin_key`` is outside the grammar, or belonged to a
+                deleted episode (a key is never reused).
             ValueError: ``state_key`` is not a valid key.
             ValueError: ``trust`` is not a known trust class, or is above the
                 Store's ``trust_ceiling``, or a ``derived_from`` source does not
@@ -3018,6 +3112,8 @@ class Store:
         """
         if not content or not content.strip():
             raise ValueError("Episode content cannot be empty")
+        if origin_key is not None:
+            validate_origin_key(origin_key)
 
         if isinstance(episode_type, str):
             episode_type = EpisodeType(episode_type)
@@ -3082,25 +3178,45 @@ class Store:
             if not self._conn.in_transaction:
                 self._conn.execute("BEGIN IMMEDIATE")
             session_id = self._current_session_id()
-            # Validated under the same write lock as the insert, so a target
-            # cannot vanish between the check and the link. ⛔ The refusal is
-            # raised AFTER this block (see _db_boundary's docstring).
-            missing_sources = [
-                sid for sid in source_ids
-                if self._conn.execute(
-                    "SELECT 1 FROM episodes WHERE id = ?", (sid,)
-                ).fetchone() is None
-            ]
-            # Judged by the effective class the episode will have once its
-            # derived_from edges exist (L3 r1 1009+22, run).
-            new_trust = self._proposed_trust(
-                trust, [sid for sid in source_ids if sid not in missing_sources])
-            problem = next(
-                (p for p in (self._supersession_problem(
-                    o, None, content, ts, new_trust=new_trust) for o in old_ids) if p),
-                None,
-            )
-            if problem is None and not missing_sources:
+            # The key decides first, before the source and supersession checks: a
+            # retry of a keyed record whose first call already linked ``old_ids``
+            # must get that episode back, not a SupersessionError (design r5 §11.5 4).
+            # The key alone decides: the caller compares the returned episode with
+            # what it meant to record.
+            keyed_row = None
+            key_retired = False
+            if origin_key is not None:
+                keyed_row = self._conn.execute(
+                    "SELECT * FROM episodes WHERE origin_key = ?", (origin_key,)
+                ).fetchone()
+                if keyed_row is None:
+                    key_retired = self._conn.execute(
+                        "SELECT 1 FROM retired_origin_keys WHERE origin_key = ?",
+                        (origin_key,),
+                    ).fetchone() is not None
+            missing_sources: list[str] = []
+            problem: str | None = None
+            minted_key: str | None = None
+            if keyed_row is None and not key_retired:
+                # Validated under the same write lock as the insert, so a target
+                # cannot vanish between the check and the link. ⛔ The refusal is
+                # raised AFTER this block (see _db_boundary's docstring).
+                missing_sources = [
+                    sid for sid in source_ids
+                    if self._conn.execute(
+                        "SELECT 1 FROM episodes WHERE id = ?", (sid,)
+                    ).fetchone() is None
+                ]
+                # Judged by the effective class the episode will have once its
+                # derived_from edges exist (L3 r1 1009+22, run).
+                new_trust = self._proposed_trust(
+                    trust, [sid for sid in source_ids if sid not in missing_sources])
+                problem = next(
+                    (p for p in (self._supersession_problem(
+                        o, None, content, ts, new_trust=new_trust) for o in old_ids) if p),
+                    None,
+                )
+            if keyed_row is None and not key_retired and problem is None and not missing_sources:
                 # The key plan needs the inserted row (its rowid breaks a timestamp
                 # tie), so a refused key link is undone back to here.
                 self._conn.execute("SAVEPOINT record_state_key")
@@ -3108,9 +3224,9 @@ class Store:
                     ep_id = _episode_id(content, ts, nonce)
                     try:
                         self._conn.execute(
-                            """INSERT INTO episodes (id, timestamp, type, content, source, session_id, metadata)
-                               VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                            (ep_id, ts, episode_type.value, content, source, session_id, meta_json),
+                            """INSERT INTO episodes (id, timestamp, type, content, source, session_id, metadata, origin_key)
+                               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                            (ep_id, ts, episode_type.value, content, source, session_id, meta_json, origin_key),
                         )
                         break
                     except sqlite3.IntegrityError:
@@ -3164,11 +3280,30 @@ class Store:
                         )
                 if problem is not None:
                     self._conn.execute("ROLLBACK TO record_state_key")
+                else:
+                    # The mint trigger's key when the caller gave none.
+                    minted_key = self._conn.execute(
+                        "SELECT origin_key FROM episodes WHERE id = ?", (ep_id,)
+                    ).fetchone()[0]
                 self._conn.execute("RELEASE record_state_key")
             # On a refusal this commits an empty transaction (releasing the
             # lock); inside a batch it leaves the batch's writes alone.
             if not self._defer_commit:
                 self._conn.commit()
+        if keyed_row is not None:
+            if (keyed_row["content"], keyed_row["type"], keyed_row["source"]) != (
+                content, episode_type.value, source
+            ):
+                raise OriginKeyConflict(
+                    f"origin_key {origin_key!r} is stored on episode {keyed_row['id']!r} "
+                    "with a different content, type or source. Nothing was recorded."
+                )
+            return self._row_to_episode(keyed_row)
+        if key_retired:
+            raise ValueError(
+                f"origin_key {origin_key!r} belonged to a deleted episode, and a key is "
+                "never reused. Nothing was recorded."
+            )
         if problem:
             raise SupersessionError(problem)
         if missing_sources:
@@ -3185,6 +3320,7 @@ class Store:
             source=source,
             session_id=session_id,
             metadata=metadata,
+            origin_key=minted_key,
         )
 
         # ⛔ POST-COMMIT (the INSERT committed above, or is owned by an outer
@@ -9622,6 +9758,7 @@ class Store:
             source=row["source"],
             session_id=row["session_id"],
             metadata=meta,
+            origin_key=row["origin_key"] if "origin_key" in row.keys() else None,
         )
 
     # -- Two-phase commit / batched write mode (10.5c.5) --

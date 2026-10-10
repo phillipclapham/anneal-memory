@@ -60,6 +60,10 @@ class Episode:
     # ``prepare_wrap`` builds; where it was not looked up, ``None`` means "not
     # looked up", not "not superseded".
     superseded_by: str | None = None
+    # The immutable id the row carries from creation and never reuses (P(2)).
+    # ``None`` only from a store opened read-only before its first write-capable
+    # open gave it the column.
+    origin_key: str | None = None
 
 
 @dataclass(frozen=True)

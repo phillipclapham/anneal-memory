@@ -1544,11 +1544,12 @@ class TestCmdExport:
         assert not out.exists()
         assert not [p for p in tmp_path.iterdir() if p.name.endswith(".export-tmp")]
 
-    def test_export_sqlite_interrupted_at_publication_removes_its_claim(
-        self, base_args_with_data, tmp_path, monkeypatch
+    def test_export_sqlite_interrupted_at_publication_leaves_its_claim_and_says_so(
+        self, base_args_with_data, tmp_path, capsys, monkeypatch
     ):
-        """walopen L1 r15 (run: Ctrl-C between the claim and the rename left a
-        0-byte file at --output, which every later export then refused)."""
+        """walopen L3 r17 (codex HIGH + glm HIGH): removing the claim after an
+        interrupt is a check and an unlink by name, which can remove another
+        process's file, so the empty claim stays and the export says so."""
         import errno
         from anneal_memory import cli
 
@@ -1565,7 +1566,8 @@ class TestCmdExport:
         base_args_with_data.output = str(out)
         with pytest.raises(KeyboardInterrupt):
             cmd_export(base_args_with_data)
-        assert not out.exists()
+        assert out.exists() and out.stat().st_size == 0
+        assert "left as an empty file" in capsys.readouterr().err
         assert not [p for p in tmp_path.iterdir() if ".export-tmp" in p.name]
 
     def test_export_sqlite_publishes_by_hard_link(self, base_args_with_data, tmp_path):
@@ -1717,36 +1719,6 @@ class TestCmdExport:
         assert exc.value.code == 1
         assert "never overwrites" in capsys.readouterr().err
         assert out.read_bytes() == before
-
-    def test_export_sqlite_interrupted_inside_the_claim_removes_it(
-        self, base_args_with_data, tmp_path, monkeypatch
-    ):
-        """walopen L3 r15 (codex LOW): an interrupt after the exclusive create and
-        before the rename must not leave the claim behind."""
-        import errno
-        from anneal_memory import cli
-        real_fstat = cli.os.fstat
-        calls = []
-
-        def _nolink(*a, **k):
-            raise OSError(errno.ENOTSUP, "no hard links here")
-
-        def _fstat(fd):
-            calls.append(fd)
-            if len(calls) == 1:
-                raise KeyboardInterrupt
-            return real_fstat(fd)
-
-        monkeypatch.setattr(cli.os, "link", _nolink)
-        monkeypatch.setattr(cli.os, "fstat", _fstat)
-        out = tmp_path / "copy.db"
-        base_args_with_data.format = "sqlite"
-        base_args_with_data.output = str(out)
-        with pytest.raises(KeyboardInterrupt):
-            cmd_export(base_args_with_data)
-        assert calls, "the claim's fstat never ran: the window under test was not reached"
-        assert not out.exists()
-        assert not [p for p in tmp_path.iterdir() if ".export-tmp" in p.name]
 
     def test_export_sqlite_of_a_removed_source_does_not_recreate_it(
         self, base_args_with_data, tmp_path, capsys, monkeypatch

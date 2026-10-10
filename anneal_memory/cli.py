@@ -2140,12 +2140,8 @@ def _publish_no_clobber(tmp: Path, out: Path) -> None:
     is the target claimed with an exclusive create and the copy renamed over that
     claim (git's lockfile, with the target as the lock): a concurrent creator is
     still refused, but a process that deletes the claim and writes its own file
-    before the rename is overwritten (walopen L3 r15). An error or an interrupt
-    after the claim removes it if it is still the empty file this call created;
-    a crash or SIGTERM there can leave it. That removal is a check and then an
-    unlink by name, so a file another process puts in the claim's place between
-    the two is removed (walopen L3 r16, codex): the same window, on the same
-    filesystems, as the overwrite above.
+    before the rename is overwritten (walopen L3 r15). A failure or interrupt
+    after the claim leaves it as an empty file (see :func:`_publish_by_claim`).
     """
     fd = os.open(tmp, os.O_RDWR | getattr(os, "O_BINARY", 0))
     try:
@@ -2161,11 +2157,10 @@ def _publish_no_clobber(tmp: Path, out: Path) -> None:
         # so it never counts as ours (walopen L3 r16, codex).
         try:
             mine, there = os.stat(tmp), os.lstat(out)
+            ours = bool(mine.st_ino) and (mine.st_dev, mine.st_ino) == (there.st_dev, there.st_ino)
         except OSError:
-            mine = there = None
-        if mine is None or there is None or not mine.st_ino or (
-            (mine.st_dev, mine.st_ino) != (there.st_dev, there.st_ino)
-        ):
+            ours = False
+        if not ours:
             raise
     except OSError:
         _publish_by_claim(tmp, out)
@@ -2173,27 +2168,25 @@ def _publish_no_clobber(tmp: Path, out: Path) -> None:
 
 
 def _publish_by_claim(tmp: Path, out: Path) -> None:
-    """The no-hard-link publish of :func:`_publish_no_clobber`."""
-    fd = -1
-    claim = None
+    """The no-hard-link publish of :func:`_publish_no_clobber`.
+
+    A failure or an interrupt after the claim LEAVES the empty claim at
+    ``out`` and says so: removing it is a check and then an unlink by name,
+    which removes whatever another process put there in between, and on
+    filesystems that report inode 0 cannot even tell the claim from another
+    empty file (walopen L3 r17, codex HIGH + glm HIGH + complement MED). So
+    nothing here deletes a file at ``out``.
+    """
+    fd = os.open(out, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0), 0o666)
     try:
-        fd = os.open(out, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0), 0o666)
-        claim = os.fstat(fd)
         os.close(fd)
-        fd = -1
         os.replace(tmp, out)
     except BaseException:
-        if fd >= 0:
-            with contextlib.suppress(OSError):
-                if claim is None:
-                    claim = os.fstat(fd)
-            with contextlib.suppress(OSError):
-                os.close(fd)
-        if claim is not None:
-            with contextlib.suppress(OSError):
-                now = os.lstat(out)
-                if (now.st_dev, now.st_ino, now.st_size) == (claim.st_dev, claim.st_ino, 0):
-                    os.unlink(out)
+        print(
+            f"Note: the export was not published; {out} was left as an empty file. Remove it "
+            "before exporting there again.",
+            file=sys.stderr,
+        )
         raise
 
 

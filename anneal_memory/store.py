@@ -2171,8 +2171,17 @@ def connect(path: str | Path, *, must_exist: bool = False, **kwargs: Any) -> sql
     if must_exist:
         if target == ":memory:":
             raise StorePathError("':memory:' is not an existing database file")
-        uri = _existing_file_uri(os.path.abspath(target))
-        return sqlite3.connect(uri, uri=True, **kwargs)
+        # Joined, never normalised: abspath collapses ``link/..`` by text, which
+        # can name a different file than the OS resolves (walopen L3 r17).
+        full = target if os.path.isabs(target) else os.path.join(os.getcwd(), target)
+        try:
+            os.fsencode(full).decode("utf-8")
+        except UnicodeDecodeError:
+            # SQLite leaves a URI that decodes to invalid UTF-8 undefined
+            # (sqlite.org/c3ref/open.html, walopen L3 r17 codex), so such a name
+            # opens as main always opened it, without the must-exist guarantee.
+            return sqlite3.connect(target, **kwargs)
+        return sqlite3.connect(_existing_file_uri(full), uri=True, **kwargs)
     return sqlite3.connect(target, **kwargs)
 
 
@@ -2183,8 +2192,8 @@ def _existing_file_uri(abs_path: str) -> str:
     ``\\`` included, so the URI has no authority and SQLite decodes the very
     string it was given, on every platform: no drive-letter, UNC or verbatim
     (``\\\\?\\``) rewriting, which lost or changed paths (walopen L3 r16, codex
-    + complement), and a non-UTF-8 POSIX name is passed as its bytes. A NUL,
-    which SQLite would read as the end of the name, is refused."""
+    + complement). A NUL, which SQLite would read as the end of the name, is
+    refused."""
     if "\0" in abs_path:
         raise StorePathError(f"Database path {abs_path!r} contains a NUL character")
     return "file:" + urllib.parse.quote_from_bytes(os.fsencode(abs_path), safe="") + "?mode=rw"

@@ -4540,6 +4540,40 @@ def test_existing_file_uri_names_exactly_the_path(abs_path):
     assert urllib.parse.unquote_to_bytes(body) == os.fsencode(abs_path)
 
 
+def test_connect_must_exist_does_not_collapse_dotdot(tmp_path, monkeypatch):
+    """walopen L3 r17 (complement): abspath collapsed link/.. by text, naming a
+    different file than the OS resolves."""
+    from anneal_memory.store import connect
+    real_dir = tmp_path / "real"
+    (real_dir / "sub").mkdir(parents=True)
+    c = connect(tmp_path / "x.db")  # what a textual collapse of link/../x.db names
+    c.execute("create table wrong(x)")
+    c.close()
+    c = connect(real_dir / "x.db")  # what the OS resolves link/../x.db to
+    c.execute("create table right(x)")
+    c.close()
+    try:
+        (tmp_path / "link").symlink_to(real_dir / "sub")
+    except OSError:
+        pytest.skip("cannot create a symlink here")
+    monkeypatch.chdir(tmp_path)
+    c = connect("link/../x.db", must_exist=True)
+    try:
+        assert c.execute("select name from sqlite_master").fetchone()[0] == "right"
+    finally:
+        c.close()
+
+
+def test_connect_must_exist_opens_a_non_utf8_name_without_a_uri(monkeypatch):
+    """walopen L3 r17 (codex): SQLite leaves a URI that decodes to invalid
+    UTF-8 undefined, so such a name takes the plain open."""
+    import anneal_memory.store as store_mod
+    seen = []
+    monkeypatch.setattr(store_mod.sqlite3, "connect", lambda *a, **k: seen.append((a, k)))
+    store_mod.connect("/tmp/caf\udce9.db", must_exist=True)
+    assert seen == [(("/tmp/caf\udce9.db",), {})]
+
+
 def test_existing_file_uri_refuses_a_nul():
     """walopen L3 r16 (codex + complement): SQLite ends the name at a NUL, so
     'real.db\\0x' would have opened real.db."""

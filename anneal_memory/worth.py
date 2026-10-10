@@ -96,7 +96,7 @@ _O_NONBLOCK = getattr(os, "O_NONBLOCK", 0)
 _O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
 
 
-def _open_log(path: Path, *, write: bool, what: str = "the outcome log") -> int:
+def _open_log(path: Path, *, write: bool, what: str) -> int:
     """The one way the outcome log, and a receipt file (``what``), is opened: a
     descriptor on a REGULAR file. A receipt must be a file, not a pipe:
     ``fold_surfaced`` reads it under the crystal store's lock, where a FIFO with
@@ -144,14 +144,22 @@ def _open_log(path: Path, *, write: bool, what: str = "the outcome log") -> int:
 
 
 @contextlib.contextmanager
-def _owned_reader(fd: int) -> Iterator[TextIO]:
-    """A text reader over ``fd`` that closes ``fd`` itself, so nothing can leak
-    it between the open and a reader adopting it (outcomes-open L3 r1)."""
+def _read_regular(path: Path, *, what: str) -> Iterator[TextIO | None]:
+    """A text reader over the regular file at ``path`` (:func:`_open_log`), or
+    ``None`` when nothing is there. The descriptor is acquired and closed inside
+    this one ``try``, so no caller ever holds a bare one (outcomes-open L3 r1-r3)."""
+    fd = -1
     try:
+        try:
+            fd = _open_log(path, write=False, what=what)
+        except FileNotFoundError:
+            yield None
+            return
         with open(fd, "r", encoding="utf-8", errors="replace", closefd=False) as f:
             yield f
     finally:
-        os.close(fd)
+        if fd >= 0:
+            os.close(fd)
 
 
 def outcome_log_path(db_path: str | os.PathLike[str]) -> Path:
@@ -281,7 +289,7 @@ class OutcomeLog:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         # Read-write, not write-only: the append reads the last byte to repair a
         # torn final line, so a write-only (0200) log now refuses.
-        fd = _open_log(self.path, write=True)
+        fd = _open_log(self.path, write=True, what="the outcome log")
         try:
             if fcntl is not None:
                 fcntl.flock(fd, fcntl.LOCK_EX)
@@ -326,7 +334,7 @@ class OutcomeLog:
         self._writable_id()
         rec = _build_record(exposure_id, items, outcome, exposed, ts, self.store_id)
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        fd = _open_log(self.path, write=True)
+        fd = _open_log(self.path, write=True, what="the outcome log")
         try:
             if fcntl is not None:
                 fcntl.flock(fd, fcntl.LOCK_EX)
@@ -373,7 +381,7 @@ class OutcomeLog:
             "ts": when.strftime("%Y-%m-%dT%H:%M:%SZ"),
         }
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        fd = _open_log(self.path, write=True)
+        fd = _open_log(self.path, write=True, what="the outcome log")
         try:
             if fcntl is not None:
                 fcntl.flock(fd, fcntl.LOCK_EX)
@@ -409,12 +417,8 @@ class OutcomeLog:
         return self._snapshot()[2]
 
     def _entries(self) -> tuple[list[dict[str, Any]], int]:
-        try:
-            fd = _open_log(self.path, write=False)
-        except FileNotFoundError:
-            return [], 0
-        with _owned_reader(fd) as f:
-            return _parse_entries(f)
+        with _read_regular(self.path, what="the outcome log") as f:
+            return ([], 0) if f is None else _parse_entries(f)
 
     def _snapshot(self) -> tuple[dict[str, dict[str, Any]], int, LogBinding]:
         """The merged records this log counts, the skipped-line count and the
@@ -789,7 +793,13 @@ def fold_surfaced(
         seconds=skew_seconds
     )
     cutoff = cutoff.replace(microsecond=0)
-    missing = [str(p) for p in paths if not p.is_file()]
+    # Missing means absent; a path that is there but not a regular file is
+    # refused here, before the lock, the watermark or any early return
+    # (outcomes-open L3 r3). The read's descriptor check stays the authority.
+    missing = [str(p) for p in paths if not os.path.lexists(p)]
+    for p in paths:
+        if str(p) not in missing and not p.is_file():
+            raise OSError(errno.EINVAL, "a receipt file is not a regular file", str(p))
     if len(missing) == len(paths):
         raise FileNotFoundError(
             f"none of the receipt paths exists ({', '.join(missing)}); the fold "
@@ -828,11 +838,9 @@ def fold_surfaced(
         last_on: dict[str, str] = {}
         seen_events: set[str] = set()
         for path in paths:
-            try:
-                fd = _open_log(Path(path), write=False, what="a receipt file")
-            except FileNotFoundError:
-                continue
-            with _owned_reader(fd) as f:
+            with _read_regular(Path(path), what="a receipt file") as f:
+                if f is None:
+                    continue
                 for line in f:
                     if not line.strip():
                         continue
@@ -1029,12 +1037,10 @@ def load_receipts(
     bad = 0
     missing: list[str] = []
     for path in ps:
-        try:
-            fd = _open_log(Path(path), write=False, what="a receipt file")
-        except FileNotFoundError:
-            missing.append(str(path))
-            continue
-        with _owned_reader(fd) as f:
+        with _read_regular(Path(path), what="a receipt file") as f:
+            if f is None:
+                missing.append(str(path))
+                continue
             for line in f:
                 if not line.strip():
                     continue

@@ -483,3 +483,20 @@ def test_a_fifo_receipt_file_refuses_instead_of_hanging(tmp_path):
     os.mkfifo(fifo)
     with pytest.raises(OSError, match="receipt file is not a regular file"):
         load_receipts([fifo])
+
+
+@pytest.mark.skipif(_NO_FIFO, reason="no FIFOs on this platform")
+def test_fold_surfaced_refuses_a_fifo_receipt_before_anything_else(tmp_path):
+    """outcomes-open L3 r3 (codex + complement LOW): the preflight called a FIFO
+    "missing", so a lone FIFO read as "none exists" and a mixed list could
+    return early without the FIFO ever being checked."""
+    import os
+    from anneal_memory.worth import fold_surfaced
+    good = tmp_path / "good.jsonl"
+    good.write_text("", encoding="utf-8")
+    fifo = tmp_path / "r.jsonl"
+    os.mkfifo(fifo)
+    store = CrystalStore(tmp_path / "c.crystal.json")
+    for paths in ([fifo], [good, fifo]):
+        with pytest.raises(OSError, match="receipt file is not a regular file"):
+            fold_surfaced(store, paths)

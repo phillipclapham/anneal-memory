@@ -509,8 +509,8 @@ def read_marker(marker_path: Path) -> str | None:
 def _fsync_dir(dir_path: Path) -> None:
     """Best-effort POSIX directory fsync so the rename itself is durable. Mirrors
     the episodic store's / spore store's ``_fsync_dir``; on macOS ``os.fsync``
-    is weaker than ``F_FULLFSYNC`` — a documented platform limit, not a bug
-    here. No-ops where a directory fd can't be opened/synced (e.g. Windows)."""
+    is weaker than ``fcntl.F_FULLFSYNC``, which this helper does not call
+    (``spores._full_fsync`` does) — a known edge, not a bug here. No-ops where a directory fd can't be opened/synced (e.g. Windows)."""
     try:
         fd = os.open(dir_path, os.O_RDONLY)
         try:

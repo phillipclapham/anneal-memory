@@ -290,8 +290,9 @@ def _fsync_dir(path: Path) -> None:
     directory entry created by a subsequent rename; a crash in that gap
     can leave the rename's target missing on recovery even though the
     data was durable. macOS ``fsync`` is weaker than Linux (true
-    durability needs ``F_FULLFSYNC``, which stdlib doesn't expose) but
-    the directory sync still narrows the window. Windows can't fsync a
+    durability needs ``fcntl.F_FULLFSYNC``, which ``spores._full_fsync``
+    uses and this plain ``os.fsync`` does not) but the directory sync
+    still narrows the window. Windows can't fsync a
     directory handle; no-op there. Swallows ``OSError`` — best-effort,
     not a guarantee callers may rely on.
     """

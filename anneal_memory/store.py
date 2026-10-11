@@ -890,8 +890,8 @@ def _fsync_dir(path: Path) -> None:
 
     Windows does NOT support ``os.open`` on a directory for fsync;
     on that platform this function is a no-op. macOS ``fsync`` is
-    weaker than Linux (true durability needs ``F_FULLFSYNC`` via
-    ``fcntl``, which Python's stdlib doesn't expose) but the
+    weaker than Linux (true durability needs ``fcntl.F_FULLFSYNC``,
+    which this helper does not call; ``spores._full_fsync`` does) but the
     directory entry sync still helps reduce the residual crash
     window.
 
@@ -10688,8 +10688,10 @@ class Store:
 
         **macOS durability caveat:** ``os.fsync`` on macOS (APFS)
         flushes to the drive cache but NOT to the physical medium.
-        True durability requires ``fcntl(F_FULLFSYNC)``, which
-        Python's stdlib does not expose. The two-phase commit
+        True durability requires ``fcntl(F_FULLFSYNC)``. The
+        SQLite commit gets it from ``PRAGMA fullfsync`` (set at open on
+        macOS); the sidecar file writes and renames use plain
+        ``os.fsync``. The two-phase commit
         ordering (DB commit → file rename) still holds under normal
         crashes, but a power loss in the wrong microsecond can lose
         the most recent committed wrap on macOS. L2 H1.

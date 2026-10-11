@@ -368,7 +368,8 @@ def _clean_str_list(value: object, field: str) -> list[str]:
 def _fsync_dir(dir_path: Path) -> None:
     """Best-effort POSIX directory fsync so the rename itself is durable. Mirrors the
     episodic store's and spores' ``_fsync_dir``; on macOS ``os.fsync`` is weaker than
-    ``F_FULLFSYNC`` — a documented platform limit, not a bug here."""
+    ``fcntl.F_FULLFSYNC``, which this helper does not call (``spores._full_fsync``
+    does) — a known edge, not a bug here."""
     try:
         fd = os.open(dir_path, os.O_RDONLY)
         try:

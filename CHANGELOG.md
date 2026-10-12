@@ -37,8 +37,10 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
 - With `ANNEAL_MEMORY_DB` unset and no home directory to be found (a launcher that drops `USERPROFILE`/`HOMEPATH`, or a
   POSIX container uid with no passwd entry and no `HOME`), every invocation crashed with `RuntimeError: Could not
   determine home directory` while the parser was being built, `--db` included, and the MCP server never started.
-  The default path is now expanded only when a command uses it, and then a missing home is a usage error (exit 2)
-  naming `--db` and `ANNEAL_MEMORY_DB`. The CLI and the MCP server's parser share one default.
+  The default path is now expanded only by a command that opens it, which then refuses with exit 1 and names `--db`
+  and `ANNEAL_MEMORY_DB`, as an unexpandable `--db` such as `~user` naming no user already did. That refusal now covers
+  every subcommand (`init`, `serve` and others used to print a traceback for such a path). `--generate-integrity`
+  opens no database and needs no home. The CLI and the MCP server's parser share one default.
 
 ### Known edges (sorted 2026-10-12 against the reachability line; each was open before this release)
 - Two cited episodes that disagree both ground a pattern: anneal does not compare them. The graduation reaches the

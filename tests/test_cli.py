@@ -1349,15 +1349,32 @@ class TestEnvVars:
         main()
         assert json.loads(capsys.readouterr().out)["total_episodes"] == 0
 
-    def test_no_home_default_db_is_a_usage_error(self, monkeypatch, capsys):
+    @pytest.mark.parametrize("argv", [["status"], ["init"], ["serve"]])
+    def test_no_home_default_db_refuses_naming_the_fix(self, monkeypatch, capsys, argv):
+        """A command that opens the default path refuses like any unexpandable
+        --db (exit 1, the same words as a ~user naming no user)."""
         self._no_home(monkeypatch)
-        monkeypatch.setattr(sys, "argv", ["anneal-memory", "status"])
+        monkeypatch.setattr(sys, "argv", ["anneal-memory", *argv])
         from anneal_memory.cli import main
         with pytest.raises(SystemExit) as exc:
             main()
-        assert exc.value.code == 2
+        assert exc.value.code == 1
         err = capsys.readouterr().err
-        assert "ANNEAL_MEMORY_DB" in err and "Traceback" not in err
+        assert "cannot inspect the database path" in err and "ANNEAL_MEMORY_DB" in err
+
+    @pytest.mark.parametrize("argv", [["--generate-integrity"], ["serve", "--generate-integrity"]])
+    def test_no_home_generate_integrity_opens_no_db(self, monkeypatch, capsys, argv):
+        """Integrity generation opens no database, so it needs no home (L3 r1, codex)."""
+        self._no_home(monkeypatch)
+        written = []
+        import anneal_memory.integrity as integrity
+        import anneal_memory.server as server
+        monkeypatch.setattr(integrity, "generate_integrity_file", written.append)
+        monkeypatch.setattr(server, "generate_integrity_file", written.append)
+        monkeypatch.setattr(sys, "argv", ["anneal-memory", *argv])
+        from anneal_memory.cli import main
+        main()
+        assert len(written) == 1
 
     def test_no_home_server_parser_explicit_db(self, monkeypatch, tmp_path, capsys):
         """The no-subcommand path (the MCP server's own parser) has the same default."""

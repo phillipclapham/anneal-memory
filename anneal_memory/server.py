@@ -1817,7 +1817,7 @@ def main() -> None:
         prog="anneal-memory",
         description="Living memory MCP server for AI agents.",
     )
-    from .cli import _default_db, _expand_db  # one default for both parsers
+    from .cli import _db_path, _default_db  # one default for both parsers
 
     default_db = _default_db()
     parser.add_argument(
@@ -1866,15 +1866,15 @@ def main() -> None:
 
     args = parser.parse_args()
 
-    # Expand ~ in db path (user-provided or default)
-    args.db = _expand_db(parser, args.db)
-
-    # Generate integrity file mode
+    # Generate integrity file mode (opens no database, so needs no home directory)
     if args.generate_integrity:
         out = Path(__file__).parent / "tool-integrity.json"
         generate_integrity_file(out)
         print(f"Generated {out}", file=sys.stderr)
         return
+
+    # Expand ~ in db path (user-provided or default)
+    args.db = str(_db_path(args.db))
 
     # Verify audit trail mode
     if args.verify_audit:

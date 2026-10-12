@@ -293,7 +293,7 @@ def _default_db() -> str:
     minimal environment, or a container uid with no passwd entry), so building
     the parser never needs one. Until 2026-10-12 it expanded here and crashed
     every invocation at startup, ``--db`` included; now only a command that
-    uses the default needs a home, and :func:`_expand_db` says so.
+    opens the default path needs a home, and :func:`_db_path` says so.
     """
     env_db = os.environ.get("ANNEAL_MEMORY_DB")
     if env_db:
@@ -304,15 +304,22 @@ def _default_db() -> str:
         return _DEFAULT_DB
 
 
-def _expand_db(parser: argparse.ArgumentParser, db: str) -> str:
-    """Expand ``~`` in ``--db``, or exit with a usage error naming the fix."""
+def _db_path(db: str) -> Path:
+    """``--db`` with ``~`` expanded, or exit 1 naming the fix when it cannot be
+    (no home directory, or a ``~user`` naming no user)."""
     try:
-        return str(Path(db).expanduser())
-    except RuntimeError:
-        parser.error(
-            f"cannot find a home directory to expand {db!r}; "
-            "pass --db with a full path or set ANNEAL_MEMORY_DB"
-        )
+        return Path(db).expanduser()
+    except RuntimeError as exc:
+        _refuse_unexpandable_db(db, exc)
+
+
+def _refuse_unexpandable_db(db: str, exc: RuntimeError) -> NoReturn:
+    print(
+        f"Error: cannot inspect the database path {db}: {exc} "
+        "Pass --db with a full path or set ANNEAL_MEMORY_DB.",
+        file=sys.stderr,
+    )
+    sys.exit(1)
 
 
 # -- Shared --json argparse parent --
@@ -369,8 +376,7 @@ def _existing_db_path(args: argparse.Namespace, *, require_file: bool = False) -
             sys.exit(1)
     except RuntimeError as exc:
         # expanduser() when "~user" names no user or no home directory is found.
-        print(f"Error: cannot inspect the database path {args.db}: {exc}", file=sys.stderr)
-        sys.exit(1)
+        _refuse_unexpandable_db(args.db, exc)
     else:
         exists = True
         is_file = stat.S_ISREG(st.st_mode)
@@ -451,7 +457,7 @@ def _episode_dict(ep: Any) -> dict[str, Any]:
 
 def cmd_init(args: argparse.Namespace) -> None:
     """Initialize a new memory store."""
-    db_path = Path(args.db).expanduser()
+    db_path = _db_path(args.db)
     if db_path.exists():
         print(f"Store already exists: {db_path}", file=sys.stderr)
         sys.exit(1)
@@ -859,7 +865,7 @@ def cmd_derive(args: argparse.Namespace) -> None:
     if action is None:
         print("Usage: anneal-memory derive {allow,revoke,status}", file=sys.stderr)
         sys.exit(2)
-    db_path = Path(args.db).expanduser()
+    db_path = _db_path(args.db)
     # revoke/status work on a binding whose database has gone, so a stale
     # binding can always be removed.
     if action == "allow" and not db_path.exists():
@@ -1415,7 +1421,7 @@ def cmd_prune(args: argparse.Namespace) -> None:
 
 def cmd_verify(args: argparse.Namespace) -> None:
     """Verify audit trail integrity."""
-    db_path = Path(args.db).expanduser()
+    db_path = _db_path(args.db)
     result = AuditTrail.verify(db_path)
 
     if args.json:
@@ -1474,7 +1480,7 @@ def cmd_audit_repair(args: argparse.Namespace) -> None:
     Thin adapter over :meth:`AuditTrail.repair_manifest`, the only way out of
     quarantine. Exits 1 when the repair refuses, having written nothing.
     """
-    db_path = Path(args.db).expanduser()
+    db_path = _db_path(args.db)
     result = AuditTrail.repair_manifest(
         db_path, set_aside_unreadable=getattr(args, "set_aside_unreadable", False)
     )
@@ -1916,7 +1922,7 @@ def cmd_wrap_status(args: argparse.Namespace) -> None:
         # A library-minted token the CLI cannot accept gets no command at all.
         token = snapshot["token"]
         if _WRAP_TOKEN_RE.fullmatch(token):
-            db_arg = shlex.quote(str(Path(args.db).expanduser().resolve()))
+            db_arg = shlex.quote(str(_db_path(args.db).resolve()))
             print(f"  complete: anneal-memory --db {db_arg} save-continuity "
                   f"--wrap-token {token} <file>")
             if gated_by is None and not bound:
@@ -2368,7 +2374,7 @@ def cmd_export(args: argparse.Namespace) -> None:
 
     if fmt == "sqlite":
         # Use SQLite backup API for a consistent snapshot (safe even mid-transaction)
-        db_path = Path(args.db).expanduser()
+        db_path = _db_path(args.db)
         if not db_path.exists():
             print(f"Error: database not found: {db_path}", file=sys.stderr)
             sys.exit(1)
@@ -2656,7 +2662,7 @@ def cmd_import(args: argparse.Namespace) -> None:
             # An empty export still warns (L1 + L2), through a read-only probe of an
             # existing target only: the no-op import must not take the writer lock
             # or fail on a missing database (L3: codex MED, complement LOW).
-            db_path = Path(args.db).expanduser()
+            db_path = _db_path(args.db)
             if db_path.exists():
                 try:
                     probe = Store(db_path, audit=False, read_only=True)
@@ -3151,7 +3157,7 @@ def _frozen(names: set[str] | None) -> frozenset[str] | None:
 
 def cmd_audit(args: argparse.Namespace) -> None:
     """Read and filter audit trail entries."""
-    db_path = Path(args.db).expanduser()
+    db_path = _db_path(args.db)
     manifest_path = db_path.parent / f"{db_path.stem}.audit.manifest.json"
     # ⛔ OUTPUT IS TRUSTED ONLY FROM A READ BRACKETED BY AN UNCHANGED SNAPSHOT.
     # Four review rounds each found one more writer landing inside this read
@@ -3736,16 +3742,17 @@ def cmd_serve(args: argparse.Namespace) -> None:
     """
     from .server import start_server
 
-    db_path = str(Path(args.db).expanduser())
     audit_ret = getattr(args, "audit_retention_days", 0)
 
-    # Handle one-shot server modes
+    # Handle one-shot server modes (integrity generation opens no database,
+    # so it runs before the path is expanded and needs no home directory)
     if getattr(args, "generate_integrity", False):
         from .integrity import generate_integrity_file
         out = Path(__file__).parent / "tool-integrity.json"
         generate_integrity_file(out)
         print(f"Generated {out}", file=sys.stderr)
         return
+    db_path = str(_db_path(args.db))
 
     if getattr(args, "verify_audit", False):
         cmd_verify(args)
@@ -3812,7 +3819,7 @@ def _open_spore_store(args: argparse.Namespace) -> SporeStore:
     Unlike :func:`_open_store`, the file need NOT pre-exist — ``SporeStore``
     creates it on first write, so spores can be planted into a fresh store
     location (the prospective layer is independent of the episodic db)."""
-    db_path = Path(args.db).expanduser()
+    db_path = _db_path(args.db)
     return SporeStore(db_path.parent / f"{db_path.stem}.spores.json")
 
 
@@ -4021,7 +4028,7 @@ def _open_crystal_store(args: argparse.Namespace) -> CrystalStore:
     ``CrystalStore`` creates it on first write, so patterns can be crystallized
     into a fresh store location (the crystallized tier is independent of the
     episodic db, exactly like the spore layer)."""
-    db_path = Path(args.db).expanduser()
+    db_path = _db_path(args.db)
     return CrystalStore(db_path.parent / f"{db_path.stem}.crystal.json")
 
 
@@ -4055,7 +4062,7 @@ def _open_crystal_store_for_wrap(args: argparse.Namespace) -> CrystalStore | Non
     subcommands keep ``_open_crystal_store`` (create-on-write) — creating the
     store IS the opt-in act.
     """
-    db_path = Path(args.db).expanduser()
+    db_path = _db_path(args.db)
     crystal_path = db_path.parent / f"{db_path.stem}.crystal.json"
     if getattr(args, "crystal", False) or crystal_path.exists():
         return CrystalStore(crystal_path)
@@ -4154,7 +4161,7 @@ def _record_pull_label(args: argparse.Namespace, name: str) -> None:
     failure is one stderr line."""
     try:
         try:
-            db_path = Path(args.db).expanduser()
+            db_path = _db_path(args.db)
             if not db_path.is_file():
                 return
         except (OSError, ValueError, RuntimeError):
@@ -4335,7 +4342,7 @@ def _crystal_recall_associative(
     # emit a spurious degrade breadcrumb against a present-but-faulting episodic db.
     if args.max_patterns <= 0:
         return []
-    db_path = Path(args.db).expanduser()
+    db_path = _db_path(args.db)
     try:
         with Store(db_path, read_only=True) as store:
             return retrieve_relevant(
@@ -4856,7 +4863,7 @@ def cmd_migrate_check(args: argparse.Namespace) -> None:
     operator review, then runs ``migrate ack``. The db need not exist — the
     acknowledgement marker is an independent sibling file.
     """
-    db_path = Path(args.db).expanduser()
+    db_path = _db_path(args.db)
     marker = marker_path_for(db_path)
     acknowledged = read_marker(marker)
     pending = pending_migrations(acknowledged)
@@ -4900,7 +4907,7 @@ def cmd_migrate_ack(args: argparse.Namespace) -> None:
     simply re-surfaces the newer entries — a safe, intentional escape hatch,
     since a re-proposed edit the agent already applied is a no-op.
     """
-    db_path = Path(args.db).expanduser()
+    db_path = _db_path(args.db)
     # `args.version is None` ONLY for the genuine no-argument case (the positional
     # is `nargs="?"`, default None). An explicit empty string is malformed input
     # and must reach the guard below, not silently fall through to the default.
@@ -5875,7 +5882,6 @@ def main() -> None:
     # CLI subcommand present — reject any unrecognized arguments
     if remaining:
         parser.error(f"unrecognized arguments: {' '.join(remaining)}")
-    args.db = _expand_db(parser, args.db)
 
     # Dispatch to subcommand handler, behind the ONE contention boundary.
     #

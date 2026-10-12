@@ -239,6 +239,7 @@ class TestCmdInitSchema:
         # only via a library-constructed Store(section_schema=FLOW_SCHEMA).
         from anneal_memory.continuity import prepare_wrap
         base_args.schema = "partnership"
+        base_args.no_baton = True  # KL-19: this test wraps with no session id
         cmd_init(base_args)
         store = Store(base_args.db)
         store.record("a session episode", "observation")
@@ -318,6 +319,7 @@ class TestCmdSetSchema:
         # set-schema during an active wrap must exit clean (no traceback) —
         # main() has no top-level handler; matches cmd_prepare_wrap's contract.
         from anneal_memory.continuity import prepare_wrap
+        base_args.no_baton = True  # KL-19: this test wraps with no session id
         cmd_init(base_args)
         store = Store(base_args.db)
         store.record("an episode", "observation")
@@ -3479,7 +3481,7 @@ class TestCLICrossProcessTOCTOU:
         """prepare-wrap text output ends with the 'Wrap token: <hex>'
         trailer so wrapping scripts can grep/awk the value."""
         db_path = str(tmp_path / "trailer.db")
-        self._run("--db", db_path, "init")
+        self._run("--db", db_path, "init", "--no-baton")
         self._run(
             "--db", db_path,
             "record", "Trailer test", "--type", "observation",
@@ -3493,7 +3495,7 @@ class TestCLICrossProcessTOCTOU:
         """prepare-wrap --json output includes wrap_token as a
         top-level key on the package dict."""
         db_path = str(tmp_path / "json_token.db")
-        self._run("--db", db_path, "init")
+        self._run("--db", db_path, "init", "--no-baton")
         self._run(
             "--db", db_path,
             "record", "JSON test", "--type", "observation",
@@ -3511,7 +3513,7 @@ class TestCLICrossProcessTOCTOU:
         and save.
         """
         db_path = str(tmp_path / "cross.db")
-        self._run("--db", db_path, "init")
+        self._run("--db", db_path, "init", "--no-baton")
         # Record one snapshot episode.
         rec = self._run(
             "--db", db_path,
@@ -3578,7 +3580,7 @@ class TestCLICrossProcessTOCTOU:
         fails with a non-zero exit and the in-progress wrap is
         preserved for retry."""
         db_path = str(tmp_path / "cross_wrong.db")
-        self._run("--db", db_path, "init")
+        self._run("--db", db_path, "init", "--no-baton")
         self._run(
             "--db", db_path,
             "record", "A real episode",
@@ -3616,7 +3618,7 @@ class TestCLICrossProcessTOCTOU:
         ceremony.
         """
         db_path = str(tmp_path / "implicit_cross.db")
-        self._run("--db", db_path, "init")
+        self._run("--db", db_path, "init", "--no-baton")
         rec = self._run(
             "--db", db_path,
             "record", "Real episode",
@@ -3950,7 +3952,7 @@ class TestWrapOperatorSubcommandsSubprocess:
     def test_prepare_status_token_cancel_roundtrip(self, tmp_path):
         db_path = str(tmp_path / "ops.db")
 
-        self._run("--db", db_path, "init")
+        self._run("--db", db_path, "init", "--no-baton")
         self._run("--db", db_path, "record", "ep1", "--type", "observation")
         self._run("--db", db_path, "record", "ep2", "--type", "observation")
 

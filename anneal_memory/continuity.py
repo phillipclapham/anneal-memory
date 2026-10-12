@@ -24,6 +24,7 @@ import inspect
 import json
 import dataclasses
 import re
+import shlex
 import glob
 import os
 import sqlite3
@@ -1648,6 +1649,27 @@ def _downgraded_empty(message: str, episode_count: int = 0) -> PrepareWrapResult
     )
 
 
+def _claim_recipe(store: Store, session_id: str | None, episode_count: int) -> str:
+    """The cadence line a downgrade carries (KL-19): how much is waiting, and the one
+    operator command that lets a named session consolidate. Consolidation is the
+    operator's act, so the line is addressed to the operator, through the agent."""
+    db = shlex.quote(str(store.path))
+    waiting = (
+        f"{episode_count} episode(s) since the last wrap are waiting to be consolidated. "
+    )
+    if session_id is None:
+        return waiting + (
+            "To consolidate, run the wrap under a session id (CLI: --session-id NAME; MCP: "
+            "start the server with --session-id NAME) and have the operator claim the "
+            f"baton for it once: anneal-memory --db {db} baton claim NAME"
+        )
+    return waiting + (
+        "If the operator wants this session to consolidate, the operator runs: "
+        f"anneal-memory --db {db} baton claim {shlex.quote(session_id)}"
+        " (add --take to move the baton from another session)."
+    )
+
+
 def _consolidate_gate(
     store: Store,
     session_id: str | None,
@@ -1670,8 +1692,9 @@ def _consolidate_gate(
                 "Consolidate downgraded to capture-only (downgraded-baton-required): this "
                 "store is baton-protected (Store.consolidate_requires_baton), so only the "
                 "session the operator has given the consolidate baton can consolidate it, "
-                "identifying itself with session_id. This call passed none, and the CLI and "
-                "MCP wrap cannot. Capture (afferent) is unaffected."
+                "identifying itself with session_id. This call passed none. Capture "
+                "(afferent) is unaffected. "
+                + _claim_recipe(store, None, episode_count)
             ),
             episode_count=episode_count,
             package=None,
@@ -1705,7 +1728,8 @@ def _consolidate_gate(
             f"{len(auth['live_session_ids'])} live session(s), baton holder = "
             f"{auth['baton_holder'] or 'none'}. Capture (afferent) is unaffected. "
             f"A consolidate needs the baton, which the operator assigns to one "
-            f"session; a session does not claim it on its own initiative."
+            f"session; a session does not claim it on its own initiative. "
+            + _claim_recipe(store, session_id, episode_count)
         ),
         episode_count=episode_count,
         package=None,

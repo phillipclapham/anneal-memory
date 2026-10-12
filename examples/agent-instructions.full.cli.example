@@ -209,6 +209,10 @@ don't lean on the backstop.)
   The sequence is: `prepare-wrap` → you compress → `save-continuity`.
   All three steps, every time. Your judgment during compression is
   where identity forms — this cannot be delegated.
+  Wrap with `--session-id` if your operator gave you one. If the wrap
+  downgrades to capture-only (exit 3), nothing is lost: tell your human
+  what it says (episodes waiting, and the one claim command).
+  Consolidating is the operator's act; never run `baton claim` yourself.
 
   An explicit wrap produces better continuity than stopping without one.
   Always encourage wrapping before ending a session.

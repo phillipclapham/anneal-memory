@@ -408,6 +408,30 @@ MIGRATION_MANIFEST: list[MigrationEntry] = [
         ),
         "files": list(CORE_FILES),
     },
+    {
+        "version": "0.9.44",
+        "feature": "KL-19-OPERATOR-CONSOLIDATES",
+        "summary": (
+            "Consolidation is now the operator's act by default. A store created "
+            "by `anneal-memory init`, or created fresh by the MCP server, requires "
+            "the consolidate baton: agents record freely, and a wrap consolidates "
+            "only under a session id the operator has claimed the baton for "
+            "(`anneal-memory baton claim NAME`). The CLI wraps with `--session-id "
+            "NAME`; the MCP server takes it from its config (`serve --session-id "
+            "NAME`), never from a tool argument. Otherwise `prepare_wrap` "
+            "downgrades to capture-only and says how many episodes are waiting "
+            "and the claim command. An EXISTING store keeps its policy "
+            "(`anneal-memory status` shows it)."
+        ),
+        "suggested_edit": (
+            "Where your files describe the wrap, add one instruction: if "
+            "`prepare_wrap` downgrades to capture-only, nothing is lost; tell the "
+            "human what it says, and never claim the baton yourself, because "
+            "consolidating is the operator's act. Choosing the session id and "
+            "claiming the baton are the operator's steps, not the agent's."
+        ),
+        "files": list(CORE_FILES),
+    },
 ]
 
 

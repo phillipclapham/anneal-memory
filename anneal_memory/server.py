@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import shlex
 import logging
 import os
 import sys
@@ -20,6 +21,7 @@ from pathlib import Path
 from typing import Any, cast
 
 from . import __version__
+from . import sessions
 from .continuity import (
     format_wrap_package_text,
     prepare_wrap as _lib_prepare_wrap,
@@ -226,10 +228,16 @@ class Server:
 
     Args:
         store: An open Store instance.
+        session_id: The session this server wraps as (KL-19). It comes from the
+            launch config the operator writes (``serve --session-id``), never
+            from a tool argument, so an agent cannot choose who it wraps as.
     """
 
-    def __init__(self, store: Store) -> None:
+    def __init__(self, store: Store, session_id: str | None = None) -> None:
+        if session_id is not None and (not isinstance(session_id, str) or not session_id):
+            raise ValueError("Server: session_id must be a non-empty string or None")
         self._store = store
+        self._session_id = session_id
         # The prospective (spore) store is a JSON sibling of the episodic db:
         # ``<stem>.spores.json``, mirroring the ``<stem>.continuity.md`` sibling.
         # Created on first write, so it need not pre-exist.
@@ -755,6 +763,7 @@ class Server:
             staleness_days=staleness_days,
             # AM-CRYSTAL-OPTIN: opt-in gate — pass the store only when it exists.
             crystal_store=self._crystal_store_for_wrap(),
+            session_id=self._session_id,
         )
 
         text = format_wrap_package_text(result)
@@ -850,6 +859,7 @@ class Server:
                 text,
                 affective_state=affective_state,
                 wrap_token=wrap_token,
+                session_id=self._session_id,
                 allow_shrink=allow_shrink,
                 allow_unlinked=allow_unlinked,
                 # AM-CRYSTAL-OPTIN: opt-in gate — pass the store only when it exists.
@@ -1215,6 +1225,33 @@ class Server:
             f"— they are NOT deleted and the next prepare_wrap picks them up."
         )
 
+    def _baton_status_line(self, episodes_since_wrap: int) -> str:
+        """KL-19's cadence signal: on a baton-protected store, whether THIS server may
+        consolidate, and if not, the operator's one command (said to the agent, for
+        its human: the server exposes no tool that claims the baton)."""
+        try:
+            holder = sessions.baton_holder(self._store.continuity_path)
+        except (OSError, json.JSONDecodeError):
+            holder = "<unreadable>"
+        if self._session_id is not None and holder == self._session_id:
+            return (
+                f"Baton-protected store: this server ({self._session_id!r}) holds the "
+                "baton and may consolidate"
+            )
+        db = shlex.quote(str(self._store.path))
+        name = shlex.quote(self._session_id) if self._session_id else "NAME"
+        how = (
+            f"ask your operator to run: anneal-memory --db {db} baton claim {name}"
+            if self._session_id
+            else "ask your operator to start this server with --session-id NAME and "
+            f"run: anneal-memory --db {db} baton claim NAME"
+        )
+        return (
+            f"Baton-protected store: {episodes_since_wrap} episode(s) since the last wrap; "
+            f"prepare_wrap from this server downgrades (baton holder: {holder or 'none'}). "
+            f"To consolidate, {how}"
+        )
+
     def _tool_status(self, args: dict[str, Any]) -> dict[str, Any]:
         status = self._store.status()
 
@@ -1244,10 +1281,7 @@ class Server:
             )
 
         if status.consolidate_requires_baton:
-            lines.append(
-                "Baton-protected store: only the session holding the consolidate baton "
-                "can consolidate; prepare_wrap from this server downgrades"
-            )
+            lines.append(self._baton_status_line(status.episodes_since_wrap))
 
         if status.continuity_chars is not None:
             lines.append(f"Continuity: {status.continuity_chars} chars")
@@ -1654,8 +1688,12 @@ def start_server(
     skip_integrity: bool = False,
     no_audit: bool = False,
     audit_retention_days: int | None = None,
+    session_id: str | None = None,
 ) -> None:
     """Start the MCP server with the given configuration.
+
+    ``session_id`` (else ``ANNEAL_MEMORY_SESSION_ID``) is the session this server
+    wraps as; see :class:`Server`.
 
     Called by main() (standalone entry point) and by the CLI dispatcher's
     ``serve`` subcommand. Factored out so callers don't need to reconstruct
@@ -1705,8 +1743,10 @@ def start_server(
         print(f"Error: {exc}", file=sys.stderr)
         sys.exit(1)
 
+    if session_id is None:
+        session_id = os.environ.get("ANNEAL_MEMORY_SESSION_ID") or None
     try:
-        server = Server(store)
+        server = Server(store, session_id=session_id)
         server.run()
     finally:
         store.close()
@@ -1760,6 +1800,13 @@ def main() -> None:
         default=0,
         help="Auto-cleanup rotated audit files older than N days (default: 0=keep forever)",
     )
+    parser.add_argument(
+        "--session-id",
+        default=None,
+        help="The session this server wraps as (default: $ANNEAL_MEMORY_SESSION_ID). On a "
+             "baton-protected store a wrap consolidates only if the operator has claimed "
+             "the baton for it: anneal-memory baton claim NAME",
+    )
 
     args = parser.parse_args()
 
@@ -1809,6 +1856,7 @@ def main() -> None:
         skip_integrity=args.skip_integrity,
         no_audit=args.no_audit,
         audit_retention_days=audit_retention,
+        session_id=args.session_id or None,
     )
 
 

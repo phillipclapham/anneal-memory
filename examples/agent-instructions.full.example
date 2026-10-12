@@ -182,6 +182,9 @@ don't lean on the backstop.)
   The wrap sequence is prepare_wrap → compress → save_continuity.
   All three steps, every time. If `prepare_wrap` returns "No
   episodes" — there's nothing to compress. Skip the wrap.
+  If `prepare_wrap` downgrades to capture-only, nothing is lost: tell your
+  human what it says (episodes waiting, and the one claim command).
+  Consolidating is the operator's act; never try to claim the baton.
 
   An explicit wrap produces better continuity than stopping without
   one. Always encourage wrapping before ending a session.

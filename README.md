@@ -89,10 +89,15 @@ anneal-memory --project-name MyAgent init
 anneal-memory record "Chose PostgreSQL as the database for ACID" --type decision
 anneal-memory search "database"
 
+# Consolidation is the operator's act: a new store wraps only under a session
+# you have claimed the baton for. Claim once (init --no-baton opts out).
+anneal-memory baton claim me
+
 # Agent-driven compression (same workflow as library and MCP)
-anneal-memory --project-name MyAgent prepare-wrap           # Get compression package
+anneal-memory --project-name MyAgent prepare-wrap --session-id me    # Get compression package
 # Agent compresses...
-anneal-memory --project-name MyAgent save-continuity out.md # Save with validation
+anneal-memory --project-name MyAgent save-continuity out.md \
+    --session-id me --wrap-token <token from prepare-wrap>            # Save with validation
 
 # Operator commands (things MCP can't do)
 anneal-memory stats                  # Detailed analytics
@@ -121,7 +126,7 @@ The server is one command — `anneal-memory --project-name MyProject serve` —
   "mcpServers": {
     "anneal_memory": {
       "command": "uvx",
-      "args": ["anneal-memory", "--project-name", "MyProject", "serve"]
+      "args": ["anneal-memory", "--project-name", "MyProject", "serve", "--session-id", "claude-code"]
     }
   }
 }
@@ -132,7 +137,7 @@ The server is one command — `anneal-memory --project-name MyProject serve` —
 ```toml
 [mcp_servers.anneal_memory]
 command = "uvx"
-args = ["anneal-memory", "--project-name", "MyProject", "serve"]
+args = ["anneal-memory", "--project-name", "MyProject", "serve", "--session-id", "codex"]
 ```
 
 **Gemini CLI** — `~/.gemini/settings.json` (or a project `.gemini/settings.json`):
@@ -142,7 +147,7 @@ args = ["anneal-memory", "--project-name", "MyProject", "serve"]
   "mcpServers": {
     "anneal_memory": {
       "command": "uvx",
-      "args": ["anneal-memory", "--project-name", "MyProject", "serve"]
+      "args": ["anneal-memory", "--project-name", "MyProject", "serve", "--session-id", "gemini"]
     }
   }
 }
@@ -151,6 +156,8 @@ args = ["anneal-memory", "--project-name", "MyProject", "serve"]
 Gemini CLI starts MCP servers only from a folder it trusts: in an untrusted folder `gemini mcp list` shows the server as `Disconnected` even though the config is right (trust the folder, or set `GEMINI_CLI_TRUST_WORKSPACE=true`).
 
 Then add the agent-instructions snippet — [`agent-instructions.lean.example`](examples/agent-instructions.lean.example) (the always-loaded baseline) or the [`.full.example`](examples/agent-instructions.full.example) reference — to the harness's instructions file (`CLAUDE.md` for Claude Code, `AGENTS.md` for Codex, `GEMINI.md` for Gemini CLI). It teaches the agent *when* and *how* to use the memory tools; without it the tools are available but the agent won't know the cognitive workflow. (See [Claude Code / agent-harness adopters](#claude-code--agent-harness-adopters-skill--snippet) below for the lean/Skill/full layering.)
+
+**Consolidation is yours.** Agents record episodes freely. Rewriting the agent's identity layer (the wrap) is the operator's act, so a new store consolidates only through a server whose `--session-id` you have claimed the baton for, once, from a shell: `anneal-memory baton claim claude-code`. Until then the agent's wrap downgrades to capture-only, and both the downgrade and the `status` tool say how many episodes are waiting and the command to run. The id comes from this config, which you write; no tool lets an agent choose it or claim the baton. Every conversation started from one config shares its id, so a claim designates a client, not a single conversation. Move the baton between clients with `baton claim NAME --take`; see who holds it with `baton status`.
 
 > **Pinned install:** `uvx` fetches the latest published version on each run. For a pinned install, `pip install anneal-memory`, then set `"command": "anneal-memory"` with `"args": ["--project-name", "MyProject", "serve"]` — or point `command` at an absolute path to the installed binary.
 
@@ -253,7 +260,7 @@ The library implements a set of structural defenses around how patterns earn gra
 
 **No save refusal on unlinked wraps (AM-LINKGATE, removed in 0.9.26).** From 0.9.11 to 0.9.25 `save_continuity` refused a wrap whose offered co-citation pairs recorded no Hebbian link. It was removed once pattern recall stopped reading links: blocking an identity save over a layer recall does not read cost more than it bought. That wrap now saves and AM-WARN Signal B (below) warns. `allow_unlinked` is still accepted and does nothing, and `linkgate_overridden` is always `false`. Every save reports `citation_spread`, the number of distinct episodes from this wrap that its graduation lines cited (demoted lines included), so a citation habit stays visible as a number.
 
-**Single-consolidator gate (structural; opt-in).** Recording episodes is afferent — append-only, parallel-safe, every session does it. Consolidating — recomposing the compressed identity layer — is efferent: it rewrites shared state, so it's gated to human authority. When several sessions run in parallel over one store (the real operating mode of a multi-conversation operator), each could independently recompose the felt/identity layer from its own narrow slice of context, and the identity memory thrashes. The gate makes the discipline structural: a consolidation proceeds only if this session holds the consolidate baton — otherwise it auto-downgrades to capture-only and surfaces a flag. The operator designates one session as the consolidate seat by claiming the baton, and taking it from another session requires an explicit `take=True`, so automation cannot take it by accident. (Before 0.9.13 a session that was the only live one was authorized without the baton; that rule is now an explicit `allow_sole_live=True` opt-in, because "only live session" is judged from a registry snapshot a resumed session can race.) A store can also carry a policy, `Store.set_consolidate_requires_baton(True)`, that extends the gate to callers that never pass a `session_id`, including the CLI and MCP wrap: on such a store they downgrade, and a save must name the baton holder (`session_id`) as well as carry the prepare `wrap_token`. A wrap prepared with a `session_id` on any store is committed only by that same `session_id` (a save that omits it, or names another session even if it now holds the baton, is refused, since the token identifies the wrap, not who may commit it); the CLI and MCP cannot name a session when saving, so a gated wrap they cannot finish is abandoned with `wrap-cancel`, which for a gated wrap needs its `--wrap-token`, the preparing `--session-id`, or an explicit `--force` (MCP: `wrap_token`, `session_id`, `force`). Because the baton is a file outside the store's transaction, a take landing in the milliseconds between a save's final check and its commit is not seen; the take then applies to the next wrap. The whole layer is opt-in (it engages when a caller passes a `session_id`, or when the store carries that policy) and lives in coordination sidecars next to the store, never in the store's single-writer DB. Drift becomes a safe downgrade, not a silent identity-thrash.
+**Single-consolidator gate (structural; on by default for new stores).** Consolidation is the operator's act. A store created by `init` or by the MCP server requires the consolidate baton; `init --no-baton` creates an open one, and an existing store keeps whatever policy it has. The operator claims the baton for a session id once (`anneal-memory baton claim NAME`); a CLI wrap names it with `--session-id`, and the MCP server takes it from its launch config (`serve --session-id NAME` or `ANNEAL_MEMORY_SESSION_ID`), never from a tool argument. Recording episodes is afferent — append-only, parallel-safe, every session does it. Consolidating — recomposing the compressed identity layer — is efferent: it rewrites shared state, so it's gated to human authority. When several sessions run in parallel over one store (the real operating mode of a multi-conversation operator), each could independently recompose the felt/identity layer from its own narrow slice of context, and the identity memory thrashes. The gate makes the discipline structural: a consolidation proceeds only if this session holds the consolidate baton — otherwise it auto-downgrades to capture-only and surfaces a flag. The operator designates one session as the consolidate seat by claiming the baton, and taking it from another session requires an explicit `take=True`, so automation cannot take it by accident. (Before 0.9.13 a session that was the only live one was authorized without the baton; that rule is now an explicit `allow_sole_live=True` opt-in, because "only live session" is judged from a registry snapshot a resumed session can race.) The policy, `Store.set_consolidate_requires_baton(True)` (on by default for a store `init` or the MCP server creates; a `Store()` opened from Python keeps it off unless set), extends the gate to callers that pass no `session_id`: they downgrade, and a save must name the baton holder (`session_id`) as well as carry the prepare `wrap_token`. A wrap prepared with a `session_id` on any store is committed only by that same `session_id` (a save that omits it, or names another session even if it now holds the baton, is refused, since the token identifies the wrap, not who may commit it); a gated wrap that cannot be finished is abandoned with `wrap-cancel`, which for a gated wrap needs its `--wrap-token`, the preparing `--session-id`, or an explicit `--force` (MCP: `wrap_token`, `session_id`, `force`). Because the baton is a file outside the store's transaction, a take landing in the milliseconds between a save's final check and its commit is not seen; the take then applies to the next wrap. The layer engages when a caller passes a `session_id` or the store carries that policy, and lives in coordination sidecars next to the store, never in the store's single-writer DB. Drift becomes a safe downgrade, not a silent identity-thrash.
 
 **Dead-Hebbian-graph warning (AM-WARN), two signals and a quiet stat.** A citation-gated association layer can silently stop wiring — the failure runs invisibly for months while every wrap still reports success. AM-WARN warns at the end of a wrap in two cases. **(A)** graduated patterns carried evidence citations but *none* resolved to an episode in this store — typically ids minted in another namespace — so the graph cannot form at all. **(B)** co-citation pairs *were* available but nothing formed or strengthened, meaning the association write path itself is mis-wired. Both are structural and false-positive-free: they fire only on a genuine mis-wire. **(C)** (AM-LINKGATE) — graduations validated and their citations resolved, but no graduation offered a co-citation pair, so zero links formed — is a **quiet stat**, not a warning: it shows as `associations_formed == 0` and `associations_strengthened == 0` in the save result. It warned as a discipline reminder until 0.9.26 and went quiet then, because recall no longer reads links and one genuine citation per pattern is often the honest one. Nothing in AM-WARN refuses a save. A wrap with no graduations at all stays silent. Only *cited* carryforwards are counted, so a bare carry cannot fabricate a wrong-namespace alarm. AM-WARN checks that links get written. Recall does not read them (see *What the links do, measured*).
 

@@ -43,6 +43,10 @@ instructions (this step IS the thinking; principles over facts) →
 the validation pipeline working, not an error; don't re-run to chase a
 clean report. Cite real episode IDs honestly — you are the first line of
 defense, the library is the second.
+Wrap with `--session-id` if your operator gave you one. If the wrap
+downgrades to capture-only (exit 3), nothing is lost: tell your human
+what it says (episodes waiting, and the one claim command).
+Consolidating is the operator's act; never run `baton claim` yourself.
 
 **Operator inspection:** `status` · `stats` · `graph` · `history` ·
 `audit` · `verify` · `export` (all support `--json`).

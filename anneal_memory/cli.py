@@ -58,6 +58,7 @@ from pathlib import Path
 from typing import Any, NoReturn
 
 from . import __version__
+from . import sessions
 from .audit import (
     AuditTrail,
     _CORRUPT_MANIFEST as _CORRUPT_AUDIT_MANIFEST,
@@ -456,7 +457,15 @@ def cmd_init(args: argparse.Namespace) -> None:
         # pre-AM-INITSCHEMA. (LOW-3, codex L3.)
         section_schema=(None if schema_name == "default" else section_schema),
     )
-    store.close()
+    # KL-19 (Phill 10-12, ruling A): consolidation is the operator's act, so a new
+    # store requires the consolidate baton unless the operator opts out here.
+    # Existing stores are never touched: init refuses an existing path above.
+    requires_baton = not getattr(args, "no_baton", False)
+    try:
+        if requires_baton:
+            store.set_consolidate_requires_baton(True)
+    finally:
+        store.close()
 
     headings = [s["heading"] for s in section_schema]
     if args.json:
@@ -466,6 +475,7 @@ def cmd_init(args: argparse.Namespace) -> None:
             "project": project,
             "schema": schema_name,
             "sections": headings,
+            "consolidate_requires_baton": requires_baton,
         })
         return
 
@@ -474,6 +484,15 @@ def cmd_init(args: argparse.Namespace) -> None:
     print(f"  Continuity: {db_path.parent / f'{db_path.stem}.continuity.md'}")
     print(f"  Project: {project}")
     print(f"  Schema: {schema_name} ({' / '.join(headings)})")
+    if requires_baton:
+        print(
+            "  Consolidation: operator-gated. Agents record freely; a wrap consolidates only\n"
+            "  under a session id the operator has claimed the baton for, once:\n"
+            f"    anneal-memory --db {shlex.quote(str(db_path))} baton claim NAME\n"
+            "  (then wrap with --session-id NAME, or start the MCP server with --session-id NAME)"
+        )
+    else:
+        print("  Consolidation: open (--no-baton): any session may wrap.")
 
 
 def _missing_required_headings(content: str, schema: list[SectionSpec]) -> list[str]:
@@ -575,6 +594,7 @@ def cmd_status(args: argparse.Namespace) -> None:
                 "last_wrap_at": status.last_wrap_at,
                 "wrap_in_progress": status.wrap_in_progress,
                 "consolidate_requires_baton": status.consolidate_requires_baton,
+                "baton_holder": _baton_holder_or_error(store),
                 "tombstone_count": status.tombstone_count,
                 "continuity_chars": status.continuity_chars,
                 "episodes_by_type": status.episodes_by_type,
@@ -624,8 +644,7 @@ def cmd_status(args: argparse.Namespace) -> None:
         if status.wrap_in_progress:
             print(f"  !! Wrap in progress")
         if status.consolidate_requires_baton:
-            print("  Baton-protected: only the session holding the consolidate baton can "
-                  "consolidate; prepare-wrap here downgrades")
+            print(_baton_status_line(store, status.episodes_since_wrap))
         if status.continuity_chars is not None:
             print(f"Continuity: {status.continuity_chars:,} chars")
         else:
@@ -1526,6 +1545,7 @@ def cmd_prepare_wrap(args: argparse.Namespace) -> None:
                 store,
                 max_chars=args.max_chars,
                 staleness_days=args.staleness_days,
+                session_id=getattr(args, "session_id", None),
                 # AM-CRYSTAL-MIGRATE + AM-CRYSTAL-OPTIN: the crystallized tier lives
                 # beside the db (<stem>.crystal.json). OPT-IN — passed only when the
                 # operator has a crystal store (file exists) or --crystal is set; else
@@ -1545,10 +1565,10 @@ def cmd_prepare_wrap(args: argparse.Namespace) -> None:
             if result["status"] != "ready":
                 # Emit wrap_token: null on the empty and downgraded paths so
                 # jq-style scrapers can uniformly access the field without a
-                # missing-key error. This command passes no session_id, so
-                # "downgraded" means a require-baton store, another session's
-                # gated wrap, or a wrap replaced mid-decision; without this
-                # branch it printed a bare {"wrap_token": null} and dropped the reason.
+                # missing-key error. "downgraded" means a require-baton store
+                # with no --session-id, a session not holding the baton, another
+                # session's gated wrap, or a wrap replaced mid-decision; without
+                # this branch it printed a bare {"wrap_token": null} and dropped the reason.
                 _print_json({
                     "status": result["status"],
                     "message": result["message"],
@@ -1665,6 +1685,7 @@ def cmd_save_continuity(args: argparse.Namespace) -> None:
                 text,
                 affective_state=affective_state,
                 wrap_token=wrap_token,
+                session_id=getattr(args, "session_id", None),
                 allow_shrink=getattr(args, "allow_shrink", False),
                 allow_unlinked=getattr(args, "allow_unlinked", False),
                 # AM-CRYSTAL-MIGRATE + AM-CRYSTAL-OPTIN: pass the crystal store so the
@@ -3537,6 +3558,84 @@ def cmd_history(args: argparse.Namespace) -> None:
             print()
 
 
+def _baton_holder_or_error(store: Store) -> str | None:
+    """The baton holder for a status surface; an unreadable baton reads as the
+    string ``"<unreadable>"`` so a status call never crashes on it."""
+    try:
+        return sessions.baton_holder(store.continuity_path)
+    except (OSError, json.JSONDecodeError):
+        return "<unreadable>"
+
+
+def _baton_status_line(store: Store, episodes_since_wrap: int) -> str:
+    """KL-19's cadence signal on ``status``: on a baton-protected store, say who may
+    consolidate and how many episodes are waiting, with the claim command when
+    nobody may."""
+    holder = _baton_holder_or_error(store)
+    if holder is None:
+        return (
+            f"  Baton-protected, no holder: {episodes_since_wrap} episode(s) since the last "
+            "wrap; claim the baton to consolidate:\n"
+            f"    anneal-memory --db {shlex.quote(str(store.path))} baton claim NAME"
+        )
+    return (
+        f"  Baton-protected: only session {holder!r} consolidates "
+        f"({episodes_since_wrap} episode(s) since the last wrap)"
+    )
+
+
+def cmd_baton(args: argparse.Namespace) -> None:
+    """Claim, release or show the consolidate baton (KL-19).
+
+    The operator's command: it is what turns a session id into one allowed to
+    consolidate. The MCP server exposes no tool for it, so an agent cannot
+    designate itself; the CLI cannot tell a human from an agent with a shell,
+    which is the operator's to manage (see sessions.claim_baton)."""
+    with _open_store(args) as store:
+        path = store.continuity_path
+        op = args.baton_command
+        if op == "claim":
+            try:
+                claim = sessions.claim_baton(path, args.name, take=args.take)
+            except sessions.BatonHeldError as exc:
+                print(f"Error: {exc} (pass --take to move it)", file=sys.stderr)
+                sys.exit(1)
+            if args.json:
+                _print_json(dict(claim))
+                return
+            prev = claim["previous_holder"]
+            if prev == args.name:
+                print(f"Session {args.name!r} already holds the baton.")
+            elif prev:
+                print(f"Baton moved from {prev!r} to {args.name!r}.")
+            else:
+                print(f"Session {args.name!r} holds the baton.")
+            return
+        if op == "release":
+            released = sessions.release_baton(path, args.name)
+            if args.json:
+                _print_json({"released": released, "session_id": args.name})
+            elif released:
+                print(f"Released the baton held by {args.name!r}.")
+            else:
+                print(f"Session {args.name!r} does not hold the baton; nothing released.")
+            if not released:
+                sys.exit(1)
+            return
+        status = store.status()
+        holder = _baton_holder_or_error(store)
+        if args.json:
+            _print_json({
+                "consolidate_requires_baton": status.consolidate_requires_baton,
+                "baton_holder": holder,
+                "episodes_since_wrap": status.episodes_since_wrap,
+            })
+            return
+        print(f"Policy: {'baton required' if status.consolidate_requires_baton else 'open (any session may wrap)'}")
+        print(f"Holder: {holder or 'none'}")
+        print(f"Episodes since last wrap: {status.episodes_since_wrap}")
+
+
 def cmd_serve(args: argparse.Namespace) -> None:
     """Start the MCP server.
 
@@ -3566,6 +3665,7 @@ def cmd_serve(args: argparse.Namespace) -> None:
         skip_integrity=getattr(args, "skip_integrity", False),
         no_audit=getattr(args, "no_audit", False),
         audit_retention_days=audit_ret if audit_ret > 0 else None,
+        session_id=getattr(args, "session_id", None) or None,
     )
 
 
@@ -4797,6 +4897,14 @@ def build_parser() -> argparse.ArgumentParser:
              "required for a cognitive-partnership entity so the felt-layer "
              "proportion-gate and schema-aware budget actually fire.",
     )
+    sub.add_argument(
+        "--no-baton",
+        action="store_true",
+        help="Create the store with consolidation open to any session. By default a "
+             "new store requires the consolidate baton: agents record freely, and a "
+             "wrap consolidates only under a session id the operator has claimed "
+             "('baton claim').",
+    )
     sub.set_defaults(func=cmd_init)
 
     # -- set-schema --
@@ -5046,6 +5154,13 @@ def build_parser() -> argparse.ArgumentParser:
              "crystallizing a pattern. Without it (and no existing store) the "
              "wrap is byte-identical to the pre-crystal pipeline.",
     )
+    sub.add_argument(
+        "--session-id",
+        help="Wrap as this session. On a store that requires the consolidate baton "
+             "(the default for a new store), the wrap consolidates only if the "
+             "operator has claimed the baton for this name ('baton claim NAME'); "
+             "otherwise it downgrades to capture-only and exits 3.",
+    )
     sub.set_defaults(func=cmd_prepare_wrap)
 
     # -- save-continuity --
@@ -5103,7 +5218,41 @@ def build_parser() -> argparse.ArgumentParser:
              "('derive allow'), so its State lines are run at this save "
              "(see docs/rederive.md).",
     )
+    sub.add_argument(
+        "--session-id",
+        help="The session the wrap was prepared under (prepare-wrap --session-id). "
+             "Required, with --wrap-token, on a store that requires the consolidate baton.",
+    )
     sub.set_defaults(func=cmd_save_continuity)
+
+    # -- baton --
+    baton_parser = subparsers.add_parser(
+        "baton",
+        help="Claim, release or show the consolidate baton (operator only)",
+        parents=[json_parent],
+    )
+    baton_sub = baton_parser.add_subparsers(dest="baton_command", required=True)
+    bp = baton_sub.add_parser(
+        "claim", parents=[json_parent],
+        help="Let the named session consolidate this store",
+    )
+    bp.add_argument("name", help="The session id a wrap will run under (--session-id)")
+    bp.add_argument(
+        "--take", action="store_true",
+        help="Move the baton from the session that holds it now",
+    )
+    bp.set_defaults(func=cmd_baton)
+    bp = baton_sub.add_parser(
+        "release", parents=[json_parent],
+        help="Release the baton if the named session holds it",
+    )
+    bp.add_argument("name")
+    bp.set_defaults(func=cmd_baton)
+    bp = baton_sub.add_parser(
+        "status", parents=[json_parent],
+        help="Show the policy, the holder and the episodes waiting",
+    )
+    bp.set_defaults(func=cmd_baton)
 
     # -- wrap-status --
     sub = subparsers.add_parser(
@@ -5165,6 +5314,12 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_argument("--generate-integrity", action="store_true", help="Generate tool-integrity.json and exit")
     sub.add_argument("--verify-audit", action="store_true", help="Verify audit trail and exit")
     sub.add_argument("--audit-retention-days", type=int, default=0, help="Auto-cleanup rotated audit files")
+    sub.add_argument(
+        "--session-id",
+        help="The session this server wraps as (default: $ANNEAL_MEMORY_SESSION_ID). "
+             "Written into the MCP config by the operator; on a baton-protected store "
+             "the server's wraps consolidate only after 'baton claim NAME'.",
+    )
     sub.set_defaults(func=cmd_serve)
 
     # -- export --

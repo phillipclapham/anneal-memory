@@ -4,6 +4,21 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
 
 ## [Unreleased]
 
+### Changed — consolidation is the operator's act by default (KL-19)
+- ⚠ **Onboarding change.** A store created by `anneal-memory init`, or created fresh by the MCP server on its first
+  open, requires the consolidate baton (`Store.set_consolidate_requires_baton(True)`). Agents record freely; a wrap
+  consolidates only under a session id the operator has claimed the baton for. `init --no-baton` creates an open
+  store. An existing store keeps its policy, and a `Store()` opened from Python is unchanged.
+- New `anneal-memory baton claim NAME [--take] | release NAME | status`. The MCP server has no tool that claims.
+- `prepare-wrap` and `save-continuity` take `--session-id`. The MCP server wraps as `serve --session-id NAME` (or
+  `ANNEAL_MEMORY_SESSION_ID`), set in the config the operator writes; a `session_id` tool argument is not read. Before
+  this, a baton-protected store could not consolidate over the CLI or MCP at all.
+- A downgrade, `status` (CLI and MCP) and `baton status` say how many episodes are waiting since the last wrap and give
+  the exact claim command. `status --json` adds `baton_holder`.
+- Known edges: every conversation started from one MCP config shares its session id, so a claim designates a client
+  config, not a conversation. An MCP server does not register as a live session (closing one would release the
+  operator's claim), so a refused server's message calls the holder `stale-baton-holder` even while that server runs.
+
 ## [0.9.43] — 2026-10-10
 
 ### Added — `SporeStore.apply`: land one decided spore effect at most once, with a typed outcome

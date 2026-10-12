@@ -414,7 +414,6 @@ class TestMigrateSubprocess:
 def test_durable_facts_entry_keyed_at_0_9_27() -> None:
     [entry] = [e for e in MIGRATION_MANIFEST if e["feature"] == "AM-DURABLE-FACTS"]
     assert entry["version"] == "0.9.27"
-    assert MIGRATION_MANIFEST[-1] is entry
     assert entry["files"] == ["CLAUDE.md", "AGENTS.md", "GEMINI.md"]
     for phrase in ("[drop-durable:", "— cues:", "set-schema <its schema name>",
                    "set_section_schema", "pending change"):

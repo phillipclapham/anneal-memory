@@ -39,6 +39,9 @@ step IS the thinking; principles over facts) → `save_continuity`.
 Demoted graduations are the validation pipeline working, not an error;
 don't re-run to chase a clean report. Cite real episode IDs honestly —
 you are the first line of defense, the library is the second.
+If `prepare_wrap` downgrades to capture-only, nothing is lost: tell your
+human what it says (episodes waiting, and the one claim command).
+Consolidating is the operator's act; never try to claim the baton.
 
 **Staying current:** after upgrading the package, run `anneal-memory
 migrate check` — it proposes edits to *these* instructions so they don't

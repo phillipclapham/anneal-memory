@@ -26,7 +26,12 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
   config, not a conversation. An MCP server does not register as a live session (closing one would release the
   operator's claim), so a refused server's message calls the holder `stale-baton-holder` and counts 0 live sessions
   even while that server runs. `baton` opens the store write-capable, so it can wait on a peer's write lock. A process
-  killed between creating a store in `serve` and setting the policy leaves that store open.
+  killed between creating a store in `serve` and setting the policy leaves that store open, and two first launches
+  racing on one fresh path (or a first launch racing `init --no-baton`) decide freshness from a size check before
+  the open; a racing open server's save re-checks the policy, so it does not consolidate. A server started without
+  `--session-id` still accepts `session_id` on `wrap_cancel` (the 0.9.22 contract), which can discard another
+  session's in-flight compression but never consolidates; a server with an id cancels a same-id wrap the operator
+  prepared from the CLI, since the id designates the client.
 
 ## [0.9.43] — 2026-10-10
 

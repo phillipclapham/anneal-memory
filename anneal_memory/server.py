@@ -1785,6 +1785,11 @@ def start_server(
     if fresh:
         try:
             store.set_consolidate_requires_baton(True)
+        except StoreError as exc:
+            store.close()
+            print(f"Error: could not set the consolidate-baton policy on the new store "
+                  f"{db_path}: {exc}", file=sys.stderr)
+            sys.exit(1)
         except BaseException:
             store.close()
             raise

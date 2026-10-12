@@ -97,7 +97,7 @@ anneal-memory baton claim me
 anneal-memory --project-name MyAgent prepare-wrap --session-id me    # Get compression package
 # Agent compresses...
 anneal-memory --project-name MyAgent save-continuity out.md \
-    --session-id me --wrap-token <token from prepare-wrap>            # Save with validation
+    --session-id me --wrap-token "$WRAP_TOKEN"                        # the 'Wrap token:' line
 
 # Operator commands (things MCP can't do)
 anneal-memory stats                  # Detailed analytics

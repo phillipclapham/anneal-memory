@@ -464,6 +464,11 @@ def cmd_init(args: argparse.Namespace) -> None:
     try:
         if requires_baton:
             store.set_consolidate_requires_baton(True)
+    except StoreError as exc:
+        print(f"Error: the store was created at {db_path}, but its consolidate-baton "
+              f"policy could not be set ({exc}), so it is open to any session. Delete "
+              "the new file and re-run init.", file=sys.stderr)
+        sys.exit(1)
     finally:
         store.close()
 
@@ -3615,6 +3620,17 @@ def _baton_status_line(store: Store, episodes_since_wrap: int) -> str:
     )
 
 
+def _baton_io_error(args: argparse.Namespace, op: str, exc: OSError) -> NoReturn:
+    """A baton sidecar that cannot be written or locked: a clean error, never a
+    traceback, and never a report of success."""
+    msg = f"baton {op} failed: the baton file could not be written or locked ({exc})"
+    if getattr(args, "json", False):
+        _print_json({"error": msg})
+    else:
+        print(f"Error: {msg}", file=sys.stderr)
+    sys.exit(1)
+
+
 def cmd_baton(args: argparse.Namespace) -> None:
     """Claim, release or show the consolidate baton (KL-19).
 
@@ -3634,8 +3650,11 @@ def cmd_baton(args: argparse.Namespace) -> None:
                        f"{args.name!r}")
                 if args.json:
                     _print_json({"error": msg, "baton_holder": exc.holder})
-                print(f"Error: {msg}", file=sys.stderr)
+                else:
+                    print(f"Error: {msg}", file=sys.stderr)
                 sys.exit(1)
+            except OSError as exc:
+                _baton_io_error(args, "claim", exc)
             if args.json:
                 _print_json(dict(claim))
                 return
@@ -3651,7 +3670,10 @@ def cmd_baton(args: argparse.Namespace) -> None:
                 print(f"Session {args.name!r} holds the baton.")
             return
         if op == "release":
-            released = sessions.release_baton(path, args.name)
+            try:
+                released = sessions.release_baton(path, args.name)
+            except OSError as exc:
+                _baton_io_error(args, "release", exc)
             if args.json:
                 _print_json({"released": released, "session_id": args.name})
             elif released:
@@ -5272,7 +5294,6 @@ def build_parser() -> argparse.ArgumentParser:
     baton_parser = subparsers.add_parser(
         "baton",
         help="Claim, release or show the consolidate baton (operator only)",
-        parents=[json_parent],
     )
     baton_sub = baton_parser.add_subparsers(dest="baton_command", required=True)
     bp = baton_sub.add_parser(

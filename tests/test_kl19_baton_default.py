@@ -348,3 +348,42 @@ def test_an_empty_store_says_nothing_is_waiting(init_db):
         assert "Nothing is waiting" in out and "baton claim" not in out
     finally:
         s.close()
+
+
+# -- L3 r1 fixes --
+
+def test_the_recipe_takes_when_a_plain_claim_would_be_refused(init_db):
+    _record(init_db)
+    assert _cli(init_db, "baton", "claim", "other").returncode == 0
+    no_id = json.loads(_cli(init_db, "prepare-wrap", "--json").stdout)["message"]
+    assert "baton claim NAME --take" in no_id
+    s = Store(str(init_db))
+    try:
+        sessions._baton_path(s.continuity_path).write_text("[]")
+    finally:
+        s.close()
+    unreadable = json.loads(
+        _cli(init_db, "prepare-wrap", "--json", "--session-id", "me").stdout)["message"]
+    assert "baton claim me --take" in unreadable
+
+
+def test_a_held_claim_under_json_writes_json_only(init_db):
+    assert _cli(init_db, "baton", "claim", "a").returncode == 0
+    run = _cli(init_db, "baton", "claim", "b", "--json")
+    assert run.returncode == 1 and run.stderr == ""
+    assert json.loads(run.stdout)["baton_holder"] == "a"
+
+
+@pytest.mark.parametrize("op", ["claim", "release"])
+def test_a_baton_that_cannot_be_written_is_a_clean_error(init_db, monkeypatch, capsys, op):
+    from anneal_memory import cli
+
+    def boom(*a, **k):
+        raise PermissionError(13, "Permission denied")
+
+    monkeypatch.setattr(cli.sessions, f"{op}_baton", boom)
+    args = cli.build_parser().parse_args(["--db", str(init_db), "baton", op, "me"])
+    with pytest.raises(SystemExit) as exc:
+        args.func(args)
+    assert exc.value.code == 1
+    assert f"baton {op} failed" in capsys.readouterr().err

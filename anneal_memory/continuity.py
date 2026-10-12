@@ -1649,14 +1649,19 @@ def _downgraded_empty(message: str, episode_count: int = 0) -> PrepareWrapResult
     )
 
 
-def _claim_recipe(
-    store: Store, session_id: str | None, episode_count: int, holder: str | None = None
-) -> str:
+def _claim_recipe(store: Store, session_id: str | None, episode_count: int) -> str:
     """The cadence line a downgrade carries (KL-19): how much is waiting, and the one
     command that lets a named session consolidate. Consolidation is the operator's act,
-    so the command is addressed to the operator: an agent shows it, never runs it."""
+    so the command is addressed to the operator: an agent shows it, never runs it.
+    The baton is read here so the command carries ``--take`` exactly when a plain
+    claim would be refused (held by another session, or unreadable)."""
     if episode_count == 0:
         return "Nothing is waiting to be consolidated yet."
+    try:
+        holder = sessions.baton_holder(store.continuity_path)
+        take = " --take" if holder is not None and holder != session_id else ""
+    except (OSError, json.JSONDecodeError):
+        take = " --take"
     db = shlex.quote(str(store.path))
     waiting = (
         f"{episode_count} episode(s) since the last wrap are waiting to be consolidated. "
@@ -1666,9 +1671,8 @@ def _claim_recipe(
         return waiting + (
             "to consolidate, the operator gives the wrap a session id (CLI: --session-id "
             "NAME; MCP: start the server with --session-id NAME) and claims the baton for "
-            f"it once: anneal-memory --db {db} baton claim NAME"
+            f"it once: anneal-memory --db {db} baton claim NAME{take}"
         )
-    take = " --take" if holder is not None and holder != session_id else ""
     return waiting + (
         "to let this session consolidate, the operator runs: "
         f"anneal-memory --db {db} baton claim {shlex.quote(session_id)}{take}"
@@ -1734,7 +1738,7 @@ def _consolidate_gate(
             f"{auth['baton_holder'] or 'none'}. Capture (afferent) is unaffected. "
             f"A consolidate needs the baton, which the operator assigns to one "
             f"session; a session does not claim it on its own initiative. "
-            + _claim_recipe(store, session_id, episode_count, auth["baton_holder"])
+            + _claim_recipe(store, session_id, episode_count)
         ),
         episode_count=episode_count,
         package=None,

@@ -283,12 +283,36 @@ def _truncate(text: str, max_len: int = 80) -> str:
     return text[: max_len - 3] + "..."
 
 
+_DEFAULT_DB = "~/.anneal-memory/memory.db"
+
+
 def _default_db() -> str:
-    """Get the default database path (env var or ~/.anneal-memory/memory.db)."""
+    """Get the default database path (env var or ~/.anneal-memory/memory.db).
+
+    Returned unexpanded when no home directory can be found (a launcher with a
+    minimal environment, or a container uid with no passwd entry), so building
+    the parser never needs one. Until 2026-10-12 it expanded here and crashed
+    every invocation at startup, ``--db`` included; now only a command that
+    uses the default needs a home, and :func:`_expand_db` says so.
+    """
     env_db = os.environ.get("ANNEAL_MEMORY_DB")
     if env_db:
         return env_db
-    return str(Path("~/.anneal-memory/memory.db").expanduser())
+    try:
+        return str(Path(_DEFAULT_DB).expanduser())
+    except RuntimeError:
+        return _DEFAULT_DB
+
+
+def _expand_db(parser: argparse.ArgumentParser, db: str) -> str:
+    """Expand ``~`` in ``--db``, or exit with a usage error naming the fix."""
+    try:
+        return str(Path(db).expanduser())
+    except RuntimeError:
+        parser.error(
+            f"cannot find a home directory to expand {db!r}; "
+            "pass --db with a full path or set ANNEAL_MEMORY_DB"
+        )
 
 
 # -- Shared --json argparse parent --
@@ -5851,6 +5875,7 @@ def main() -> None:
     # CLI subcommand present — reject any unrecognized arguments
     if remaining:
         parser.error(f"unrecognized arguments: {' '.join(remaining)}")
+    args.db = _expand_db(parser, args.db)
 
     # Dispatch to subcommand handler, behind the ONE contention boundary.
     #

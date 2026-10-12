@@ -33,6 +33,27 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
   session's in-flight compression but never consolidates; a server with an id cancels a same-id wrap the operator
   prepared from the CLI, since the id designates the client.
 
+### Fixed — startup no longer needs a home directory
+- With `ANNEAL_MEMORY_DB` unset and no home directory to be found (a launcher that drops `USERPROFILE`/`HOMEPATH`, or a
+  POSIX container uid with no passwd entry and no `HOME`), every invocation crashed with `RuntimeError: Could not
+  determine home directory` while the parser was being built, `--db` included, and the MCP server never started.
+  The default path is now expanded only when a command uses it, and then a missing home is a usage error (exit 2)
+  naming `--db` and `ANNEAL_MEMORY_DB`. The CLI and the MCP server's parser share one default.
+
+### Known edges (sorted 2026-10-12 against the reachability line; each was open before this release)
+- Two cited episodes that disagree both ground a pattern: anneal does not compare them. The graduation reaches the
+  `probe status` worklist, where the operator holds semantic truth.
+- An `on_event` callback that raises `KeyboardInterrupt` or `SystemExit` escapes the append after the entry is on disk,
+  so the next entry's `dropped_before` counts a write that landed (the README's audit paragraph states the reading).
+- `status().prune_failures` counts only the open `Store`'s own post-commit prune failures, so a CLI `status` cannot
+  see a failure from an earlier process; the MCP server, one long-lived `Store`, reports it. A failed prune keeps
+  episodes longer, it never drops one.
+- A hand-edited audit manifest whose sealed-file record carries a non-string `last_ts` makes retention cleanup raise;
+  anneal never writes one.
+- Mixed versions writing one store: an anneal before 0.9.42 takes no audit append lock, so writing beside a newer one
+  breaks the chain; 0.9.9 does not know a quarantine marker, writes a fresh manifest and reports the trail valid. Nothing on the
+  newer side can detect either: run one release on every writer.
+
 ## [0.9.43] — 2026-10-10
 
 ### Added — `SporeStore.apply`: land one decided spore effect at most once, with a typed outcome

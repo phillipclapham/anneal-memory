@@ -1313,9 +1313,8 @@ class TestEnvVars:
         "USERPROFILE (or HOMEDRIVE+HOMEPATH); this test's specific "
         "technique — clearing os.environ ENTIRELY — is not how a real "
         "Windows caller reaches a missing USERPROFILE (a sanitized/minimal "
-        "launcher environment can still lack it; see README.md's "
-        "Windows section for the reachable, unfixed startup "
-        "crash this skip does not paper over)",
+        "launcher environment can still lack it; the no-home tests "
+        "below patch Path.expanduser instead and run everywhere)",
     )
     def test_default_db_without_env(self):
         with mock.patch.dict(os.environ, {}, clear=True):
@@ -1323,6 +1322,52 @@ class TestEnvVars:
             result = _default_db()
             assert "anneal-memory" in result
             assert "memory.db" in result
+
+    @staticmethod
+    def _no_home(monkeypatch):
+        """No home directory: what a minimal launcher environment (Windows
+        without USERPROFILE) or a container uid with no passwd entry gives
+        pathlib. Patched at Path.expanduser so it holds on every OS."""
+        real = Path.expanduser
+
+        def expanduser(self):
+            if str(self).startswith("~"):
+                raise RuntimeError("Could not determine home directory.")
+            return real(self)
+
+        monkeypatch.delenv("ANNEAL_MEMORY_DB", raising=False)
+        monkeypatch.setattr(Path, "expanduser", expanduser)
+
+    def test_no_home_explicit_db_runs(self, monkeypatch, tmp_path, capsys):
+        """An explicit --db needs no home (until 2026-10-12 every invocation
+        crashed at parser build, --db included)."""
+        self._no_home(monkeypatch)
+        db = str(tmp_path / "m.db")
+        Store(db).close()
+        monkeypatch.setattr(sys, "argv", ["anneal-memory", "--db", db, "status", "--json"])
+        from anneal_memory.cli import main
+        main()
+        assert json.loads(capsys.readouterr().out)["total_episodes"] == 0
+
+    def test_no_home_default_db_is_a_usage_error(self, monkeypatch, capsys):
+        self._no_home(monkeypatch)
+        monkeypatch.setattr(sys, "argv", ["anneal-memory", "status"])
+        from anneal_memory.cli import main
+        with pytest.raises(SystemExit) as exc:
+            main()
+        assert exc.value.code == 2
+        err = capsys.readouterr().err
+        assert "ANNEAL_MEMORY_DB" in err and "Traceback" not in err
+
+    def test_no_home_server_parser_explicit_db(self, monkeypatch, tmp_path, capsys):
+        """The no-subcommand path (the MCP server's own parser) has the same default."""
+        self._no_home(monkeypatch)
+        db = str(tmp_path / "m.db")
+        Store(db).close()
+        monkeypatch.setattr(sys, "argv", ["anneal-memory", "--db", db, "--verify-audit"])
+        from anneal_memory.server import main as server_main
+        server_main()
+        assert "Audit trail valid" in capsys.readouterr().err
 
     def test_anneal_memory_source_env(self):
         """ANNEAL_MEMORY_SOURCE env var sets default source for record."""

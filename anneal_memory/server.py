@@ -1817,8 +1817,9 @@ def main() -> None:
         prog="anneal-memory",
         description="Living memory MCP server for AI agents.",
     )
-    env_db = os.environ.get("ANNEAL_MEMORY_DB")
-    default_db = env_db if env_db else str(Path("~/.anneal-memory/memory.db").expanduser())
+    from .cli import _default_db, _expand_db  # one default for both parsers
+
+    default_db = _default_db()
     parser.add_argument(
         "--db",
         default=default_db,
@@ -1866,7 +1867,7 @@ def main() -> None:
     args = parser.parse_args()
 
     # Expand ~ in db path (user-provided or default)
-    args.db = str(Path(args.db).expanduser())
+    args.db = _expand_db(parser, args.db)
 
     # Generate integrity file mode
     if args.generate_integrity:

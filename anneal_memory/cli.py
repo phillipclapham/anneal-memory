@@ -4161,7 +4161,8 @@ def _record_pull_label(args: argparse.Namespace, name: str) -> None:
     failure is one stderr line."""
     try:
         try:
-            db_path = _db_path(args.db)
+            # Not _db_path: that exits, and this read must never fail (L3 r2).
+            db_path = Path(args.db).expanduser()
             if not db_path.is_file():
                 return
         except (OSError, ValueError, RuntimeError):

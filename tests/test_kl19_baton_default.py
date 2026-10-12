@@ -387,3 +387,9 @@ def test_a_baton_that_cannot_be_written_is_a_clean_error(init_db, monkeypatch, c
         args.func(args)
     assert exc.value.code == 1
     assert f"baton {op} failed" in capsys.readouterr().err
+
+
+def test_status_surfaces_carry_the_claim_command_when_held(init_db):
+    assert _cli(init_db, "baton", "claim", "a").returncode == 0
+    assert "baton claim NAME --take" in _cli(init_db, "status").stdout
+    assert "baton claim NAME --take" in _cli(init_db, "baton", "status").stdout

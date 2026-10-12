@@ -3616,7 +3616,8 @@ def _baton_status_line(store: Store, episodes_since_wrap: int) -> str:
         )
     return (
         f"  Baton-protected: only session {holder!r} consolidates "
-        f"({episodes_since_wrap} episode(s) since the last wrap)"
+        f"({episodes_since_wrap} episode(s) since the last wrap); to move it:\n"
+        f"    anneal-memory --db {db} baton claim NAME --take"
     )
 
 
@@ -3695,8 +3696,12 @@ def cmd_baton(args: argparse.Namespace) -> None:
             return
         print(f"Policy: {'baton required' if status.consolidate_requires_baton else 'open (any session may wrap)'}")
         print(f"Holder: {holder or 'none'}" if readable
-              else "Holder: UNREADABLE baton file (nobody may consolidate; recover with claim NAME --take)")
+              else "Holder: UNREADABLE baton file (nobody may consolidate)")
         print(f"Episodes since last wrap: {status.episodes_since_wrap}")
+        if status.consolidate_requires_baton:
+            take = "" if readable and holder is None else " --take"
+            print(f"Claim: anneal-memory --db {shlex.quote(str(store.path))} "
+                  f"baton claim NAME{take}")
 
 
 def cmd_serve(args: argparse.Namespace) -> None:

@@ -55,6 +55,9 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
 - Mixed versions writing one store: an anneal before 0.9.42 takes no audit append lock, so writing beside a newer one
   breaks the chain; 0.9.9 does not know a quarantine marker, writes a fresh manifest and reports the trail valid. Nothing on the
   newer side can detect either: run one release on every writer.
+- Windows has no file lock for spores, crystals or the audit trail, in every release: two writers on one store at once
+  (separate processes, or threads in one process) can lose a spore or crystal update or break the audit chain (the
+  README's Windows section names the sites). One writer (one process, one thread) at a time is unaffected.
 
 ## [0.9.43] — 2026-10-10
 

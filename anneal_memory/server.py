@@ -233,6 +233,10 @@ class Server:
             from a tool argument, so an agent cannot choose who it wraps as.
     """
 
+    # Class default: a stub or subclass that skips __init__ reads as a server
+    # started without --session-id.
+    _session_id: str | None = None
+
     def __init__(self, store: Store, session_id: str | None = None) -> None:
         if session_id is not None and (not isinstance(session_id, str) or not session_id):
             raise ValueError("Server: session_id must be a non-empty string or None")

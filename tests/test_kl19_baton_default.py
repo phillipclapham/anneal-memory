@@ -168,7 +168,7 @@ def test_cli_round_trip_under_a_claimed_session(init_db, tmp_path):
     assert prep.returncode == 0, prep.stderr
     token = json.loads(prep.stdout)["wrap_token"]
     out = tmp_path / "wrap.md"
-    out.write_text(_WRAP_TEXT)
+    out.write_text(_WRAP_TEXT, encoding="utf-8")
     no_session = _cli(init_db, "save-continuity", str(out), "--wrap-token", token)
     assert no_session.returncode == 1 and "baton-protected" in no_session.stderr
     saved = _cli(init_db, "save-continuity", str(out), "--wrap-token", token,

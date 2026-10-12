@@ -594,7 +594,7 @@ def cmd_status(args: argparse.Namespace) -> None:
                 "last_wrap_at": status.last_wrap_at,
                 "wrap_in_progress": status.wrap_in_progress,
                 "consolidate_requires_baton": status.consolidate_requires_baton,
-                "baton_holder": _baton_holder_or_error(store),
+                **dict(zip(("baton_holder", "baton_readable"), _baton_read(store))),
                 "tombstone_count": status.tombstone_count,
                 "continuity_chars": status.continuity_chars,
                 "episodes_by_type": status.episodes_by_type,
@@ -1545,7 +1545,7 @@ def cmd_prepare_wrap(args: argparse.Namespace) -> None:
                 store,
                 max_chars=args.max_chars,
                 staleness_days=args.staleness_days,
-                session_id=getattr(args, "session_id", None),
+                session_id=_wrap_session(store, args, saving=False),
                 # AM-CRYSTAL-MIGRATE + AM-CRYSTAL-OPTIN: the crystallized tier lives
                 # beside the db (<stem>.crystal.json). OPT-IN — passed only when the
                 # operator has a crystal store (file exists) or --crystal is set; else
@@ -1685,7 +1685,7 @@ def cmd_save_continuity(args: argparse.Namespace) -> None:
                 text,
                 affective_state=affective_state,
                 wrap_token=wrap_token,
-                session_id=getattr(args, "session_id", None),
+                session_id=_wrap_session(store, args, saving=True),
                 allow_shrink=getattr(args, "allow_shrink", False),
                 allow_unlinked=getattr(args, "allow_unlinked", False),
                 # AM-CRYSTAL-MIGRATE + AM-CRYSTAL-OPTIN: pass the crystal store so the
@@ -1873,7 +1873,8 @@ def cmd_wrap_status(args: argparse.Namespace) -> None:
         gated_by = status.gated_session
         if gated_by is not None:
             print(f"  prepared under the consolidate gate by session {gated_by!r}: only that")
-            print("  session can complete it (library save_continuity with that session_id)")
+            print("  session can complete it (save-continuity --session-id "
+                  f"{shlex.quote(gated_by)})")
         bound = status.bound_token == snapshot["token"]
         if bound:
             print("  opened with a token its preparer holds: a cancel without that token")
@@ -3558,25 +3559,55 @@ def cmd_history(args: argparse.Namespace) -> None:
             print()
 
 
-def _baton_holder_or_error(store: Store) -> str | None:
-    """The baton holder for a status surface; an unreadable baton reads as the
-    string ``"<unreadable>"`` so a status call never crashes on it."""
+def _baton_read(store: Store) -> tuple[str | None, bool]:
+    """``(holder, readable)`` for a status surface. An unreadable baton is
+    ``(None, False)``: the gate fails closed on it, so nobody may consolidate, and
+    a status call must neither crash nor name a holder that does not exist."""
     try:
-        return sessions.baton_holder(store.continuity_path)
+        return sessions.baton_holder(store.continuity_path), True
     except (OSError, json.JSONDecodeError):
-        return "<unreadable>"
+        return None, False
+
+
+def _wrap_session(store: Store, args: argparse.Namespace, *, saving: bool) -> str | None:
+    """The session a CLI wrap runs as. ``--session-id`` engages the gate only where
+    the store asks for it (the baton policy) or, for a save, where the open wrap
+    was prepared under it; on an open store the flag is ignored, so an existing
+    store's behaviour does not change because its operator copied a newer
+    command line (KL-19 L2)."""
+    sid = getattr(args, "session_id", None)
+    if sid is None:
+        return None
+    if store.consolidate_requires_baton():
+        return sid
+    if saving and store.wrap_gated_session() is not None:
+        return sid
+    return None
+
+
+def _session_name(value: str) -> str:
+    """argparse type for a session id: an empty name is refused at the argument."""
+    if not value:
+        raise argparse.ArgumentTypeError("a session id must not be empty")
+    return value
 
 
 def _baton_status_line(store: Store, episodes_since_wrap: int) -> str:
     """KL-19's cadence signal on ``status``: on a baton-protected store, say who may
     consolidate and how many episodes are waiting, with the claim command when
     nobody may."""
-    holder = _baton_holder_or_error(store)
+    holder, readable = _baton_read(store)
+    db = shlex.quote(str(store.path))
+    if not readable:
+        return (
+            "  Baton-protected, baton file UNREADABLE: nobody may consolidate. Recover with:\n"
+            f"    anneal-memory --db {db} baton claim NAME --take"
+        )
     if holder is None:
         return (
             f"  Baton-protected, no holder: {episodes_since_wrap} episode(s) since the last "
             "wrap; claim the baton to consolidate:\n"
-            f"    anneal-memory --db {shlex.quote(str(store.path))} baton claim NAME"
+            f"    anneal-memory --db {db} baton claim NAME"
         )
     return (
         f"  Baton-protected: only session {holder!r} consolidates "
@@ -3598,11 +3629,19 @@ def cmd_baton(args: argparse.Namespace) -> None:
             try:
                 claim = sessions.claim_baton(path, args.name, take=args.take)
             except sessions.BatonHeldError as exc:
-                print(f"Error: {exc} (pass --take to move it)", file=sys.stderr)
+                held_by = "an unreadable baton" if exc.holder is None else repr(exc.holder)
+                msg = (f"the baton is held by {held_by}; pass --take to move it to "
+                       f"{args.name!r}")
+                if args.json:
+                    _print_json({"error": msg, "baton_holder": exc.holder})
+                print(f"Error: {msg}", file=sys.stderr)
                 sys.exit(1)
             if args.json:
                 _print_json(dict(claim))
                 return
+            if not store.consolidate_requires_baton():
+                print("Note: this store does not require the baton (init --no-baton), so a "
+                      "wrap with no --session-id still consolidates.")
             prev = claim["previous_holder"]
             if prev == args.name:
                 print(f"Session {args.name!r} already holds the baton.")
@@ -3623,16 +3662,18 @@ def cmd_baton(args: argparse.Namespace) -> None:
                 sys.exit(1)
             return
         status = store.status()
-        holder = _baton_holder_or_error(store)
+        holder, readable = _baton_read(store)
         if args.json:
             _print_json({
                 "consolidate_requires_baton": status.consolidate_requires_baton,
                 "baton_holder": holder,
+                "baton_readable": readable,
                 "episodes_since_wrap": status.episodes_since_wrap,
             })
             return
         print(f"Policy: {'baton required' if status.consolidate_requires_baton else 'open (any session may wrap)'}")
-        print(f"Holder: {holder or 'none'}")
+        print(f"Holder: {holder or 'none'}" if readable
+              else "Holder: UNREADABLE baton file (nobody may consolidate; recover with claim NAME --take)")
         print(f"Episodes since last wrap: {status.episodes_since_wrap}")
 
 
@@ -5156,6 +5197,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sub.add_argument(
         "--session-id",
+        type=_session_name,
         help="Wrap as this session. On a store that requires the consolidate baton "
              "(the default for a new store), the wrap consolidates only if the "
              "operator has claimed the baton for this name ('baton claim NAME'); "
@@ -5220,6 +5262,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sub.add_argument(
         "--session-id",
+        type=_session_name,
         help="The session the wrap was prepared under (prepare-wrap --session-id). "
              "Required, with --wrap-token, on a store that requires the consolidate baton.",
     )
@@ -5236,7 +5279,8 @@ def build_parser() -> argparse.ArgumentParser:
         "claim", parents=[json_parent],
         help="Let the named session consolidate this store",
     )
-    bp.add_argument("name", help="The session id a wrap will run under (--session-id)")
+    bp.add_argument("name", type=_session_name,
+                    help="The session id a wrap will run under (--session-id)")
     bp.add_argument(
         "--take", action="store_true",
         help="Move the baton from the session that holds it now",
@@ -5246,7 +5290,7 @@ def build_parser() -> argparse.ArgumentParser:
         "release", parents=[json_parent],
         help="Release the baton if the named session holds it",
     )
-    bp.add_argument("name")
+    bp.add_argument("name", type=_session_name)
     bp.set_defaults(func=cmd_baton)
     bp = baton_sub.add_parser(
         "status", parents=[json_parent],

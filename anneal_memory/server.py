@@ -763,7 +763,7 @@ class Server:
             staleness_days=staleness_days,
             # AM-CRYSTAL-OPTIN: opt-in gate — pass the store only when it exists.
             crystal_store=self._crystal_store_for_wrap(),
-            session_id=self._session_id,
+            session_id=self._wrap_session(saving=False),
         )
 
         text = format_wrap_package_text(result)
@@ -859,7 +859,7 @@ class Server:
                 text,
                 affective_state=affective_state,
                 wrap_token=wrap_token,
-                session_id=self._session_id,
+                session_id=self._wrap_session(saving=True),
                 allow_shrink=allow_shrink,
                 allow_unlinked=allow_unlinked,
                 # AM-CRYSTAL-OPTIN: opt-in gate — pass the store only when it exists.
@@ -1027,6 +1027,18 @@ class Server:
         session_id = args.get("session_id")
         if session_id is not None and (not isinstance(session_id, str) or not session_id):
             return _tool_result("session_id must be a non-empty string.", is_error=True)
+        if self._session_id is not None:
+            # KL-19: a server started with --session-id cancels as that session, as it
+            # prepares and saves as it; a tool argument naming another session is
+            # refused, so an agent cannot borrow a name it read in a status line.
+            if session_id is not None and session_id != self._session_id:
+                return _tool_result(
+                    f"session_id must be this server's own ({self._session_id!r}) or "
+                    "omitted. Ending another session's gated wrap is `force`, which "
+                    "discards its compression and is the operator's decision.",
+                    is_error=True,
+                )
+            session_id = self._session_id
         force = args.get("force", False)
         if not isinstance(force, bool):
             return _tool_result("force must be true or false.", is_error=True)
@@ -1225,31 +1237,51 @@ class Server:
             f"— they are NOT deleted and the next prepare_wrap picks them up."
         )
 
+    def _wrap_session(self, *, saving: bool) -> str | None:
+        """The session this server's wrap runs as: its configured id, but only where
+        the store asks for the gate (the baton policy) or, for a save, where the open
+        wrap was prepared under it. On an open store the id is not passed, so an
+        existing store behaves as before when its config gains --session-id (KL-19 L2)."""
+        if self._session_id is None:
+            return None
+        if self._store.consolidate_requires_baton():
+            return self._session_id
+        if saving and self._store.wrap_gated_session() is not None:
+            return self._session_id
+        return None
+
     def _baton_status_line(self, episodes_since_wrap: int) -> str:
         """KL-19's cadence signal: on a baton-protected store, whether THIS server may
         consolidate, and if not, the operator's one command (said to the agent, for
         its human: the server exposes no tool that claims the baton)."""
         try:
             holder = sessions.baton_holder(self._store.continuity_path)
+            readable = True
         except (OSError, json.JSONDecodeError):
-            holder = "<unreadable>"
-        if self._session_id is not None and holder == self._session_id:
+            holder, readable = None, False
+        if readable and self._session_id is not None and holder == self._session_id:
             return (
                 f"Baton-protected store: this server ({self._session_id!r}) holds the "
                 "baton and may consolidate"
             )
+        # The holder is not named here: an agent reads this, and a name it can read is
+        # a name it can present (KL-19 L1).
+        held = ("the baton file is unreadable" if not readable
+                else "no session holds the baton" if holder is None
+                else "another session holds the baton")
         db = shlex.quote(str(self._store.path))
+        take = " --take" if (not readable or holder is not None) else ""
         name = shlex.quote(self._session_id) if self._session_id else "NAME"
         how = (
-            f"ask your operator to run: anneal-memory --db {db} baton claim {name}"
+            f"the operator runs: anneal-memory --db {db} baton claim {name}{take}"
             if self._session_id
-            else "ask your operator to start this server with --session-id NAME and "
-            f"run: anneal-memory --db {db} baton claim NAME"
+            else "the operator starts this server with --session-id NAME and runs: "
+            f"anneal-memory --db {db} baton claim NAME{take}"
         )
         return (
             f"Baton-protected store: {episodes_since_wrap} episode(s) since the last wrap; "
-            f"prepare_wrap from this server downgrades (baton holder: {holder or 'none'}). "
-            f"To consolidate, {how}"
+            f"prepare_wrap from this server downgrades ({held}). Show your human this; do "
+            f"not run it yourself: to consolidate here, {how}"
         )
 
     def _tool_status(self, args: dict[str, Any]) -> dict[str, Any]:

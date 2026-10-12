@@ -1649,24 +1649,29 @@ def _downgraded_empty(message: str, episode_count: int = 0) -> PrepareWrapResult
     )
 
 
-def _claim_recipe(store: Store, session_id: str | None, episode_count: int) -> str:
+def _claim_recipe(
+    store: Store, session_id: str | None, episode_count: int, holder: str | None = None
+) -> str:
     """The cadence line a downgrade carries (KL-19): how much is waiting, and the one
-    operator command that lets a named session consolidate. Consolidation is the
-    operator's act, so the line is addressed to the operator, through the agent."""
+    command that lets a named session consolidate. Consolidation is the operator's act,
+    so the command is addressed to the operator: an agent shows it, never runs it."""
+    if episode_count == 0:
+        return "Nothing is waiting to be consolidated yet."
     db = shlex.quote(str(store.path))
     waiting = (
         f"{episode_count} episode(s) since the last wrap are waiting to be consolidated. "
+        "Show your human this; do not run it yourself: "
     )
     if session_id is None:
         return waiting + (
-            "To consolidate, run the wrap under a session id (CLI: --session-id NAME; MCP: "
-            "start the server with --session-id NAME) and have the operator claim the "
-            f"baton for it once: anneal-memory --db {db} baton claim NAME"
+            "to consolidate, the operator gives the wrap a session id (CLI: --session-id "
+            "NAME; MCP: start the server with --session-id NAME) and claims the baton for "
+            f"it once: anneal-memory --db {db} baton claim NAME"
         )
+    take = " --take" if holder is not None and holder != session_id else ""
     return waiting + (
-        "If the operator wants this session to consolidate, the operator runs: "
-        f"anneal-memory --db {db} baton claim {shlex.quote(session_id)}"
-        " (add --take to move the baton from another session)."
+        "to let this session consolidate, the operator runs: "
+        f"anneal-memory --db {db} baton claim {shlex.quote(session_id)}{take}"
     )
 
 
@@ -1729,7 +1734,7 @@ def _consolidate_gate(
             f"{auth['baton_holder'] or 'none'}. Capture (afferent) is unaffected. "
             f"A consolidate needs the baton, which the operator assigns to one "
             f"session; a session does not claim it on its own initiative. "
-            + _claim_recipe(store, session_id, episode_count)
+            + _claim_recipe(store, session_id, episode_count, auth["baton_holder"])
         ),
         episode_count=episode_count,
         package=None,
@@ -2390,8 +2395,10 @@ def _check_save_authority(
     if requires_baton and (session_id is None or wrap_token is None):
         raise SaveAuthorityError(
             "This store is baton-protected (Store.consolidate_requires_baton): a save must "
-            "pass the session_id of the baton holder and the wrap_token its prepare_wrap "
-            "returned. Nothing was written."
+            "name the baton holder's session id (CLI: --session-id; MCP: the server's "
+            "--session-id; library: session_id=) and carry the token its prepare returned "
+            "(the 'Wrap token:' line; CLI: --wrap-token; MCP and library: wrap_token). "
+            "Nothing was written."
         )
     if session_id is None:
         return
@@ -3009,7 +3016,9 @@ def validated_save_continuity(
             raise SaveAuthorityError(
                 f"This wrap was prepared under the consolidate gate by session {gated_by!r}, "
                 f"so the save must come from that session, naming its session_id: without one the "
-                f"baton is never re-checked. Finish it from the library with that session_id, or "
+                f"baton is never re-checked. Finish it under that session id (CLI: "
+                f"save-continuity --session-id; MCP: the server started with that --session-id; "
+                f"library: session_id=), or "
                 f"abandon it with wrap-cancel --wrap-token <this wrap's token> (MCP: wrap_cancel "
                 f"with wrap_token), which discards the compression. Nothing was written."
             )

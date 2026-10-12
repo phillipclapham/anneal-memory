@@ -11,13 +11,22 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
   store. An existing store keeps its policy, and a `Store()` opened from Python is unchanged.
 - New `anneal-memory baton claim NAME [--take] | release NAME | status`. The MCP server has no tool that claims.
 - `prepare-wrap` and `save-continuity` take `--session-id`. The MCP server wraps as `serve --session-id NAME` (or
-  `ANNEAL_MEMORY_SESSION_ID`), set in the config the operator writes; a `session_id` tool argument is not read. Before
-  this, a baton-protected store could not consolidate over the CLI or MCP at all.
+  `ANNEAL_MEMORY_SESSION_ID`), set in the config the operator writes; `prepare_wrap` and `save_continuity` take no
+  session from the agent, and `wrap_cancel` acts as the server's session and refuses an argument naming another.
+  Before this, a baton-protected store could not consolidate over the CLI or MCP at all. On a store without the policy
+  (any existing open store, or `init --no-baton`) the CLI and MCP ignore the session id, so it wraps as before.
+- What it holds: after the operator's one claim, every conversation of that client may consolidate; before it, none
+  may, and no MCP path lets an agent claim. It does not hold against an agent with a shell that runs `baton claim`
+  itself; the downgrade text is addressed to the human and the MCP status no longer names the holder.
 - A downgrade, `status` (CLI and MCP) and `baton status` say how many episodes are waiting since the last wrap and give
-  the exact claim command. `status --json` adds `baton_holder`.
+  the exact claim command (`--take` only when another session holds it). `status --json` and `baton status --json`
+  add `baton_holder` and `baton_readable`; an unreadable baton is reported as unreadable (nobody may consolidate),
+  with the `--take` recovery. `wrap-status` names `save-continuity --session-id` for a gated wrap.
 - Known edges: every conversation started from one MCP config shares its session id, so a claim designates a client
   config, not a conversation. An MCP server does not register as a live session (closing one would release the
-  operator's claim), so a refused server's message calls the holder `stale-baton-holder` even while that server runs.
+  operator's claim), so a refused server's message calls the holder `stale-baton-holder` and counts 0 live sessions
+  even while that server runs. `baton` opens the store write-capable, so it can wait on a peer's write lock. A process
+  killed between creating a store in `serve` and setting the policy leaves that store open.
 
 ## [0.9.43] — 2026-10-10
 

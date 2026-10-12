@@ -180,7 +180,7 @@ def test_baton_cli_claim_take_status_release(init_db):
     _record(init_db, 4)
     st = json.loads(_cli(init_db, "baton", "status", "--json").stdout)
     assert st == {"consolidate_requires_baton": True, "baton_holder": None,
-                  "episodes_since_wrap": 4}
+                  "baton_readable": True, "episodes_since_wrap": 4}
     text_status = _cli(init_db, "status").stdout
     assert "no holder: 4 episode(s) since the last wrap" in text_status
 
@@ -252,5 +252,99 @@ def test_the_server_never_changes_an_existing_stores_policy(tmp_path, monkeypatc
     s = Store(str(open_db))
     try:
         assert s.consolidate_requires_baton() is False
+    finally:
+        s.close()
+
+
+# -- L1/L2 round 1 fixes --
+
+def test_an_existing_open_store_is_not_gated_by_a_configured_session_id(tmp_path):
+    """L2 HIGH: an open store whose config gains --session-id keeps wrapping."""
+    db = tmp_path / "open.db"
+    s = Store(str(db))
+    s.record("before", EpisodeType.OBSERVATION)
+    try:
+        out = _text(Server(s, session_id="claude-code")._tool_prepare_wrap({}))
+        assert "Wrap token:" in out, out
+        s.wrap_cancelled()
+    finally:
+        s.close()
+    run = _cli(db, "prepare-wrap", "--json", "--session-id", "me")
+    assert run.returncode == 0, run.stderr
+    assert json.loads(run.stdout)["wrap_token"]
+
+
+def test_mcp_wrap_cancel_acts_as_the_server_and_refuses_another_name(init_db):
+    _record(init_db)
+    assert _cli(init_db, "baton", "claim", "desk").returncode == 0
+    store = Store(str(init_db))
+    try:
+        desk = Server(store, session_id="desk")
+        assert "Wrap token:" in _text(desk._tool_prepare_wrap({}))
+        borrowed = desk._tool_wrap_cancel({"session_id": "someone-else"})
+        assert borrowed.get("isError") and "this server's own" in _text(borrowed)
+        assert store.status().wrap_in_progress is True
+        own = desk._tool_wrap_cancel({})  # no argument: cancels as 'desk'
+        assert not own.get("isError"), _text(own)
+        assert store.status().wrap_in_progress is False
+    finally:
+        store.close()
+
+
+def test_wrap_status_complete_line_names_the_session(init_db):
+    _record(init_db)
+    assert _cli(init_db, "baton", "claim", "me").returncode == 0
+    assert _cli(init_db, "prepare-wrap", "--session-id", "me").returncode == 0
+    out = _cli(init_db, "wrap-status").stdout
+    assert "save-continuity --session-id me" in out
+
+
+def test_an_unreadable_baton_is_reported_as_unreadable_not_as_a_holder(init_db):
+    s = Store(str(init_db))
+    try:
+        sessions._baton_path(s.continuity_path).write_text("[]")
+    finally:
+        s.close()
+    text = _cli(init_db, "status").stdout
+    assert "UNREADABLE" in text and "only session" not in text
+    st = json.loads(_cli(init_db, "status", "--json").stdout)
+    assert st["baton_holder"] is None and st["baton_readable"] is False
+    s = Store(str(init_db))
+    try:
+        mcp = _text(Server(s, session_id="desk")._tool_status({}))
+        assert "unreadable" in mcp and "--take" in mcp
+    finally:
+        s.close()
+
+
+def test_an_empty_session_id_is_an_argument_error(init_db):
+    for argv in (("baton", "claim", ""), ("prepare-wrap", "--session-id", ""),
+                 ("save-continuity", "-", "--session-id", "")):
+        run = _cli(init_db, *argv)
+        assert run.returncode == 2 and "Traceback" not in run.stderr, argv
+
+
+def test_the_recipe_is_for_the_human_and_takes_only_from_another_holder(init_db):
+    _record(init_db)
+    unheld = _cli(init_db, "prepare-wrap", "--json", "--session-id", "me")
+    msg = json.loads(unheld.stdout)["message"]
+    assert "do not run it yourself" in msg and "baton claim me" in msg and "--take" not in msg
+    assert _cli(init_db, "baton", "claim", "other").returncode == 0
+    held = json.loads(_cli(init_db, "prepare-wrap", "--json", "--session-id", "me").stdout)
+    assert "baton claim me --take" in held["message"]
+    s = Store(str(init_db))
+    try:
+        mcp = _text(Server(s, session_id="me")._tool_status({}))
+        assert "(another session holds the baton)" in mcp
+        assert "'other'" not in mcp and "holder: other" not in mcp
+    finally:
+        s.close()
+
+
+def test_an_empty_store_says_nothing_is_waiting(init_db):
+    s = Store(str(init_db))
+    try:
+        out = _text(Server(s)._tool_prepare_wrap({}))
+        assert "Nothing is waiting" in out and "baton claim" not in out
     finally:
         s.close()

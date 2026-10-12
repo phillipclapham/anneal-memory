@@ -210,3 +210,47 @@ def test_migration_entry_tells_existing_adopters_the_agent_never_claims():
     assert _version_tuple(entry["version"]) <= _version_tuple(__version__)
     assert "baton claim NAME" in entry["summary"]
     assert "never claim the baton yourself" in entry["suggested_edit"]
+
+
+def _start(monkeypatch, db, **kw):
+    from anneal_memory import server as server_mod
+
+    class _NoRun(server_mod.Server):
+        def run(self):
+            pass
+
+    monkeypatch.setattr(server_mod, "Server", _NoRun)
+    monkeypatch.setattr(sys.stdin, "reconfigure", lambda **k: None, raising=False)
+    monkeypatch.setattr(sys.stdout, "reconfigure", lambda **k: None, raising=False)
+    server_mod.start_server(db_path=str(db), skip_integrity=True, **kw)
+
+
+def test_a_store_the_server_creates_is_baton_protected(tmp_path, monkeypatch):
+    db = tmp_path / "fresh.db"
+    _start(monkeypatch, db)
+    s = Store(str(db))
+    try:
+        assert s.consolidate_requires_baton() is True
+    finally:
+        s.close()
+
+
+def test_the_server_never_changes_an_existing_stores_policy(tmp_path, monkeypatch):
+    db = tmp_path / "old.db"
+    s = Store(str(db))
+    s.record("before", EpisodeType.OBSERVATION)
+    s.close()
+    _start(monkeypatch, db)
+    s = Store(str(db))
+    try:
+        assert s.consolidate_requires_baton() is False
+    finally:
+        s.close()
+    open_db = tmp_path / "open.db"
+    assert _cli(open_db, "init", "--no-baton").returncode == 0
+    _start(monkeypatch, open_db)
+    s = Store(str(open_db))
+    try:
+        assert s.consolidate_requires_baton() is False
+    finally:
+        s.close()

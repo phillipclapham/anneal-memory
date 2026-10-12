@@ -1731,6 +1731,14 @@ def start_server(
     # CAP-08 (C#11): the server is the host of this Store and pins its trust
     # ceiling at agent; no tool argument reaches it, so an agent's write can
     # never carry operator trust.
+    # KL-19 (Phill 10-12: "yes, do it please"): a store this server creates is
+    # baton-protected, as one `init` creates is, because an MCP user's first open
+    # IS their init. Fresh = no file, or an empty one. An existing store keeps its
+    # policy: the server never changes it.
+    try:
+        fresh = os.path.getsize(db_path) == 0
+    except OSError:
+        fresh = True
     try:
         store = Store(
             path=db_path,
@@ -1742,6 +1750,12 @@ def start_server(
     except StorePathError as exc:  # every server entry (cli, `-m anneal_memory.server`)
         print(f"Error: {exc}", file=sys.stderr)
         sys.exit(1)
+    if fresh:
+        try:
+            store.set_consolidate_requires_baton(True)
+        except BaseException:
+            store.close()
+            raise
 
     if session_id is None:
         session_id = os.environ.get("ANNEAL_MEMORY_SESSION_ID") or None

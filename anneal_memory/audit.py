@@ -284,7 +284,7 @@ class _ManifestQuarantined(_ManifestUnavailable):
 def _fsync_dir(path: Path) -> None:
     """Best-effort directory fsync after an atomic rename/replace.
 
-    Same idiom as ``store._fsync_dir`` / ``spores._fsync_dir`` (duplicated
+    Same idiom as ``store._fsync_dir`` (duplicated
     rather than imported — this module is zero-dependency, including on
     its siblings). ``fsync(file)`` durability does not extend to the
     directory entry created by a subsequent rename; a crash in that gap

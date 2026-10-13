@@ -37,8 +37,9 @@ Germination (computed at read-time, NEVER stored — parallel to "top of mind"):
   - ``parked``   tier == parked                  — deliberate dormancy, not neglect
 
 Storage: a single JSON document, written atomically (unique-tmp + fsync + rename +
-dir-fsync — the same durability idiom as the SQLite store's ``_fsync_dir``). The
-prospective set is small and mutable (open loops, frequently re-tiered and
+dir-flush). The dir-flush is ``_flush_dir``: ``F_FULLFSYNC`` on macOS, and a real
+failure raises (the SQLite store's ``_fsync_dir`` swallows ``OSError`` instead).
+The prospective set is small and mutable (open loops, frequently re-tiered and
 resolved); a JSON document fits that shape where the append-heavy episodic corpus
 fits SQLite. Zero dependencies beyond the Python stdlib. Unlike the episodic
 store's single-process invariant, this layer is multi-writer-safe: every mutation

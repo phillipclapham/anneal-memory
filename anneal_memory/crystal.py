@@ -67,7 +67,8 @@ germination and to "top of mind"):
 
 Storage: a single JSON document beside the episodic db (``<stem>.crystal.json``),
 written atomically (unique-tmp + fsync + rename + dir-fsync — the same durability
-idiom as the SQLite store's ``_fsync_dir`` and :mod:`spores`). Like spores and
+idiom as the SQLite store's ``_fsync_dir``; :mod:`spores` flushes its directory more
+strictly). Like spores and
 UNLIKE the episodic :class:`Store` (a documented single-process invariant), this
 layer is **multi-writer-safe**: crystallization happens at WRAP time (single-writer
 consolidate) but recall reads fire on EVERY turn across parallel sessions, so every
@@ -318,9 +319,9 @@ class CrystalDict(TypedDict):
 
 
 # ---------------------------------------------------------------------------
-# date / value helpers (mirror spores.py — duplicated by design, like the
-# _fsync_dir idiom shared store.py↔spores.py; keeps this module's blast radius
-# to one new file rather than refactoring a shared util into the others)
+# date / value helpers (mirror spores.py — duplicated by design; keeps this
+# module's blast radius to one new file rather than refactoring a shared util
+# into the others)
 # ---------------------------------------------------------------------------
 
 def _parse_date(value: object) -> date | None:
@@ -367,7 +368,7 @@ def _clean_str_list(value: object, field: str) -> list[str]:
 
 def _fsync_dir(dir_path: Path) -> None:
     """Best-effort POSIX directory fsync so the rename itself is durable. Mirrors the
-    episodic store's and spores' ``_fsync_dir``; on macOS ``os.fsync`` is weaker than
+    episodic store's ``_fsync_dir``; on macOS ``os.fsync`` is weaker than
     ``fcntl.F_FULLFSYNC``, which this helper does not call (``spores._full_fsync``
     does) — a known edge, not a bug here."""
     try:

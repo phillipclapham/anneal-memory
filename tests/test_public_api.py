@@ -115,7 +115,10 @@ def test_snapshot_file_is_what_the_generator_writes() -> None:
 
 @_same_python
 def test_snapshot_is_independent_of_home_and_env() -> None:
+    # The child writes to a file, not a pipe: on Windows CI the piped stdout came
+    # back None with returncode 0 (run 38621285354), so the pipe is not trusted.
     with tempfile.TemporaryDirectory() as home:
+        out = os.path.join(home, "snapshot.out")
         env = {
             **os.environ,
             "HOME": home,
@@ -128,11 +131,10 @@ def test_snapshot_is_independent_of_home_and_env() -> None:
             f"s=importlib.util.spec_from_file_location('g',{str(_GEN)!r});"
             "g=importlib.util.module_from_spec(s);s.loader.exec_module(g);"
             f"sys.path.insert(0,{str(ROOT)!r});"
-            "sys.stdout.write(g.render(g.collect()))"
+            f"open({out!r},'w',encoding='utf-8',newline='\\n').write(g.render(g.collect()))"
         )
-        proc = subprocess.run(
-            [sys.executable, "-c", code], env=env, capture_output=True, text=True, encoding="utf-8"
-        )
-    assert proc.returncode == 0, proc.stderr
+        proc = subprocess.run([sys.executable, "-c", code], env=env, capture_output=True, text=True)
+        assert proc.returncode == 0, proc.stderr
+        regenerated = Path(out).read_text(encoding="utf-8")
     committed = _SNAP.read_text(encoding="utf-8")
-    assert proc.stdout == committed, _unified(committed, proc.stdout)
+    assert regenerated == committed, _unified(committed, regenerated)

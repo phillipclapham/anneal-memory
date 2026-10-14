@@ -14,6 +14,7 @@ import errno
 import fnmatch
 import inspect
 import hashlib
+import hmac
 import logging
 import json
 import glob
@@ -22,6 +23,7 @@ import sys
 import tempfile
 import urllib.parse
 import re
+import secrets
 import sqlite3
 import time
 import unicodedata
@@ -2263,9 +2265,26 @@ def _episode_id(content: str, timestamp: str, nonce: int = 0) -> str:
     return hashlib.sha256(raw).hexdigest()[:8]
 
 
-def _content_hash(content: str) -> str:
-    """SHA256 hash of content for tombstones."""
-    return hashlib.sha256(content.encode("utf-8")).hexdigest()
+# The per-store salt for episode content hashes (W3 erasure, ruled "fix both"
+# 10-13): a metadata row minted once, under ``_init_schema``'s lock, by the first
+# write-capable open of this release. Never written to the audit trail.
+_CONTENT_SALT_KEY = "content_hash_salt"
+# Set in the same transaction as a PRE-EXISTING store's salt: that store may hold
+# content freed before secure_delete was on, which only a VACUUM clears. Deleted
+# once the VACUUM has run; while it stands, each write-capable open retries.
+_ERASURE_VACUUM_KEY = "erasure_vacuum_pending"
+# The prefix that marks a salted content hash. A bare 64-hex value is an
+# unsalted sha256 written before the salt existed; the value says which it is.
+_SALTED_HASH_PREFIX = "hmac-sha256:"
+
+
+def _content_hash(content: str, salt: bytes) -> str:
+    """The content hash a tombstone and an audit event carry: HMAC-SHA256 keyed by
+    the store's salt, as ``"hmac-sha256:<hex>"``. Without the salt a short secret
+    cannot be recovered from it by guessing; the salt is in the store, so whoever
+    holds the database file can still guess (see ``Store.delete``)."""
+    return _SALTED_HASH_PREFIX + hmac.new(
+        salt, content.encode("utf-8"), hashlib.sha256).hexdigest()
 
 
 def _normalize_explanation_for_dedup(explanation: str) -> str:
@@ -2391,6 +2410,10 @@ def connect(
     # write fails "unsafe use of anneal_writer_schema()". MEASURED 2026-10-14 on
     # sqlite 3.53.4; ON is SQLite's default and fixes it (L3 r1, codex).
     conn.execute("PRAGMA trusted_schema=ON")
+    # Deleted content is overwritten with zeros, not left in freed space (W3
+    # erasure, ruled "fix both" 10-13). Per connection, not stored in the file: a
+    # host writing with its own sqlite3 connection does not get it.
+    conn.execute("PRAGMA secure_delete=ON")
     return conn
 
 
@@ -2696,6 +2719,11 @@ class Store:
         # boundary detect closed-store usage and raise StoreError
         # with the caller's operation name instead.
         self._closed: bool = False
+        # W3 erasure: the store's content-hash salt (None on a read-only handle,
+        # which never hashes) and whether a WAL clear after an erasing write is
+        # still owed (see ``_clear_wal_after_erasure``).
+        self._content_salt: bytes | None = None
+        self._wal_clear_owed: bool = False
         try:
             with self._db_boundary("schema_init"):
                 self._conn = connect(self._path)
@@ -2751,6 +2779,8 @@ class Store:
                     self._conn.execute("PRAGMA checkpoint_fullfsync=ON")
                 self._conn.execute("PRAGMA foreign_keys=ON")
                 self._init_schema()
+                self._content_salt = self._read_content_salt()
+                self._run_pending_erasure_vacuum()
                 self._repair_dangling_supersessions()
                 # 10.5c.5 L3 Fix #13: detect orphan tmp sidecars from a
                 # prior crashed pipeline before any new wrap runs. If a
@@ -2909,6 +2939,11 @@ class Store:
         copy_label = self._pre_migration_copy_label()
         if copy_label is not None:
             self._copy_before_migration(copy_label)
+        # Read before the DDL below creates the tables: a store with episodes
+        # already in place may hold content freed before secure_delete was on.
+        pre_existing = self._conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'episodes'"
+        ).fetchone() is not None
         for script in (
             _SCHEMA_SQL,
             _ASSOCIATIONS_SCHEMA_SQL,
@@ -2951,6 +2986,21 @@ class Store:
             "INSERT OR IGNORE INTO metadata (key, value) VALUES ('store_id', ?)",
             (uuid.uuid4().hex,),
         )
+        # The content-hash salt (W3 erasure), minted the same way: once, under
+        # this lock, on a fresh store at creation and on an existing store at its
+        # first open by this release. Hashes written before it stay unsalted.
+        minted = self._conn.execute(
+            "INSERT OR IGNORE INTO metadata (key, value) VALUES (?, ?)",
+            (_CONTENT_SALT_KEY, secrets.token_bytes(32).hex()),
+        ).rowcount == 1
+        if minted and pre_existing:
+            # Owed a one-time VACUUM, which cannot run in this transaction; the
+            # marker commits with the salt, so a crash before the VACUUM still
+            # leaves it owed (``_run_pending_erasure_vacuum``).
+            self._conn.execute(
+                "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, '1')",
+                (_ERASURE_VACUUM_KEY,),
+            )
 
         # ⚖⚖ STAMP THE WRITING VERSION ON EVERY WRITE-CAPABLE OPEN (ruled
         # 2026-09-05; codex L3 HIGH, spore-747).
@@ -3501,7 +3551,7 @@ class Store:
         record_event: dict[str, Any] = {
             "episode_id": ep_id,
             "type": episode_type.value,
-            "content_hash": _content_hash(content),
+            "content_hash": self._content_hash(content),
             "source": source,
         }
         if trust != DEFAULT_TRUST:
@@ -4096,21 +4146,21 @@ class Store:
             for item in ins["imported"]:
                 self._audit_log_after_commit("record", {
                     "episode_id": item["episode"], "type": item["type"],
-                    "content_hash": _content_hash(item["content"]),
+                    "content_hash": self._content_hash(item["content"]),
                     "source": item["source"],
                 }, method="import_team_snapshot", committed="the episode",
                     actor=item["source"])
             for item in ins["replaced_audit"]:
                 self._audit_log_after_commit("record", {
                     "episode_id": item["episode"], "type": item["type"],
-                    "content_hash": _content_hash(item["content"]),
+                    "content_hash": self._content_hash(item["content"]),
                     "source": item["source"],
                 }, method="import_team_snapshot", committed="the new hash of an unchanged episode",
                     actor=item["source"])
             for item in ins["superseded"]:
                 self._audit_log_after_commit("record", {
                     "episode_id": item["new"], "type": item["type"],
-                    "content_hash": _content_hash(item["content"]),
+                    "content_hash": self._content_hash(item["content"]),
                     "source": item["source"], "replaces_episode": item["old"],
                     **({"revived": True} if item["revived"] else {}),
                 }, method="import_team_snapshot",
@@ -5060,7 +5110,7 @@ class Store:
             for item in imported:
                 self._audit_log_after_commit("record", {
                     "episode_id": item["episode"], "type": item["type"],
-                    "content_hash": _content_hash(item["content"]),
+                    "content_hash": self._content_hash(item["content"]),
                     "source": item["source"],
                 }, method="import_team_entries", committed="the episode",
                     actor=item["source"])
@@ -5795,12 +5845,19 @@ class Store:
     def delete(self, episode_id: str, *, team_operator: bool = False) -> bool:
         """Delete a single episode by ID.
 
-        For corrections, mistakes, or privacy (right to erasure). The
-        original content is fully erased from the episodes table. If
-        ``keep_tombstones`` is enabled (default), a tombstone row is
-        inserted recording the episode ID, original timestamp, episode
-        type, and SHA-256 content hash — the text itself is gone but the
-        audit trail retains enough metadata to prove the episode existed.
+        For corrections, mistakes, or privacy (right to erasure). The row is
+        removed and, under ``secure_delete`` (set on every connection this
+        package opens), its bytes are overwritten in the database file; a
+        TRUNCATE checkpoint then empties the WAL, best effort (another
+        connection reading at that moment defers it; see
+        :meth:`_clear_wal_after_erasure`). If ``keep_tombstones`` is enabled
+        (default), a tombstone row is inserted recording the episode ID,
+        original timestamp, episode type, and a content hash keyed by the
+        store's salt (``hmac-sha256:...``); the audit trail's events carry the
+        same hash. Without the salt, which is in the database and never in the
+        audit trail, the hash cannot be guessed back to short content; whoever
+        holds the database file holds the salt too. Tombstones and audit events
+        written before this store had a salt carry a bare unsalted sha256.
         An imported team entry's ledger id and hash stay in ``team_entries`` either
         way, so a later v2 team import does not bring it back. A v3 replace brings
         back an entry its stream enforces unless ``team_operator=True``: only the
@@ -5854,11 +5911,12 @@ class Store:
         self._audit_log_after_commit("delete", {
             "episode_id": row["id"],
             "type": row["type"],
-            "content_hash": _content_hash(row["content"]),
+            "content_hash": self._content_hash(row["content"]),
             **({"supersession_links_removed": links_removed} if links_removed else {}),
             **({"supersessions_removed": trust_removed} if trust_removed else {}),
             **({"team_supersessions_left": team_left} if team_left else {}),
         }, method="delete", committed="the deletion")
+        self._clear_wal_after_erasure()
 
         return True
 
@@ -5873,7 +5931,7 @@ class Store:
                 """INSERT OR IGNORE INTO tombstones
                    (id, timestamp, type, content_hash)
                    VALUES (?, ?, ?, ?)""",
-                (row["id"], row["timestamp"], row["type"], _content_hash(row["content"])),
+                (row["id"], row["timestamp"], row["type"], self._content_hash(row["content"])),
             )
 
         linker_of = self._conn.execute(
@@ -6028,7 +6086,7 @@ class Store:
             self._audit_log_after_commit("delete", {
                 "episode_id": row["id"],
                 "type": row["type"],
-                "content_hash": _content_hash(row["content"]),
+                "content_hash": self._content_hash(row["content"]),
                 "origin_key": origin_key,
                 "effect_id": effect_id,
                 **({"supersession_links_removed": result.links_removed} if result.links_removed else {}),
@@ -6036,6 +6094,7 @@ class Store:
                 **({"supersessions_removed": result.trust_removed} if result.trust_removed else {}),
                 **({"team_supersessions_left": result.team_left} if result.team_left else {}),
             }, method="delete_by_origin_key", committed="the deletion")
+            self._clear_wal_after_erasure()
         return result
 
     def read_section(self, heading: str) -> tuple[str, str] | None:
@@ -9055,7 +9114,7 @@ class Store:
                             row["id"],
                             row["timestamp"],
                             row["type"],
-                            _content_hash(row["content"]),
+                            self._content_hash(row["content"]),
                         ),
                     )
                 self._conn.execute("DELETE FROM episodes WHERE id = ?", (row["id"],))
@@ -9076,6 +9135,7 @@ class Store:
                 "older_than_days": days,
                 **({"supersession_links_removed": links_removed} if links_removed else {}),
             }, method="prune", committed="the prune", batch_aware=False)
+            self._clear_wal_after_erasure()
 
         return pruned
 
@@ -9770,6 +9830,98 @@ class Store:
                 operation="schema_init",
                 path=str(self._path),
             )
+
+    def _read_content_salt(self) -> bytes:
+        """The store's content-hash salt, as the HMAC key. Called after
+        ``_init_schema`` committed, which minted it if absent. The stored text is
+        used as the key as it stands (64 hex characters as written), so a value
+        edited by hand still keys a hash rather than failing every write."""
+        row = self._conn.execute(
+            "SELECT value FROM metadata WHERE key = ?", (_CONTENT_SALT_KEY,)
+        ).fetchone()
+        if row is None or not row["value"]:
+            raise StoreError(
+                "the store has no content-hash salt after schema init",
+                operation="schema_init", path=str(self._path),
+            )
+        return str(row["value"]).encode("utf-8")
+
+    def _content_hash(self, content: str) -> str:
+        """``_content_hash`` keyed by this store's salt (W3 erasure)."""
+        if self._content_salt is None:
+            # Only a read-only handle has no salt, and every caller is a write
+            # (a tombstone, or an audit event after one): the same refusal its
+            # write would get, raised inside the caller's ``_db_boundary``.
+            raise sqlite3.OperationalError("attempt to write a readonly database")
+        return _content_hash(content, self._content_salt)
+
+    def _run_pending_erasure_vacuum(self) -> None:
+        """Run the one-time VACUUM a pre-existing store is owed (see
+        ``_ERASURE_VACUUM_KEY``), then clear the WAL and drop the marker.
+
+        ``secure_delete`` overwrites content freed from now on; space freed
+        before it was on keeps its bytes until the pages are rebuilt, which is
+        what VACUUM does (measured: a deleted value still in the file after a
+        secure_delete reopen, gone after VACUUM plus a TRUNCATE checkpoint).
+        VACUUM cannot run inside a transaction, so it runs here, after
+        ``_init_schema`` committed. A failure (a peer writer past the busy
+        timeout, too little disk: VACUUM needs up to twice the store's size free)
+        warns and leaves the marker for the next write-capable open; the store
+        is fully usable either way."""
+        row = self._conn.execute(
+            "SELECT value FROM metadata WHERE key = ?", (_ERASURE_VACUUM_KEY,)
+        ).fetchone()
+        if row is None:
+            return
+        try:
+            self._conn.execute("VACUUM")
+            self._conn.execute(
+                "DELETE FROM metadata WHERE key = ?", (_ERASURE_VACUUM_KEY,))
+            self._conn.commit()
+        except sqlite3.Error as exc:
+            try:
+                self._conn.rollback()
+            except sqlite3.Error:
+                pass
+            warnings.warn(
+                f"anneal-memory: the one-time VACUUM that clears content deleted "
+                f"before this release could not run ({exc}); the store works, and "
+                f"the next write-capable open retries it.",
+                UserWarning, stacklevel=4,
+            )
+            return
+        self._clear_wal_after_erasure()
+
+    def _clear_wal_after_erasure(self) -> None:
+        """Best effort, never raises, never waits: a TRUNCATE checkpoint so the
+        WAL frames that still hold erased content are written back (and zeroed
+        there by ``secure_delete``) and the WAL file is emptied.
+
+        Measured 10-14: after a delete under ``secure_delete`` the database file
+        was clean once checkpointed, but the WAL kept the frames written while
+        the content was live for as long as the store stayed open. A reader
+        holding a snapshot in another connection blocks a TRUNCATE checkpoint;
+        under the store's busy timeout that cost the delete 5.2 s and still
+        failed, so the timeout is 0 for this call. When it cannot complete the
+        store owes it (``_wal_clear_owed``) and retries at its next erasing
+        write and at ``close()``. Skipped inside a ``_batch`` (nothing is
+        committed yet); the batch's own commit does not retry it."""
+        try:
+            if self._defer_commit or self._conn.in_transaction:
+                self._wal_clear_owed = True
+                return
+            budget = self._conn.execute("PRAGMA busy_timeout").fetchone()[0]
+            self._conn.execute("PRAGMA busy_timeout=0")
+            try:
+                busy = self._conn.execute(
+                    "PRAGMA wal_checkpoint(TRUNCATE)").fetchone()[0]
+            finally:
+                self._conn.execute(f"PRAGMA busy_timeout={int(budget)}")
+        except sqlite3.Error as exc:
+            _LOG.info("anneal-memory: WAL clear after erasure failed: %s", exc)
+            self._wal_clear_owed = True
+            return
+        self._wal_clear_owed = bool(busy)
 
     def _pre_migration_copy_label(self) -> str | None:
         """``"gen<N>"`` (or ``"genunknown"``) when this open must copy the
@@ -11784,6 +11936,10 @@ class Store:
             # Construction failed before connect ever ran.
             self._closed = True
             return
+        if self._wal_clear_owed:
+            # An erasing write whose WAL clear could not complete (W3); best
+            # effort, never raises.
+            self._clear_wal_after_erasure()
         # ⛔ FLUSH POINT 3 OF 3 — THE LAST ONE THIS PROCESS WILL EVER GET.
         # A delta still pending here is one no failure handler and no batch
         # exit reached, and the connection is about to go away. Deliberately

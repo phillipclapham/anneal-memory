@@ -69,6 +69,38 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
     refuses an older process first); a newer meta copied in by hand between a wrap's version check and its
     post-commit rename is overwritten by that wrap (a real newer anneal raises the store generation first, so this
     release's database commit is refused by the guard triggers before the rename).
+- **Deleting an episode now erases its text from the database files, and the audit trail's hashes can no longer be guessed back.**
+  Until now `delete_episode` removed the row but SQLite left the text in the file's freed space and, while the store
+  was open, in the WAL; and the tombstone and the audit events kept an unsalted SHA-256 of the text, which for short
+  content (a phone number, an ID number) is recovered by guessing. Measured on 0.9.44.dev0: a
+  deleted "my SSN is 078-05-1120" was still in `memory.db` and in 5 WAL frames, and its tombstone hash was guessed, knowing only its shape and first three digits, in
+  0.05 s. Now:
+  - Every connection anneal opens sets `PRAGMA secure_delete=ON`, so deleted content is overwritten with zeros.
+  - After each committed `delete`, `delete_by_origin_key` and `prune`, anneal empties the WAL (a TRUNCATE checkpoint),
+    because the WAL keeps copies of pages written while the text was live. This never waits: if another connection
+    is reading at that moment, the WAL is emptied at the store's next delete or at `close()` instead, and until then
+    it still holds those copies. A delete inside a batch is cleared at the next delete or `close()` the same way.
+  - Each store gets a random salt (`content_hash_salt` in its metadata table, 32 random bytes), minted once: when the
+    store is created, or at the first open by this release. Tombstones and audit events now carry
+    `hmac-sha256:<hex>`, a hash keyed by that salt. The salt is never written to the audit trail, so the audit trail
+    can be kept or shared without its hashes being guessable. **The salt is in the database file**, so someone who has
+    the database can still guess a short deleted value from its tombstone; construct the store with
+    `keep_tombstones=False` if no hash at all should stay in it.
+  - **Tombstones and audit events written before the upgrade keep their unsalted SHA-256** (a bare 64-character hex
+    value; salted ones start with `hmac-sha256:`). anneal cannot salt them: the text they hash is gone. The audit
+    chain verifies across both.
+  - **The first open of an existing store runs `VACUUM` once**, which clears text deleted before this release. It
+    needs free disk up to twice the size of the store and took 31 ms on a 3.7 MB store and 214 ms on a 34 MB one. If it
+    fails (disk full, another process writing), the open warns and works, the old deleted text stays in the file, and
+    the next open tries again.
+  - Cost: `secure_delete` added nothing measurable to a delete (median 4.00 ms without, 4.01 ms with, 450 deletes on
+    a 4,000-episode store); emptying the WAL adds about 8 ms (median 12.0 ms per delete, on macOS with full fsync).
+  - **What this does not erase:** the `<name>.gen1-<time>.bak` copy the generation-2 migration makes is taken before
+    the `VACUUM`, so it holds any deleted text that was still in the file: delete it once the upgrade is settled.
+    Nor does it reach backups, filesystem snapshots or copies other tools took (`export`, a host's snapshots), the
+    disk blocks a filesystem or SSD keeps after a file shrinks, or text that consolidation already wrote into
+    continuity, crystal or a team ledger. A host writing to the store with its own `sqlite3` connection must set
+    `PRAGMA secure_delete=ON` itself.
 
 ### Changed — consolidation is the operator's act by default (KL-19)
 - ⚠ **Onboarding change.** A store created by `anneal-memory init`, or created fresh by the MCP server on its first

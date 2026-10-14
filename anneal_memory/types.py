@@ -131,7 +131,9 @@ class Tombstone:
     id: str  # Original episode ID
     timestamp: str  # Original timestamp
     type: EpisodeType
-    content_hash: str  # SHA256 of original content
+    # "hmac-sha256:<hex>", keyed by the store's salt; a bare 64-hex value is an
+    # unsalted sha256 written before the store had one.
+    content_hash: str
     pruned_at: str  # ISO 8601 UTC
 
 

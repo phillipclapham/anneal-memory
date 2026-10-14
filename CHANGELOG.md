@@ -181,6 +181,20 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
   (separate processes, or threads in one process) can lose a spore or crystal update or break the audit chain (the
   README's Windows section names the sites). One writer (one process, one thread) at a time is unaffected.
 
+### Moved from the README
+
+Version-history wording cut from the README at 1.0, verbatim; the README keeps the present-tense contract.
+
+- README L37: - **Through v0.9.11, the CLI uses the locale's encoding for stdin, stdout and stderr.** Under a Windows console codepage, or any piped, redirected or subprocess consumption, the CLI's own status glyphs raise `UnicodeEncodeError`, and non-ASCII content piped to `record -` or `save-continuity -` can be mis-decoded into the store. Fixed in 0.9.12: the CLI's standard streams are UTF-8 on every platform.
+- README L38: - **Through v0.9.43, if `ANNEAL_MEMORY_DB` was unset and no home directory could be found (a launcher that drops `USERPROFILE`/`HOMEPATH`, or on POSIX a container uid with no passwd entry and no `HOME`), every invocation crashed at startup with `RuntimeError: Could not determine home directory`**, even one passing `--db`. Fixed after 0.9.43: only a command that opens the default path needs a home, and it refuses with exit 1, naming `--db` and `ANNEAL_MEMORY_DB`.
+- README L245: (v0.5.0; see below)
+- README L263: (AM-LINKGATE, removed in 0.9.26).** From 0.9.11 to 0.9.25 `save_continuity` refused a wrap whose offered co-citation pairs recorded no Hebbian link. It was removed once pattern recall stopped reading links: blocking an identity save over a layer recall does not read cost more than it bought. That wrap now saves and
+- README L267: It warned as a discipline reminder until 0.9.26 and went quiet then, because recall no longer reads links
+- README L327: and since 0.9.26 recall does not read them (measurement below)
+- README L341a: Until 0.9.26, pattern recall (`retrieve_relevant`, `crystal recall`) also followed one Hebbian hop from the episodes a query matched. On my own
+- README L341b: So 0.9.26 removed the hop from recall.
+- README L399: Recall stopped reading them in 0.9.26, after measurement showed
+
 ## [0.9.43] — 2026-10-10
 
 ### Added — `SporeStore.apply`: land one decided spore effect at most once, with a typed outcome

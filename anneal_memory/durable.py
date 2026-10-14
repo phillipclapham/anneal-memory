@@ -47,6 +47,8 @@ __all__ = [
     "DurableFact",
     "parse_durable_facts",
     "MAX_CUES",
+    "DROP_DURABLE_RE",
+    "section_chars",
 ]
 
 #: More cues than this on one line draws a save warning (cue sprawl).

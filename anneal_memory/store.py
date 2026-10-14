@@ -9787,7 +9787,9 @@ class Store:
             dst = None
             src.close()
             src = None
-            fd = os.open(tmp, os.O_RDONLY)
+            # read-write: Windows fsync of a read-only descriptor is EBADF
+            # (CI run 38581159160, the Windows job, 10-14)
+            fd = os.open(tmp, os.O_RDWR)
             try:
                 os.fsync(fd)
             finally:

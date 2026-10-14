@@ -4,6 +4,26 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
 
 ## [Unreleased]
 
+### Fixed — three findings of the rc1 whole-diff review (Phill 10-14: "fix the HIGH and MEDs 2 and 4")
+- **A new store's consolidate-baton policy is written in the transaction that creates its schema.** New
+  `Store(..., consolidate_requires_baton_on_create=True)`, which `init` and `serve` now use. In rc1 the policy was a
+  second transaction after the store was created, so a process killed between the two left a store without the baton
+  default for good, and `serve` decided "new" from a file-size check made before the open, so a first launch racing
+  another creator could set the default on a store that creator made with `--no-baton`. New `Store.created` says
+  whether this open created the store, decided under the lock that creates the schema: `init` refuses with "Store
+  already exists" when another process created it first, and `serve` never changes an existing store's policy.
+  Reproduced on rc1 with a process killed right after the open, and with a size probe that read the store as empty.
+- **The generation guards cover anneal's own tables only** (named in `anneal_memory.store._ANNEAL_TABLES`). In rc1 a
+  host's virtual table in the same database (an FTS5 index, say) failed the migration with "cannot create triggers on
+  virtual tables", and every writable open after it, each attempt leaving another `.gen1` copy. Measured on a store
+  written by 0.9.43 with an FTS5 table: two failed opens and two copies under rc1; under this release one migration,
+  one copy, and writable on reopen. A guard rc1 put on a host's own table is dropped at the next open.
+- **`register_writer_schema(conn)` sets `PRAGMA trusted_schema=ON` on the connection** and raises
+  `sqlite3.NotSupportedError` at once if the connection does not take it. In rc1 a host connection with it OFF failed
+  its first guarded write with "unsafe use of anneal_writer_schema()".
+- Known edge: `init --schema NAME` that loses the creation race to another process has already written its section
+  schema onto that process's store when it refuses, as any `Store(section_schema=...)` open of an existing store does.
+
 ## [1.0.0rc1] — 2026-10-14
 
 Release candidate for 1.0.0: the API freeze, schema generation 2, the erasure fix and the dreaming primitives below. Pre-releases are not installed by default (`pip install --pre anneal-memory`).
@@ -158,10 +178,8 @@ Release candidate for 1.0.0: the API freeze, schema generation 2, the erasure fi
 - Known edges: every conversation started from one MCP config shares its session id, so a claim designates a client
   config, not a conversation. An MCP server does not register as a live session (closing one would release the
   operator's claim), so a refused server's message calls the holder `stale-baton-holder` and counts 0 live sessions
-  even while that server runs. `baton` opens the store write-capable, so it can wait on a peer's write lock. A process
-  killed between creating a store in `serve` and setting the policy leaves that store open, and two first launches
-  racing on one fresh path (or a first launch racing `init --no-baton`) decide freshness from a size check before
-  the open; a racing open server's save re-checks the policy, so it does not consolidate. A server started without
+  even while that server runs. `baton` opens the store write-capable, so it can wait on a peer's write lock. (The
+  edge listed here in rc1, a policy set in a second transaction after creation, is fixed in [Unreleased].) A server started without
   `--session-id` still accepts `session_id` on `wrap_cancel` (the 0.9.22 contract), which can discard another
   session's in-flight compression but never consolidates; a server with an id cancels a same-id wrap the operator
   prepared from the CLI, since the id designates the client.
@@ -191,13 +209,6 @@ Release candidate for 1.0.0: the API freeze, schema generation 2, the erasure fi
   generation 2 and a 0.9.x writer is refused (0.9.9 measured: "no such function: anneal_writer_schema"), so the edge
   closes with the migration. The sidecar-file cases (the spore registry, the wrap's continuity-moved check) are
   unguarded: run one release on every writer.
-- A new store's baton policy is set in a second transaction after the store is created (`init`, and `serve` on a path
-  that does not exist or is empty). A process killed in that gap, or a second creator racing it, leaves a store without
-  the baton default, which is the policy every existing store already has (`status` shows it). `serve` can also set the
-  default on a store another process created a moment earlier. Nothing is lost.
-- A host that adds its own virtual table (an FTS5 index, say) to an anneal database makes the generation migration fail
-  with "cannot create triggers on virtual tables" and every writable open after it; anneal's own database holds none.
-  The failed attempt leaves its `.gen1` copy beside the store.
 - An episode id is 32 bits drawn under the write lock and checked against live episodes, not against tombstones: a new
   episode can take a deleted one's id, about 1 in 250,000 per 15,000 episodes with one tombstone, and a later delete of
   the new one keeps the older tombstone.

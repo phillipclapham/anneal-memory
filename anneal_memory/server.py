@@ -1779,12 +1779,9 @@ def start_server(
     # never carry operator trust.
     # KL-19 (Phill 10-12: "yes, do it please"): a store this server creates is
     # baton-protected, as one `init` creates is, because an MCP user's first open
-    # IS their init. Fresh = no file, or an empty one. An existing store keeps its
-    # policy: the server never changes it.
-    try:
-        fresh = os.path.getsize(db_path) == 0
-    except OSError:
-        fresh = True
+    # IS their init. The Store writes the policy with the schema, only when this
+    # open creates it; an existing store keeps its policy: the server never
+    # changes it.
     try:
         store = Store(
             path=db_path,
@@ -1792,21 +1789,11 @@ def start_server(
             audit=not no_audit,
             audit_retention_days=audit_retention_days,
             trust_ceiling="agent",
+            consolidate_requires_baton_on_create=True,
         )
     except StorePathError as exc:  # every server entry (cli, `-m anneal_memory.server`)
         print(f"Error: {exc}", file=sys.stderr)
         sys.exit(1)
-    if fresh:
-        try:
-            store.set_consolidate_requires_baton(True)
-        except StoreError as exc:
-            store.close()
-            print(f"Error: could not set the consolidate-baton policy on the new store "
-                  f"{db_path}: {exc}", file=sys.stderr)
-            sys.exit(1)
-        except BaseException:
-            store.close()
-            raise
 
     if session_id is None:
         session_id = os.environ.get("ANNEAL_MEMORY_SESSION_ID") or None

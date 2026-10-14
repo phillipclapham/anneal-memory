@@ -6100,7 +6100,7 @@
   },
   "Store": {
    "bases": [],
-   "init": "(path: 'str | Path', retention_days: 'int | None' = None, keep_tombstones: 'bool' = True, project_name: 'str | None' = None, section_schema: 'list[SectionSpec] | None' = None, audit: 'bool' = True, audit_retention_days: 'int | None' = None, on_audit_event: 'Callable | None' = None, read_only: 'bool' = False, trust_ceiling: 'str' = 'agent') -> 'None'",
+   "init": "(path: 'str | Path', retention_days: 'int | None' = None, keep_tombstones: 'bool' = True, project_name: 'str | None' = None, section_schema: 'list[SectionSpec] | None' = None, audit: 'bool' = True, audit_retention_days: 'int | None' = None, on_audit_event: 'Callable | None' = None, read_only: 'bool' = False, trust_ceiling: 'str' = 'agent', consolidate_requires_baton_on_create: 'bool' = False) -> 'None'",
    "kind": "class",
    "members": {
     "add_drift_probe": {
@@ -6134,6 +6134,10 @@
     "count_episodes_since_wrap": {
      "kind": "method",
      "signature": "(self) -> 'int'"
+    },
+    "created": {
+     "kind": "property",
+     "settable": false
     },
     "decay_associations": {
      "kind": "method",

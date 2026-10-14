@@ -478,6 +478,10 @@ def cmd_init(args: argparse.Namespace) -> None:
     db_path.parent.mkdir(parents=True, exist_ok=True)
 
     project = getattr(args, "project_name", "Agent")
+    # KL-19 (Phill 10-12, ruling A): consolidation is the operator's act, so a new
+    # store requires the consolidate baton unless the operator opts out here. The
+    # policy is written with the schema, in the transaction that creates it.
+    requires_baton = not getattr(args, "no_baton", False)
     store = Store(
         path=db_path,
         project_name=project,
@@ -487,21 +491,16 @@ def cmd_init(args: argparse.Namespace) -> None:
         # INSERT default), so the default store stays byte-identical to
         # pre-AM-INITSCHEMA. (LOW-3, codex L3.)
         section_schema=(None if schema_name == "default" else section_schema),
+        consolidate_requires_baton_on_create=requires_baton,
     )
-    # KL-19 (Phill 10-12, ruling A): consolidation is the operator's act, so a new
-    # store requires the consolidate baton unless the operator opts out here.
-    # Existing stores are never touched: init refuses an existing path above.
-    requires_baton = not getattr(args, "no_baton", False)
-    try:
-        if requires_baton:
-            store.set_consolidate_requires_baton(True)
-    except StoreError as exc:
-        print(f"Error: the store was created at {db_path}, but its consolidate-baton "
-              f"policy could not be set ({exc}), so it is open to any session. Delete "
-              "the new file and re-run init.", file=sys.stderr)
+    created = store.created
+    store.close()
+    # The exists() check above is for the message; this is the refusal. Another
+    # process can create the store between that check and the open, and init
+    # does not report, or set a policy on, a store it did not create.
+    if not created:
+        print(f"Store already exists: {db_path}", file=sys.stderr)
         sys.exit(1)
-    finally:
-        store.close()
 
     headings = [s["heading"] for s in section_schema]
     if args.json:

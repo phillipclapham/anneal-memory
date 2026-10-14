@@ -1494,6 +1494,23 @@ _GEN_GUARD_OPS = ("INSERT", "UPDATE", "DELETE")
 # generation 1 has none: what a test builds by simulating generation 1 is then
 # exactly what those releases left on disk.
 _FIRST_GUARDED_GENERATION = 2
+# The tables the guards cover: anneal's own physical tables, by name. A host's
+# table in the same file (an FTS5 index and its shadow tables, say) is the
+# host's: SQLite refuses a trigger on a virtual table, which failed every
+# write-capable open of such a store (rc1 L3 --final, codex MED), and no older
+# anneal writes a host's table anyway. Explicit, so a table a release adds must
+# be named here: ``test_every_table_a_new_store_creates_is_on_the_guard_list``
+# fails until it is.
+_ANNEAL_TABLES = frozenset({
+    "associations", "drift_probes", "drift_results", "episode_derived",
+    "episode_trust", "episodes", "metadata", "pattern_aliases",
+    "pattern_associations", "pattern_graph_projection_meta", "pattern_grounding",
+    "pattern_history", "pattern_levels", "processed_co_surface_events",
+    "retired_origin_keys", "rewire_origin", "state_keys", "supersessions",
+    "team_entries", "team_overrides", "team_snapshot", "team_snapshot_enforced",
+    "team_snapshot_notes", "team_snapshot_rows", "tombstones", "wrap_graduations",
+    "wraps",
+})
 
 
 def register_writer_schema(conn: sqlite3.Connection) -> None:
@@ -1503,6 +1520,9 @@ def register_writer_schema(conn: sqlite3.Connection) -> None:
     on a raw connection that lacked it). Exported for hosts that open a store
     with plain ``sqlite3`` and must write to it.
 
+    It also sets ``PRAGMA trusted_schema=ON`` on ``conn`` (the guards need it)
+    and raises ``sqlite3.NotSupportedError`` if the connection does not take it.
+
     The generation is captured HERE, once: the connection reports the
     generation of the code that opened it for its whole life (L3 r1 10-14,
     codex: a closure over the module global changed its answer when the global
@@ -1511,6 +1531,24 @@ def register_writer_schema(conn: sqlite3.Connection) -> None:
     conn.create_function(
         _WRITER_SCHEMA_FUNCTION, 0, lambda: generation, deterministic=True,
     )
+    # The guards call a Python function, which SQLite does not mark innocuous:
+    # under trusted_schema=OFF (a build option on hardened hosts, or a host's
+    # own PRAGMA) every guarded write fails "unsafe use of
+    # anneal_writer_schema()". MEASURED 2026-10-14 on sqlite 3.53.4; ON is
+    # SQLite's default and fixes it (L3 r1, codex). Set HERE, not only in
+    # :func:`connect`, so a host connection gets it too (rc1 L3 --final, codex
+    # MED). Read back, so a connection that will not take it is refused now,
+    # not at its first write. An SQLite older than the pragma (3.31) answers
+    # no row and has no such check to fail.
+    conn.execute("PRAGMA trusted_schema=ON")
+    row = conn.execute("PRAGMA trusted_schema").fetchone()
+    if row is not None and row[0] != 1:
+        raise sqlite3.NotSupportedError(
+            "anneal-memory: this connection keeps trusted_schema OFF, so its writes "
+            "to an anneal store would fail the generation guards (\"unsafe use of "
+            f"{_WRITER_SCHEMA_FUNCTION}()\"). Open the store with a connection "
+            "that allows PRAGMA trusted_schema=ON."
+        )
 
 
 def _gen_guard_sql(table: str, op: str, generation: int) -> tuple[str, str]:
@@ -1546,9 +1584,8 @@ def _generation_guard_state(
     name while the installer compared the full set)."""
     tables = [] if generation < _FIRST_GUARDED_GENERATION else [
         row[0] for row in conn.execute(
-            "SELECT name FROM sqlite_master WHERE type = 'table' "
-            "AND name NOT LIKE 'sqlite\\_%' ESCAPE '\\'"
-        )
+            "SELECT name FROM sqlite_master WHERE type = 'table'"
+        ) if row[0] in _ANNEAL_TABLES
     ]
     want = dict(
         _gen_guard_sql(table, op, generation)
@@ -1572,12 +1609,13 @@ def _generation_guard_state(
 def _install_generation_guards(
     conn: sqlite3.Connection, generation: int | None = None,
 ) -> None:
-    """Make every table carry exactly this generation's three guards
-    (``generation`` defaults to ``_SCHEMA_VERSION`` read at call time).
+    """Make every anneal table (``_ANNEAL_TABLES``) present in the store carry
+    exactly this generation's three guards (``generation`` defaults to
+    ``_SCHEMA_VERSION`` read at call time).
 
     Runs inside the caller's transaction and never commits. Tables are read
-    from ``sqlite_master`` after all DDL, so a table a later release adds is
-    guarded from its first write-capable open. Guards of an OLDER generation
+    from ``sqlite_master`` after all DDL. A guard on a table off the list (one
+    an earlier release put on a host's table) is dropped. Guards of an OLDER generation
     are dropped (a migration replaces them); a guard whose SQL is not exactly
     this generation's is recreated, so a name alone never counts as a guard
     (L3 r1 10-14, codex: a same-named no-op trigger was trusted).
@@ -2419,12 +2457,8 @@ def connect(
         conn = sqlite3.connect(target, **kwargs)
     # Every connection, read-only included (harmless there): a write through
     # one that lacked it fails a migrated store's generation guards.
+    # It also sets trusted_schema=ON, which the guards need.
     register_writer_schema(conn)
-    # The guards call a Python function, which SQLite does not mark innocuous:
-    # under trusted_schema=OFF (a build option on hardened hosts) every guarded
-    # write fails "unsafe use of anneal_writer_schema()". MEASURED 2026-10-14 on
-    # sqlite 3.53.4; ON is SQLite's default and fixes it (L3 r1, codex).
-    conn.execute("PRAGMA trusted_schema=ON")
     # Deleted content is overwritten with zeros, not left in freed space (W3
     # erasure, ruled "fix both" 10-13). Per connection, not stored in the file: a
     # host writing with its own sqlite3 connection does not get it.
@@ -2551,8 +2585,22 @@ class Store:
         on_audit_event: Callable | None = None,
         read_only: bool = False,
         trust_ceiling: str = DEFAULT_TRUST,
+        consolidate_requires_baton_on_create: bool = False,
     ) -> None:
         self._path = Path(sqlite_path(path))
+        # KL-19: the require-baton consolidate policy a store gets when THIS open
+        # creates it, written in the transaction that creates the schema, so no
+        # moment exists in which the new store is open to any session (rc1 L3
+        # --final, codex HIGH: it was a second transaction, and a kill between
+        # the two left the store unprotected for good). An existing store's
+        # policy is never touched by it. ``created`` reports which happened.
+        if not isinstance(consolidate_requires_baton_on_create, bool):
+            raise TypeError(
+                "consolidate_requires_baton_on_create must be a bool, got "
+                f"{type(consolidate_requires_baton_on_create).__name__}"
+            )
+        self._requires_baton_on_create: bool = consolidate_requires_baton_on_create
+        self._created: bool = False
         # CAP-08 (C#11): the highest trust class any write through this instance
         # may carry. The code that constructs the Store is the host, so the host
         # sets it; no call argument moves it (record, set_trust and the CLI's JSON
@@ -2850,6 +2898,12 @@ class Store:
         # constructs — and after ``_init_schema``, so the metadata table
         # exists on a freshly created database.
         self._seed_audit_health()
+        if self._created and self._requires_baton_on_create:
+            self._audit_log_after_commit("consolidate_policy_set", {
+                "requires_baton": True,
+                "was": False,
+            }, method="Store", committed="the new store's consolidate policy",
+                batch_aware=False)
 
     def _init_schema(self) -> None:
         """Initialize database schema and default metadata.
@@ -2969,6 +3023,15 @@ class Store:
         ):
             for statement in _sql_statements(script):
                 self._conn.execute(statement)
+        # This open creates the store exactly when the episodes table was not
+        # there under this lock, so of two processes creating one path only
+        # the first reports it, and its policy commits with the schema.
+        self._created = not pre_existing
+        if self._created and self._requires_baton_on_create:
+            self._conn.execute(
+                "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, '1')",
+                (_CONSOLIDATE_REQUIRES_BATON_KEY,),
+            )
         # Migrate existing associations tables to include affective columns
         # (safe no-op if columns already exist or table was just created)
         _migrate_affective(self._conn, commit=False)
@@ -7580,6 +7643,17 @@ class Store:
                 path=str(self.path),
             ) from exc
         return out
+
+    @property
+    def created(self) -> bool:
+        """True when this open created the store; False when it opened an
+        existing one (or opened read-only).
+
+        Decided under the writer lock that creates the schema, so of two
+        processes opening one new path at once, exactly one sees True. A
+        caller that must not act on a store it did not create (``init``) reads
+        this, never a file-size or existence check made before the open."""
+        return self._created
 
     def consolidate_requires_baton(self) -> bool:
         """Does this store require the consolidate baton for EVERY consolidate?

@@ -19,6 +19,7 @@ import json
 import glob
 import os
 import sys
+import tempfile
 import urllib.parse
 import re
 import sqlite3
@@ -1485,9 +1486,15 @@ def register_writer_schema(conn: sqlite3.Connection) -> None:
     it on every connection it returns, so no call site can forget it (L3 r1
     10-03, codex + complement: the CLI's store-id mint once wrote ``metadata``
     on a raw connection that lacked it). Exported for hosts that open a store
-    with plain ``sqlite3`` and must write to it."""
+    with plain ``sqlite3`` and must write to it.
+
+    The generation is captured HERE, once: the connection reports the
+    generation of the code that opened it for its whole life (L3 r1 10-14,
+    codex: a closure over the module global changed its answer when the global
+    did)."""
+    generation = _SCHEMA_VERSION
     conn.create_function(
-        _WRITER_SCHEMA_FUNCTION, 0, lambda: _SCHEMA_VERSION, deterministic=True,
+        _WRITER_SCHEMA_FUNCTION, 0, lambda: generation, deterministic=True,
     )
 
 
@@ -1522,8 +1529,15 @@ def _install_generation_guards(
 
     Runs inside the caller's transaction and never commits. Tables are read
     from ``sqlite_master`` after all DDL, so a table a later release adds is
-    guarded from its first write-capable open. Guards of any other generation
-    are dropped (a migration replaces the previous generation's)."""
+    guarded from its first write-capable open. Guards of an OLDER generation
+    are dropped (a migration replaces them); a guard whose SQL is not exactly
+    this generation's is recreated, so a name alone never counts as a guard
+    (L3 r1 10-14, codex: a same-named no-op trigger was trusted).
+
+    ⛔ A NEWER generation's guard is never dropped: it raises ``StoreError``.
+    The marker check can be skipped (a garbled or missing marker opens), so the
+    guards themselves must refuse an older release rather than be replaced by
+    it (L3 r1 10-14, complement)."""
     if generation is None:
         generation = _SCHEMA_VERSION
     tables = [] if generation < _FIRST_GUARDED_GENERATION else [
@@ -1536,16 +1550,27 @@ def _install_generation_guards(
         _gen_guard_sql(table, op, generation)
         for table in tables for op in _GEN_GUARD_OPS
     )
-    have = {
-        row[0] for row in conn.execute(
-            "SELECT name FROM sqlite_master WHERE type = 'trigger'"
-        )
-        if _GEN_GUARD_NAME_RE.fullmatch(row[0])
-    }
-    for name in sorted(have - want.keys()):
-        conn.execute(f'DROP TRIGGER IF EXISTS "{name}"')
-    for name in sorted(want.keys() - have):
-        conn.execute(want[name])
+    have: dict[str, str] = {}
+    for name, sql in conn.execute(
+        "SELECT name, sql FROM sqlite_master WHERE type = 'trigger'"
+    ).fetchall():
+        match = _GEN_GUARD_NAME_RE.fullmatch(name)
+        if match is None:
+            continue
+        if int(match.group(1)) > generation:
+            raise StoreError(
+                f"this store carries schema generation {match.group(1)} guards "
+                f"({name}) and this anneal-memory writes generation {generation}; "
+                "refusing to open it. Upgrade anneal-memory.",
+                operation="schema_init",
+            )
+        have[name] = sql
+    for name in sorted(have):
+        if want.get(name) != have[name]:
+            conn.execute(f'DROP TRIGGER IF EXISTS "{name}"')
+    for name in sorted(want):
+        if have.get(name) != want[name]:
+            conn.execute(want[name])
 
 def _sql_statements(script: str) -> list[str]:
     """Split a DDL script into individual statements.
@@ -2332,6 +2357,11 @@ def connect(
     # Every connection, read-only included (harmless there): a write through
     # one that lacked it fails a migrated store's generation guards.
     register_writer_schema(conn)
+    # The guards call a Python function, which SQLite does not mark innocuous:
+    # under trusted_schema=OFF (a build option on hardened hosts) every guarded
+    # write fails "unsafe use of anneal_writer_schema()". MEASURED 2026-10-14 on
+    # sqlite 3.53.4; ON is SQLite's default and fixes it (L3 r1, codex).
+    conn.execute("PRAGMA trusted_schema=ON")
     return conn
 
 
@@ -2847,9 +2877,9 @@ class Store:
         # COPY FIRST, before this transaction changes anything: a store that
         # exists at an older generation is backed up whole before it migrates.
         # Under the lock, so no writer lands between the copy and the change.
-        before = self._stamped_generation()
-        if before is not None and before < _SCHEMA_VERSION:
-            self._copy_before_migration(before)
+        copy_label = self._pre_migration_copy_label()
+        if copy_label is not None:
+            self._copy_before_migration(copy_label)
         for script in (
             _SCHEMA_SQL,
             _ASSOCIATIONS_SCHEMA_SQL,
@@ -9667,35 +9697,52 @@ class Store:
                 path=str(self._path),
             )
 
-    def _stamped_generation(self) -> int | None:
-        """The stamped ``format_version`` read with the one parser, or None
-        for a brand-new database (no metadata table or no row) or a garbled
-        marker. Called under ``_init_schema``'s lock."""
-        try:
+    def _pre_migration_copy_label(self) -> str | None:
+        """``"gen<N>"`` (or ``"genunknown"``) when this open must copy the
+        store before migrating it, else None. Called under ``_init_schema``'s
+        lock, before any DDL.
+
+        ⛔ DECIDED BY STRUCTURE, NOT BY THE MARKER (L3 r1 10-14, complement +
+        codex): an existing store whose marker is missing or garbled reads like
+        a brand-new database by its marker, and migrated with no copy. A store
+        exists when it has an ``episodes`` table; it needs a copy until it
+        carries THIS generation's guards, which this transaction installs. So a
+        store with a garbled marker (which the stamp never rewrites) is copied
+        once, not on every open."""
+        if _SCHEMA_VERSION < _FIRST_GUARDED_GENERATION:
+            return None
+        names = {
+            row[0] for row in self._conn.execute(
+                "SELECT name FROM sqlite_master WHERE type IN ('table', 'trigger')"
+            )
+        }
+        if "episodes" not in names:
+            return None
+        if any(
+            (m := _GEN_GUARD_NAME_RE.fullmatch(n)) and int(m.group(1)) == _SCHEMA_VERSION
+            for n in names
+        ):
+            return None
+        marker: int | None = None
+        if "metadata" in names:
             row = self._conn.execute(
                 "SELECT value FROM metadata WHERE key = 'format_version'"
             ).fetchone()
-        except sqlite3.OperationalError as exc:
-            if "no such table" in str(exc).lower():
-                return None
-            raise
-        return None if row is None else _parse_format_version(row["value"])
+            marker = None if row is None else _parse_format_version(row["value"])
+        return f"gen{marker}" if marker is not None else "genunknown"
 
-    def _copy_before_migration(self, generation: int) -> None:
-        """Back the whole database up beside itself before it migrates from
-        ``generation``. Called under ``_init_schema``'s ``BEGIN IMMEDIATE``
-        before this transaction has changed anything, so the copy is the
-        committed store as it stood. Never overwrites; never deleted by
-        anneal. A copy that cannot be made aborts the migration (the store
-        stays at ``generation``, untouched) and the open raises."""
+    def _copy_before_migration(self, label: str) -> None:
+        """Back the whole database up beside itself as
+        ``<name>.<label>-<UTC time>.bak`` before it migrates. Called under
+        ``_init_schema``'s ``BEGIN IMMEDIATE`` before this transaction has
+        changed anything, so the copy is the committed store as it stood.
+        Built in a private temp file and published under its final name only
+        when complete, never over an existing file (L3 r1 10-14, codex: a crash
+        mid-copy left a partial file under the name of a finished one). Never
+        deleted by anneal. A copy that cannot be made aborts the migration (the
+        store stays as it was) and the open raises."""
         stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
-        target = self._path.with_name(f"{self._path.name}.gen{generation}-{stamp}.bak")
-        if os.path.lexists(target):
-            raise StoreError(
-                f"{self._path}: the pre-migration copy {target.name} already "
-                "exists; not overwriting it. Nothing was migrated.",
-                operation="schema_init", path=str(self._path),
-            )
+        target = self._path.with_name(f"{self._path.name}.{label}-{stamp}.bak")
         # ⛔ A SECOND CONNECTION READS THE COPY; ``self._conn.backup`` HANGS.
         # MEASURED 2026-10-14: a backup whose source is the connection holding
         # this BEGIN IMMEDIATE never completes (Python retries the locked
@@ -9706,20 +9753,37 @@ class Store:
         # 0.9.43 wrote.
         src: sqlite3.Connection | None = None
         dst: sqlite3.Connection | None = None
+        tmp: Path | None = None
         try:
+            fd, tmp_name = tempfile.mkstemp(
+                dir=str(self._path.parent), prefix=f".{self._path.name}.copy-",
+                suffix=".tmp",
+            )
+            os.close(fd)
+            tmp = Path(tmp_name)
             src = connect(self._path, must_exist=True, timeout=30.0)
             src.execute("PRAGMA query_only=ON")
-            dst = connect(target)
+            dst = connect(tmp)
             src.backup(dst)
             dst.close()
             dst = None
             src.close()
             src = None
-            fd = os.open(target, os.O_RDONLY)
+            fd = os.open(tmp, os.O_RDONLY)
             try:
                 os.fsync(fd)
             finally:
                 os.close(fd)
+            # No-clobber publish: link() fails if the name exists. A filesystem
+            # without hard links falls back to a checked rename.
+            try:
+                os.link(tmp, target)
+            except FileExistsError:
+                raise
+            except OSError:
+                if os.path.lexists(target):
+                    raise FileExistsError(errno.EEXIST, "exists", str(target)) from None
+                os.rename(tmp, target)
             _fsync_dir(target.parent)
         except (OSError, sqlite3.Error) as exc:
             for c in (dst, src):
@@ -9728,17 +9792,22 @@ class Store:
                         c.close()
                     except sqlite3.Error:
                         pass
-            try:
-                os.unlink(target)
-            except OSError:
-                pass
             raise StoreError(
-                f"{self._path}: could not copy the store before migrating it "
-                f"from schema generation {generation} to {_SCHEMA_VERSION} "
-                f"({exc}); nothing was migrated. Free space or fix permissions "
-                "beside the database and open it again.",
+                f"{self._path}: could not copy the store before migrating it to "
+                f"schema generation {_SCHEMA_VERSION} ({exc}); nothing was "
+                "migrated. Free space or fix permissions beside the database "
+                "and open it again.",
                 operation="schema_init", path=str(self._path),
             ) from exc
+        finally:
+            if tmp is not None:
+                # the temp name and any journal SQLite left beside it (after a
+                # link, the copy lives on under ``target``)
+                for leftover in (tmp, *(Path(f"{tmp}{s}") for s in ("-journal", "-wal", "-shm"))):
+                    try:
+                        os.unlink(leftover)
+                    except OSError:
+                        pass
 
     def _record_prune_failure(self, detail: str) -> None:
         """Count a post-commit auto-prune failure so ``status()`` can see it.

@@ -113,6 +113,7 @@ class TestANewerSchemaIsRefusedTheWayTheSidecarsRefuseIt:
         import anneal_memory.store as store_mod
 
         db = tmp_path / "m.db"
+        monkeypatch.setattr(store_mod, "_SCHEMA_VERSION", 1)  # seed as gen 1 (L3 r1 10-14, codex)
         v1 = Store(db)
         v1.record("written by v1", episode_type="observation")
         v1.close()
@@ -166,6 +167,7 @@ class TestANewerSchemaIsRefusedTheWayTheSidecarsRefuseIt:
         import anneal_memory.store as store_mod
 
         db = tmp_path / "m.db"
+        monkeypatch.setattr(store_mod, "_SCHEMA_VERSION", 1)  # seed as gen 1 (L3 r1 10-14, codex)
         v1 = Store(db)
         v1.record("v1 wrote this", episode_type="observation")
         v1.close()
@@ -4466,33 +4468,146 @@ class TestGenerationGuards:
         Store(tmp_path / "m.db").close()
         assert not list(tmp_path.glob("*.bak"))
 
-    @pytest.mark.skipif(os.name == "nt" or (hasattr(os, "geteuid") and os.geteuid() == 0),
-                        reason="directory permissions do not bind on Windows or as root")
     def test_a_copy_that_cannot_be_made_leaves_the_store_at_gen1(self, tmp_path):
-        d = tmp_path / "s"
-        d.mkdir()
-        db = d / "m.db"
+        import anneal_memory.store as store_mod
+
+        db = tmp_path / "m.db"
         with Store(db) as s:
             s.record("one", episode_type="observation")
         self._as_generation_1(db)
-        # a WAL store needs its -wal/-shm writable, so block only the copy's name
-        blocker = d / "m.db.gen1-blocked"
-        orig_with_name = Path.with_name
+        real_connect = store_mod.connect
 
-        def no_room(self, name):
-            if name.startswith("m.db.gen1-") and name.endswith(".bak"):
-                return blocker / "nope" / name
-            return orig_with_name(self, name)
+        def full_disk(path, **kwargs):
+            # the copy's destination fails the way a full disk does
+            if ".copy-" in str(path):
+                raise sqlite3.OperationalError("database or disk is full")
+            return real_connect(path, **kwargs)
 
-        import anneal_memory.store as store_mod
         with pytest.MonkeyPatch.context() as mp:
-            mp.setattr(store_mod.Path, "with_name", no_room)
+            mp.setattr(store_mod, "connect", full_disk)
             with pytest.raises(StoreError, match="could not copy the store"):
                 Store(db)
         conn = sqlite3.connect(str(db))
         assert conn.execute("SELECT value FROM metadata WHERE key = 'format_version'").fetchone()[0] == "1"
         conn.close()
         assert self._guards(db)[0] == set()
+        # nothing left beside the store: no published copy, no temp file
+        assert sorted(p.name for p in tmp_path.iterdir() if ".bak" in p.name or ".copy-" in p.name) == []
+
+    def test_no_temp_file_survives_a_successful_copy(self, tmp_path):
+        db = tmp_path / "m.db"
+        with Store(db) as s:
+            s.record("one", episode_type="observation")
+        self._as_generation_1(db)
+        Store(db).close()
+        names = sorted(p.name for p in tmp_path.iterdir())
+        assert [n for n in names if ".copy-" in n] == []
+        assert len([n for n in names if n.startswith("m.db.gen1-") and n.endswith(".bak")]) == 1
+
+    def test_an_existing_store_with_no_or_a_garbled_marker_is_copied_once(self, tmp_path):
+        # L3 r1 10-14 (complement + codex): the marker read like a fresh database
+        for value in (None, "garbled"):
+            d = tmp_path / ("none" if value is None else value)
+            d.mkdir()
+            db = d / "m.db"
+            with Store(db) as s:
+                s.record("one", episode_type="observation")
+            self._as_generation_1(db)
+            conn = sqlite3.connect(str(db))
+            if value is None:
+                conn.execute("DELETE FROM metadata WHERE key = 'format_version'")
+            else:
+                conn.execute("UPDATE metadata SET value = ? WHERE key = 'format_version'", (value,))
+            conn.commit()
+            conn.close()
+            Store(db).close()
+            Store(db).close()  # already migrated (this generation's guards exist): no second copy
+            copies = sorted(p.name for p in d.iterdir() if p.name.endswith(".bak"))
+            label = "genunknown"
+            assert len(copies) == 1 and copies[0].startswith(f"m.db.{label}-"), (value, copies)
+
+    def test_a_newer_generations_guards_refuse_an_older_release(self, tmp_path):
+        # L3 r1 10-14 (complement): with the marker garbled, the open passes the
+        # marker check; the newer guards must still refuse, not be dropped
+        from anneal_memory.store import _SCHEMA_VERSION, _install_generation_guards
+
+        db = tmp_path / "m.db"
+        Store(db).close()
+        later = self._old_writer(db, _SCHEMA_VERSION + 1)
+        later.execute("BEGIN IMMEDIATE")
+        _install_generation_guards(later, _SCHEMA_VERSION + 1)
+        later.execute("UPDATE metadata SET value = 'garbled' WHERE key = 'format_version'")
+        later.commit()
+        later.close()
+        # refused either by the newer guards themselves (this open's own default
+        # INSERTs reach them first) or by the installer's check; never dropped
+        with pytest.raises(StoreError, match=f"generation {_SCHEMA_VERSION + 1}"):
+            Store(db)
+        guards, _ = self._guards(db)
+        assert guards and all(g.startswith(f"anneal_gen{_SCHEMA_VERSION + 1}_") for g in guards)
+
+    def test_a_same_named_trigger_that_is_not_the_guard_is_replaced(self, tmp_path):
+        # L3 r1 10-14 (codex, reproduced): a name alone was trusted
+        from anneal_memory.store import _SCHEMA_VERSION
+
+        db = tmp_path / "m.db"
+        Store(db).close()
+        name = f"anneal_gen{_SCHEMA_VERSION}_guard_episodes_insert"
+        conn = sqlite3.connect(str(db))
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute(f'DROP TRIGGER "{name}"')
+        conn.execute(f'CREATE TRIGGER "{name}" BEFORE INSERT ON episodes BEGIN SELECT 1; END')
+        conn.commit()
+        conn.close()
+        Store(db).close()
+        old = self._old_writer(db, 1)
+        with pytest.raises(sqlite3.IntegrityError, match=f"schema generation {_SCHEMA_VERSION}"):
+            old.execute(
+                "INSERT INTO episodes (id, timestamp, type, content) VALUES ('x', '2026-01-01T00:00:00Z', 'observation', 'c')"
+            )
+        old.close()
+
+    def test_a_reopen_does_not_rewrite_the_guards(self, tmp_path):
+        # the guards are compared by SQL, so an unchanged store sees no DDL on open
+        db = tmp_path / "m.db"
+        Store(db).close()
+        conn = sqlite3.connect(str(db))
+        before = conn.execute("PRAGMA schema_version").fetchone()[0]
+        conn.close()
+        Store(db).close()
+        conn = sqlite3.connect(str(db))
+        assert conn.execute("PRAGMA schema_version").fetchone()[0] == before
+        conn.close()
+
+    def test_a_connection_keeps_the_generation_it_was_opened_with(self, monkeypatch):
+        # L3 r1 10-14 (codex): the function closed over the module global
+        import anneal_memory.store as store_mod
+        from anneal_memory.store import register_writer_schema
+
+        conn = sqlite3.connect(":memory:")
+        register_writer_schema(conn)
+        opened_with = store_mod._SCHEMA_VERSION
+        monkeypatch.setattr(store_mod, "_SCHEMA_VERSION", opened_with + 5)
+        assert conn.execute("SELECT anneal_writer_schema()").fetchone()[0] == opened_with
+        conn.close()
+
+    def test_package_connections_trust_the_schema(self, tmp_path):
+        # L3 r1 10-14 (codex, measured on sqlite 3.53.4): under trusted_schema=OFF a
+        # trigger calling a Python function fails "unsafe use"; the package's
+        # connections set it ON
+        from anneal_memory.store import connect, register_writer_schema
+
+        db = tmp_path / "m.db"
+        Store(db).close()
+        conn = connect(db)
+        assert conn.execute("PRAGMA trusted_schema").fetchone()[0] == 1
+        conn.close()
+        host = sqlite3.connect(str(db))
+        register_writer_schema(host)
+        host.execute("PRAGMA trusted_schema=OFF")
+        with pytest.raises(sqlite3.OperationalError, match="unsafe use"):
+            host.execute("INSERT INTO metadata (key, value) VALUES ('h', 'x')")
+        host.close()
 
     def test_cascading_deletes_pass_the_guards(self, tmp_path):
         # case H: episodes' AFTER DELETE triggers write other guarded tables

@@ -10,7 +10,7 @@ Four things are public, and only these:
 
 1. **The Python API.** Every name in `anneal_memory.__all__`. Each name is also frozen at the module path that defines it, so `from anneal_memory.durable import section_chars` and `from anneal_memory import section_chars` both stay valid. Names that start with an underscore, and public-looking names that are not in `__all__`, are internal and carry no promise, even when a module exposes them.
 2. **The command line.** The subcommands, their flags, and the keys of the `--json` output of each command.
-3. **The MCP server.** The tool names and each tool's input schema. The tool descriptions are guarded separately by the integrity manifest ([tests/test_integrity.py](../tests/test_integrity.py)); the schemas are guarded by the public API snapshot ([tests/test_public_api.py](../tests/test_public_api.py)).
+3. **The MCP server.** The tool names and each tool's input schema. The tool descriptions are guarded separately by the integrity manifest ([tests/test_integrity.py](../tests/test_integrity.py)); the schemas are guarded by the public API snapshot test.
 4. **The files on disk.** See "On-disk format" below.
 
 Anything not listed here can change in any release.
@@ -29,7 +29,7 @@ A public name, flag or field is deprecated before it is removed:
 2. Using it raises a `DeprecationWarning`, and the [CHANGELOG](../CHANGELOG.md) has a line that names the replacement.
 3. It is removed no earlier than the next MAJOR release.
 
-The first deprecation is `allow_unlinked` (the `allow_unlinked` argument of `validated_save_continuity`, the CLI flag `--allow-unlinked`, and the MCP argument of the same name). It is accepted and does nothing today. The plan is to emit the `DeprecationWarning` through 1.x and remove it in 2.0. The warning is not emitted yet.
+The first deprecation is `allow_unlinked` (the `allow_unlinked` argument of `validated_save_continuity`, the CLI flag `--allow-unlinked`, and the MCP argument of the same name). It is accepted and does nothing today. The MCP tool's result already says it is deprecated and did nothing. The plan is to emit a `DeprecationWarning` from the library and the CLI through 1.x and remove the argument in 2.0.
 
 ## Supported environments
 
@@ -46,6 +46,7 @@ This section states what 1.0 will promise. It takes effect when the schema gener
 - The migration is forward-only, additive and idempotent, and it copies the database before changing it.
 - A store written by 1.x is refused by an older writer. The refusal is deliberate: it keeps an older release from writing into a store whose format it does not know.
 - The sidecar files and the per-record formats (the audit log, the outcome log) are versioned. A record written by one release stays readable by every later release.
+- A program that writes to a store with plain `sqlite3` calls `anneal_memory.register_writer_schema(conn)` on its connection first. Reading needs nothing.
 
 The mechanism of the migration is described in the CHANGELOG entry for the release that ships it.
 

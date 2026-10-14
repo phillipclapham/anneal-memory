@@ -181,9 +181,12 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
   episodes longer, it never drops one.
 - A hand-edited audit manifest whose sealed-file record carries a non-string `last_ts` makes retention cleanup raise;
   anneal never writes one.
-- Mixed versions writing one store: an anneal before 0.9.42 takes no audit append lock, so writing beside a newer one
-  breaks the chain; 0.9.9 does not know a quarantine marker, writes a fresh manifest and reports the trail valid. Nothing on the
-  newer side can detect either: run one release on every writer.
+- Mixed versions writing one store: on a generation 1 store (every 0.9.x, before any open by this release) an anneal
+  before 0.9.42 takes no audit append lock, so writing beside a newer one breaks the chain; 0.9.9 does not know a
+  quarantine marker, writes a fresh manifest and reports the trail valid. Once this release has opened the store it is
+  generation 2 and a 0.9.x writer is refused (0.9.9 measured: "no such function: anneal_writer_schema"), so the edge
+  closes with the migration. The sidecar-file cases (the spore registry, the wrap's continuity-moved check) are
+  unguarded: run one release on every writer.
 - A raw SQLite error (a locked or full database) raised inside `validated_save_continuity`'s batch by a helper with no
   `_db_boundary` escapes as the SQLite exception rather than `StoreError`. The batch still rolls back the whole
   transaction, so nothing is written (read from the code, not reproduced).

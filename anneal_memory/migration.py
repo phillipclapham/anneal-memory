@@ -410,7 +410,7 @@ MIGRATION_MANIFEST: list[MigrationEntry] = [
         "files": list(CORE_FILES),
     },
     {
-        "version": "0.9.44",
+        "version": "1.0.0",
         "feature": "KL-19-OPERATOR-CONSOLIDATES",
         "summary": (
             "Consolidation is now the operator's act by default. A store created "

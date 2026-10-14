@@ -3179,7 +3179,11 @@ class Store:
         from a concurrent loser's debris (no committed wrap recorded this exact
         ``<token12>-<uuid8>`` pair id → safe to discard).
 
-        Both columns are NULLable: legacy wraps and direct ``wrap_completed``
+        The same block adds ``continuity_text``, ``unattended`` and ``model``
+        (the dreaming primitives; see :meth:`wrap_completed`). It runs from
+        ``_init_schema_locked`` on every writable open, before any wrap.
+
+        Both oracle columns are NULLable: legacy wraps and direct ``wrap_completed``
         calls (not routed through the canonical pipeline) leave them NULL, and
         the orphan classifier reads NULL as "no oracle for this wrap" and falls
         back to the conservative manual-provenance path. Safe to call on tables

@@ -19,11 +19,13 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
 - `validated_save_continuity(..., unattended=False, model=None)` and `Store.wrap_completed(..., continuity_text=None,
   unattended=False, model=None)`: the wraps row now keeps the text the wrap saved, whether it ran unattended, and the
   model that composed it (three columns on `wraps`, added to existing stores by the same open-time migration as the
-  recovery columns; NULL / 0 for earlier wraps). Nothing reads them back in this release: a reader and a revert
+  recovery columns; NULL / 0 for earlier wraps). Library-only: the MCP `save_continuity` tool and the CLI take no such
+  arguments and ignore an unknown one. Nothing reads them back in this release: a reader and a revert
   (`revert_wrap`) come after 1.0. The saved text is a copy of continuity as it stood at that wrap, so it can hold
   content of an episode deleted afterwards; `delete_episode` does not rewrite old wraps rows (a known edge).
 - `SaveContinuityResult["contradictions"]`: every pattern line of the saved text that declares `[contradicts: ...]`, as
-  `{"pattern", "contradicts": [...]}` (empty when none).
+  `{"pattern", "contradicts": [...]}`, one entry per occurrence (empty when none). It is result-only: unlike
+  `proven_without_contradicts_declaration` it is not written to the audit chain.
 
 ### Changed — the store is schema generation 2; an older anneal can no longer write to it
 - ⚠ **Upgrade every process that touches a store together.** The first write-capable open by this release migrates a

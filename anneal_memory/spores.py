@@ -553,8 +553,8 @@ class SporeStore:
     """A JSON-backed store of open cognitive loops (the prospective layer).
 
     Mirrors :class:`Store`'s constructor shape — an explicit path, no magic
-    default — and its atomic-write durability (unique-tmp + fsync + rename +
-    dir-fsync). UNLIKE the episodic :class:`Store` (a documented single-process
+    default. Its writes are atomic (unique-tmp + fsync + rename + dir-flush; see
+    the module docstring's Storage paragraph for what the dir-flush does). UNLIKE the episodic :class:`Store` (a documented single-process
     invariant), the prospective layer is inherently MULTI-writer — its use-case
     is several parallel sessions plus overnight wrappers each planting / touching
     / resolving loops against one store. Every mutation therefore runs under an

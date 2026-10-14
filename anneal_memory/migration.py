@@ -42,6 +42,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, TypedDict
 
 from . import __version__
+from ._fsdir import _fsync_dir
 
 if TYPE_CHECKING:
     from typing import Sequence
@@ -528,21 +529,6 @@ def read_marker(marker_path: Path) -> str | None:
     if not isinstance(version, str) or not version.strip():
         return None
     return version
-
-
-def _fsync_dir(dir_path: Path) -> None:
-    """Best-effort POSIX directory fsync so the rename itself is durable. Mirrors
-    the episodic store's ``_fsync_dir``; on macOS ``os.fsync``
-    is weaker than ``fcntl.F_FULLFSYNC``, which this helper does not call
-    (``spores._full_fsync`` does) — a known edge, not a bug here. No-ops where a directory fd can't be opened/synced (e.g. Windows)."""
-    try:
-        fd = os.open(dir_path, os.O_RDONLY)
-        try:
-            os.fsync(fd)
-        finally:
-            os.close(fd)
-    except OSError:
-        pass
 
 
 def write_marker(marker_path: Path, version: str) -> None:

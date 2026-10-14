@@ -66,9 +66,9 @@ germination and to "top of mind"):
   - ``dormant``  activated > 90 days ago / unknown — deep store; recall or retire
 
 Storage: a single JSON document beside the episodic db (``<stem>.crystal.json``),
-written atomically (unique-tmp + fsync + rename + dir-fsync — the same durability
-idiom as the SQLite store's ``_fsync_dir``; :mod:`spores` flushes its directory more
-strictly). Like spores and
+written atomically (unique-tmp + fsync + rename + dir-fsync — the shared
+best-effort idiom, :func:`anneal_memory._fsdir._fsync_dir`; :mod:`spores`
+flushes its directory more strictly). Like spores and
 UNLIKE the episodic :class:`Store` (a documented single-process invariant), this
 layer is **multi-writer-safe**: crystallization happens at WRAP time (single-writer
 consolidate) but recall reads fire on EVERY turn across parallel sessions, so every
@@ -108,6 +108,7 @@ try:  # POSIX advisory locking; absent on Windows (see CrystalStore._transaction
 except ImportError:  # pragma: no cover - exercised only on non-POSIX platforms
     fcntl = None  # type: ignore[assignment]
 
+from ._fsdir import _fsync_dir
 from .graduation import (
     _LEVEL_ATOM,
     _SCAFFOLD_TAG_RE,
@@ -364,21 +365,6 @@ def _clean_str_list(value: object, field: str) -> list[str]:
             seen.add(s)
             out.append(s)
     return out
-
-
-def _fsync_dir(dir_path: Path) -> None:
-    """Best-effort POSIX directory fsync so the rename itself is durable. Mirrors the
-    episodic store's ``_fsync_dir``; on macOS ``os.fsync`` is weaker than
-    ``fcntl.F_FULLFSYNC``, which this helper does not call (``spores._full_fsync``
-    does) — a known edge, not a bug here."""
-    try:
-        fd = os.open(dir_path, os.O_RDONLY)
-        try:
-            os.fsync(fd)
-        finally:
-            os.close(fd)
-    except OSError:
-        pass
 
 
 def activation_tier(crystal: CrystalDict, today: date | None = None) -> Activation:

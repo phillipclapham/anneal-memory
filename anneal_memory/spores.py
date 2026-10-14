@@ -38,7 +38,8 @@ Germination (computed at read-time, NEVER stored — parallel to "top of mind"):
 
 Storage: a single JSON document, written atomically (unique-tmp + fsync + rename +
 dir-flush). The dir-flush is ``_flush_dir``: ``F_FULLFSYNC`` on macOS, and a real
-failure raises (the SQLite store's ``_fsync_dir`` swallows ``OSError`` instead).
+failure raises (the shared ``_fsync_dir`` helper (:mod:`anneal_memory._fsdir`)
+swallows ``OSError`` instead).
 The prospective set is small and mutable (open loops, frequently re-tiered and
 resolved); a JSON document fits that shape where the append-heavy episodic corpus
 fits SQLite. Zero dependencies beyond the Python stdlib. Unlike the episodic
@@ -698,7 +699,7 @@ class SporeStore:
 
         Platform: ``fcntl`` is POSIX-only and reliable on a LOCAL filesystem. On
         a non-POSIX platform the lock degrades to a no-op (mirroring
-        ``store._fsync_dir``'s best-effort Windows behavior); over NFS / a network
+        ``anneal_memory._fsdir._fsync_dir``'s best-effort Windows behavior); over NFS / a network
         filesystem ``flock`` may also silently no-op. In either case the
         unique-tmp + atomic-replace write still applies, so a *single-process*
         writer is unaffected, but cross-process serialization is guaranteed only

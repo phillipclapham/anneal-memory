@@ -59,6 +59,7 @@ from typing import Any, NoReturn
 
 from . import __version__
 from . import sessions
+from ._fsdir import _fsync_dir
 from .audit import (
     AuditTrail,
     _CORRUPT_MANIFEST as _CORRUPT_AUDIT_MANIFEST,
@@ -154,7 +155,6 @@ from .store import (
     _SCHEMA_VERSION,
     _parse_format_version,
     normalize_state_key,
-    _fsync_dir,
 )
 from .types import (
     DEFAULT_TRUST,

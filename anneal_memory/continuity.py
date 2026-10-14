@@ -37,6 +37,7 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from ._fsdir import _fsync_dir
 from .graduation import (
     mask_explanations_text,
     CrossSessionCollision,
@@ -107,7 +108,6 @@ from .store import (
     WrapWindowMovedError,
     WrapContinuityMovedError,
     SectionError,
-    _fsync_dir,
     _safe_unlink,
 )
 from .types import (

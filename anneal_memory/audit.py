@@ -20,7 +20,8 @@ Weekly rotation with gzip compression keeps the active file small.
 A manifest index enables cross-file chain verification and efficient
 time-range queries without decompressing sealed files.
 
-Zero dependencies beyond Python stdlib.
+Zero dependencies beyond Python stdlib. (Package-internal imports reach
+only the leaf helper :mod:`anneal_memory._fsdir`, never a heavier sibling.)
 """
 
 from __future__ import annotations
@@ -44,6 +45,8 @@ from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterator, NamedTuple
+
+from ._fsdir import _fsync_dir
 
 try:  # POSIX advisory locking; absent on Windows (see AuditTrail._manifest_lock).
     import fcntl
@@ -279,35 +282,6 @@ class _ManifestQuarantined(_ManifestUnavailable):
     def __init__(self, message: str, markers: list[str] | None = None) -> None:
         super().__init__(message)
         self.markers = list(markers or [])
-
-
-def _fsync_dir(path: Path) -> None:
-    """Best-effort directory fsync after an atomic rename/replace.
-
-    Same idiom as ``store._fsync_dir`` (duplicated
-    rather than imported — this module is zero-dependency, including on
-    its siblings). ``fsync(file)`` durability does not extend to the
-    directory entry created by a subsequent rename; a crash in that gap
-    can leave the rename's target missing on recovery even though the
-    data was durable. macOS ``fsync`` is weaker than Linux (true
-    durability needs ``fcntl.F_FULLFSYNC``, which ``spores._full_fsync``
-    uses and this plain ``os.fsync`` does not) but the directory sync
-    still narrows the window. Windows can't fsync a
-    directory handle; no-op there. Swallows ``OSError`` — best-effort,
-    not a guarantee callers may rely on.
-    """
-    if os.name != "posix":
-        return
-    try:
-        dir_fd = os.open(str(path), os.O_RDONLY)
-    except OSError:
-        return
-    try:
-        os.fsync(dir_fd)
-    except OSError:
-        pass
-    finally:
-        os.close(dir_fd)
 
 
 # The fields of one record in the manifest's ``set_aside`` list.

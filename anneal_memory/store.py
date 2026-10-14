@@ -73,6 +73,7 @@ from .associations import (
     migrate_add_affective_columns as _migrate_affective,
     record_associations as _record_associations,
 )
+from ._fsdir import _fsync_dir
 from .audit import AuditTrail
 from .graduation import _meaningful_words, canonical_continuity_text
 from .origin import ORIGIN_KEY_CHECK_SQL, validate_origin_key
@@ -875,46 +876,6 @@ def _safe_unlink(path: Path) -> None:
         path.unlink(missing_ok=True)
     except OSError:
         pass
-
-
-def _fsync_dir(path: Path) -> None:
-    """Best-effort directory fsync for crash-safe atomic writes.
-
-    On POSIX filesystems (ext4, xfs, btrfs, APFS), ``fsync(file)``
-    guarantees the file's data blocks are on disk but does NOT
-    guarantee the containing directory's entry for the file is
-    durable. A crash between the file fsync and a subsequent
-    ``rename(2)`` can leave the directory without an entry for the
-    tmp file — the rename then fails with ``ENOENT`` even though the
-    data was durable. Syncing the parent directory closes this gap.
-
-    Windows does NOT support ``os.open`` on a directory for fsync;
-    on that platform this function is a no-op. macOS ``fsync`` is
-    weaker than Linux (true durability needs ``fcntl.F_FULLFSYNC``,
-    which this helper does not call; ``spores._full_fsync`` does) but the
-    directory entry sync still helps reduce the residual crash
-    window.
-
-    Swallows all OSError — this is a best-effort durability
-    reinforcement, NOT a hard guarantee. Callers must not rely on
-    this function either succeeding or raising; it's one layer of
-    defense among several.
-    """
-    if os.name != "posix":
-        return
-    try:
-        dir_fd = os.open(str(path), os.O_RDONLY)
-    except OSError:
-        return
-    try:
-        os.fsync(dir_fd)
-    except OSError:
-        pass
-    finally:
-        try:
-            os.close(dir_fd)
-        except OSError:
-            pass
 
 
 def _reconstruct_wrap_ownership_error(

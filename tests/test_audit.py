@@ -1170,7 +1170,7 @@ class TestWeeklyRotation:
         self, tmp_path, monkeypatch
     ):
         """audit.py was the only durability-sensitive module without the
-        directory-fsync idiom (`store._fsync_dir`);
+        directory-fsync idiom (:func:`anneal_memory._fsdir._fsync_dir`);
         a crash between a rename's file fsync and its directory entry
         landing durably could leave the renamed target missing on
         recovery. Rotation makes THREE renames durable this way: the

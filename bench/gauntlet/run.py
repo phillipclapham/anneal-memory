@@ -21,7 +21,10 @@ def evaluate(expected, counts):
     if expected is None:
         return "UNSET"
     for e in expected:
-        if e["metric"] not in counts or not OPS[e["op"]](counts[e["metric"]], e["value"]):
+        try:
+            if e["metric"] not in counts or not OPS[e["op"]](counts[e["metric"]], e["value"]):
+                return "FAIL"
+        except (TypeError, KeyError):  # a None metric or an unknown op is a failed expectation
             return "FAIL"
     return "PASS"
 
@@ -35,18 +38,18 @@ def fmt_expected(expected):
 def main() -> int:
     results = []
     for name in ROWS:
-        mod = importlib.import_module(f"bench.gauntlet.{name}")
-        missing = mod.requires() if hasattr(mod, "requires") else None
-        if missing:
-            results.append((name, f"missing: {missing}", fmt_expected(mod.EXPECTED), "SKIP"))
-            continue
         try:
+            mod = importlib.import_module(f"bench.gauntlet.{name}")
+            missing = mod.requires() if hasattr(mod, "requires") else None
+            if missing:
+                results.append((name, f"missing: {missing}", fmt_expected(mod.EXPECTED), "SKIP"))
+                continue
             with tempfile.TemporaryDirectory() as td:
                 counts = mod.run(td)
             results.append((name, counts, fmt_expected(mod.EXPECTED), evaluate(mod.EXPECTED, counts)))
-        except Exception as exc:  # a crashed row is a result, not silence
+        except Exception as exc:  # a crashed row (or one that cannot import) is a result, not silence
             traceback.print_exc(file=sys.stderr)
-            results.append((name, f"{type(exc).__name__}: {exc}", fmt_expected(mod.EXPECTED), "ERROR"))
+            results.append((name, f"{type(exc).__name__}: {exc}", "(none)", "ERROR"))
     for name, why in NOT_BUILT:
         results.append((name, why, "(none)", "NOT BUILT"))
     for name, counts, exp, verdict in results:

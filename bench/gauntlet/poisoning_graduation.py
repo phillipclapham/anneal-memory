@@ -22,9 +22,9 @@ def _variant(tmpdir: str, tag: str, **kw) -> dict:
     s = Store(os.path.join(tmpdir, f"poison_{tag}.db"), project_name="t")
     try:
         e1 = s.record(_CLAIM, "observation", **kw)
-        wrap(s, [f'- moon_is_cheese | 1x ({WRAP1_DAY}) {cite(e1, 'moon green cheese')}'], WRAP1_DAY)
+        wrap(s, [f'- moon_is_cheese | 1x ({WRAP1_DAY}) {cite(e1, "moon green cheese")}'], WRAP1_DAY)
         e2 = s.record(_CLAIM + " again, same page", "observation", **kw)
-        r, w = wrap(s, [f'- moon_is_cheese | 2x ({WRAP2_DAY}) {cite(e2, 'page again fire cold')}'], WRAP2_DAY,
+        r, w = wrap(s, [f'- moon_is_cheese | 2x ({WRAP2_DAY}) {cite(e2, "page again fire cold")}'], WRAP2_DAY,
                     record_warnings=True)
         on_worklist = [x["name"] for x in s.drift_status()["graduated"]]
         return {

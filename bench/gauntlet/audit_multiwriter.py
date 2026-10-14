@@ -10,7 +10,8 @@ from anneal_memory.audit import AuditTrail
 
 NAME = "audit_multiwriter"
 # Direction: the KL-24 lock keeps one valid chain.
-EXPECTED = [{"metric": "episodes", "op": "==", "value": 600}, {"metric": "verify_valid", "op": "==", "value": True}, {"metric": "status_write_failures", "op": "==", "value": 0}]
+EXPECTED = [{"metric": "episodes", "op": "==", "value": 600}, {"metric": "verify_valid", "op": "==", "value": True}, {"metric": "status_write_failures", "op": "==", "value": 0},
+            {"metric": "audit_entries", "op": ">=", "value": 600}, {"metric": "writer_failures", "op": "==", "value": 0}]
 _WRITERS, _EACH = 3, 200
 
 
@@ -27,6 +28,10 @@ def run(tmpdir: str) -> dict:
     for p in ps:
         p.start()
     for p in ps:
+        p.join(timeout=300)
+    hung = [p for p in ps if p.is_alive()]
+    for p in hung:
+        p.terminate()
         p.join()
     with Store(db, audit=True) as st:
         episodes = st.recall(limit=0).total_matching
@@ -36,6 +41,8 @@ def run(tmpdir: str) -> dict:
         "episodes": episodes,
         "verify_valid": bool(getattr(r, "valid", False)),
         "status_write_failures": failures,
+        "audit_entries": getattr(r, "total_entries", None),
+        "writer_failures": sum(1 for p in ps if p.exitcode != 0),
     }
     for k in ("first_invalid_seq", "invalid_seq", "broken_at"):
         if hasattr(r, k):

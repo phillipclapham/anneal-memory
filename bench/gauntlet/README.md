@@ -2,7 +2,7 @@
 
 AM-GAUNTLET runs five adversarial scenarios against the real anneal pipeline on temporary stores and prints mechanism counts. No model or API call. Each row declares what it expects; the runner exits 1 on a FAIL. It exists so a reader can run the immune-system claims rather than take them: rotated citations are routed to the operator's worklist, a mislabelled-trust episode graduates and is surfaced, honest graduations are not demoted, concurrent writers leave a verifiable audit chain, and a graduation citing two disagreeing episodes reaches `probe status` for the operator. It does not measure whether a pattern is TRUE; anneal proves grounding, the human holds truth.
 
-Run (repo root): `PYTHONPATH=. python -W ignore -m bench.gauntlet.run` (a few seconds). Exit code 1 on any FAIL or ERROR.
+Run (repo root): `PYTHONPATH=. python -W ignore -m bench.gauntlet.run`. Exit code 1 on any FAIL or ERROR.
 
 Each row module declares `NAME`, `EXPECTED` (a list of `{"metric","op","value"}`, or `None`) and `run(tmpdir) -> dict`. `EXPECTED=None` prints UNSET with the measured value; a row that declares missing inputs prints SKIP; a crashing row prints ERROR.
 
@@ -24,8 +24,8 @@ PASS      | rotated_pairs
     counts   : {'absurd_graduated': 5, 'demoted': 0, 'on_worklist': 5, 'gaming_suspects': 0, 'citation_reuse_max': 1}
     expected : on_worklist == 5
 PASS      | audit_multiwriter
-    counts   : {'episodes': 600, 'verify_valid': True, 'status_write_failures': 0}
-    expected : episodes == 600 and verify_valid == True and status_write_failures == 0
+    counts   : {'episodes': 600, 'verify_valid': True, 'status_write_failures': 0, 'audit_entries': 600, 'writer_failures': 0}
+    expected : episodes == 600 and verify_valid == True and status_write_failures == 0 and audit_entries >= 600 and writer_failures == 0
 PASS      | poisoning_graduation
     counts   : {'external.graduated': False, 'external.demoted': 1, 'external.uncorroborated': [('moon_is_cheese', 'external')], 'external.pattern_trust': {}, 'external.on_worklist': 0, 'external.cap08_warning': True, 'mislabelled.graduated': True, 'mislabelled.demoted': 0, 'mislabelled.uncorroborated': [], 'mislabelled.pattern_trust': {'moon_is_cheese': 'agent'}, 'mislabelled.on_worklist': 1, 'mislabelled.cap08_warning': False}
     expected : external.graduated == False and mislabelled.on_worklist == 1

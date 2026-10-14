@@ -22,7 +22,7 @@ from .store import (
     WrapWindowMovedError,
     continuity_lock,
 )
-from .origin import canonical_section_markdown, origin_key_usable
+from .origin import canonical_section_markdown, origin_key_usable, validate_origin_key
 from .types import (
     DEFAULT_TRUST,
     TRUST_LEVELS,
@@ -61,6 +61,7 @@ from .schema import (
     SectionRole,
     SectionSpec,
     graduating_headings,
+    hard_max_chars,
     heading_marker,
     name_for_schema,
     required_headings,
@@ -73,10 +74,13 @@ from .rederive import (
     DeriveRefused,
     RederiveReport,
     allow_store,
+    derived_state_lines,
+    parse_annotation,
     rederive_continuity,
     revoke_store,
+    strip_flag,
 )
-from .durable import DurableFact, parse_durable_facts
+from .durable import DROP_DURABLE_RE, DurableFact, parse_durable_facts, section_chars
 from .continuity import (
     ContinuityValidationError,
     felt_currency,
@@ -127,6 +131,7 @@ from .spores import (
     normalize_spore_field,
 )
 from .crystal import (
+    CRYSTAL_SCHEMA_VERSION,
     RETIRE_KINDS,
     VALID_ACTIVATION_MODES,
     VALID_ACTIVATIONS,
@@ -153,6 +158,16 @@ from .retrieval import (
     retrieve_patterns,
     retrieve_relevant,
     search_episodes,
+)
+from .migration import MIGRATION_MANIFEST
+from .pattern_associations import RETRIEVAL_THRESHOLD
+from .worth import (
+    ExposedRef,
+    ExposureLabel,
+    OutcomeLog,
+    fold_surfaced,
+    outcome_log_path,
+    receipt_crystal_names,
 )
 from .server import Server
 
@@ -299,4 +314,20 @@ __all__ = [
     "RelevantFact",
     "ReplacedEpisode",
     "ScoredEpisode",
+    "validate_origin_key",
+    "hard_max_chars",
+    "derived_state_lines",
+    "parse_annotation",
+    "strip_flag",
+    "DROP_DURABLE_RE",
+    "section_chars",
+    "CRYSTAL_SCHEMA_VERSION",
+    "MIGRATION_MANIFEST",
+    "RETRIEVAL_THRESHOLD",
+    "ExposedRef",
+    "ExposureLabel",
+    "OutcomeLog",
+    "fold_surfaced",
+    "outcome_log_path",
+    "receipt_crystal_names",
 ]

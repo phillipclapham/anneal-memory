@@ -11,6 +11,15 @@ from pathlib import Path
 
 from anneal_memory import OriginKeyConflict, Store
 from anneal_memory.origin import origin_key_usable
+from anneal_memory.store import register_writer_schema
+
+
+def _wconnect(*args, **kwargs):
+    """A raw writer fixture: the gen-2 guard triggers need the writer-schema function."""
+    conn = sqlite3.connect(*args, **kwargs)
+    register_writer_schema(conn)
+    return conn
+
 from anneal_memory.store import _ORIGIN_TRIGGER_GEN, _ORIGIN_TRIGGERS
 
 from tests.test_origin import GRAMMAR_FIXTURE
@@ -40,7 +49,7 @@ class _StoreCase(unittest.TestCase):
         self._tmp.cleanup()
 
     def raw(self) -> sqlite3.Connection:
-        c = sqlite3.connect(self.path)
+        c = _wconnect(self.path)
         self._conns.append(c)
         return c
 

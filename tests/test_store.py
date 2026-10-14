@@ -23,7 +23,9 @@ from anneal_memory.store import (
     StoreError,
     WrapInProgressError,
     WrapOwnershipError,
+    register_writer_schema,
 )
+from anneal_memory.store import _SCHEMA_VERSION as _STORE_SCHEMA_VERSION
 from anneal_memory.types import EpisodeType, StoreStatus, WrapRecord, WrapResult
 from anneal_memory import prepare_wrap
 
@@ -43,6 +45,11 @@ def store(tmp_db):
 
 
 # -- Initialization --
+
+
+# A marker one generation past this release's (the class below was written when
+# this release was generation 1 and "2" meant newer).
+_NEWER = str(_STORE_SCHEMA_VERSION + 1)
 
 
 class TestANewerSchemaIsRefusedTheWayTheSidecarsRefuseIt:
@@ -72,6 +79,7 @@ class TestANewerSchemaIsRefusedTheWayTheSidecarsRefuseIt:
         store.record("hello", episode_type="observation")
         store.close()
         conn = sqlite3.connect(db)
+        register_writer_schema(conn)  # a hand edit, not an older writer
         conn.execute(
             "INSERT OR REPLACE INTO metadata (key, value) VALUES ('format_version', ?)",
             (value,),
@@ -105,6 +113,7 @@ class TestANewerSchemaIsRefusedTheWayTheSidecarsRefuseIt:
         import anneal_memory.store as store_mod
 
         db = tmp_path / "m.db"
+        monkeypatch.setattr(store_mod, "_SCHEMA_VERSION", 1)  # seed as gen 1 (L3 r1 10-14, codex)
         v1 = Store(db)
         v1.record("written by v1", episode_type="observation")
         v1.close()
@@ -158,6 +167,7 @@ class TestANewerSchemaIsRefusedTheWayTheSidecarsRefuseIt:
         import anneal_memory.store as store_mod
 
         db = tmp_path / "m.db"
+        monkeypatch.setattr(store_mod, "_SCHEMA_VERSION", 1)  # seed as gen 1 (L3 r1 10-14, codex)
         v1 = Store(db)
         v1.record("v1 wrote this", episode_type="observation")
         v1.close()
@@ -541,6 +551,7 @@ class TestANewerSchemaIsRefusedTheWayTheSidecarsRefuseIt:
         import anneal_memory.store as store_mod
 
         db = tmp_path / "m.db"
+        monkeypatch.setattr(store_mod, "_SCHEMA_VERSION", 1)
         v1 = Store(db)
         v1.record("written by v1", episode_type="observation")
         v1.close()
@@ -560,7 +571,7 @@ class TestANewerSchemaIsRefusedTheWayTheSidecarsRefuseIt:
             again.close()
 
     def test_a_newer_store_is_refused_on_both_open_paths(self, tmp_path):
-        db = self._store_stamped(tmp_path, "2")
+        db = self._store_stamped(tmp_path, _NEWER)
 
         with pytest.raises(StoreError, match="newer anneal-memory schema"):
             Store(db)
@@ -585,7 +596,7 @@ class TestANewerSchemaIsRefusedTheWayTheSidecarsRefuseIt:
         after-state is identical whether or not schema init ran. The observable
         it graded was invariant to the thing it was named for. Spy on the call.
         """
-        db = self._store_stamped(tmp_path, "2")
+        db = self._store_stamped(tmp_path, _NEWER)
 
         calls = []
         original = Store._init_schema
@@ -635,7 +646,7 @@ class TestANewerSchemaIsRefusedTheWayTheSidecarsRefuseIt:
         """
         import sqlite3
 
-        db = self._store_stamped(tmp_path, "2")
+        db = self._store_stamped(tmp_path, _NEWER)
         conn = sqlite3.connect(db)
         conn.execute("PRAGMA journal_mode=DELETE")
         conn.commit()
@@ -666,7 +677,7 @@ class TestANewerSchemaIsRefusedTheWayTheSidecarsRefuseIt:
         """
         import sqlite3
 
-        db = self._store_stamped(tmp_path, "2")
+        db = self._store_stamped(tmp_path, _NEWER)
         conn = sqlite3.connect(db)
         conn.execute("ALTER TABLE metadata RENAME COLUMN value TO val")
         conn.commit()
@@ -678,7 +689,8 @@ class TestANewerSchemaIsRefusedTheWayTheSidecarsRefuseIt:
     @pytest.mark.parametrize(
         "value,why",
         [
-            ("1", "the current version"),
+            (str(_STORE_SCHEMA_VERSION), "the current version"),
+            ("1", "an older generation, which migrates on open"),
             ("garbled", "unparseable — deliberately tolerated, see the class docstring"),
         ],
     )
@@ -695,6 +707,7 @@ class TestANewerSchemaIsRefusedTheWayTheSidecarsRefuseIt:
 
         db = self._store_stamped(tmp_path, "1")
         conn = sqlite3.connect(db)
+        register_writer_schema(conn)  # a hand edit, not an older writer
         conn.execute("DELETE FROM metadata WHERE key = 'format_version'")
         conn.commit()
         conn.close()
@@ -722,7 +735,8 @@ class TestInit:
         row = store._conn.execute(
             "SELECT value FROM metadata WHERE key = 'format_version'"
         ).fetchone()
-        assert row["value"] == "1"
+        from anneal_memory.store import _SCHEMA_VERSION
+        assert row["value"] == str(_SCHEMA_VERSION)
 
     def test_project_name_stored(self, store):
         row = store._conn.execute(
@@ -4012,6 +4026,7 @@ def test_recall_corrupt_row_type_raises_store_error(tmp_path):
     with Store(db) as s:
         s.record("a findable observation about apparatus routing", EpisodeType.OBSERVATION)
     conn = sqlite3.connect(db)
+    register_writer_schema(conn)  # planting a corrupt row by hand
     conn.execute("UPDATE episodes SET type = 'not_a_real_type'")
     conn.commit()
     conn.close()
@@ -4316,83 +4331,343 @@ class TestRecoveryOracle:
             tmp.unlink(missing_ok=True)
 
 
-class TestTheWriterSchemaFunctionLetsABumpRefuseOpenWriters:
-    """Phill 2026-10-03 "3A": every connection registers the SQL function the
-    first schema bump's write triggers call (``_WRITER_SCHEMA_FUNCTION``). No
-    trigger exists at schema 1; this plays the bump from a second connection
-    while a Store is already open, which is the race only this closes (the
-    open-time check has already passed)."""
+class TestGenerationGuards:
+    """Schema generation 2 (Phill 2026-10-13, "yes, let's have it in 1.0"): every
+    table carries BEFORE INSERT/UPDATE/DELETE guards that refuse a writer whose
+    ``anneal_writer_schema()`` is below the store's generation; an older store is
+    copied whole before it migrates. The cases are the ones reproduced against a
+    real 0.9.43 / 0.9.23 from PyPI on 2026-10-14: a
+    0.9.43 connection registers the function returning 1, a 0.9.23 one registers
+    nothing."""
 
-    TABLES = ("episodes", "metadata")
-
-    def _bump(self, db, to):
-        import sqlite3
-        from anneal_memory.store import _WRITER_SCHEMA_FUNCTION
-
+    @staticmethod
+    def _old_writer(db, generation=1):
+        # what an already-open older release holds: a connection whose function
+        # returns its own (lower) generation
         conn = sqlite3.connect(str(db))
-        conn.create_function(_WRITER_SCHEMA_FUNCTION, 0, lambda: to, deterministic=True)
+        conn.create_function("anneal_writer_schema", 0, lambda: generation, deterministic=True)
+        return conn
+
+    @staticmethod
+    def _guards(db):
+        conn = sqlite3.connect(str(db))
+        try:
+            return {r[0] for r in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'trigger' AND name LIKE 'anneal\\_gen%' ESCAPE '\\'"
+            )}, [r[0] for r in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite\\_%' ESCAPE '\\'"
+            )]
+        finally:
+            conn.close()
+
+    @staticmethod
+    def _as_generation_1(db):
+        # a store as a gen-1 release left it: no guards, marker 1 (gen 2 changes no layout)
+        conn = sqlite3.connect(str(db))
         conn.execute("BEGIN IMMEDIATE")
-        for table in self.TABLES:
-            for op in ("INSERT", "UPDATE", "DELETE"):
-                conn.execute(
-                    f"CREATE TRIGGER bump_guard_{table}_{op.lower()} BEFORE {op} ON {table} "
-                    "BEGIN SELECT RAISE(ABORT, 'store is a newer anneal schema') WHERE "
-                    f"{_WRITER_SCHEMA_FUNCTION}() < (SELECT CAST(value AS INTEGER) "
-                    "FROM metadata WHERE key = 'format_version'); END"
-                )
-        conn.execute("UPDATE metadata SET value = ? WHERE key = 'format_version'", (str(to),))
+        for (name,) in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'trigger' AND name LIKE 'anneal\\_gen%' ESCAPE '\\'"
+        ).fetchall():
+            conn.execute(f'DROP TRIGGER "{name}"')
+        conn.execute("UPDATE metadata SET value = '1' WHERE key = 'format_version'")
         conn.commit()
         conn.close()
 
-    def test_an_open_store_is_refused_after_another_process_bumps_the_schema(self, tmp_path):
-        from anneal_memory.store import _SCHEMA_VERSION
-
-        db = tmp_path / "m.db"
-        store = Store(db)
-        store.record("before the bump", episode_type="observation")
-        self._bump(db, _SCHEMA_VERSION + 1)
-        with pytest.raises(StoreError, match="newer anneal schema"):
-            store.record("after the bump", episode_type="observation")
-        store.close()
-
-    def test_triggers_at_this_schema_let_this_release_write(self, tmp_path):
-        # positive control: the same triggers with the stamp unchanged pass
-        from anneal_memory.store import _SCHEMA_VERSION, _WRITER_SCHEMA_FUNCTION
-
-        db = tmp_path / "m.db"
-        store = Store(db)
-        import sqlite3 as _sq
-
-        fresh = _sq.connect(str(db))
-        # Schema 1's triggers are CAP-04's key-row cleanup and CAP-08's trust-row
-        # cleanup; neither calls the writer-schema function, so no bump guard
-        # exists before a bump.
-        assert fresh.execute(
-            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger' AND sql LIKE ?",
-            (f"%{_WRITER_SCHEMA_FUNCTION}%",),
-        ).fetchone()[0] == 0, "schema 1 installs no bump guard; the first bump does"
-        fresh.close()
-        self._bump(db, _SCHEMA_VERSION)
-        store.record("same schema", episode_type="observation")
-        store.close()
-        import sqlite3
-
-        conn = sqlite3.connect(str(db))
-        assert conn.execute("SELECT COUNT(*) FROM episodes").fetchone()[0] == 1
-        conn.close()
-
-    def test_a_connection_without_the_function_is_refused(self, tmp_path):
-        # what a release from before this one does: it never registered it
-        import sqlite3
+    def test_every_table_carries_this_generations_three_guards(self, tmp_path):
         from anneal_memory.store import _SCHEMA_VERSION
 
         db = tmp_path / "m.db"
         Store(db).close()
-        self._bump(db, _SCHEMA_VERSION + 1)
+        guards, tables = self._guards(db)
+        want = {
+            f"anneal_gen{_SCHEMA_VERSION}_guard_{t}_{op}"
+            for t in tables for op in ("insert", "update", "delete")
+        }
+        assert tables and guards == want
+
+    def test_an_open_older_writer_is_refused_and_nothing_lands(self, tmp_path):
+        # case A: 0.9.43 (function returns 1) already open when the store is gen 2
+        db = tmp_path / "m.db"
+        store = Store(db)
+        store.record("kept", episode_type="observation")
+        store.close()
+        old = self._old_writer(db, 1)
+        for sql in (
+            "INSERT INTO metadata (key, value) VALUES ('x', 'y')",
+            "UPDATE metadata SET value = value WHERE key = 'format_version'",
+            "DELETE FROM episodes",
+        ):
+            with pytest.raises(sqlite3.IntegrityError, match="schema generation 2"):
+                old.execute(sql)
+        old.rollback()
+        old.close()
+        conn = sqlite3.connect(str(db))
+        assert conn.execute("SELECT COUNT(*) FROM episodes").fetchone()[0] == 1
+        assert conn.execute("SELECT COUNT(*) FROM metadata WHERE key = 'x'").fetchone()[0] == 0
+        conn.close()
+
+    def test_a_release_without_the_function_is_refused(self, tmp_path):
+        # case B: 0.9.23 never registered the function
+        db = tmp_path / "m.db"
+        Store(db).close()
         conn = sqlite3.connect(str(db))
         with pytest.raises(sqlite3.OperationalError, match="no such function"):
             conn.execute("DELETE FROM episodes")
         conn.close()
+
+    def test_an_open_store_is_refused_after_a_later_generation_migrates(self, tmp_path):
+        # the same race one generation on: this release's own open handle
+        from anneal_memory.store import _SCHEMA_VERSION, _install_generation_guards
+
+        db = tmp_path / "m.db"
+        store = Store(db)
+        store.record("before", episode_type="observation")
+        later = self._old_writer(db, _SCHEMA_VERSION + 1)
+        later.execute("BEGIN IMMEDIATE")
+        _install_generation_guards(later, _SCHEMA_VERSION + 1)
+        later.execute(
+            "UPDATE metadata SET value = ? WHERE key = 'format_version'",
+            (str(_SCHEMA_VERSION + 1),),
+        )
+        later.commit()
+        later.close()
+        with pytest.raises(StoreError, match=f"schema generation {_SCHEMA_VERSION + 1}"):
+            store.record("after", episode_type="observation")
+        store.close()
+        guards, _ = self._guards(db)
+        assert guards and all(g.startswith(f"anneal_gen{_SCHEMA_VERSION + 1}_") for g in guards)
+
+    def test_a_gen1_store_is_copied_then_migrated(self, tmp_path):
+        from anneal_memory.store import _SCHEMA_VERSION
+
+        db = tmp_path / "m.db"
+        with Store(db) as s:
+            s.record("one", episode_type="observation")
+            s.record("two", episode_type="observation")
+        self._as_generation_1(db)
+        assert self._guards(db)[0] == set()
+        Store(db).close()
+        copies = sorted(tmp_path.glob("m.db.gen1-*.bak"))
+        assert len(copies) == 1
+        c = sqlite3.connect(str(copies[0]))
+        assert c.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+        assert c.execute("SELECT value FROM metadata WHERE key = 'format_version'").fetchone()[0] == "1"
+        assert c.execute("SELECT COUNT(*) FROM episodes").fetchone()[0] == 2
+        assert c.execute(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger' AND name LIKE 'anneal\\_gen%' ESCAPE '\\'"
+        ).fetchone()[0] == 0
+        c.close()
+        live = sqlite3.connect(str(db))
+        assert live.execute("SELECT value FROM metadata WHERE key = 'format_version'").fetchone()[0] == str(_SCHEMA_VERSION)
+        live.close()
+        assert self._guards(db)[0]
+        Store(db).close()  # already gen 2: no second copy
+        assert len(sorted(tmp_path.glob("m.db.gen1-*.bak"))) == 1
+
+    def test_a_fresh_store_is_not_copied(self, tmp_path):
+        Store(tmp_path / "m.db").close()
+        assert not list(tmp_path.glob("*.bak"))
+
+    def test_a_copy_that_cannot_be_made_leaves_the_store_at_gen1(self, tmp_path):
+        import anneal_memory.store as store_mod
+
+        db = tmp_path / "m.db"
+        with Store(db) as s:
+            s.record("one", episode_type="observation")
+        self._as_generation_1(db)
+        real_connect = store_mod.connect
+
+        def full_disk(path, **kwargs):
+            # the copy's destination fails the way a full disk does
+            if ".copy-" in str(path):
+                raise sqlite3.OperationalError("database or disk is full")
+            return real_connect(path, **kwargs)
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(store_mod, "connect", full_disk)
+            with pytest.raises(StoreError, match="could not copy the store"):
+                Store(db)
+        conn = sqlite3.connect(str(db))
+        assert conn.execute("SELECT value FROM metadata WHERE key = 'format_version'").fetchone()[0] == "1"
+        conn.close()
+        assert self._guards(db)[0] == set()
+        # nothing left beside the store: no published copy, no temp file
+        assert sorted(p.name for p in tmp_path.iterdir() if ".bak" in p.name or ".copy-" in p.name) == []
+
+    def test_no_temp_file_survives_a_successful_copy(self, tmp_path):
+        db = tmp_path / "m.db"
+        with Store(db) as s:
+            s.record("one", episode_type="observation")
+        self._as_generation_1(db)
+        Store(db).close()
+        names = sorted(p.name for p in tmp_path.iterdir())
+        assert [n for n in names if ".copy-" in n] == []
+        assert len([n for n in names if n.startswith("m.db.gen1-") and n.endswith(".bak")]) == 1
+
+    def test_an_existing_store_with_no_or_a_garbled_marker_is_copied_once(self, tmp_path):
+        # L3 r1 10-14 (complement + codex): the marker read like a fresh database
+        for value in (None, "garbled"):
+            d = tmp_path / ("none" if value is None else value)
+            d.mkdir()
+            db = d / "m.db"
+            with Store(db) as s:
+                s.record("one", episode_type="observation")
+            self._as_generation_1(db)
+            conn = sqlite3.connect(str(db))
+            if value is None:
+                conn.execute("DELETE FROM metadata WHERE key = 'format_version'")
+            else:
+                conn.execute("UPDATE metadata SET value = ? WHERE key = 'format_version'", (value,))
+            conn.commit()
+            conn.close()
+            Store(db).close()
+            Store(db).close()  # already migrated (this generation's guards exist): no second copy
+            copies = sorted(p.name for p in d.iterdir() if p.name.endswith(".bak"))
+            label = "genunknown"
+            assert len(copies) == 1 and copies[0].startswith(f"m.db.{label}-"), (value, copies)
+
+    def test_a_newer_generations_guards_refuse_an_older_release(self, tmp_path):
+        # L3 r1 10-14 (complement): with the marker garbled, the open passes the
+        # marker check; the newer guards must still refuse, not be dropped
+        from anneal_memory.store import _SCHEMA_VERSION, _install_generation_guards
+
+        db = tmp_path / "m.db"
+        Store(db).close()
+        later = self._old_writer(db, _SCHEMA_VERSION + 1)
+        later.execute("BEGIN IMMEDIATE")
+        _install_generation_guards(later, _SCHEMA_VERSION + 1)
+        later.execute("UPDATE metadata SET value = 'garbled' WHERE key = 'format_version'")
+        later.commit()
+        later.close()
+        # refused either by the newer guards themselves (this open's own default
+        # INSERTs reach them first) or by the installer's check; never dropped
+        with pytest.raises(StoreError, match=f"generation {_SCHEMA_VERSION + 1}"):
+            Store(db)
+        guards, _ = self._guards(db)
+        assert guards and all(g.startswith(f"anneal_gen{_SCHEMA_VERSION + 1}_") for g in guards)
+        # a refused open copies nothing (L3 r2 10-14, complement: one copy per retry)
+        assert not list(tmp_path.glob("*.bak"))
+
+    def test_one_planted_guard_name_does_not_skip_the_copy(self, tmp_path):
+        # L3 r2 10-14 (codex): the copy decision trusted one name; it now asks
+        # the installer's question (the full set, exact SQL)
+        from anneal_memory.store import _SCHEMA_VERSION
+
+        db = tmp_path / "m.db"
+        with Store(db) as s:
+            s.record("one", episode_type="observation")
+        self._as_generation_1(db)
+        conn = sqlite3.connect(str(db))
+        conn.execute("UPDATE metadata SET value = 'garbled' WHERE key = 'format_version'")
+        conn.execute(
+            f'CREATE TRIGGER "anneal_gen{_SCHEMA_VERSION}_guard_episodes_insert" '
+            "BEFORE INSERT ON episodes BEGIN SELECT 1; END"
+        )
+        conn.commit()
+        conn.close()
+        Store(db).close()
+        assert len(list(tmp_path.glob("m.db.genunknown-*.bak"))) == 1
+
+    def test_a_same_named_trigger_that_is_not_the_guard_is_replaced(self, tmp_path):
+        # L3 r1 10-14 (codex, reproduced): a name alone was trusted
+        from anneal_memory.store import _SCHEMA_VERSION
+
+        db = tmp_path / "m.db"
+        Store(db).close()
+        name = f"anneal_gen{_SCHEMA_VERSION}_guard_episodes_insert"
+        conn = sqlite3.connect(str(db))
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute(f'DROP TRIGGER "{name}"')
+        conn.execute(f'CREATE TRIGGER "{name}" BEFORE INSERT ON episodes BEGIN SELECT 1; END')
+        conn.commit()
+        conn.close()
+        Store(db).close()
+        old = self._old_writer(db, 1)
+        with pytest.raises(sqlite3.IntegrityError, match=f"schema generation {_SCHEMA_VERSION}"):
+            old.execute(
+                "INSERT INTO episodes (id, timestamp, type, content) VALUES ('x', '2026-01-01T00:00:00Z', 'observation', 'c')"
+            )
+        old.close()
+
+    def test_a_reopen_does_not_rewrite_the_guards(self, tmp_path):
+        # the guards are compared by SQL, so an unchanged store sees no DDL on open
+        db = tmp_path / "m.db"
+        Store(db).close()
+        conn = sqlite3.connect(str(db))
+        before = conn.execute("PRAGMA schema_version").fetchone()[0]
+        conn.close()
+        Store(db).close()
+        conn = sqlite3.connect(str(db))
+        assert conn.execute("PRAGMA schema_version").fetchone()[0] == before
+        conn.close()
+
+    def test_a_connection_keeps_the_generation_it_was_opened_with(self, monkeypatch):
+        # L3 r1 10-14 (codex): the function closed over the module global
+        import anneal_memory.store as store_mod
+        from anneal_memory.store import register_writer_schema
+
+        conn = sqlite3.connect(":memory:")
+        register_writer_schema(conn)
+        opened_with = store_mod._SCHEMA_VERSION
+        monkeypatch.setattr(store_mod, "_SCHEMA_VERSION", opened_with + 5)
+        assert conn.execute("SELECT anneal_writer_schema()").fetchone()[0] == opened_with
+        conn.close()
+
+    def test_package_connections_trust_the_schema(self, tmp_path):
+        # L3 r1 10-14 (codex, measured on sqlite 3.53.4): under trusted_schema=OFF a
+        # trigger calling a Python function fails "unsafe use"; the package's
+        # connections set it ON
+        from anneal_memory.store import connect, register_writer_schema
+
+        db = tmp_path / "m.db"
+        Store(db).close()
+        conn = connect(db)
+        assert conn.execute("PRAGMA trusted_schema").fetchone()[0] == 1
+        conn.close()
+        host = sqlite3.connect(str(db))
+        register_writer_schema(host)
+        host.execute("PRAGMA trusted_schema=OFF")
+        with pytest.raises(sqlite3.OperationalError, match="unsafe use"):
+            host.execute("INSERT INTO metadata (key, value) VALUES ('h', 'x')")
+        host.close()
+
+    def test_cascading_deletes_pass_the_guards(self, tmp_path):
+        # case H: episodes' AFTER DELETE triggers write other guarded tables
+        db = tmp_path / "m.db"
+        with Store(db) as s:
+            ep = s.record("doomed", episode_type="observation")
+            assert s.delete(ep.id)
+        conn = sqlite3.connect(str(db))
+        assert conn.execute("SELECT COUNT(*) FROM episodes").fetchone()[0] == 0
+        conn.close()
+
+    def test_a_host_connection_that_registers_the_function_can_write(self, tmp_path):
+        from anneal_memory.store import register_writer_schema
+
+        db = tmp_path / "m.db"
+        Store(db).close()
+        conn = sqlite3.connect(str(db))
+        register_writer_schema(conn)
+        conn.execute("INSERT INTO metadata (key, value) VALUES ('host', 'ok')")
+        conn.commit()
+        conn.close()
+
+    def test_a_garbled_marker_still_gets_the_guards(self, tmp_path):
+        # the guard reads a literal, never the marker, so a garbled marker does not disarm it
+        db = tmp_path / "m.db"
+        Store(db).close()
+        conn = sqlite3.connect(str(db))
+        conn.create_function("anneal_writer_schema", 0, lambda: 2, deterministic=True)
+        conn.execute("UPDATE metadata SET value = 'garbled' WHERE key = 'format_version'")
+        conn.commit()
+        conn.close()
+        Store(db).close()
+        old = self._old_writer(db, 1)
+        # an INSERT, not a DELETE: the guards are row triggers, and a statement
+        # that touches no row (DELETE on an empty table) fires none
+        with pytest.raises(sqlite3.IntegrityError, match="schema generation 2"):
+            old.execute("INSERT INTO metadata (key, value) VALUES ('x', 'y')")
+        old.close()
 
 
 # --- WAL switch at open (moved from test_continuity_lock: not fcntl-gated, runs on Windows) ---

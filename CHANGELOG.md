@@ -15,6 +15,35 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
   keep working. Nothing is removed or renamed. The exported constants (`MIGRATION_MANIFEST`, `RETRIEVAL_THRESHOLD`,
   `DROP_DURABLE_RE`, `CRYSTAL_SCHEMA_VERSION`) are for reading; changing one in a running process is not supported.
 
+### Changed — the store is schema generation 2; an older anneal can no longer write to it
+- ⚠ **Upgrade every process that touches a store together.** The first write-capable open by this release migrates a
+  store from generation 1 (every 0.9.x) to generation 2. From then on every 0.9.x refuses to open it, read-only opens,
+  `status` and `search` included (measured against a real 0.9.43 and 0.9.23). A hook, an MCP config or a second venv
+  still on 0.9.x stops working on that store until it is upgraded.
+- **A process already open when the store migrates is refused inside its own write.** Every table carries
+  `BEFORE INSERT/UPDATE/DELETE` guard triggers named `anneal_gen2_guard_<table>_<op>`. A 0.9.24-0.9.43 writer gets
+  "this store is schema generation 2 and this process writes an older generation"; an older one gets "no such
+  function: anneal_writer_schema". Nothing it tried to write lands, and its audit trail stays valid. A 0.9.x wrap
+  interrupted this way stays open with nothing written; this release completes it with the same wrap token.
+- **The store is copied before it migrates**, beside the database as `<name>.gen1-<UTC time>.bak`, taken under the
+  migration's write lock. anneal never deletes it; remove it by hand once the upgrade is settled. If the copy cannot
+  be made (disk full, permissions), nothing migrates and the open fails with the reason. A store whose
+  `format_version` is missing or garbled is copied too, as `<name>.genunknown-<UTC time>.bak`. The copy holds the
+  write lock while it runs, so on a large store a peer opening at that moment can time out with "database is locked"
+  and should be retried. A store whose guards were dropped by hand is copied again on its next open, which restores
+  them. A process killed mid-copy leaves a `.<name>.copy-*.tmp` file beside the database, never a `.bak`; delete it.
+- **Writing to a store with plain `sqlite3`** now fails with "no such function: anneal_writer_schema". Reads are
+  unaffected. A host that must write registers the function with `anneal_memory.store.register_writer_schema(conn)`;
+  the alternative is to drop the `anneal_gen2_guard_*` triggers by hand, which also removes the protection. Its
+  connection also needs `PRAGMA trusted_schema=ON` (SQLite's default): under OFF a guarded write fails "unsafe use of
+  anneal_writer_schema()". anneal's own connections set it.
+- Known edges: the copy reopens the database by its path, so a same-user process that renames or replaces the file
+  between the open and the copy gets a copy of the replacement. A host that registers `anneal_writer_schema` returning
+  text or NULL is not refused by the guards. On a filesystem without hard links the copy is published by a checked
+  rename, which a process creating the same timestamped name in between would lose.
+- Gen 2 changes no table or column. A store-attached file format change (continuity meta, audit manifest) raises the
+  generation from here on, so this guard covers it.
+
 ### Changed — consolidation is the operator's act by default (KL-19)
 - ⚠ **Onboarding change.** A store created by `anneal-memory init`, or created fresh by the MCP server on its first
   open, requires the consolidate baton (`Store.set_consolidate_requires_baton(True)`). Agents record freely; a wrap

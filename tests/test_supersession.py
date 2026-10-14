@@ -20,6 +20,15 @@ from anneal_memory import (
     validated_save_continuity,
 )
 from anneal_memory.retrieval import retrieve_relevant
+from anneal_memory.store import register_writer_schema
+
+
+def _wconnect(*args, **kwargs):
+    """A raw writer fixture: the gen-2 guard triggers need the writer-schema function."""
+    conn = sqlite3.connect(*args, **kwargs)
+    register_writer_schema(conn)
+    return conn
+
 
 # One of the probe's pairs (Quillmark), paraphrase shape: the update rewords the
 # fact, which is the shape scored recall served stale 14 of 16 times.
@@ -297,7 +306,7 @@ def test_open_repairs_links_an_older_version_left_dangling(tmp_path):
         b = st.record(NEW, "observation", timestamp="2026-02-01T00:00:00Z", supersedes=[a.id])
         c = st.record("Quillmark moved its storage to duckdb." + CONTEXT, "observation",
                       timestamp="2026-03-01T00:00:00Z", supersedes=[b.id])
-    con = sqlite3.connect(db)  # an older anneal-memory's plain delete
+    con = _wconnect(db)  # an older anneal-memory's plain delete
     con.execute("DELETE FROM episodes WHERE id = ?", (b.id,))
     con.commit()
     con.close()
@@ -403,7 +412,7 @@ def _dangling_store(db: str):
         b = st.record(NEW, "observation", timestamp="2026-02-01T00:00:00Z", supersedes=[a.id])
         d = st.record("Quillmark moved its storage to duckdb." + CONTEXT, "observation",
                       timestamp="2026-03-01T00:00:00Z", supersedes=[b.id])
-    con = sqlite3.connect(db)
+    con = _wconnect(db)
     con.row_factory = sqlite3.Row
     row = dict(con.execute("SELECT * FROM episodes WHERE id = ?", (b.id,)).fetchone())
     con.execute("DELETE FROM episodes WHERE id = ?", (b.id,))
@@ -429,6 +438,7 @@ def test_the_repair_derives_what_it_removes_under_its_lock(tmp_path, monkeypatch
         elif state["hint"] and not state["done"] and stmt.strip().upper() == "BEGIN IMMEDIATE":
             state["done"] = True
             peer = real_connect(db)
+            register_writer_schema(peer)
             cols = ",".join(row)
             peer.execute(f"INSERT INTO episodes ({cols}) VALUES ({','.join('?' * len(row))})",
                          list(row.values()))

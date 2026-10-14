@@ -441,7 +441,10 @@ def _pull_store(tmp_path, *, with_id=True):
     if not with_id:
         import sqlite3
 
+        from anneal_memory.store import register_writer_schema
+
         conn = sqlite3.connect(str(db))
+        register_writer_schema(conn)
         conn.execute("DELETE FROM metadata WHERE key = 'store_id'")
         conn.commit()
         conn.close()

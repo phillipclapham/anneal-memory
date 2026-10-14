@@ -29,6 +29,15 @@ from anneal_memory import (
     validated_save_continuity,
 )
 from anneal_memory.audit import AuditTrail
+from anneal_memory.store import register_writer_schema
+
+
+def _wconnect(*args, **kwargs):
+    """A raw writer fixture: the gen-2 guard triggers need the writer-schema function."""
+    conn = sqlite3.connect(*args, **kwargs)
+    register_writer_schema(conn)
+    return conn
+
 from anneal_memory.graduation import validate_graduations
 from anneal_memory.server import Server
 
@@ -89,7 +98,7 @@ class TestTrustStorage:
         would otherwise inherit the old label."""
         e = store.record(CLAIM, EpisodeType.OBSERVATION, trust="external")
         assert store.delete(e.id)
-        conn = sqlite3.connect(tmp_path / "m.db")
+        conn = _wconnect(tmp_path / "m.db")
         assert conn.execute("SELECT COUNT(*) FROM episode_trust").fetchone()[0] == 0
         conn.execute("INSERT INTO episodes (id, timestamp, type, content) VALUES ('aaaaaaaa', 't', 'observation', 'c')")
         conn.execute("INSERT INTO episode_trust VALUES ('aaaaaaaa', 'tool')")

@@ -141,7 +141,6 @@ from .store import (
     StorePathError,
     connect as sqlite_connect,
     sqlite_path,
-    register_writer_schema,
     Store,
     StoreDatabaseError,
     _is_write_lock_contention,
@@ -4535,7 +4534,6 @@ def _outcome_store_id(db_path: Path, *, mint: bool) -> str | None:
     except (OSError, sqlite3.Error, ValueError) as exc:  # ValueError: a URI path
         refuse(exc)
     try:
-        register_writer_schema(conn)  # inside the try whose finally closes conn
         conn.execute("BEGIN IMMEDIATE")
         if not _is_anneal_schema(conn):
             conn.execute("ROLLBACK")

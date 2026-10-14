@@ -53,6 +53,15 @@ from anneal_memory.cli import (
     _open_crystal_store_for_wrap,
 )
 from anneal_memory.store import StoreError
+from anneal_memory.store import _SCHEMA_VERSION, register_writer_schema
+
+
+def _wconnect(*args, **kwargs):
+    """A raw writer fixture: the gen-2 guard triggers need the writer-schema function."""
+    conn = sqlite3.connect(*args, **kwargs)
+    register_writer_schema(conn)
+    return conn
+
 from anneal_memory.crystal import CrystalStore
 from anneal_memory.audit import _ManifestQuarantined
 
@@ -4430,7 +4439,7 @@ class TestCrystalIndexAndRecallCLI:
         from anneal_memory.types import EpisodeType
         with Store(tmp_path / "mem.db") as store:
             store.record(self._DRIFT_EPISODE, EpisodeType.DECISION, source="flow")
-        conn = sqlite3.connect(str(tmp_path / "mem.db"))
+        conn = _wconnect(str(tmp_path / "mem.db"))
         conn.execute("UPDATE episodes SET type = 'not_a_real_type'")
         conn.commit()
         conn.close()
@@ -4450,7 +4459,7 @@ class TestCrystalIndexAndRecallCLI:
         from anneal_memory.types import EpisodeType
         with Store(tmp_path / "mem.db") as store:
             store.record(self._DRIFT_EPISODE, EpisodeType.DECISION, source="flow")
-        conn = sqlite3.connect(str(tmp_path / "mem.db"))
+        conn = _wconnect(str(tmp_path / "mem.db"))
         conn.execute("UPDATE episodes SET type = 'not_a_real_type'")  # would fault IF opened
         conn.commit()
         conn.close()
@@ -5183,7 +5192,7 @@ def test_adopt_unbound_binds_records_written_before_store_ids(tmp_path):
         )
 
     assert run("init").returncode == 0
-    db = sqlite3.connect(tmp_path / "mem.db")
+    db = _wconnect(tmp_path / "mem.db")
     db.execute("DELETE FROM metadata WHERE key = 'store_id'")  # as a 0.9.23 store
     db.commit()
     db.close()
@@ -5232,7 +5241,7 @@ def test_adopt_without_a_file_lock_refuses_before_minting_the_store_id(tmp_path)
     db = tmp_path / "mem.db"
     assert subprocess.run([sys.executable, "-m", "anneal_memory.cli", "--db", str(db), "init"],
                           capture_output=True, text=True).returncode == 0
-    con = sqlite3.connect(db)
+    con = _wconnect(db)
     con.execute("DELETE FROM metadata WHERE key = 'store_id'")
     con.commit()
     con.close()
@@ -5267,7 +5276,7 @@ def test_store_id_proof_and_mint_refuse_what_l3_reproduced(tmp_path):
         )
 
     imp = tmp_path / "imp.db"
-    with sqlite3.connect(imp) as conn:
+    with _wconnect(imp) as conn:
         conn.execute("CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT)")
         conn.execute("INSERT INTO metadata VALUES ('store_id', 'deadbeef')")
     for argv in (["outcome", "--exposure-id", "e1", "--outcome", "success"], ["worth"]):
@@ -5277,17 +5286,17 @@ def test_store_id_proof_and_mint_refuse_what_l3_reproduced(tmp_path):
 
     bad = tmp_path / "bad.db"
     assert run(bad, "init").returncode == 0
-    with sqlite3.connect(bad) as conn:
+    with _wconnect(bad) as conn:
         conn.execute("UPDATE metadata SET value = 'two\nlines' WHERE key = 'store_id'")
     result = run(bad, "outcome", "--exposure-id", "e1", "--outcome", "success")
     assert result.returncode == 1 and "Traceback" not in result.stderr, result.stderr
 
     idless = tmp_path / "idless.db"
     assert run(idless, "init").returncode == 0
-    with sqlite3.connect(idless) as conn:
+    with _wconnect(idless) as conn:
         conn.execute("DELETE FROM metadata WHERE key = 'store_id'")
     assert run(idless, "outcome", "--exposure-id", "e1", "--item", "badkind:x=maybe").returncode == 1
-    with sqlite3.connect(idless) as conn:
+    with _wconnect(idless) as conn:
         assert conn.execute("SELECT value FROM metadata WHERE key = 'store_id'").fetchall() == []
 
 
@@ -5305,15 +5314,16 @@ def test_store_id_mint_respects_schema_version_full_validation_and_marker_shape(
         )
 
     def store_ids(db):
-        with sqlite3.connect(db) as conn:
+        with _wconnect(db) as conn:
             return conn.execute("SELECT value FROM metadata WHERE key = 'store_id'").fetchall()
 
     newer = tmp_path / "newer.db"
     assert run(newer, "init").returncode == 0
-    with sqlite3.connect(newer) as conn:
-        conn.execute("UPDATE metadata SET value = '2' WHERE key = 'format_version'")
+    with _wconnect(newer) as conn:
+        conn.execute("UPDATE metadata SET value = ? WHERE key = 'format_version'",
+                     (str(_SCHEMA_VERSION + 1),))
     assert run(newer, "outcome", "--exposure-id", "e1", "--outcome", "success").returncode == 1
-    with sqlite3.connect(newer) as conn:
+    with _wconnect(newer) as conn:
         conn.execute("DELETE FROM metadata WHERE key = 'store_id'")
     assert run(newer, "outcome", "--exposure-id", "e1", "--outcome", "success").returncode == 1
     assert store_ids(newer) == []
@@ -5321,7 +5331,7 @@ def test_store_id_mint_respects_schema_version_full_validation_and_marker_shape(
 
     idless = tmp_path / "idless.db"
     assert run(idless, "init").returncode == 0
-    with sqlite3.connect(idless) as conn:
+    with _wconnect(idless) as conn:
         conn.execute("DELETE FROM metadata WHERE key = 'store_id'")
     assert run(idless, "outcome", "--exposure-id", "e1").returncode == 1
     assert store_ids(idless) == []

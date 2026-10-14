@@ -24,6 +24,15 @@ from anneal_memory import (
     validated_save_continuity,
 )
 from anneal_memory.continuity import format_wrap_package_text
+from anneal_memory.store import register_writer_schema
+
+
+def _wconnect(*args, **kwargs):
+    """A raw writer fixture: the gen-2 guard triggers need the writer-schema function."""
+    conn = sqlite3.connect(*args, **kwargs)
+    register_writer_schema(conn)
+    return conn
+
 from anneal_memory.durable import DurableFact, parse_durable_facts
 from anneal_memory.schema import (
     default_max_chars,
@@ -374,7 +383,7 @@ class TestPersistedSchema:
         # (3) no persisted schema -> DEFAULT_SCHEMA -> gets it.
         p = str(tmp_path / "none.db")
         Store(p).close()
-        conn = sqlite3.connect(p)
+        conn = _wconnect(p)
         conn.execute("DELETE FROM metadata WHERE key='section_schema'")
         conn.commit()
         conn.close()

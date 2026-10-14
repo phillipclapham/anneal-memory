@@ -3901,7 +3901,7 @@ class TestCodexL3TwentySixOhNineOhFour:
         """
         import sqlite3
 
-        from anneal_memory.store import Store
+        from anneal_memory.store import Store, register_writer_schema
 
         db = tmp_path / "m.db"
         seed = Store(db)
@@ -3910,6 +3910,7 @@ class TestCodexL3TwentySixOhNineOhFour:
 
         if stored is not None:
             conn = sqlite3.connect(db)
+            register_writer_schema(conn)
             conn.execute(
                 "INSERT OR REPLACE INTO metadata (key, value) "
                 "VALUES ('audit_last_failure', ?)",

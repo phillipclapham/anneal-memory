@@ -48,12 +48,15 @@ _NEWER_META = {"format_version": 99, "sessions_produced": 7, "citations_seen": T
 
 
 def _cli(db: Path, *args: str, env: dict | None = None) -> subprocess.CompletedProcess:
-    full_env = dict(os.environ, PYTHONPATH=str(_REPO))
+    # The child writes UTF-8 and the parent reads UTF-8 on every platform, so
+    # the assertions on stderr never depend on the console code page (console
+    # encodings are tested in test_cli.py, not here).
+    full_env = dict(os.environ, PYTHONPATH=str(_REPO), PYTHONIOENCODING="utf-8")
     if env:
         full_env.update(env)
     return subprocess.run(
         [sys.executable, "-m", "anneal_memory.cli", "--db", str(db), *args],
-        capture_output=True, text=True, env=full_env, timeout=120,
+        capture_output=True, text=True, encoding="utf-8", env=full_env, timeout=120,
     )
 
 
@@ -192,7 +195,7 @@ class TestContinuityMeta:
         # The plain text read does not touch the meta and still works.
         assert _cli(db, "continuity").returncode == 0
         # The CLI wrap: refused as a refusal, not "store I/O failure".
-        (tmp_path / "c.md").write_text(_CONT + "Again.\n")
+        (tmp_path / "c.md").write_text(_CONT + "Again.\n", encoding="utf-8")
         r = _cli(db, "save-continuity", str(tmp_path / "c.md"), "--session-id", "S2",
                  "--wrap-token", token)
         assert r.returncode == 1
@@ -252,7 +255,7 @@ class TestContinuityMeta:
         token = _cli(db, "prepare-wrap", "--session-id", "S2").stdout.split(
             "Wrap token:")[1].split()[0]
         before = store.meta_path.read_bytes()
-        (tmp_path / "c.md").write_text(_CONT + "Again.\n")
+        (tmp_path / "c.md").write_text(_CONT + "Again.\n", encoding="utf-8")
         with _unreadable(store.meta_path):
             runs = [
                 _cli(db, "--json", "continuity"),
@@ -444,6 +447,7 @@ class TestAuditManifest:
 # -- derive-trust.json ------------------------------------------------------
 
 
+@pytest.mark.skipif(os.name != "posix", reason="re-derive is POSIX-only by design")
 class TestDeriveTrust:
     @pytest.fixture
     def trust(self, tmp_path, monkeypatch):

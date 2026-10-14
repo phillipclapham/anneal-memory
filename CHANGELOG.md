@@ -8,9 +8,12 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
 - The public names that flow and Levain already import from submodules are now exported at the top level and listed in
   the defining module's `__all__` where it has one: `validate_origin_key`, `hard_max_chars`, `section_chars`,
   `DROP_DURABLE_RE`, `derived_state_lines`, `parse_annotation`, `strip_flag`, `CRYSTAL_SCHEMA_VERSION`,
-  `MIGRATION_MANIFEST`, `RETRIEVAL_THRESHOLD`, and from `worth`: `ExposedRef`, `ExposureLabel`, `OutcomeLog`,
-  `fold_surfaced`, `outcome_log_path`, `receipt_crystal_names`, and `register_writer_schema` (for a host that writes
-  to a store with plain `sqlite3`). The submodule import paths keep working. Nothing is removed or renamed.
+  `MIGRATION_MANIFEST`, `RETRIEVAL_THRESHOLD`; from `worth`: `ExposedRef`, `ExposureLabel`, `OutcomeLog`,
+  `fold_surfaced`, `outcome_log_path`, `receipt_crystal_names`; from `store`: `register_writer_schema` (for a host
+  that writes to a store with plain `sqlite3`). The types those names return or raise are exported with them:
+  `Annotation`, `FoldResult`, `LogBinding`, `OutcomeLogBusy`, `ForeignOutcomeLogError`. The submodule import paths
+  keep working. Nothing is removed or renamed. The exported constants (`MIGRATION_MANIFEST`, `RETRIEVAL_THRESHOLD`,
+  `DROP_DURABLE_RE`, `CRYSTAL_SCHEMA_VERSION`) are for reading; changing one in a running process is not supported.
 
 ### Changed — consolidation is the operator's act by default (KL-19)
 - ⚠ **Onboarding change.** A store created by `anneal-memory init`, or created fresh by the MCP server on its first

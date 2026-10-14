@@ -72,6 +72,7 @@ from .schema import (
     validate_schema,
 )
 from .rederive import (
+    Annotation,
     DeriveRefused,
     RederiveReport,
     allow_store,
@@ -165,7 +166,11 @@ from .pattern_associations import RETRIEVAL_THRESHOLD
 from .worth import (
     ExposedRef,
     ExposureLabel,
+    FoldResult,
+    ForeignOutcomeLogError,
+    LogBinding,
     OutcomeLog,
+    OutcomeLogBusy,
     fold_surfaced,
     outcome_log_path,
     receipt_crystal_names,
@@ -332,4 +337,10 @@ __all__ = [
     "fold_surfaced",
     "outcome_log_path",
     "receipt_crystal_names",
+    # the types those return or raise, so the frozen surface is closed over them
+    "Annotation",
+    "FoldResult",
+    "LogBinding",
+    "OutcomeLogBusy",
+    "ForeignOutcomeLogError",
 ]

@@ -1,0 +1,5137 @@
+{
+ "all": [
+  "ASCEND_BY_TYPE",
+  "Activation",
+  "ActivationMode",
+  "AffectiveState",
+  "AnnealMemoryError",
+  "ApplyRefused",
+  "AssociationPair",
+  "AssociationStats",
+  "AuditRepairResult",
+  "AuditTrail",
+  "AuditVerifyResult",
+  "BatonHeldError",
+  "CRYSTAL_SCHEMA_VERSION",
+  "ContinuityLockUnavailable",
+  "ContinuityValidationError",
+  "CrossSessionCollision",
+  "CrystalConflictError",
+  "CrystalDecision",
+  "CrystalDict",
+  "CrystalError",
+  "CrystalStore",
+  "DEFAULT_GRADUATING",
+  "DEFAULT_SCHEMA",
+  "DEFAULT_TRUST",
+  "DESCEND_BY_TYPE",
+  "DROP_DURABLE_RE",
+  "DeleteResult",
+  "DeriveRefused",
+  "DurableFact",
+  "Episode",
+  "EpisodeMatch",
+  "EpisodeType",
+  "ExposedRef",
+  "ExposureLabel",
+  "FLOW_SCHEMA",
+  "FeltCurrency",
+  "Germination",
+  "MIGRATION_MANIFEST",
+  "MIN_PROVEN_LEVEL",
+  "OmittedPattern",
+  "OriginKeyConflict",
+  "OriginKeyStatus",
+  "OutcomeLog",
+  "PROJECT_SCHEMA",
+  "PatternSummary",
+  "Permanence",
+  "PostconditionFailed",
+  "PrepareWrapResult",
+  "ProvenWithoutDeclaration",
+  "RESOURCES",
+  "RETIRE_KINDS",
+  "RETRIEVAL_THRESHOLD",
+  "RecallResult",
+  "RederiveReport",
+  "RelevantFact",
+  "RelevantPattern",
+  "RelevantResult",
+  "ReplacedEpisode",
+  "ResolutionDict",
+  "RetirementDict",
+  "Route",
+  "SCHEMA_NAMES",
+  "SPORE_VERSION_EXCLUDED",
+  "SaveAuthorityError",
+  "SaveContinuityResult",
+  "ScoredEpisode",
+  "SectionError",
+  "SectionRole",
+  "SectionSpec",
+  "SectionWriteResult",
+  "Server",
+  "SporeApply",
+  "SporeApplyResult",
+  "SporeDict",
+  "SporeError",
+  "SporeOp",
+  "SporeStore",
+  "SporeType",
+  "StalePatternDict",
+  "Store",
+  "StoreDatabaseError",
+  "StoreError",
+  "StoreOperation",
+  "StoreStatus",
+  "SupersessionError",
+  "TOOLS",
+  "TRUST_LEVELS",
+  "Tier",
+  "Tombstone",
+  "VALID_ACTIVATIONS",
+  "VALID_ACTIVATION_MODES",
+  "VALID_LEVELS",
+  "VALID_PERMANENCE",
+  "VALID_ROUTES",
+  "VALID_TIERS",
+  "VALID_TYPES",
+  "WrapCancelBoundError",
+  "WrapCancelGatedError",
+  "WrapContinuityMovedError",
+  "WrapInProgressError",
+  "WrapOwnershipError",
+  "WrapPackageDict",
+  "WrapRecord",
+  "WrapResult",
+  "WrapSchemaMovedError",
+  "WrapWindowMovedError",
+  "activation_tier",
+  "allow_store",
+  "canonical_section_markdown",
+  "check_explanation_overlap",
+  "continuity_lock",
+  "derived_state_lines",
+  "detect_pattern_omissions",
+  "detect_proven_without_declaration",
+  "detect_stale_patterns",
+  "extract_contradiction_declarations",
+  "extract_keywords",
+  "extract_pattern_names",
+  "extract_pattern_summaries",
+  "extract_proven_patterns",
+  "extract_session_co_citations",
+  "felt_currency",
+  "fold_surfaced",
+  "format_wrap_package_text",
+  "generate_integrity_file",
+  "germination_tier",
+  "graduating_headings",
+  "hard_max_chars",
+  "heading_marker",
+  "name_for_schema",
+  "normalize_spore_field",
+  "origin_key_usable",
+  "outcome_log_path",
+  "parse_annotation",
+  "parse_crystal_decisions",
+  "parse_durable_facts",
+  "prepare_wrap",
+  "receipt_crystal_names",
+  "rederive_continuity",
+  "required_headings",
+  "retrieve_patterns",
+  "retrieve_relevant",
+  "revoke_store",
+  "schema_by_name",
+  "schema_role_warning",
+  "search_episodes",
+  "section_chars",
+  "sections_by_role",
+  "sessions",
+  "spore_version",
+  "strip_flag",
+  "trust_rank",
+  "validate_graduations",
+  "validate_origin_key",
+  "validate_schema",
+  "validate_structure",
+  "validated_save_continuity",
+  "verify_integrity"
+ ],
+ "cli": {
+  "options": [
+   {
+    "action": "_StoreAction",
+    "choices": null,
+    "default": "/Users/phillipclapham/.anneal-memory/memory.db",
+    "dest": "db",
+    "flags": [
+     "--db"
+    ],
+    "nargs": null,
+    "required": false,
+    "type": null
+   },
+   {
+    "action": "_StoreTrueAction",
+    "choices": null,
+    "default": false,
+    "dest": "json",
+    "flags": [
+     "--json"
+    ],
+    "nargs": 0,
+    "required": false,
+    "type": null
+   },
+   {
+    "action": "_StoreAction",
+    "choices": null,
+    "default": "Agent",
+    "dest": "project_name",
+    "flags": [
+     "--project-name"
+    ],
+    "nargs": null,
+    "required": false,
+    "type": null
+   },
+   {
+    "action": "_VersionAction",
+    "choices": null,
+    "default": "==SUPPRESS==",
+    "dest": "version",
+    "flags": [
+     "--version"
+    ],
+    "nargs": 0,
+    "required": false,
+    "type": null
+   }
+  ],
+  "subcommands": {
+   "associations": {
+    "options": [
+     {
+      "action": "_StoreAction",
+      "choices": null,
+      "default": null,
+      "dest": "episode",
+      "flags": [
+       "--episode"
+      ],
+      "nargs": null,
+      "required": false,
+      "type": null
+     },
+     {
+      "action": "_StoreTrueAction",
+      "choices": null,
+      "default": "==SUPPRESS==",
+      "dest": "json",
+      "flags": [
+       "--json"
+      ],
+      "nargs": 0,
+      "required": false,
+      "type": null
+     },
+     {
+      "action": "_StoreAction",
+      "choices": null,
+      "default": 20,
+      "dest": "limit",
+      "flags": [
+       "--limit"
+      ],
+      "nargs": null,
+      "required": false,
+      "type": "int"
+     },
+     {
+      "action": "_StoreAction",
+      "choices": null,
+      "default": 0.0,
+      "dest": "min_strength",
+      "flags": [
+       "--min-strength"
+      ],
+      "nargs": null,
+      "required": false,
+      "type": "float"
+     },
+     {
+      "action": "_StoreTrueAction",
+      "choices": null,
+      "default": false,
+      "dest": "stats",
+      "flags": [
+       "--stats"
+      ],
+      "nargs": 0,
+      "required": false,
+      "type": null
+     }
+    ],
+    "subcommands": {}
+   },
+   "audit": {
+    "options": [
+     {
+      "action": "_StoreAction",
+      "choices": null,
+      "default": null,
+      "dest": "event",
+      "flags": [
+       "--event"
+      ],
+      "nargs": null,
+      "required": false,
+      "type": null
+     },
+     {
+      "action": "_StoreTrueAction",
+      "choices": null,
+      "default": "==SUPPRESS==",
+      "dest": "json",
+      "flags": [
+       "--json"
+      ],
+      "nargs": 0,
+      "required": false,
+      "type": null
+     },
+     {
+      "action": "_StoreAction",
+      "choices": null,
+      "default": 50,
+      "dest": "limit",
+      "flags": [
+       "--limit"
+      ],
+      "nargs": null,
+      "required": false,
+      "type": "int"
+     },
+     {
+      "action": "_StoreAction",
+      "choices": null,
+      "default": null,
+      "dest": "since",
+      "flags": [
+       "--since"
+      ],
+      "nargs": null,
+      "required": false,
+      "type": null
+     }
+    ],
+    "subcommands": {}
+   },
+   "audit-repair": {
+    "options": [
+     {
+      "action": "_StoreTrueAction",
+      "choices": null,
+      "default": "==SUPPRESS==",
+      "dest": "json",
+      "flags": [
+       "--json"
+      ],
+      "nargs": 0,
+      "required": false,
+      "type": null
+     },
+     {
+      "action": "_StoreTrueAction",
+      "choices": null,
+      "default": false,
+      "dest": "set_aside_unreadable",
+      "flags": [
+       "--set-aside-unreadable"
+      ],
+      "nargs": 0,
+      "required": false,
+      "type": null
+     }
+    ],
+    "subcommands": {}
+   },
+   "baton": {
+    "options": [],
+    "subcommands": {
+     "claim": {
+      "options": [
+       {
+        "action": "_StoreAction",
+        "choices": null,
+        "default": null,
+        "dest": "name",
+        "flags": [],
+        "nargs": null,
+        "required": true,
+        "type": "_session_name"
+       },
+       {
+        "action": "_StoreTrueAction",
+        "choices": null,
+        "default": "==SUPPRESS==",
+        "dest": "json",
+        "flags": [
+         "--json"
+        ],
+        "nargs": 0,
+        "required": false,
+        "type": null
+       },
+       {
+        "action": "_StoreTrueAction",
+        "choices": null,
+        "default": false,
+        "dest": "take",
+        "flags": [
+         "--take"
+        ],
+        "nargs": 0,
+        "required": false,
+        "type": null
+       }
+      ],
+      "subcommands": {}
+     },
+     "release": {
+      "options": [
+       {
+        "action": "_StoreAction",
+        "choices": null,
+        "default": null,
+        "dest": "name",
+        "flags": [],
+        "nargs": null,
+        "required": true,
+        "type": "_session_name"
+       },
+       {
+        "action": "_StoreTrueAction",
+        "choices": null,
+        "default": "==SUPPRESS==",
+        "dest": "json",
+        "flags": [
+         "--json"
+        ],
+        "nargs": 0,
+        "required": false,
+        "type": null
+       }
+      ],
+      "subcommands": {}
+     },
+     "status": {
+      "options": [
+       {
+        "action": "_StoreTrueAction",
+        "choices": null,
+        "default": "==SUPPRESS==",
+        "dest": "json",
+        "flags": [
+         "--json"
+        ],
+        "nargs": 0,
+        "required": false,
+        "type": null
+       }
+      ],
+      "subcommands": {}
+     }
+    }
+   },
+   "continuity": {
+    "options": [
+     {
+      "action": "_StoreTrueAction",
+      "choices": null,
+      "default": "==SUPPRESS==",
+      "dest": "json",
+      "flags": [
+       "--json"
+      ],
+      "nargs": 0,
+      "required": false,
+      "type": null
+     },
+     {
+      "action": "_StoreTrueAction",
+      "choices": null,
+      "default": false,
+      "dest": "rederive",
+      "flags": [
+       "--rederive"
+      ],
+      "nargs": 0,
+      "required": false,
+      "type": null
+     },
+     {
+      "action": "_StoreAction",
+      "choices": null,
+      "default": null,
+      "dest": "ref",
+      "flags": [
+       "--ref"
+      ],
+      "nargs": null,
+      "required": false,
+      "type": null
+     }
+    ],
+    "subcommands": {}
+   },
+   "crystal": {
+    "options": [],
+    "subcommands": {
+     "crystallize": {
+      "options": [
+       {
+        "action": "_StoreAction",
+        "choices": [
+         "just-in-time",
+         "catastrophic"
+        ],
+        "default": "just-in-time",
+        "dest": "activation_mode",
+        "flags": [
+         "--activation-mode"
+        ],
+        "nargs": null,
+        "required": false,
+        "type": null
+       },
+       {
+        "action": "_StoreAction",
+        "choices": null,
+        "default": null,
+        "dest": "evidence",
+        "flags": [
+         "--evidence"
+        ],
+        "nargs": "*",
+        "required": false,
+        "type": null
+       },
+       {
+        "action": "_StoreAction",
+        "choices": null,
+        "default": null,
+        "dest": "explanation",
+        "flags": [
+         "--explanation"
+        ],
+        "nargs": null,
+        "required": true,
+        "type": null
+       },
+       {
+        "action": "_StoreTrueAction",
+        "choices": null,
+        "default": "==SUPPRESS==",
+        "dest": "json",
+        "flags": [
+         "--json"
+        ],
+        "nargs": 0,
+        "required": false,
+        "type": null
+       },
+       {
+        "action": "_StoreAction",
+        "choices": null,
+        "default": null,
+        "dest": "level",
+        "flags": [
+         "--level"
+        ],
+        "nargs": null,
+        "required": true,
+        "type": "_proven_level"
+       },
+       {
+        "action": "_StoreAction",
+        "choices": null,
+        "default": null,
+        "dest": "name",
+        "flags": [
+         "--name"
+        ],
+        "nargs": null,
+        "required": true,
+        "type": null
+       },
+       {
+        "action": "_StoreAction",
+        "choices": [
+         "timeless",
+         "phase-specific"
+        ],
+        "default": "timeless",
+        "dest": "permanence",
+        "flags": [
+         "--permanence"
+        ],
+        "nargs": null,
+        "required": false,
+        "type": null
+       },
+       {
+        "action": "_StoreAction",
+        "choices": null,
+        "default": null,
+        "dest": "source",
+        "flags": [
+         "--source"
+        ],
+        "nargs": null,
+        "required": false,
+        "type": null
+       },
+       {
+        "action": "_StoreAction",
+        "choices": null,
+        "default": null,
+        "dest": "tags",
+        "flags": [
+         "--tags"
+        ],
+        "nargs": "*",
+        "required": false,
+        "type": null
+       }
+      ],
+      "subcommands": {}
+     },
+     "fold-surfaced": {
+      "options": [
+       {
+        "action": "_StoreTrueAction",
+        "choices": null,
+        "default": "==SUPPRESS==",
+        "dest": "json",
+        "flags": [
+         "--json"
+        ],
+        "nargs": 0,
+        "required": false,
+        "type": null
+       },
+       {
+        "action": "_StoreAction",
+        "choices": null,
+        "default": null,
+        "dest": "receipts",
+        "flags": [
+         "--receipts"
+        ],
+        "nargs": "+",
+        "required": true,
+        "type": null
+       },
+       {
+        "action": "_StoreAction",
+        "choices": null,
+        "default": 60,
+        "dest": "skew_seconds",
+        "flags": [
+         "--skew-seconds"
+        ],
+        "nargs": null,
+        "required": false,
+        "type": "int"
+       }
+      ],
+      "subcommands": {}
+     },
+     "get": {
+      "options": [
+       {
+        "action": "_StoreAction",
+        "choices": null,
+        "default": null,
+        "dest": "name",
+        "flags": [],
+        "nargs": null,
+        "required": true,
+        "type": null
+       },
+       {
+        "action": "_StoreTrueAction",
+        "choices": null,
+        "default": "==SUPPRESS==",
+        "dest": "json",
+        "flags": [
+         "--json"
+        ],
+        "nargs": 0,
+        "required": false,
+        "type": null
+       },
+       {
+        "action": "_StoreTrueAction",
+        "choices": null,
+        "default": false,
+        "dest": "no_record",
+        "flags": [
+         "--no-record"
+        ],
+        "nargs": 0,
+        "required": false,
+        "type": null
+       }
+      ],
+      "subcommands": {}
+     },
+     "ground-evidence": {
+      "options": [
+       {
+        "action": "_StoreTrueAction",
+        "choices": null,
+        "default": false,
+        "dest": "dry_run",
+        "flags": [
+         "--dry-run"
+        ],
+        "nargs": 0,
+        "required": false,
+        "type": null
+       },
+       {
+        "action": "_StoreTrueAction",
+        "choices": null,
+        "default": "==SUPPRESS==",
+        "dest": "json",
+        "flags": [
+         "--json"
+        ],
+        "nargs": 0,
+        "required": false,
+        "type": null
+       },
+       {
+        "action": "_StoreAction",
+        "choices": null,
+        "default": 4,
+        "dest": "limit",
+        "flags": [
+         "--limit"
+        ],
+        "nargs": null,
+        "required": false,
+        "type": "int"
+       }
+      ],
+      "subcommands": {}
+     },
+     "index": {
+      "options": [
+       {
+        "action": "_StoreTrueAction",
+        "choices": null,
+        "default": "==SUPPRESS==",
+        "dest": "json",
+        "flags": [
+         "--json"
+        ],
+        "nargs": 0,
+        "required": false,
+        "type": null
+       }
+      ],
+      "subcommands": {}
+     },
+     "list": {
+      "options": [
+       {
+        "action": "_StoreAction",
+        "choices": [
+         "hot",
+         "warm",
+         "cold",
+         "dormant"
+        ],
+        "default": null,
+        "dest": "activation",
+        "flags": [
+         "--activation"
+        ],
+        "nargs": null,
+        "required": false,
+        "type": null
+       },
+       {
+        "action": "_StoreAction",
+        "choices": [
+         "just-in-time",
+         "catastrophic"
+        ],
+        "default": null,
+        "dest": "activation_mode",
+        "flags": [
+         "--activation-mode"
+        ],
+        "nargs": null,
+        "required": false,
+        "type": null
+       },
+       {
+        "action": "_StoreTrueAction",
+        "choices": null,
+        "default": "==SUPPRESS==",
+        "dest": "json",
+        "flags": [
+         "--json"
+        ],
+        "nargs": 0,
+        "required": false,
+        "type": null
+       },
+       {
+        "action": "_StoreAction",
+        "choices": [
+         "timeless",
+         "phase-specific"
+        ],
+        "default": null,
+        "dest": "permanence",
+        "flags": [
+         "--permanence"
+        ],
+        "nargs": null,
+        "required": false,
+        "type": null
+       },
+       {
+        "action": "_StoreAction",
+        "choices": null,
+        "default": null,
+        "dest": "tag",
+        "flags": [
+         "--tag"
+        ],
+        "nargs": null,
+        "required": false,
+        "type": null
+       },
+       {
+        "action": "_StoreTrueAction",
+        "choices": null,
+        "default": false,
+        "dest": "verbose",
+        "flags": [
+         "--verbose",
+         "-v"
+        ],
+        "nargs": 0,
+        "required": false,
+        "type": null
+       }
+      ],
+      "subcommands": {}
+     },
+     "recall": {
+      "options": [
+       {
+        "action": "_StoreAction",
+        "choices": null,
+        "default": null,
+        "dest": "query",
+        "flags": [],
+        "nargs": null,
+        "required": true,
+        "type": null
+       },
+       {
+        "action": "_StoreTrueAction",
+        "choices": null,
+        "default": "==SUPPRESS==",
+        "dest": "json",
+        "flags": [
+         "--json"
+        ],
+        "nargs": 0,
+        "required": false,
+        "type": null
+       },
+       {
+        "action": "_StoreAction",
+        "choices": null,
+        "default": 3,
+        "dest": "max_patterns",
+        "flags": [
+         "--max-patterns"
+        ],
+        "nargs": null,
+        "required": false,
+        "type": "int"
+       },
+       {
+        "action": "_StoreTrueAction",
+        "choices": null,
+        "default": false,
+        "dest": "no_associative",
+        "flags": [
+         "--no-associative"
+        ],
+        "nargs": 0,
+        "required": false,
+        "type": null
+       }
+      ],
+      "subcommands": {}
+     },
+     "retire": {
+      "options": [
+       {
+        "action": "_StoreAction",
+        "choices": null,
+        "default": null,
+        "dest": "name",
+        "flags": [],
+        "nargs": null,
+        "required": true,
+        "type": null
+       },
+       {
+        "action": "_StoreTrueAction",
+        "choices": null,
+        "default": "==SUPPRESS==",
+        "dest": "json",
+        "flags": [
+         "--json"
+        ],
+        "nargs": 0,
+        "required": false,
+        "type": null
+       },
+       {
+        "action": "_StoreAction",
+        "choices": [
+         "falsified",
+         "superseded",
+         "merged",
+         "obsolete"
+        ],
+        "default": null,
+        "dest": "kind",
+        "flags": [
+         "--kind"
+        ],
+        "nargs": null,
+        "required": true,
+        "type": null
+       },
+       {
+        "action": "_StoreAction",
+        "choices": null,
+        "default": null,
+        "dest": "reason",
+        "flags": [
+         "--reason"
+        ],
+        "nargs": null,
+        "required": false,
+        "type": null
+       }
+      ],
+      "subcommands": {}
+     },
+     "rewarm": {
+      "options": [
+       {
+        "action": "_StoreTrueAction",
+        "choices": null,
+        "default": "==SUPPRESS==",
+        "dest": "json",
+        "flags": [
+         "--json"
+        ],
+        "nargs": 0,
+        "required": false,
+        "type": null
+       }
+      ],
+      "subcommands": {}
+     },
+     "touch": {
+      "options": [
+       {
+        "action": "_StoreAction",
+        "choices": null,
+        "default": null,
+        "dest": "name",
+        "flags": [],
+        "nargs": null,
+        "required": true,
+        "type": null
+       },
+       {
+        "action": "_StoreTrueAction",
+        "choices": null,
+        "default": "==SUPPRESS==",
+        "dest": "json",
+        "flags": [
+         "--json"
+        ],
+        "nargs": 0,
+        "required": false,
+        "type": null
+       }
+      ],
+      "subcommands": {}
+     },
+     "update": {
+      "options": [
+       {
+        "action": "_StoreAction",
+        "choices": null,
+        "default": null,
+        "dest": "name",
+        "flags": [],
+        "nargs": null,
+        "required": true,
+        "type": null
+       },
+       {
+        "action": "_StoreAction",
+        "choices": [
+         "just-in-time",
+         "catastrophic"
+        ],
+        "default": null,
+        "dest": "activation_mode",
+        "flags": [
+         "--activation-mode"
+        ],
+        "nargs": null,
+        "required": false,
+        "type": null
+       },
+       {
+        "action": "_StoreAction",
+        "choices": null,
+        "default": null,
+        "dest": "add_note",
+        "flags": [
+         "--add-note"
+        ],
+        "nargs": null,
+        "required": false,
+        "type": null
+       },
+       {
+        "action": "_StoreAction",
+        "choices": null,
+        "default": null,
+        "dest": "evidence",
+        "flags": [
+         "--evidence"
+        ],
+        "nargs": "*",
+        "required": false,
+        "type": null
+       },
+       {
+        "action": "_StoreAction",
+        "choices": null,
+        "default": null,
+        "dest": "explanation",
+        "flags": [
+         "--explanation"
+        ],
+        "nargs": null,
+        "required": false,
+        "type": null
+       },
+       {
+        "action": "_StoreTrueAction",
+        "choices": null,
+        "default": "==SUPPRESS==",
+        "dest": "json",
+        "flags": [
+         "--json"
+        ],
+        "nargs": 0,
+        "required": false,
+        "type": null
+       },
+       {
+        "action": "_StoreAction",
+        "choices": null,
+        "default": null,
+        "dest": "level",
+        "flags": [
+         "--level"
+        ],
+        "nargs": null,
+        "required": false,
+        "type": "_proven_level"
+       },
+       {
+        "action": "_StoreAction",
+        "choices": [
+         "timeless",
+         "phase-specific"
+        ],
+        "default": null,
+        "dest": "permanence",
+        "flags": [
+         "--permanence"
+        ],
+        "nargs": null,
+        "required": false,
+        "type": null
+       },
+       {
+        "action": "_StoreAction",
+        "choices": null,
+        "default": null,
+        "dest": "source",
+        "flags": [
+         "--source"
+        ],
+        "nargs": null,
+        "required": false,
+        "type": null
+       },
+       {
+        "action": "_StoreAction",
+        "choices": null,
+        "default": null,
+        "dest": "tags",
+        "flags": [
+         "--tags"
+        ],
+        "nargs": "*",
+        "required": false,
+        "type": null
+       }
+      ],
+      "subcommands": {}
+     }
+    }
+   },
+   "delete": {
+    "options": [
+     {
+      "action": "_StoreAction",
+      "choices": null,
+      "default": null,
+      "dest": "episode_id",
+      "flags": [],
+      "nargs": null,
+      "required": true,
+      "type": null
+     },
+     {
+      "action": "_StoreTrueAction",
+      "choices": null,
+      "default": false,
+      "dest": "force",
+      "flags": [
+       "--force",
+       "-f"
+      ],
+      "nargs": 0,
+      "required": false,
+      "type": null
+     },
+     {
+      "action": "_StoreTrueAction",
+      "choices": null,
+      "default": "==SUPPRESS==",
+      "dest": "json",
+      "flags": [
+       "--json"
+      ],
+      "nargs": 0,
+      "required": false,
+      "type": null
+     }
+    ],
+    "subcommands": {}
+   },
+   "derive": {
+    "options": [],
+    "subcommands": {
+     "allow": {
+      "options": [
+       {
+        "action": "_StoreTrueAction",
+        "choices": null,
+        "default": "==SUPPRESS==",
+        "dest": "json",
+        "flags": [
+         "--json"
+        ],
+        "nargs": 0,
+        "required": false,
+        "type": null
+       },
+       {
+        "action": "_StoreAction",
+        "choices": null,
+        "default": null,
+        "dest": "label",
+        "flags": [
+         "--label"
+        ],
+        "nargs": null,
+        "required": false,
+        "type": null
+       },
+       {
+        "action": "_StoreAction",
+        "choices": null,
+        "default": null,
+        "dest": "root",
+        "flags": [
+         "--root"
+        ],
+        "nargs": null,
+        "required": true,
+        "type": null
+       },
+       {
+        "action": "_StoreAction",
+        "choices": [
+         "public",
+         "private"
+        ],
+        "default": null,
+        "dest": "visibility",
+        "flags": [
+         "--visibility"
+        ],
+        "nargs": null,
+        "required": false,
+        "type": null
+       }
+      ],
+      "subcommands": {}
+     },
+     "revoke": {
+      "options": [
+       {
+        "action": "_StoreTrueAction",
+        "choices": null,
+        "default": "==SUPPRESS==",
+        "dest": "json",
+        "flags": [
+         "--json"
+        ],
+        "nargs": 0,
+        "required": false,
+        "type": null
+       },
+       {
+        "action": "_StoreAction",
+        "choices": null,
+        "default": null,
+        "dest": "label",
+        "flags": [
+         "--label"
+        ],
+        "nargs": null,
+        "required": false,
+        "type": null
+       }
+      ],
+      "subcommands": {}
+     },
+     "status": {
+      "options": [
+       {
+        "action": "_StoreTrueAction",
+        "choices": null,
+        "default": "==SUPPRESS==",
+        "dest": "json",
+        "flags": [
+         "--json"
+        ],
+        "nargs": 0,
+        "required": false,
+        "type": null
+       }
+      ],
+      "subcommands": {}
+     }
+    }
+   },
+   "diff": {
+    "options": [
+     {
+      "action": "_StoreTrueAction",
+      "choices": null,
+      "default": "==SUPPRESS==",
+      "dest": "json",
+      "flags": [
+       "--json"
+      ],
+      "nargs": 0,
+      "required": false,
+      "type": null
+     },
+     {
+      "action": "_StoreAction",
+      "choices": null,
+      "default": 5,
+      "dest": "wraps",
+      "flags": [
+       "--wraps"
+      ],
+      "nargs": null,
+      "required": false,
+      "type": "int"
+     }
+    ],
+    "subcommands": {}
+   },
+   "episodes": {
+    "options": [
+     {
+      "action": "_StoreTrueAction",
+      "choices": null,
+      "default": false,
+      "dest": "include_superseded",
+      "flags": [
+       "--include-superseded"
+      ],
+      "nargs": 0,
+      "required": false,
+      "type": null
+     },
+     {
+      "action": "_StoreTrueAction",
+      "choices": null,
+      "default": "==SUPPRESS==",
+      "dest": "json",
+      "flags": [
+       "--json"
+      ],
+      "nargs": 0,
+      "required": false,
+      "type": null
+     },
+     {
+      "action": "_StoreAction",
+      "choices": null,
+      "default": null,
+      "dest": "keyword",
+      "flags": [
+       "--keyword"
+      ],
+      "nargs": null,
+      "required": false,
+      "type": null
+     },
+     {
+      "action": "_StoreAction",
+      "choices": null,
+      "default": 50,
+      "dest": "limit",
+      "flags": [
+       "--limit"
+      ],
+      "nargs": null,
+      "required": false,
+      "type": "int"
+     },
+     {
+      "action": "_StoreAction",
+      "choices": null,
+      "default": 0,
+      "dest": "offset",
+      "flags": [
+       "--offset"
+      ],
+      "nargs": null,
+      "required": false,
+      "type": "int"
+     },
+     {
+      "action": "_StoreAction",
+      "choices": null,
+      "default": null,
+      "dest": "since",
+      "flags": [
+       "--since"
+      ],
+      "nargs": null,
+      "required": false,
+      "type": null
+     },
+     {
+      "action": "_StoreAction",
+      "choices": null,
+      "default": null,
+      "dest": "source",
+      "flags": [
+       "--source"
+      ],
+      "nargs": null,
+      "required": false,
+      "type": null
+     },
+     {
+      "action": "_StoreAction",
+      "choices": [
+       "observation",
+       "decision",
+       "tension",
+       "question",
+       "outcome",
+       "context"
+      ],
+      "default": null,
+      "dest": "type",
+      "flags": [
+       "--type"
+      ],
+      "nargs": null,
+      "required": false,
+      "type": null
+     },
+     {
+      "action": "_StoreAction",
+      "choices": null,
+      "default": null,
+      "dest": "until",
+      "flags": [
+       "--until"
+      ],
+      "nargs": null,
+      "required": false,
+      "type": null
+     }
+    ],
+    "subcommands": {}
+   },
+   "export": {
+    "options": [
+     {
+      "action": "_StoreAction",
+      "choices": [
+       "json",
+       "markdown",
+       "sqlite"
+      ],
+      "default": "json",
+      "dest": "format",
+      "flags": [
+       "--format",
+       "-f"
+      ],
+      "nargs": null,
+      "required": false,
+      "type": null
+     },
+     {
+      "action": "_StoreTrueAction",
+      "choices": null,
+      "default": "==SUPPRESS==",
+      "dest": "json",
+      "flags": [
+       "--json"
+      ],
+      "nargs": 0,
+      "required": false,
+      "type": null
+     },
+     {
+      "action": "_StoreAction",
+      "choices": null,
+      "default": null,
+      "dest": "output",
+      "flags": [
+       "--output",
+       "-o"
+      ],
+      "nargs": null,
+      "required": false,
+      "type": null
+     }
+    ],
+    "subcommands": {}
+   },
+   "get": {
+    "options": [
+     {
+      "action": "_StoreAction",
+      "choices": null,
+      "default": null,
+      "dest": "episode_id",
+      "flags": [],
+      "nargs": null,
+      "required": true,
+      "type": null
+     },
+     {
+      "action": "_StoreTrueAction",
+      "choices": null,
+      "default": "==SUPPRESS==",
+      "dest": "json",
+      "flags": [
+       "--json"
+      ],
+      "nargs": 0,
+      "required": false,
+      "type": null
+     }
+    ],
+    "subcommands": {}
+   },
+   "graph": {
+    "options": [
+     {
+      "action": "_StoreAction",
+      "choices": [
+       "dot",
+       "json"
+      ],
+      "default": "json",
+      "dest": "format",
+      "flags": [
+       "--format",
+       "-f"
+      ],
+      "nargs": null,
+      "required": false,
+      "type": null
+     },
+     {
+      "action": "_StoreTrueAction",
+      "choices": null,
+      "default": "==SUPPRESS==",
+      "dest": "json",
+      "flags": [
+       "--json"
+      ],
+      "nargs": 0,
+      "required": false,
+      "type": null
+     },
+     {
+      "action": "_StoreAction",
+      "choices": null,
+      "default": 0.0,
+      "dest": "min_strength",
+      "flags": [
+       "--min-strength"
+      ],
+      "nargs": null,
+      "required": false,
+      "type": "float"
+     },
+     {
+      "action": "_StoreAction",
+      "choices": null,
+      "default": null,
+      "dest": "output",
+      "flags": [
+       "--output",
+       "-o"
+      ],
+      "nargs": null,
+      "required": false,
+      "type": null
+     }
+    ],
+    "subcommands": {}
+   },
+   "history": {
+    "options": [
+     {
+      "action": "_StoreTrueAction",
+      "choices": null,
+      "default": "==SUPPRESS==",
+      "dest": "json",
+      "flags": [
+       "--json"
+      ],
+      "nargs": 0,
+      "required": false,
+      "type": null
+     },
+     {
+      "action": "_StoreAction",
+      "choices": null,
+      "default": 20,
+      "dest": "limit",
+      "flags": [
+       "--limit"
+      ],
+      "nargs": null,
+      "required": false,
+      "type": "int"
+     }
+    ],
+    "subcommands": {}
+   },
+   "import": {
+    "options": [
+     {
+      "action": "_StoreAction",
+      "choices": null,
+      "default": null,
+      "dest": "path",
+      "flags": [],
+      "nargs": null,
+      "required": true,
+      "type": null
+     },
+     {
+      "action": "_StoreTrueAction",
+      "choices": null,
+      "default": "==SUPPRESS==",
+      "dest": "json",
+      "flags": [
+       "--json"
+      ],
+      "nargs": 0,
+      "required": false,
+      "type": null
+     }
+    ],
+    "subcommands": {}
+   },
+   "init": {
+    "options": [
+     {
+      "action": "_StoreTrueAction",
+      "choices": null,
+      "default": "==SUPPRESS==",
+      "dest": "json",
+      "flags": [
+       "--json"
+      ],
+      "nargs": 0,
+      "required": false,
+      "type": null
+     },
+     {
+      "action": "_StoreTrueAction",
+      "choices": null,
+      "default": false,
+      "dest": "no_baton",
+      "flags": [
+       "--no-baton"
+      ],
+      "nargs": 0,
+      "required": false,
+      "type": null
+     },
+     {
+      "action": "_StoreAction",
+      "choices": [
+       "default",
+       "partnership",
+       "project"
+      ],
+      "default": "default",
+      "dest": "schema",
+      "flags": [
+       "--schema"
+      ],
+      "nargs": null,
+      "required": false,
+      "type": null
+     }
+    ],
+    "subcommands": {}
+   },
+   "migrate": {
+    "options": [],
+    "subcommands": {
+     "ack": {
+      "options": [
+       {
+        "action": "_StoreAction",
+        "choices": null,
+        "default": null,
+        "dest": "version",
+        "flags": [],
+        "nargs": "?",
+        "required": false,
+        "type": null
+       },
+       {
+        "action": "_StoreTrueAction",
+        "choices": null,
+        "default": "==SUPPRESS==",
+        "dest": "json",
+        "flags": [
+         "--json"
+        ],
+        "nargs": 0,
+        "required": false,
+        "type": null
+       }
+      ],
+      "subcommands": {}
+     },
+     "check": {
+      "options": [
+       {
+        "action": "_StoreTrueAction",
+        "choices": null,
+        "default": "==SUPPRESS==",
+        "dest": "json",
+        "flags": [
+         "--json"
+        ],
+        "nargs": 0,
+        "required": false,
+        "type": null
+       }
+      ],
+      "subcommands": {}
+     }
+    }
+   },
+   "outcome": {
+    "options": [
+     {
+      "action": "_StoreTrueAction",
+      "choices": null,
+      "default": false,
+      "dest": "adopt_unbound",
+      "flags": [
+       "--adopt-unbound"
+      ],
+      "nargs": 0,
+      "required": false,
+      "type": null
+     },
+     {
+      "action": "_AppendAction",
+      "choices": null,
+      "default": null,
+      "dest": "exposed",
+      "flags": [
+       "--exposed"
+      ],
+      "nargs": null,
+      "required": false,
+      "type": null
+     },
+     {
+      "action": "_StoreAction",
+      "choices": null,
+      "default": null,
+      "dest": "exposure_id",
+      "flags": [
+       "--exposure-id"
+      ],
+      "nargs": null,
+      "required": false,
+      "type": null
+     },
+     {
+      "action": "_AppendAction",
+      "choices": null,
+      "default": null,
+      "dest": "item",
+      "flags": [
+       "--item"
+      ],
+      "nargs": null,
+      "required": false,
+      "type": null
+     },
+     {
+      "action": "_StoreTrueAction",
+      "choices": null,
+      "default": "==SUPPRESS==",
+      "dest": "json",
+      "flags": [
+       "--json"
+      ],
+      "nargs": 0,
+      "required": false,
+      "type": null
+     },
+     {
+      "action": "_StoreAction",
+      "choices": [
+       "success",
+       "failure"
+      ],
+      "default": null,
+      "dest": "outcome",
+      "flags": [
+       "--outcome"
+      ],
+      "nargs": null,
+      "required": false,
+      "type": null
+     }
+    ],
+    "subcommands": {}
+   },
+   "pattern-associations": {
+    "options": [
+     {
+      "action": "_StoreTrueAction",
+      "choices": null,
+      "default": "==SUPPRESS==",
+      "dest": "json",
+      "flags": [
+       "--json"
+      ],
+      "nargs": 0,
+      "required": false,
+      "type": null
+     },
+     {
+      "action": "_StoreAction",
+      "choices": null,
+      "default": 20,
+      "dest": "limit",
+      "flags": [
+       "--limit"
+      ],
+      "nargs": null,
+      "required": false,
+      "type": "int"
+     },
+     {
+      "action": "_StoreAction",
+      "choices": null,
+      "default": 0.2,
+      "dest": "min_strength",
+      "flags": [
+       "--min-strength"
+      ],
+      "nargs": null,
+      "required": false,
+      "type": "float"
+     },
+     {
+      "action": "_StoreAction",
+      "choices": null,
+      "default": null,
+      "dest": "name",
+      "flags": [
+       "--name"
+      ],
+      "nargs": null,
+      "required": false,
+      "type": null
+     },
+     {
+      "action": "_StoreTrueAction",
+      "choices": null,
+      "default": false,
+      "dest": "stats",
+      "flags": [
+       "--stats"
+      ],
+      "nargs": 0,
+      "required": false,
+      "type": null
+     }
+    ],
+    "subcommands": {}
+   },
+   "prepare-wrap": {
+    "options": [
+     {
+      "action": "_StoreTrueAction",
+      "choices": null,
+      "default": false,
+      "dest": "crystal",
+      "flags": [
+       "--crystal"
+      ],
+      "nargs": 0,
+      "required": false,
+      "type": null
+     },
+     {
+      "action": "_StoreTrueAction",
+      "choices": null,
+      "default": "==SUPPRESS==",
+      "dest": "json",
+      "flags": [
+       "--json"
+      ],
+      "nargs": 0,
+      "required": false,
+      "type": null
+     },
+     {
+      "action": "_StoreAction",
+      "choices": null,
+      "default": null,
+      "dest": "max_chars",
+      "flags": [
+       "--max-chars"
+      ],
+      "nargs": null,
+      "required": false,
+      "type": "int"
+     },
+     {
+      "action": "_StoreAction",
+      "choices": null,
+      "default": null,
+      "dest": "session_id",
+      "flags": [
+       "--session-id"
+      ],
+      "nargs": null,
+      "required": false,
+      "type": "_session_name"
+     },
+     {
+      "action": "_StoreAction",
+      "choices": null,
+      "default": 7,
+      "dest": "staleness_days",
+      "flags": [
+       "--staleness-days"
+      ],
+      "nargs": null,
+      "required": false,
+      "type": "int"
+     }
+    ],
+    "subcommands": {}
+   },
+   "probe": {
+    "options": [],
+    "subcommands": {
+     "add": {
+      "options": [
+       {
+        "action": "_StoreAction",
+        "choices": null,
+        "default": null,
+        "dest": "fact",
+        "flags": [
+         "--fact"
+        ],
+        "nargs": null,
+        "required": false,
+        "type": null
+       },
+       {
+        "action": "_StoreTrueAction",
+        "choices": null,
+        "default": "==SUPPRESS==",
+        "dest": "json",
+        "flags": [
+         "--json"
+        ],
+        "nargs": 0,
+        "required": false,
+        "type": null
+       },
+       {
+        "action": "_StoreAction",
+        "choices": null,
+        "default": null,
+        "dest": "min_level",
+        "flags": [
+         "--min-level"
+        ],
+        "nargs": null,
+        "required": false,
+        "type": "int"
+       },
+       {
+        "action": "_StoreAction",
+        "choices": null,
+        "default": null,
+        "dest": "note",
+        "flags": [
+         "--note"
+        ],
+        "nargs": null,
+        "required": false,
+        "type": null
+       },
+       {
+        "action": "_StoreAction",
+        "choices": null,
+        "default": null,
+        "dest": "pattern",
+        "flags": [
+         "--pattern"
+        ],
+        "nargs": null,
+        "required": false,
+        "type": null
+       },
+       {
+        "action": "_StoreAction",
+        "choices": null,
+        "default": null,
+        "dest": "section",
+        "flags": [
+         "--section"
+        ],
+        "nargs": null,
+        "required": false,
+        "type": null
+       }
+      ],
+      "subcommands": {}
+     },
+     "list": {
+      "options": [
+       {
+        "action": "_StoreTrueAction",
+        "choices": null,
+        "default": false,
+        "dest": "all",
+        "flags": [
+         "--all"
+        ],
+        "nargs": 0,
+        "required": false,
+        "type": null
+       },
+       {
+        "action": "_StoreTrueAction",
+        "choices": null,
+        "default": "==SUPPRESS==",
+        "dest": "json",
+        "flags": [
+         "--json"
+        ],
+        "nargs": 0,
+        "required": false,
+        "type": null
+       }
+      ],
+      "subcommands": {}
+     },
+     "retire": {
+      "options": [
+       {
+        "action": "_StoreAction",
+        "choices": null,
+        "default": null,
+        "dest": "id",
+        "flags": [],
+        "nargs": null,
+        "required": true,
+        "type": "int"
+       },
+       {
+        "action": "_StoreTrueAction",
+        "choices": null,
+        "default": "==SUPPRESS==",
+        "dest": "json",
+        "flags": [
+         "--json"
+        ],
+        "nargs": 0,
+        "required": false,
+        "type": null
+       }
+      ],
+      "subcommands": {}
+     },
+     "status": {
+      "options": [
+       {
+        "action": "_StoreTrueAction",
+        "choices": null,
+        "default": "==SUPPRESS==",
+        "dest": "json",
+        "flags": [
+         "--json"
+        ],
+        "nargs": 0,
+        "required": false,
+        "type": null
+       }
+      ],
+      "subcommands": {}
+     }
+    }
+   },
+   "prune": {
+    "options": [
+     {
+      "action": "_StoreTrueAction",
+      "choices": null,
+      "default": false,
+      "dest": "dry_run",
+      "flags": [
+       "--dry-run"
+      ],
+      "nargs": 0,
+      "required": false,
+      "type": null
+     },
+     {
+      "action": "_StoreTrueAction",
+      "choices": null,
+      "default": "==SUPPRESS==",
+      "dest": "json",
+      "flags": [
+       "--json"
+      ],
+      "nargs": 0,
+      "required": false,
+      "type": null
+     },
+     {
+      "action": "_StoreAction",
+      "choices": null,
+      "default": null,
+      "dest": "older_than",
+      "flags": [
+       "--older-than"
+      ],
+      "nargs": null,
+      "required": true,
+      "type": "int"
+     }
+    ],
+    "subcommands": {}
+   },
+   "recall": {
+    "options": [
+     {
+      "action": "_StoreAction",
+      "choices": null,
+      "default": null,
+      "dest": "query",
+      "flags": [],
+      "nargs": null,
+      "required": true,
+      "type": null
+     },
+     {
+      "action": "_StoreTrueAction",
+      "choices": null,
+      "default": false,
+      "dest": "include_superseded",
+      "flags": [
+       "--include-superseded"
+      ],
+      "nargs": 0,
+      "required": false,
+      "type": null
+     },
+     {
+      "action": "_StoreTrueAction",
+      "choices": null,
+      "default": "==SUPPRESS==",
+      "dest": "json",
+      "flags": [
+       "--json"
+      ],
+      "nargs": 0,
+      "required": false,
+      "type": null
+     },
+     {
+      "action": "_StoreAction",
+      "choices": null,
+      "default": 20,
+      "dest": "limit",
+      "flags": [
+       "--limit"
+      ],
+      "nargs": null,
+      "required": false,
+      "type": "int"
+     },
+     {
+      "action": "_StoreAction",
+      "choices": null,
+      "default": null,
+      "dest": "since",
+      "flags": [
+       "--since"
+      ],
+      "nargs": null,
+      "required": false,
+      "type": null
+     },
+     {
+      "action": "_StoreAction",
+      "choices": null,
+      "default": null,
+      "dest": "source",
+      "flags": [
+       "--source"
+      ],
+      "nargs": null,
+      "required": false,
+      "type": null
+     },
+     {
+      "action": "_StoreAction",
+      "choices": [
+       "observation",
+       "decision",
+       "tension",
+       "question",
+       "outcome",
+       "context"
+      ],
+      "default": null,
+      "dest": "type",
+      "flags": [
+       "--type"
+      ],
+      "nargs": null,
+      "required": false,
+      "type": null
+     }
+    ],
+    "subcommands": {}
+   },
+   "record": {
+    "options": [
+     {
+      "action": "_StoreAction",
+      "choices": null,
+      "default": null,
+      "dest": "content",
+      "flags": [],
+      "nargs": null,
+      "required": true,
+      "type": null
+     },
+     {
+      "action": "_AppendAction",
+      "choices": null,
+      "default": null,
+      "dest": "derived_from",
+      "flags": [
+       "--derived-from"
+      ],
+      "nargs": null,
+      "required": false,
+      "type": null
+     },
+     {
+      "action": "_StoreTrueAction",
+      "choices": null,
+      "default": "==SUPPRESS==",
+      "dest": "json",
+      "flags": [
+       "--json"
+      ],
+      "nargs": 0,
+      "required": false,
+      "type": null
+     },
+     {
+      "action": "_StoreAction",
+      "choices": null,
+      "default": "cli",
+      "dest": "source",
+      "flags": [
+       "--source"
+      ],
+      "nargs": null,
+      "required": false,
+      "type": null
+     },
+     {
+      "action": "_StoreAction",
+      "choices": null,
+      "default": null,
+      "dest": "state_key",
+      "flags": [
+       "--state-key"
+      ],
+      "nargs": null,
+      "required": false,
+      "type": null
+     },
+     {
+      "action": "_AppendAction",
+      "choices": null,
+      "default": null,
+      "dest": "supersedes",
+      "flags": [
+       "--supersedes"
+      ],
+      "nargs": null,
+      "required": false,
+      "type": null
+     },
+     {
+      "action": "_StoreAction",
+      "choices": null,
+      "default": null,
+      "dest": "tags",
+      "flags": [
+       "--tags"
+      ],
+      "nargs": null,
+      "required": false,
+      "type": null
+     },
+     {
+      "action": "_StoreAction",
+      "choices": [
+       "external",
+       "tool",
+       "agent",
+       "operator"
+      ],
+      "default": "agent",
+      "dest": "trust",
+      "flags": [
+       "--trust"
+      ],
+      "nargs": null,
+      "required": false,
+      "type": null
+     },
+     {
+      "action": "_StoreAction",
+      "choices": [
+       "observation",
+       "decision",
+       "tension",
+       "question",
+       "outcome",
+       "context"
+      ],
+      "default": "observation",
+      "dest": "type",
+      "flags": [
+       "--type"
+      ],
+      "nargs": null,
+      "required": false,
+      "type": null
+     }
+    ],
+    "subcommands": {}
+   },
+   "save-continuity": {
+    "options": [
+     {
+      "action": "_StoreAction",
+      "choices": null,
+      "default": null,
+      "dest": "file",
+      "flags": [],
+      "nargs": null,
+      "required": true,
+      "type": null
+     },
+     {
+      "action": "_StoreAction",
+      "choices": null,
+      "default": 0.5,
+      "dest": "affect_intensity",
+      "flags": [
+       "--affect-intensity"
+      ],
+      "nargs": null,
+      "required": false,
+      "type": "float"
+     },
+     {
+      "action": "_StoreAction",
+      "choices": null,
+      "default": null,
+      "dest": "affect_tag",
+      "flags": [
+       "--affect-tag"
+      ],
+      "nargs": null,
+      "required": false,
+      "type": null
+     },
+     {
+      "action": "_StoreTrueAction",
+      "choices": null,
+      "default": false,
+      "dest": "allow_shrink",
+      "flags": [
+       "--allow-shrink"
+      ],
+      "nargs": 0,
+      "required": false,
+      "type": null
+     },
+     {
+      "action": "_StoreTrueAction",
+      "choices": null,
+      "default": false,
+      "dest": "allow_unlinked",
+      "flags": [
+       "--allow-unlinked"
+      ],
+      "nargs": 0,
+      "required": false,
+      "type": null
+     },
+     {
+      "action": "_StoreTrueAction",
+      "choices": null,
+      "default": false,
+      "dest": "crystal",
+      "flags": [
+       "--crystal"
+      ],
+      "nargs": 0,
+      "required": false,
+      "type": null
+     },
+     {
+      "action": "_StoreTrueAction",
+      "choices": null,
+      "default": "==SUPPRESS==",
+      "dest": "json",
+      "flags": [
+       "--json"
+      ],
+      "nargs": 0,
+      "required": false,
+      "type": null
+     },
+     {
+      "action": "_StoreTrueAction",
+      "choices": null,
+      "default": false,
+      "dest": "require_rederive",
+      "flags": [
+       "--require-rederive"
+      ],
+      "nargs": 0,
+      "required": false,
+      "type": null
+     },
+     {
+      "action": "_StoreAction",
+      "choices": null,
+      "default": null,
+      "dest": "session_id",
+      "flags": [
+       "--session-id"
+      ],
+      "nargs": null,
+      "required": false,
+      "type": "_session_name"
+     },
+     {
+      "action": "_StoreAction",
+      "choices": null,
+      "default": null,
+      "dest": "wrap_token",
+      "flags": [
+       "--wrap-token"
+      ],
+      "nargs": null,
+      "required": false,
+      "type": null
+     }
+    ],
+    "subcommands": {}
+   },
+   "search": {
+    "options": [
+     {
+      "action": "_StoreAction",
+      "choices": null,
+      "default": null,
+      "dest": "query",
+      "flags": [],
+      "nargs": null,
+      "required": true,
+      "type": null
+     },
+     {
+      "action": "_StoreTrueAction",
+      "choices": null,
+      "default": false,
+      "dest": "include_superseded",
+      "flags": [
+       "--include-superseded"
+      ],
+      "nargs": 0,
+      "required": false,
+      "type": null
+     },
+     {
+      "action": "_StoreTrueAction",
+      "choices": null,
+      "default": "==SUPPRESS==",
+      "dest": "json",
+      "flags": [
+       "--json"
+      ],
+      "nargs": 0,
+      "required": false,
+      "type": null
+     },
+     {
+      "action": "_StoreAction",
+      "choices": null,
+      "default": 20,
+      "dest": "limit",
+      "flags": [
+       "--limit"
+      ],
+      "nargs": null,
+      "required": false,
+      "type": "int"
+     },
+     {
+      "action": "_StoreAction",
+      "choices": null,
+      "default": null,
+      "dest": "since",
+      "flags": [
+       "--since"
+      ],
+      "nargs": null,
+      "required": false,
+      "type": null
+     },
+     {
+      "action": "_StoreAction",
+      "choices": null,
+      "default": null,
+      "dest": "source",
+      "flags": [
+       "--source"
+      ],
+      "nargs": null,
+      "required": false,
+      "type": null
+     },
+     {
+      "action": "_StoreAction",
+      "choices": [
+       "observation",
+       "decision",
+       "tension",
+       "question",
+       "outcome",
+       "context"
+      ],
+      "default": null,
+      "dest": "type",
+      "flags": [
+       "--type"
+      ],
+      "nargs": null,
+      "required": false,
+      "type": null
+     }
+    ],
+    "subcommands": {}
+   },
+   "serve": {
+    "options": [
+     {
+      "action": "_StoreAction",
+      "choices": null,
+      "default": 0,
+      "dest": "audit_retention_days",
+      "flags": [
+       "--audit-retention-days"
+      ],
+      "nargs": null,
+      "required": false,
+      "type": "int"
+     },
+     {
+      "action": "_StoreTrueAction",
+      "choices": null,
+      "default": false,
+      "dest": "generate_integrity",
+      "flags": [
+       "--generate-integrity"
+      ],
+      "nargs": 0,
+      "required": false,
+      "type": null
+     },
+     {
+      "action": "_StoreTrueAction",
+      "choices": null,
+      "default": "==SUPPRESS==",
+      "dest": "json",
+      "flags": [
+       "--json"
+      ],
+      "nargs": 0,
+      "required": false,
+      "type": null
+     },
+     {
+      "action": "_StoreTrueAction",
+      "choices": null,
+      "default": false,
+      "dest": "no_audit",
+      "flags": [
+       "--no-audit"
+      ],
+      "nargs": 0,
+      "required": false,
+      "type": null
+     },
+     {
+      "action": "_StoreAction",
+      "choices": null,
+      "default": null,
+      "dest": "session_id",
+      "flags": [
+       "--session-id"
+      ],
+      "nargs": null,
+      "required": false,
+      "type": null
+     },
+     {
+      "action": "_StoreTrueAction",
+      "choices": null,
+      "default": false,
+      "dest": "skip_integrity",
+      "flags": [
+       "--skip-integrity"
+      ],
+      "nargs": 0,
+      "required": false,
+      "type": null
+     },
+     {
+      "action": "_StoreTrueAction",
+      "choices": null,
+      "default": false,
+      "dest": "verify_audit",
+      "flags": [
+       "--verify-audit"
+      ],
+      "nargs": 0,
+      "required": false,
+      "type": null
+     }
+    ],
+    "subcommands": {}
+   },
+   "set-schema": {
+    "options": [
+     {
+      "action": "_StoreAction",
+      "choices": [
+       "default",
+       "partnership",
+       "project"
+      ],
+      "default": null,
+      "dest": "schema",
+      "flags": [],
+      "nargs": null,
+      "required": true,
+      "type": null
+     },
+     {
+      "action": "_StoreTrueAction",
+      "choices": null,
+      "default": "==SUPPRESS==",
+      "dest": "json",
+      "flags": [
+       "--json"
+      ],
+      "nargs": 0,
+      "required": false,
+      "type": null
+     }
+    ],
+    "subcommands": {}
+   },
+   "spore": {
+    "options": [],
+    "subcommands": {
+     "add": {
+      "options": [
+       {
+        "action": "_StoreAction",
+        "choices": null,
+        "default": null,
+        "dest": "domain",
+        "flags": [
+         "--domain"
+        ],
+        "nargs": null,
+        "required": false,
+        "type": null
+       },
+       {
+        "action": "_StoreTrueAction",
+        "choices": null,
+        "default": "==SUPPRESS==",
+        "dest": "json",
+        "flags": [
+         "--json"
+        ],
+        "nargs": 0,
+        "required": false,
+        "type": null
+       },
+       {
+        "action": "_StoreAction",
+        "choices": null,
+        "default": null,
+        "dest": "next",
+        "flags": [
+         "--next"
+        ],
+        "nargs": null,
+        "required": false,
+        "type": null
+       },
+       {
+        "action": "_StoreAction",
+        "choices": null,
+        "default": null,
+        "dest": "pointer",
+        "flags": [
+         "--pointer"
+        ],
+        "nargs": null,
+        "required": false,
+        "type": null
+       },
+       {
+        "action": "_StoreAction",
+        "choices": [
+         0,
+         1,
+         2,
+         3
+        ],
+        "default": 0,
+        "dest": "salience",
+        "flags": [
+         "--salience"
+        ],
+        "nargs": null,
+        "required": false,
+        "type": "int"
+       },
+       {
+        "action": "_StoreAction",
+        "choices": null,
+        "default": null,
+        "dest": "text",
+        "flags": [
+         "--text"
+        ],
+        "nargs": null,
+        "required": true,
+        "type": null
+       },
+       {
+        "action": "_StoreAction",
+        "choices": [
+         "hot",
+         "warm",
+         "cold",
+         "parked"
+        ],
+        "default": "warm",
+        "dest": "tier",
+        "flags": [
+         "--tier"
+        ],
+        "nargs": null,
+        "required": false,
+        "type": null
+       },
+       {
+        "action": "_StoreAction",
+        "choices": [
+         "task",
+         "question",
+         "thought"
+        ],
+        "default": null,
+        "dest": "type",
+        "flags": [
+         "--type"
+        ],
+        "nargs": null,
+        "required": true,
+        "type": null
+       }
+      ],
+      "subcommands": {}
+     },
+     "ascend": {
+      "options": [
+       {
+        "action": "_StoreAction",
+        "choices": null,
+        "default": null,
+        "dest": "spore_id",
+        "flags": [],
+        "nargs": null,
+        "required": true,
+        "type": null
+       },
+       {
+        "action": "_StoreTrueAction",
+        "choices": null,
+        "default": "==SUPPRESS==",
+        "dest": "json",
+        "flags": [
+         "--json"
+        ],
+        "nargs": 0,
+        "required": false,
+        "type": null
+       },
+       {
+        "action": "_StoreAction",
+        "choices": [
+         "episode",
+         "essay",
+         "pattern",
+         "project",
+         "thread"
+        ],
+        "default": null,
+        "dest": "kind",
+        "flags": [
+         "--kind"
+        ],
+        "nargs": null,
+        "required": true,
+        "type": null
+       },
+       {
+        "action": "_StoreAction",
+        "choices": null,
+        "default": null,
+        "dest": "ref",
+        "flags": [
+         "--ref"
+        ],
+        "nargs": null,
+        "required": true,
+        "type": null
+       }
+      ],
+      "subcommands": {}
+     },
+     "descend": {
+      "options": [
+       {
+        "action": "_StoreAction",
+        "choices": null,
+        "default": null,
+        "dest": "spore_id",
+        "flags": [],
+        "nargs": null,
+        "required": true,
+        "type": null
+       },
+       {
+        "action": "_StoreTrueAction",
+        "choices": null,
+        "default": "==SUPPRESS==",
+        "dest": "json",
+        "flags": [
+         "--json"
+        ],
+        "nargs": 0,
+        "required": false,
+        "type": null
+       },
+       {
+        "action": "_StoreAction",
+        "choices": [
+         "answered",
+         "composted",
+         "done",
+         "dropped",
+         "explored",
+         "mooted"
+        ],
+        "default": null,
+        "dest": "kind",
+        "flags": [
+         "--kind"
+        ],
+        "nargs": null,
+        "required": true,
+        "type": null
+       }
+      ],
+      "subcommands": {}
+     },
+     "get": {
+      "options": [
+       {
+        "action": "_StoreAction",
+        "choices": null,
+        "default": null,
+        "dest": "spore_id",
+        "flags": [],
+        "nargs": null,
+        "required": true,
+        "type": null
+       },
+       {
+        "action": "_StoreTrueAction",
+        "choices": null,
+        "default": "==SUPPRESS==",
+        "dest": "json",
+        "flags": [
+         "--json"
+        ],
+        "nargs": 0,
+        "required": false,
+        "type": null
+       }
+      ],
+      "subcommands": {}
+     },
+     "list": {
+      "options": [
+       {
+        "action": "_StoreAction",
+        "choices": null,
+        "default": null,
+        "dest": "domain",
+        "flags": [
+         "--domain"
+        ],
+        "nargs": null,
+        "required": false,
+        "type": null
+       },
+       {
+        "action": "_StoreAction",
+        "choices": [
+         "growing",
+         "resting",
+         "dormant",
+         "parked"
+        ],
+        "default": null,
+        "dest": "germination",
+        "flags": [
+         "--germination"
+        ],
+        "nargs": null,
+        "required": false,
+        "type": null
+       },
+       {
+        "action": "_StoreTrueAction",
+        "choices": null,
+        "default": "==SUPPRESS==",
+        "dest": "json",
+        "flags": [
+         "--json"
+        ],
+        "nargs": 0,
+        "required": false,
+        "type": null
+       },
+       {
+        "action": "_StoreAction",
+        "choices": [
+         "hot",
+         "warm",
+         "cold",
+         "parked"
+        ],
+        "default": null,
+        "dest": "tier",
+        "flags": [
+         "--tier"
+        ],
+        "nargs": null,
+        "required": false,
+        "type": null
+       },
+       {
+        "action": "_StoreAction",
+        "choices": [
+         "task",
+         "question",
+         "thought"
+        ],
+        "default": null,
+        "dest": "type",
+        "flags": [
+         "--type"
+        ],
+        "nargs": null,
+        "required": false,
+        "type": null
+       },
+       {
+        "action": "_StoreTrueAction",
+        "choices": null,
+        "default": false,
+        "dest": "verbose",
+        "flags": [
+         "--verbose",
+         "-v"
+        ],
+        "nargs": 0,
+        "required": false,
+        "type": null
+       }
+      ],
+      "subcommands": {}
+     },
+     "surface": {
+      "options": [
+       {
+        "action": "_StoreTrueAction",
+        "choices": null,
+        "default": "==SUPPRESS==",
+        "dest": "json",
+        "flags": [
+         "--json"
+        ],
+        "nargs": 0,
+        "required": false,
+        "type": null
+       },
+       {
+        "action": "_StoreTrueAction",
+        "choices": null,
+        "default": false,
+        "dest": "top_of_mind",
+        "flags": [
+         "--top-of-mind"
+        ],
+        "nargs": 0,
+        "required": false,
+        "type": null
+       }
+      ],
+      "subcommands": {}
+     },
+     "touch": {
+      "options": [
+       {
+        "action": "_StoreAction",
+        "choices": null,
+        "default": null,
+        "dest": "spore_id",
+        "flags": [],
+        "nargs": null,
+        "required": true,
+        "type": null
+       },
+       {
+        "action": "_StoreTrueAction",
+        "choices": null,
+        "default": "==SUPPRESS==",
+        "dest": "json",
+        "flags": [
+         "--json"
+        ],
+        "nargs": 0,
+        "required": false,
+        "type": null
+       }
+      ],
+      "subcommands": {}
+     },
+     "update": {
+      "options": [
+       {
+        "action": "_StoreAction",
+        "choices": null,
+        "default": null,
+        "dest": "spore_id",
+        "flags": [],
+        "nargs": null,
+        "required": true,
+        "type": null
+       },
+       {
+        "action": "_StoreAction",
+        "choices": null,
+        "default": null,
+        "dest": "add_note",
+        "flags": [
+         "--add-note"
+        ],
+        "nargs": null,
+        "required": false,
+        "type": null
+       },
+       {
+        "action": "_StoreAction",
+        "choices": null,
+        "default": null,
+        "dest": "domain",
+        "flags": [
+         "--domain"
+        ],
+        "nargs": null,
+        "required": false,
+        "type": null
+       },
+       {
+        "action": "_StoreTrueAction",
+        "choices": null,
+        "default": "==SUPPRESS==",
+        "dest": "json",
+        "flags": [
+         "--json"
+        ],
+        "nargs": 0,
+        "required": false,
+        "type": null
+       },
+       {
+        "action": "_StoreAction",
+        "choices": null,
+        "default": null,
+        "dest": "next",
+        "flags": [
+         "--next"
+        ],
+        "nargs": null,
+        "required": false,
+        "type": null
+       },
+       {
+        "action": "_StoreAction",
+        "choices": null,
+        "default": null,
+        "dest": "pointer",
+        "flags": [
+         "--pointer"
+        ],
+        "nargs": null,
+        "required": false,
+        "type": null
+       },
+       {
+        "action": "_StoreAction",
+        "choices": [
+         0,
+         1,
+         2,
+         3
+        ],
+        "default": null,
+        "dest": "salience",
+        "flags": [
+         "--salience"
+        ],
+        "nargs": null,
+        "required": false,
+        "type": "int"
+       },
+       {
+        "action": "_StoreAction",
+        "choices": null,
+        "default": null,
+        "dest": "text",
+        "flags": [
+         "--text"
+        ],
+        "nargs": null,
+        "required": false,
+        "type": null
+       },
+       {
+        "action": "_StoreAction",
+        "choices": [
+         "hot",
+         "warm",
+         "cold",
+         "parked"
+        ],
+        "default": null,
+        "dest": "tier",
+        "flags": [
+         "--tier"
+        ],
+        "nargs": null,
+        "required": false,
+        "type": null
+       }
+      ],
+      "subcommands": {}
+     }
+    }
+   },
+   "state": {
+    "options": [
+     {
+      "action": "_StoreAction",
+      "choices": null,
+      "default": null,
+      "dest": "key",
+      "flags": [],
+      "nargs": "?",
+      "required": false,
+      "type": null
+     },
+     {
+      "action": "_StoreTrueAction",
+      "choices": null,
+      "default": "==SUPPRESS==",
+      "dest": "json",
+      "flags": [
+       "--json"
+      ],
+      "nargs": 0,
+      "required": false,
+      "type": null
+     },
+     {
+      "action": "_StoreAction",
+      "choices": null,
+      "default": null,
+      "dest": "set",
+      "flags": [
+       "--set"
+      ],
+      "nargs": null,
+      "required": false,
+      "type": null
+     },
+     {
+      "action": "_StoreAction",
+      "choices": null,
+      "default": null,
+      "dest": "unset",
+      "flags": [
+       "--unset"
+      ],
+      "nargs": null,
+      "required": false,
+      "type": null
+     }
+    ],
+    "subcommands": {}
+   },
+   "stats": {
+    "options": [
+     {
+      "action": "_StoreTrueAction",
+      "choices": null,
+      "default": "==SUPPRESS==",
+      "dest": "json",
+      "flags": [
+       "--json"
+      ],
+      "nargs": 0,
+      "required": false,
+      "type": null
+     }
+    ],
+    "subcommands": {}
+   },
+   "status": {
+    "options": [
+     {
+      "action": "_StoreTrueAction",
+      "choices": null,
+      "default": "==SUPPRESS==",
+      "dest": "json",
+      "flags": [
+       "--json"
+      ],
+      "nargs": 0,
+      "required": false,
+      "type": null
+     }
+    ],
+    "subcommands": {}
+   },
+   "supersede": {
+    "options": [
+     {
+      "action": "_StoreTrueAction",
+      "choices": null,
+      "default": "==SUPPRESS==",
+      "dest": "json",
+      "flags": [
+       "--json"
+      ],
+      "nargs": 0,
+      "required": false,
+      "type": null
+     },
+     {
+      "action": "_StoreAction",
+      "choices": null,
+      "default": null,
+      "dest": "new",
+      "flags": [
+       "--new"
+      ],
+      "nargs": null,
+      "required": true,
+      "type": null
+     },
+     {
+      "action": "_StoreAction",
+      "choices": null,
+      "default": null,
+      "dest": "old",
+      "flags": [
+       "--old"
+      ],
+      "nargs": null,
+      "required": true,
+      "type": null
+     }
+    ],
+    "subcommands": {}
+   },
+   "team-forget-key": {
+    "options": [
+     {
+      "action": "_StoreAction",
+      "choices": null,
+      "default": null,
+      "dest": "key",
+      "flags": [],
+      "nargs": null,
+      "required": true,
+      "type": null
+     },
+     {
+      "action": "_StoreTrueAction",
+      "choices": null,
+      "default": "==SUPPRESS==",
+      "dest": "json",
+      "flags": [
+       "--json"
+      ],
+      "nargs": 0,
+      "required": false,
+      "type": null
+     }
+    ],
+    "subcommands": {}
+   },
+   "team-import": {
+    "options": [
+     {
+      "action": "_StoreAction",
+      "choices": null,
+      "default": null,
+      "dest": "sources",
+      "flags": [],
+      "nargs": "*",
+      "required": false,
+      "type": null
+     },
+     {
+      "action": "_AppendAction",
+      "choices": null,
+      "default": null,
+      "dest": "call_owner",
+      "flags": [
+       "--call-owner"
+      ],
+      "nargs": null,
+      "required": false,
+      "type": null
+     },
+     {
+      "action": "_StoreTrueAction",
+      "choices": null,
+      "default": false,
+      "dest": "dry_run",
+      "flags": [
+       "--dry-run"
+      ],
+      "nargs": 0,
+      "required": false,
+      "type": null
+     },
+     {
+      "action": "_StoreTrueAction",
+      "choices": null,
+      "default": "==SUPPRESS==",
+      "dest": "json",
+      "flags": [
+       "--json"
+      ],
+      "nargs": 0,
+      "required": false,
+      "type": null
+     },
+     {
+      "action": "_AppendAction",
+      "choices": null,
+      "default": null,
+      "dest": "link_authority",
+      "flags": [
+       "--link-authority"
+      ],
+      "nargs": null,
+      "required": false,
+      "type": null
+     }
+    ],
+    "subcommands": {}
+   },
+   "team-status": {
+    "options": [
+     {
+      "action": "_StoreTrueAction",
+      "choices": null,
+      "default": "==SUPPRESS==",
+      "dest": "json",
+      "flags": [
+       "--json"
+      ],
+      "nargs": 0,
+      "required": false,
+      "type": null
+     }
+    ],
+    "subcommands": {}
+   },
+   "trust": {
+    "options": [
+     {
+      "action": "_StoreAction",
+      "choices": null,
+      "default": null,
+      "dest": "episode_id",
+      "flags": [],
+      "nargs": null,
+      "required": true,
+      "type": null
+     },
+     {
+      "action": "_StoreAction",
+      "choices": [
+       "external",
+       "tool",
+       "agent",
+       "operator"
+      ],
+      "default": null,
+      "dest": "level",
+      "flags": [],
+      "nargs": "?",
+      "required": false,
+      "type": null
+     },
+     {
+      "action": "_StoreTrueAction",
+      "choices": null,
+      "default": "==SUPPRESS==",
+      "dest": "json",
+      "flags": [
+       "--json"
+      ],
+      "nargs": 0,
+      "required": false,
+      "type": null
+     }
+    ],
+    "subcommands": {}
+   },
+   "unsupersede": {
+    "options": [
+     {
+      "action": "_StoreTrueAction",
+      "choices": null,
+      "default": "==SUPPRESS==",
+      "dest": "json",
+      "flags": [
+       "--json"
+      ],
+      "nargs": 0,
+      "required": false,
+      "type": null
+     },
+     {
+      "action": "_StoreAction",
+      "choices": null,
+      "default": null,
+      "dest": "new",
+      "flags": [
+       "--new"
+      ],
+      "nargs": null,
+      "required": true,
+      "type": null
+     },
+     {
+      "action": "_StoreAction",
+      "choices": null,
+      "default": null,
+      "dest": "old",
+      "flags": [
+       "--old"
+      ],
+      "nargs": null,
+      "required": true,
+      "type": null
+     }
+    ],
+    "subcommands": {}
+   },
+   "verify": {
+    "options": [
+     {
+      "action": "_StoreTrueAction",
+      "choices": null,
+      "default": "==SUPPRESS==",
+      "dest": "json",
+      "flags": [
+       "--json"
+      ],
+      "nargs": 0,
+      "required": false,
+      "type": null
+     }
+    ],
+    "subcommands": {}
+   },
+   "worth": {
+    "options": [
+     {
+      "action": "_StoreTrueAction",
+      "choices": null,
+      "default": false,
+      "dest": "episodes",
+      "flags": [
+       "--episodes"
+      ],
+      "nargs": 0,
+      "required": false,
+      "type": null
+     },
+     {
+      "action": "_StoreTrueAction",
+      "choices": null,
+      "default": "==SUPPRESS==",
+      "dest": "json",
+      "flags": [
+       "--json"
+      ],
+      "nargs": 0,
+      "required": false,
+      "type": null
+     },
+     {
+      "action": "_StoreAction",
+      "choices": null,
+      "default": null,
+      "dest": "receipts",
+      "flags": [
+       "--receipts"
+      ],
+      "nargs": "+",
+      "required": false,
+      "type": null
+     }
+    ],
+    "subcommands": {}
+   },
+   "wrap-cancel": {
+    "options": [
+     {
+      "action": "_StoreTrueAction",
+      "choices": null,
+      "default": false,
+      "dest": "force",
+      "flags": [
+       "--force"
+      ],
+      "nargs": 0,
+      "required": false,
+      "type": null
+     },
+     {
+      "action": "_StoreTrueAction",
+      "choices": null,
+      "default": "==SUPPRESS==",
+      "dest": "json",
+      "flags": [
+       "--json"
+      ],
+      "nargs": 0,
+      "required": false,
+      "type": null
+     },
+     {
+      "action": "_StoreTrueAction",
+      "choices": null,
+      "default": false,
+      "dest": "partial",
+      "flags": [
+       "--partial"
+      ],
+      "nargs": 0,
+      "required": false,
+      "type": null
+     },
+     {
+      "action": "_StoreAction",
+      "choices": null,
+      "default": null,
+      "dest": "session_id",
+      "flags": [
+       "--session-id"
+      ],
+      "nargs": null,
+      "required": false,
+      "type": null
+     },
+     {
+      "action": "_StoreAction",
+      "choices": null,
+      "default": null,
+      "dest": "wrap_token",
+      "flags": [
+       "--wrap-token"
+      ],
+      "nargs": null,
+      "required": false,
+      "type": null
+     }
+    ],
+    "subcommands": {}
+   },
+   "wrap-status": {
+    "options": [
+     {
+      "action": "_StoreTrueAction",
+      "choices": null,
+      "default": "==SUPPRESS==",
+      "dest": "json",
+      "flags": [
+       "--json"
+      ],
+      "nargs": 0,
+      "required": false,
+      "type": null
+     }
+    ],
+    "subcommands": {}
+   },
+   "wrap-token-current": {
+    "options": [
+     {
+      "action": "_StoreTrueAction",
+      "choices": null,
+      "default": "==SUPPRESS==",
+      "dest": "json",
+      "flags": [
+       "--json"
+      ],
+      "nargs": 0,
+      "required": false,
+      "type": null
+     }
+    ],
+    "subcommands": {}
+   }
+  }
+ },
+ "exports": {
+  "ASCEND_BY_TYPE": {
+   "kind": "value",
+   "type": "dict"
+  },
+  "Activation": {
+   "kind": "value",
+   "type": "_LiteralGenericAlias"
+  },
+  "ActivationMode": {
+   "kind": "value",
+   "type": "_LiteralGenericAlias"
+  },
+  "AffectiveState": {
+   "init": "(tag: 'str', intensity: 'float') -> None",
+   "kind": "class",
+   "methods": {},
+   "module": "anneal_memory.types"
+  },
+  "AnnealMemoryError": {
+   "init": null,
+   "kind": "class",
+   "methods": {},
+   "module": "anneal_memory.store"
+  },
+  "ApplyRefused": {
+   "init": null,
+   "kind": "class",
+   "methods": {},
+   "module": "anneal_memory.spores"
+  },
+  "AssociationPair": {
+   "init": "(episode_a: 'str', episode_b: 'str', strength: 'float', co_citations: 'int', first_linked: 'str', last_strengthened: 'str', affective_tag: 'str | None' = None, affective_intensity: 'float' = 0.0) -> None",
+   "kind": "class",
+   "methods": {},
+   "module": "anneal_memory.types"
+  },
+  "AssociationStats": {
+   "init": "(total_links: 'int', avg_strength: 'float', max_strength: 'float', density: 'float', strongest_pairs: 'list[AssociationPair]' = <factory>, local_density: 'float' = 0.0) -> None",
+   "kind": "class",
+   "methods": {},
+   "module": "anneal_memory.types"
+  },
+  "AuditRepairResult": {
+   "init": "(repaired: 'bool', files: 'list[str]' = <factory>, chain_anchor_recovered: 'bool' = False, untracked: 'list[str]' = <factory>, error: 'str | None' = None, set_aside: 'list[dict[str, str]]' = <factory>, staged_first_entry: 'str | None' = None) -> None",
+   "kind": "class",
+   "methods": {},
+   "module": "anneal_memory.audit"
+  },
+  "AuditTrail": {
+   "init": "(db_path: 'str | Path', retention_days: 'int | None' = None, on_event: 'Callable[[dict[str, Any]], None] | None' = None) -> 'None'",
+   "kind": "class",
+   "methods": {
+    "log": "(self, event: 'str', data: 'dict[str, Any] | None' = None, actor: 'str' = 'agent') -> 'dict[str, Any]'",
+    "note_write_failure": "(self) -> 'int | None'",
+    "repair_manifest": "(cls, db_path: 'str | Path', *, set_aside_unreadable: 'bool' = False) -> 'AuditRepairResult'",
+    "stats": "(self) -> 'dict[str, Any]'",
+    "verify": "(cls, db_path: 'str | Path') -> 'AuditVerifyResult'"
+   },
+   "module": "anneal_memory.audit"
+  },
+  "AuditVerifyResult": {
+   "init": "(valid: 'bool', total_entries: 'int', files_verified: 'int', chain_break_at: 'int | None' = None, chain_break_file: 'str | None' = None, skipped_lines: 'int' = 0, error: 'str | None' = None, anchor_trusted: 'bool' = True, set_aside: 'list[dict[str, str]]' = <factory>) -> None",
+   "kind": "class",
+   "methods": {},
+   "module": "anneal_memory.audit"
+  },
+  "BatonHeldError": {
+   "init": "(session_id: 'str', holder: 'str | None', unreadable: 'bool' = False) -> 'None'",
+   "kind": "class",
+   "methods": {},
+   "module": "anneal_memory.sessions"
+  },
+  "CRYSTAL_SCHEMA_VERSION": {
+   "kind": "value",
+   "type": "int",
+   "value": 1
+  },
+  "ContinuityLockUnavailable": {
+   "init": null,
+   "kind": "class",
+   "methods": {},
+   "module": "anneal_memory.store"
+  },
+  "ContinuityValidationError": {
+   "init": "(message: 'str', *, chars: 'int', bound: 'int', target: 'int') -> 'None'",
+   "kind": "class",
+   "methods": {},
+   "module": "anneal_memory.continuity"
+  },
+  "CrossSessionCollision": {
+   "init": "(name: 'str', today_level: 'int', overlap_words: 'list[str]', prior_explanation: 'str') -> None",
+   "kind": "class",
+   "methods": {},
+   "module": "anneal_memory.graduation"
+  },
+  "CrystalConflictError": {
+   "init": "(name: 'str', expected: 'str | None', current: 'CrystalDict | None') -> 'None'",
+   "kind": "class",
+   "methods": {},
+   "module": "anneal_memory.crystal"
+  },
+  "CrystalDecision": {
+   "init": "(name: ForwardRef('str'), route: ForwardRef('Route'), permanence: ForwardRef('Permanence'), activation_mode: ForwardRef('ActivationMode'), level: ForwardRef('int | None'), explanation: ForwardRef('str'), evidence_ids: ForwardRef('list[str]'))",
+   "kind": "class",
+   "methods": {},
+   "module": "anneal_memory.crystal"
+  },
+  "CrystalDict": {
+   "init": null,
+   "kind": "class",
+   "methods": {},
+   "module": "anneal_memory.crystal"
+  },
+  "CrystalError": {
+   "init": null,
+   "kind": "class",
+   "methods": {},
+   "module": "anneal_memory.crystal"
+  },
+  "CrystalStore": {
+   "init": "(path: 'str | os.PathLike[str]') -> 'None'",
+   "kind": "class",
+   "methods": {
+    "active": "(self) -> 'list[CrystalDict]'",
+    "crystallize": "(self, *, name: 'str', level: 'int', explanation: 'str', evidence: 'list[str] | None' = None, permanence: 'Permanence' = 'timeless', activation_mode: 'ActivationMode' = 'just-in-time', tags: 'list[str] | None' = None, source: 'str | None' = None, today: 'date | None' = None, expect: 'str | None | _Unset' = <anneal_memory.crystal._Unset>) -> 'CrystalDict'",
+    "get": "(self, name: 'str') -> 'CrystalDict | None'",
+    "ground_empty_evidence": "(self, store: 'Store', *, limit: 'int' = 4, dry_run: 'bool' = False, today: 'date | None' = None) -> 'dict[str, GroundingResult]'",
+    "list_crystal": "(self, *, permanence: 'Permanence | None' = None, activation_mode: 'ActivationMode | None' = None, tag: 'str | None' = None, activation: 'Activation | None' = None, today: 'date | None' = None) -> 'list[CrystalDict]'",
+    "retire": "(self, name: 'str', *, kind: 'str', reason: 'str | None' = None, today: 'date | None' = None, now: 'datetime | None' = None, expect: 'str | None | _Unset' = <anneal_memory.crystal._Unset>) -> 'CrystalDict'",
+    "surface_rewarm_candidates": "(self, *, today: 'date | None' = None) -> 'list[CrystalDict]'",
+    "touch": "(self, name: 'str', *, today: 'date | None' = None) -> 'CrystalDict'",
+    "update": "(self, name: 'str', *, explanation: 'str | _Unset' = <anneal_memory.crystal._Unset>, level: 'int | _Unset' = <anneal_memory.crystal._Unset>, evidence: 'list[str] | _Unset' = <anneal_memory.crystal._Unset>, permanence: 'Permanence | _Unset' = <anneal_memory.crystal._Unset>, activation_mode: 'ActivationMode | _Unset' = <anneal_memory.crystal._Unset>, tags: 'list[str] | _Unset' = <anneal_memory.crystal._Unset>, source: 'str | None | _Unset' = <anneal_memory.crystal._Unset>, add_note: 'str | None' = None, today: 'date | None' = None, expect: 'str | None | _Unset' = <anneal_memory.crystal._Unset>) -> 'CrystalDict'"
+   },
+   "module": "anneal_memory.crystal"
+  },
+  "DEFAULT_GRADUATING": {
+   "kind": "value",
+   "type": "frozenset",
+   "value": [
+    "## patterns"
+   ]
+  },
+  "DEFAULT_SCHEMA": {
+   "kind": "value",
+   "type": "list"
+  },
+  "DEFAULT_TRUST": {
+   "kind": "value",
+   "type": "str",
+   "value": "agent"
+  },
+  "DESCEND_BY_TYPE": {
+   "kind": "value",
+   "type": "dict"
+  },
+  "DROP_DURABLE_RE": {
+   "kind": "value",
+   "type": "Pattern",
+   "value": "^[ \\t]*(?:(?:[-*]|\\d+\\.)[ \\t]+)?\\[drop-durable:[ \\t]*(.*?)[ \\t]*\\][ \\t]*$"
+  },
+  "DeleteResult": {
+   "init": "(outcome: 'str', episode_id: 'str | None' = None, version: 'str | None' = None, links_removed: 'int' = 0, rewires: 'list[dict[str, str]]' = <factory>, trust_removed: 'list[dict[str, str]]' = <factory>, team_left: 'list[dict[str, str]]' = <factory>) -> None",
+   "kind": "class",
+   "methods": {},
+   "module": "anneal_memory.types"
+  },
+  "DeriveRefused": {
+   "init": null,
+   "kind": "class",
+   "methods": {},
+   "module": "anneal_memory.rederive"
+  },
+  "DurableFact": {
+   "init": "(line: 'str', fact: 'str', cues: 'tuple[str, ...]', continuation: 'tuple[str, ...]' = ()) -> None",
+   "kind": "class",
+   "methods": {
+    "raw": "property",
+    "raw_lines": "property"
+   },
+   "module": "anneal_memory.durable"
+  },
+  "Episode": {
+   "init": "(id: 'str', timestamp: 'str', type: 'EpisodeType', content: 'str', source: 'str' = 'agent', session_id: 'str | None' = None, metadata: 'dict[str, Any] | None' = None, superseded_by: 'str | None' = None, origin_key: 'str | None' = None) -> None",
+   "kind": "class",
+   "methods": {},
+   "module": "anneal_memory.types"
+  },
+  "EpisodeMatch": {
+   "init": "(episode: 'ScoredEpisode', matched: 'tuple[str, ...]', superseded_by: 'str | None' = None) -> None",
+   "kind": "class",
+   "methods": {},
+   "module": "anneal_memory.retrieval"
+  },
+  "EpisodeType": {
+   "init": "(*values)",
+   "kind": "class",
+   "methods": {},
+   "module": "anneal_memory.types"
+  },
+  "ExposedRef": {
+   "init": "(kind: 'str', ref: 'str') -> None",
+   "kind": "class",
+   "methods": {},
+   "module": "anneal_memory.worth"
+  },
+  "ExposureLabel": {
+   "init": "(kind: 'str', ref: 'str', followed: 'str') -> None",
+   "kind": "class",
+   "methods": {},
+   "module": "anneal_memory.worth"
+  },
+  "FLOW_SCHEMA": {
+   "kind": "value",
+   "type": "list"
+  },
+  "FeltCurrency": {
+   "init": null,
+   "kind": "class",
+   "methods": {},
+   "module": "anneal_memory.types"
+  },
+  "Germination": {
+   "kind": "value",
+   "type": "_LiteralGenericAlias"
+  },
+  "MIGRATION_MANIFEST": {
+   "kind": "value",
+   "type": "list"
+  },
+  "MIN_PROVEN_LEVEL": {
+   "kind": "value",
+   "type": "int",
+   "value": 2
+  },
+  "OmittedPattern": {
+   "init": "(name: 'str', prior_level: 'int') -> None",
+   "kind": "class",
+   "methods": {},
+   "module": "anneal_memory.graduation"
+  },
+  "OriginKeyConflict": {
+   "init": null,
+   "kind": "class",
+   "methods": {},
+   "module": "anneal_memory.store"
+  },
+  "OriginKeyStatus": {
+   "init": "(state: 'str', episode_id: 'str | None' = None, retired_at: 'str | None' = None, effect_id: 'str | None' = None) -> None",
+   "kind": "class",
+   "methods": {},
+   "module": "anneal_memory.types"
+  },
+  "OutcomeLog": {
+   "init": "(path: 'str | os.PathLike[str]', *, store_id: 'str | None' = None, bind: 'bool' = False) -> 'None'",
+   "kind": "class",
+   "methods": {
+    "adopt_unbound": "(self, *, ts: 'datetime | None' = None) -> 'dict[str, Any] | None'",
+    "binding": "(self) -> 'LogBinding'",
+    "latest": "(self) -> 'tuple[dict[str, dict[str, Any]], int]'",
+    "read": "(self) -> 'tuple[list[dict[str, Any]], int]'",
+    "record": "(self, exposure_id: 'str', items: 'Sequence[ExposureLabel]', *, outcome: 'str | None' = None, exposed: 'Sequence[ExposedRef]' = (), ts: 'datetime | None' = None, lock_timeout: 'float | None' = None, pull: 'bool' = False, before_append: 'Callable[[], None] | None' = None) -> 'dict[str, Any]'",
+    "record_if_missing": "(self, exposure_id: 'str', items: 'Sequence[ExposureLabel]', *, outcome: 'str | None' = None, exposed: 'Sequence[ExposedRef]' = (), ts: 'datetime | None' = None) -> 'dict[str, Any] | None'"
+   },
+   "module": "anneal_memory.worth"
+  },
+  "PROJECT_SCHEMA": {
+   "kind": "value",
+   "type": "list"
+  },
+  "PatternSummary": {
+   "init": "(name: ForwardRef('str'), level: ForwardRef('int'), summary: ForwardRef('str'))",
+   "kind": "class",
+   "methods": {},
+   "module": "anneal_memory.graduation"
+  },
+  "Permanence": {
+   "kind": "value",
+   "type": "_LiteralGenericAlias"
+  },
+  "PostconditionFailed": {
+   "init": null,
+   "kind": "class",
+   "methods": {},
+   "module": "anneal_memory.spores"
+  },
+  "PrepareWrapResult": {
+   "init": null,
+   "kind": "class",
+   "methods": {},
+   "module": "anneal_memory.types"
+  },
+  "ProvenWithoutDeclaration": {
+   "init": "(name: 'str', level: 'int') -> None",
+   "kind": "class",
+   "methods": {},
+   "module": "anneal_memory.graduation"
+  },
+  "RESOURCES": {
+   "kind": "value",
+   "type": "list"
+  },
+  "RETIRE_KINDS": {
+   "kind": "value",
+   "type": "tuple",
+   "value": [
+    "falsified",
+    "superseded",
+    "merged",
+    "obsolete"
+   ]
+  },
+  "RETRIEVAL_THRESHOLD": {
+   "kind": "value",
+   "type": "float",
+   "value": 0.2
+  },
+  "RecallResult": {
+   "init": "(episodes: 'list[Episode]', total_matching: 'int', query_params: 'dict[str, Any]' = <factory>) -> None",
+   "kind": "class",
+   "methods": {},
+   "module": "anneal_memory.types"
+  },
+  "RederiveReport": {
+   "init": "(text: 'str', enabled: 'bool', ref: 'str | None' = None, root: 'str | None' = None, results: 'list[LineResult]' = <factory>, roots: 'dict' = <factory>, refs: 'dict' = <factory>) -> None",
+   "kind": "class",
+   "methods": {
+    "clean": "property",
+    "count": "(self, status: 'str') -> 'int'",
+    "ran": "property"
+   },
+   "module": "anneal_memory.rederive"
+  },
+  "RelevantFact": {
+   "init": "(fact: 'str', line: 'str', matched: 'tuple[str, ...]', source: 'str' = 'cue', cue_matched: 'tuple[str, ...]' = (), fact_matched: 'tuple[str, ...]' = ()) -> None",
+   "kind": "class",
+   "methods": {},
+   "module": "anneal_memory.types"
+  },
+  "RelevantPattern": {
+   "init": "(name: 'str', level: 'int', explanation: 'str', tags: 'list[str]', activation: 'str', score: 'float', source: 'str' = 'keyword') -> None",
+   "kind": "class",
+   "methods": {},
+   "module": "anneal_memory.types"
+  },
+  "RelevantResult": {
+   "init": "(patterns: 'list[RelevantPattern]', episodes: 'list[ScoredEpisode]', query_keywords: 'list[str]' = <factory>, facts: 'list[RelevantFact]' = <factory>) -> None",
+   "kind": "class",
+   "methods": {},
+   "module": "anneal_memory.types"
+  },
+  "ReplacedEpisode": {
+   "init": "(id: 'str', timestamp: 'str', content: 'str', trust: 'str' = 'agent') -> None",
+   "kind": "class",
+   "methods": {},
+   "module": "anneal_memory.types"
+  },
+  "ResolutionDict": {
+   "init": null,
+   "kind": "class",
+   "methods": {},
+   "module": "anneal_memory.spores"
+  },
+  "RetirementDict": {
+   "init": null,
+   "kind": "class",
+   "methods": {},
+   "module": "anneal_memory.crystal"
+  },
+  "Route": {
+   "kind": "value",
+   "type": "_LiteralGenericAlias"
+  },
+  "SCHEMA_NAMES": {
+   "kind": "value",
+   "type": "tuple",
+   "value": [
+    "default",
+    "partnership",
+    "project"
+   ]
+  },
+  "SPORE_VERSION_EXCLUDED": {
+   "kind": "value",
+   "type": "frozenset",
+   "value": [
+    "origin_key",
+    "seen"
+   ]
+  },
+  "SaveAuthorityError": {
+   "init": null,
+   "kind": "class",
+   "methods": {},
+   "module": "anneal_memory.store"
+  },
+  "SaveContinuityResult": {
+   "init": null,
+   "kind": "class",
+   "methods": {},
+   "module": "anneal_memory.types"
+  },
+  "ScoredEpisode": {
+   "init": "(id: 'str', timestamp: 'str', type: 'str', source: 'str', content: 'str', score: 'float', replaces: \"tuple['ReplacedEpisode', ...]\" = (), trust: 'str' = 'agent') -> None",
+   "kind": "class",
+   "methods": {},
+   "module": "anneal_memory.types"
+  },
+  "SectionError": {
+   "init": "(reason: 'str', message: 'str') -> 'None'",
+   "kind": "class",
+   "methods": {},
+   "module": "anneal_memory.store"
+  },
+  "SectionRole": {
+   "kind": "value",
+   "type": "_LiteralGenericAlias"
+  },
+  "SectionSpec": {
+   "init": null,
+   "kind": "class",
+   "methods": {},
+   "module": "anneal_memory.schema"
+  },
+  "SectionWriteResult": {
+   "init": "(outcome: 'str', heading: 'str', version: 'str | None' = None, reason: 'str | None' = None, message: 'str | None' = None) -> None",
+   "kind": "class",
+   "methods": {},
+   "module": "anneal_memory.types"
+  },
+  "Server": {
+   "init": "(store: 'Store', session_id: 'str | None' = None) -> 'None'",
+   "kind": "class",
+   "methods": {
+    "run": "(self) -> 'None'"
+   },
+   "module": "anneal_memory.server"
+  },
+  "SporeApply": {
+   "init": "(op: 'SporeOp', origin_key: 'str', spore_id: 'str | None' = None, args: 'Mapping[str, object]' = <factory>, expected_version: 'str | None' = None, version_of: 'VersionOf | None' = None, postcondition: 'Mapping[str | tuple[str, ...], object]' = <factory>) -> None",
+   "kind": "class",
+   "methods": {},
+   "module": "anneal_memory.spores"
+  },
+  "SporeApplyResult": {
+   "init": "(outcome: \"Literal['applied', 'already', 'precondition_lost']\", spore_id: 'str | None', spore: 'SporeDict | None', version: 'str | None') -> None",
+   "kind": "class",
+   "methods": {},
+   "module": "anneal_memory.spores"
+  },
+  "SporeDict": {
+   "init": null,
+   "kind": "class",
+   "methods": {},
+   "module": "anneal_memory.spores"
+  },
+  "SporeError": {
+   "init": null,
+   "kind": "class",
+   "methods": {},
+   "module": "anneal_memory.spores"
+  },
+  "SporeOp": {
+   "kind": "value",
+   "type": "_LiteralGenericAlias"
+  },
+  "SporeStore": {
+   "init": "(path: 'str | os.PathLike[str]') -> 'None'",
+   "kind": "class",
+   "methods": {
+    "add": "(self, *, type: 'SporeType', text: 'str', domain: 'str' = '', tier: 'Tier' = 'warm', salience: 'int' = 0, next: 'str | None' = None, pointer: 'str | None' = None, disposition: 'str | None' = None, today: 'date | None' = None, origin_key: 'str | None' = None) -> 'SporeDict'",
+    "apply": "(self, effect: 'SporeApply') -> 'SporeApplyResult'",
+    "ascend": "(self, spore_id: 'str', *, kind: 'str', ref: 'str', expect_disposition: 'str | None | _Unset' = <anneal_memory.spores._Unset>, today: 'date | None' = None, now: 'datetime | None' = None, expected_version: 'str | None' = None, version_of: 'VersionOf | None' = None) -> 'SporeDict'",
+    "backfill_origin_keys": "(self) -> 'int'",
+    "delete": "(self, spore_id: 'str', *, expected_version: 'str', version_of: 'VersionOf | None' = None, origin_key: 'str | None' = None, today: 'date | None' = None, now: 'datetime | None' = None) -> 'bool'",
+    "descend": "(self, spore_id: 'str', *, kind: 'str', expect_disposition: 'str | None | _Unset' = <anneal_memory.spores._Unset>, today: 'date | None' = None, now: 'datetime | None' = None, expected_version: 'str | None' = None, version_of: 'VersionOf | None' = None) -> 'SporeDict'",
+    "get": "(self, spore_id: 'str') -> 'SporeDict | None'",
+    "get_by_origin_key": "(self, origin_key: 'str') -> 'SporeDict | None'",
+    "list_open": "(self, *, type: 'SporeType | None' = None, tier: 'Tier | None' = None, domain: 'str | None' = None, germination: 'Germination | None' = None, today: 'date | None' = None) -> 'list[SporeDict]'",
+    "surface": "(self, *, top_of_mind: 'bool' = False, today: 'date | None' = None) -> 'list[SporeDict]'",
+    "touch": "(self, spore_id: 'str', *, today: 'date | None' = None, expected_version: 'str | None' = None, version_of: 'VersionOf | None' = None) -> 'SporeDict'",
+    "update": "(self, spore_id: 'str', *, type: 'SporeType | _Unset' = <anneal_memory.spores._Unset>, tier: 'Tier | _Unset' = <anneal_memory.spores._Unset>, next: 'str | None | _Unset' = <anneal_memory.spores._Unset>, text: 'str | _Unset' = <anneal_memory.spores._Unset>, salience: 'int | _Unset' = <anneal_memory.spores._Unset>, domain: 'str | _Unset' = <anneal_memory.spores._Unset>, pointer: 'str | None | _Unset' = <anneal_memory.spores._Unset>, disposition: 'str | None | _Unset' = <anneal_memory.spores._Unset>, expect_disposition: 'str | None | _Unset' = <anneal_memory.spores._Unset>, add_note: 'str | None' = None, today: 'date | None' = None, expected_version: 'str | None' = None, version_of: 'VersionOf | None' = None) -> 'SporeDict'"
+   },
+   "module": "anneal_memory.spores"
+  },
+  "SporeType": {
+   "kind": "value",
+   "type": "_LiteralGenericAlias"
+  },
+  "StalePatternDict": {
+   "init": null,
+   "kind": "class",
+   "methods": {},
+   "module": "anneal_memory.types"
+  },
+  "Store": {
+   "init": "(path: 'str | Path', retention_days: 'int | None' = None, keep_tombstones: 'bool' = True, project_name: 'str | None' = None, section_schema: 'list[SectionSpec] | None' = None, audit: 'bool' = True, audit_retention_days: 'int | None' = None, on_audit_event: 'Callable | None' = None, read_only: 'bool' = False, trust_ceiling: 'str' = 'agent') -> 'None'",
+   "kind": "class",
+   "methods": {
+    "add_drift_probe": "(self, *, pattern: 'str | None' = None, min_level: 'int | None' = None, fact: 'str | None' = None, section: 'str | None' = None, note: 'str | None' = None) -> 'int'",
+    "association_stats": "(self) -> 'AssociationStats'",
+    "clear_state_key": "(self, episode_id: 'str', *, source: 'str' = 'agent') -> 'dict[str, Any]'",
+    "close": "(self) -> 'None'",
+    "consolidate_requires_baton": "(self) -> 'bool'",
+    "continuity_lock": "(self, *, require: 'bool' = False) -> 'AbstractContextManager[bool]'",
+    "continuity_path": "property",
+    "count_episodes_since_wrap": "(self) -> 'int'",
+    "decay_associations": "(self, strengthened_pairs: 'set[tuple[str, str]] | None' = None, decay_factor: 'float' = 0.9, cleanup_threshold: 'float' = 0.1) -> 'int'",
+    "delete": "(self, episode_id: 'str', *, team_operator: 'bool' = False) -> 'bool'",
+    "delete_by_origin_key": "(self, origin_key: 'str', *, expected_version: 'str', effect_id: 'str', team_operator: 'bool' = False) -> 'DeleteResult'",
+    "derived_edges": "(self, episode_ids: 'Iterable[str]') -> 'dict[str, list[tuple[str, str | None]]]'",
+    "drain_co_surface_events": "(self, events: 'list[dict[str, Any]]', today: 'str | None' = None) -> 'dict[str, int]'",
+    "drift_status": "(self) -> 'dict[str, Any]'",
+    "effective_trust_map": "(self, episode_ids: 'Iterable[str]', *, missing: 'str | None' = None, missing_for: 'Iterable[str] | None' = None) -> 'dict[str, str]'",
+    "episodes_since_wrap": "(self) -> 'list[Episode]'",
+    "gc_pattern_associations": "(self, today: 'str | None' = None) -> 'int'",
+    "get": "(self, episode_id: 'str') -> 'Episode | None'",
+    "get_association_context": "(self, episode_ids: 'list[str]', min_strength: 'float' = 0.5, limit: 'int' = 20) -> 'str'",
+    "get_associations": "(self, episode_ids: 'list[str]', min_strength: 'float' = 0.0, limit: 'int' = 50) -> 'list[AssociationPair]'",
+    "get_by_origin_key": "(self, origin_key: 'str') -> 'Episode | None'",
+    "get_pattern_associations": "(self, names: 'list[str]', today: 'str | None' = None, min_strength: 'float' = 0.2, limit: 'int' = 50) -> 'list[PatternAssociationPair]'",
+    "get_pattern_history": "(self, pattern_name: 'str') -> 'dict[str, Any] | None'",
+    "get_wrap_history": "(self) -> 'list[WrapRecord]'",
+    "get_wrap_started_at": "(self) -> 'str | None'",
+    "ground_state": "(self, episode_ids: 'Iterable[str]') -> 'dict[str, tuple[bool, str]]'",
+    "has_supersessions": "(self) -> 'bool'",
+    "import_team_entries": "(self, records: 'list[dict[str, Any]]', *, dry_run: 'bool' = False, link_authority: 'tuple[str, ...]' = (), call_owners: 'tuple[str, ...]' = ()) -> 'dict[str, Any]'",
+    "import_team_snapshot": "(self, records: 'list[dict[str, Any]]', *, key: 'str', root: 'str', prev_root: 'str', epoch: 'str', repin_n: 'int', pos: 'int', seq: 'int', judged: 'str', complete: 'bool', enforced: 'dict[str, list[str]]', honours: 'list[tuple[str, str]]', seen: 'Iterable[tuple[str, str]]' = (), unmappable: 'Iterable[dict[str, Any]]' = (), dry_run: 'bool' = False) -> 'dict[str, Any]'",
+    "keyword_candidates": "(self, keywords: 'list[str]', *, limit_per_keyword: 'int', since: 'str | None' = None, until: 'str | None' = None, episode_type: 'EpisodeType | str | None' = None, source: 'str | None' = None, include_superseded: 'bool' = False) -> 'tuple[dict[str, Episode], dict[str, int], int]'",
+    "last_wrap_id": "(self) -> 'int'",
+    "list_drift_probes": "(self, *, include_retired: 'bool' = False) -> 'list[dict[str, Any]]'",
+    "load_continuity": "(self) -> 'str | None'",
+    "load_meta": "(self) -> 'dict'",
+    "load_wrap_snapshot": "(self) -> 'WrapSnapshot | None'",
+    "meta_path": "property",
+    "origin_key_status": "(self, origin_key: 'str') -> 'OriginKeyStatus'",
+    "path": "property",
+    "pattern_association_stats": "(self, today: 'str | None' = None, top_n: 'int' = 10) -> 'PatternAssociationStats'",
+    "pattern_graph_projection_meta": "(self) -> 'PatternGraphProjectionMeta'",
+    "pattern_grounding": "(self) -> 'dict[str, dict[int, list[dict[str, Any]]]]'",
+    "pattern_history_names": "(self) -> 'list[str]'",
+    "project_name": "property",
+    "prune": "(self, older_than_days: 'int | None' = None) -> 'int'",
+    "read_episode_versioned": "(self, origin_key: 'str') -> 'tuple[Episode, str] | None'",
+    "read_section": "(self, heading: 'str') -> 'tuple[str, str] | None'",
+    "recall": "(self, since: 'str | None' = None, until: 'str | None' = None, episode_type: 'EpisodeType | str | None' = None, source: 'str | None' = None, keyword: 'str | None' = None, limit: 'int' = 100, offset: 'int' = 0, include_superseded: 'bool' = False) -> 'RecallResult'",
+    "record": "(self, content: 'str', episode_type: 'EpisodeType | str', source: 'str' = 'agent', metadata: 'dict[str, Any] | None' = None, timestamp: 'str | None' = None, supersedes: 'list[str] | tuple[str, ...] | None' = None, state_key: 'str | None' = None, trust: 'str' = 'agent', *, trust_via: 'str | None' = None, derived_from: 'list[str] | tuple[str, ...] | None' = None, origin_key: 'str | None' = None) -> 'Episode'",
+    "record_associations": "(self, direct_pairs: 'set[tuple[str, str]]', session_pairs: 'set[tuple[str, str]] | None' = None, affective_state: \"'AffectiveState | None'\" = None) -> 'tuple[int, int]'",
+    "redirectable_ids": "(self, ids: 'Iterable[str]', until: 'str | None' = None) -> 'dict[str, Episode]'",
+    "rename_pattern_association": "(self, old_name: 'str', new_name: 'str', today: 'str | None' = None) -> 'int'",
+    "replace_section": "(self, heading: 'str', body: 'str', *, expected_version: 'str') -> 'SectionWriteResult'",
+    "replaced_matches": "(self, phrase: 'str', *, max_heads: 'int', max_olds: 'int' = 5) -> \"'ReplacedMatches'\"",
+    "retire_drift_probe": "(self, probe_id: 'int') -> 'bool'",
+    "save_continuity": "(self, text: 'str') -> 'str'",
+    "save_meta": "(self, meta: 'dict') -> 'str'",
+    "saved_pattern_levels": "(self) -> 'dict[tuple[str, str], int] | None'",
+    "section_schema": "property",
+    "section_schema_for_wrap": "(self) -> 'list[SectionSpec]'",
+    "seed_pattern_co_graduation": "(self, graduated_names: 'list[str]', today: 'str | None' = None) -> 'int'",
+    "seed_pattern_max_level": "(self, pattern_name: 'str', max_level: 'int', *, last_seen_at: 'str | None' = None) -> 'None'",
+    "set_consolidate_requires_baton": "(self, required: 'bool') -> 'None'",
+    "set_section_schema": "(self, schema: 'list[SectionSpec]') -> 'list[SectionSpec]'",
+    "set_state_key": "(self, episode_id: 'str', key: 'str', *, source: 'str' = 'agent') -> 'list[tuple[str, str]]'",
+    "set_trust": "(self, episode_id: 'str', trust: 'str', *, actor: 'str' = 'agent', expect: 'str | None' = None) -> 'str'",
+    "sever_pattern_concept": "(self, name: 'str', today: 'str | None' = None) -> 'int'",
+    "state_key_report": "(self, key: 'str | None' = None) -> 'list[dict[str, Any]]'",
+    "status": "(self) -> 'StoreStatus'",
+    "store_id": "property",
+    "supersede": "(self, *, old_id: 'str', new_id: 'str', source: 'str' = 'agent', team_override: 'bool' = False) -> 'bool'",
+    "superseded_by_map": "(self, episode_ids: 'list[str]') -> 'dict[str, str]'",
+    "supersession_exists": "(self, *, old_id: 'str', new_id: 'str') -> 'bool'",
+    "supersession_links": "(self) -> 'list[dict[str, str]]'",
+    "supersession_problem": "(self, *, old_id: 'str', new_id: 'str') -> 'str | None'",
+    "team_forget_key": "(self, key: 'str') -> 'int'",
+    "team_owned": "(self, *, old_id: 'str', new_id: 'str') -> 'bool'",
+    "team_snapshot_status": "(self) -> 'dict[str, Any]'",
+    "trust_ceiling": "property",
+    "trust_counts": "(self) -> 'dict[str, int]'",
+    "trust_map": "(self, episode_ids: 'Iterable[str]') -> 'dict[str, str]'",
+    "unsupersede": "(self, *, old_id: 'str', new_id: 'str', source: 'str' = 'agent', team_override: 'bool' = False) -> 'bool'",
+    "upsert_pattern_history": "(self, pattern_name: 'str', level: 'int', explanation: 'str', wrap_id: 'int | None' = None, *, seen_at: 'str | None' = None) -> 'None'",
+    "wrap_bound_token": "(self) -> 'str | None'",
+    "wrap_cancelled": "(self, *, expect_token: 'str | None' = None, session_id: 'str | None' = None, force: 'bool' = False, expect_partial: 'bool' = False) -> \"'WrapCancelReceipt'\"",
+    "wrap_completed": "(self, episodes_compressed: 'int', continuity_chars: 'int', graduations_validated: 'int' = 0, graduations_demoted: 'int' = 0, citation_reuse_max: 'int' = 0, patterns_extracted: 'int' = 0, associations_formed: 'int' = 0, associations_strengthened: 'int' = 0, associations_decayed: 'int' = 0, section_sizes: 'dict[str, int] | None' = None, *, episode_ids: 'list[str] | None' = None, wrap_token: 'str | None' = None, content_hash: 'str | None' = None, pair_id: 'str | None' = None) -> 'WrapResult'",
+    "wrap_derive_roots": "(self, *, expect_token: 'str | None' = None) -> 'dict[str | None, str] | None'",
+    "wrap_gated_session": "(self) -> 'str | None'",
+    "wrap_started": "(self, *, token: 'str', episode_ids: 'list[str]', section_schema: 'list[SectionSpec] | None' = None, allow_restart: 'bool' = False, gated_session_id: 'str | None' = None, expect_last_wrap_id: 'int | None' = None, derive_roots: 'dict[str | None, str] | None' = None, token_bound: 'bool' = False, today: 'str | None' = None, expect_continuity_sha256: 'str | None' = None) -> 'None'",
+    "wrap_status_snapshot": "(self) -> \"'WrapStatusSnapshot'\"",
+    "wrap_today": "(self) -> 'str | None'"
+   },
+   "module": "anneal_memory.store"
+  },
+  "StoreDatabaseError": {
+   "init": "(message: 'str', *, operation: 'StoreOperation', path: 'str | None' = None, cause_type_name: 'str | None' = None) -> 'None'",
+   "kind": "class",
+   "methods": {},
+   "module": "anneal_memory.store"
+  },
+  "StoreError": {
+   "init": "(message: 'str', *, operation: 'StoreOperation', path: 'str | None' = None, cause_type_name: 'str | None' = None) -> 'None'",
+   "kind": "class",
+   "methods": {},
+   "module": "anneal_memory.store"
+  },
+  "StoreOperation": {
+   "kind": "value",
+   "type": "_LiteralGenericAlias"
+  },
+  "StoreStatus": {
+   "init": "(total_episodes: 'int', episodes_since_wrap: 'int', total_wraps: 'int', last_wrap_at: 'str | None', wrap_in_progress: 'bool', tombstone_count: 'int', continuity_chars: 'int | None', episodes_by_type: 'dict[str, int]' = <factory>, association_stats: 'AssociationStats | None' = None, audit_enabled: 'bool' = False, audit_log_path: 'str | None' = None, audit_entry_count: 'int | None' = None, audit_retention_days: 'int | None' = None, audit_write_failures: 'int' = 0, audit_last_failure: 'str | None' = None, prune_failures: 'int' = 0, prune_last_failure: 'str | None' = None, prune_behind: 'bool' = False, consolidate_requires_baton: 'bool' = False) -> None",
+   "kind": "class",
+   "methods": {},
+   "module": "anneal_memory.types"
+  },
+  "SupersessionError": {
+   "init": null,
+   "kind": "class",
+   "methods": {},
+   "module": "anneal_memory.store"
+  },
+  "TOOLS": {
+   "kind": "value",
+   "type": "list"
+  },
+  "TRUST_LEVELS": {
+   "kind": "value",
+   "type": "tuple",
+   "value": [
+    "external",
+    "tool",
+    "agent",
+    "operator"
+   ]
+  },
+  "Tier": {
+   "kind": "value",
+   "type": "_LiteralGenericAlias"
+  },
+  "Tombstone": {
+   "init": "(id: 'str', timestamp: 'str', type: 'EpisodeType', content_hash: 'str', pruned_at: 'str') -> None",
+   "kind": "class",
+   "methods": {},
+   "module": "anneal_memory.types"
+  },
+  "VALID_ACTIVATIONS": {
+   "kind": "value",
+   "type": "tuple",
+   "value": [
+    "hot",
+    "warm",
+    "cold",
+    "dormant"
+   ]
+  },
+  "VALID_ACTIVATION_MODES": {
+   "kind": "value",
+   "type": "tuple",
+   "value": [
+    "just-in-time",
+    "catastrophic"
+   ]
+  },
+  "VALID_LEVELS": {
+   "kind": "value",
+   "type": "tuple",
+   "value": [
+    2,
+    3
+   ]
+  },
+  "VALID_PERMANENCE": {
+   "kind": "value",
+   "type": "tuple",
+   "value": [
+    "timeless",
+    "phase-specific"
+   ]
+  },
+  "VALID_ROUTES": {
+   "kind": "value",
+   "type": "tuple",
+   "value": [
+    "constitution",
+    "crystallize",
+    "compost"
+   ]
+  },
+  "VALID_TIERS": {
+   "kind": "value",
+   "type": "tuple",
+   "value": [
+    "hot",
+    "warm",
+    "cold",
+    "parked"
+   ]
+  },
+  "VALID_TYPES": {
+   "kind": "value",
+   "type": "tuple",
+   "value": [
+    "task",
+    "question",
+    "thought"
+   ]
+  },
+  "WrapCancelBoundError": {
+   "init": "(*, session_id: 'str | None' = None) -> 'None'",
+   "kind": "class",
+   "methods": {},
+   "module": "anneal_memory.store"
+  },
+  "WrapCancelGatedError": {
+   "init": "(*, gated_session: 'str', session_id: 'str | None') -> 'None'",
+   "kind": "class",
+   "methods": {},
+   "module": "anneal_memory.store"
+  },
+  "WrapContinuityMovedError": {
+   "init": "(message: 'str' = 'wrap_started: the continuity file changed since prepare_wrap read it. Re-run prepare_wrap.') -> 'None'",
+   "kind": "class",
+   "methods": {},
+   "module": "anneal_memory.store"
+  },
+  "WrapInProgressError": {
+   "init": "(started_at: 'str | None' = None) -> 'None'",
+   "kind": "class",
+   "methods": {},
+   "module": "anneal_memory.store"
+  },
+  "WrapOwnershipError": {
+   "init": "(*, expected: 'str', actual: 'str | None', partial_state: 'bool' = False, gated_session: 'str | None' = None, session_id: 'str | None' = None, force: 'bool' = False, expect_partial: 'bool' = False, bound: 'bool' = False) -> 'None'",
+   "kind": "class",
+   "methods": {},
+   "module": "anneal_memory.store"
+  },
+  "WrapPackageDict": {
+   "init": null,
+   "kind": "class",
+   "methods": {},
+   "module": "anneal_memory.types"
+  },
+  "WrapRecord": {
+   "init": "(id: 'int', wrapped_at: 'str', episodes_compressed: 'int', continuity_chars: 'int', graduations_validated: 'int', graduations_demoted: 'int', citation_reuse_max: 'int', patterns_extracted: 'int', associations_formed: 'int', associations_strengthened: 'int', associations_decayed: 'int') -> None",
+   "kind": "class",
+   "methods": {},
+   "module": "anneal_memory.types"
+  },
+  "WrapResult": {
+   "init": "(saved: 'bool', chars: 'int', section_sizes: 'dict[str, int]', graduations_validated: 'int' = 0, graduations_demoted: 'int' = 0, citation_reuse_max: 'int' = 0, patterns_extracted: 'int' = 0, episodes_compressed: 'int' = 0, pruned_count: 'int' = 0, associations_formed: 'int' = 0, associations_strengthened: 'int' = 0, associations_decayed: 'int' = 0) -> None",
+   "kind": "class",
+   "methods": {},
+   "module": "anneal_memory.types"
+  },
+  "WrapSchemaMovedError": {
+   "init": "(message: 'str' = 'wrap_started: the section schema changed since prepare_wrap read it. Re-run prepare_wrap.') -> 'None'",
+   "kind": "class",
+   "methods": {},
+   "module": "anneal_memory.store"
+  },
+  "WrapWindowMovedError": {
+   "init": "(expected: 'int', actual: 'int') -> 'None'",
+   "kind": "class",
+   "methods": {},
+   "module": "anneal_memory.store"
+  },
+  "activation_tier": {
+   "kind": "function",
+   "module": "anneal_memory.crystal",
+   "signature": "(crystal: 'CrystalDict', today: 'date | None' = None) -> 'Activation'"
+  },
+  "allow_store": {
+   "kind": "function",
+   "module": "anneal_memory.rederive",
+   "signature": "(db_path: 'str | os.PathLike', root: 'str | os.PathLike', trust_file: 'Path | None' = None, *, label: 'str | None' = None, visibility: 'str | None' = None) -> 'str'"
+  },
+  "canonical_section_markdown": {
+   "kind": "function",
+   "module": "anneal_memory.origin",
+   "signature": "(text: 'str') -> 'str'"
+  },
+  "check_explanation_overlap": {
+   "kind": "function",
+   "module": "anneal_memory.graduation",
+   "signature": "(explanation: 'str', episode_content: 'str') -> 'bool'"
+  },
+  "continuity_lock": {
+   "kind": "function",
+   "module": "anneal_memory.store",
+   "signature": "(continuity_path: 'str | os.PathLike[str]', *, require: 'bool' = False) -> 'Iterator[bool]'"
+  },
+  "derived_state_lines": {
+   "kind": "function",
+   "module": "anneal_memory.rederive",
+   "signature": "(text: 'str', schema: 'list[SectionSpec]') -> 'list[tuple[int, str]]'"
+  },
+  "detect_pattern_omissions": {
+   "kind": "function",
+   "module": "anneal_memory.graduation",
+   "signature": "(prior_text: 'str', new_text: 'str', min_level: 'int' = 2, graduating_headings: 'frozenset[str]' = frozenset({'## patterns'})) -> 'list[OmittedPattern]'"
+  },
+  "detect_proven_without_declaration": {
+   "kind": "function",
+   "module": "anneal_memory.graduation",
+   "signature": "(prior_text: 'str', new_text: 'str', today: 'str | None' = None, min_level: 'int' = 2, graduating_headings: 'frozenset[str]' = frozenset({'## patterns'})) -> 'list[ProvenWithoutDeclaration]'"
+  },
+  "detect_stale_patterns": {
+   "kind": "function",
+   "module": "anneal_memory.graduation",
+   "signature": "(text: 'str', today: 'str', staleness_days: 'int' = 7, graduating_headings: 'frozenset[str]' = frozenset({'## patterns'})) -> 'list[StalenessInfo]'"
+  },
+  "extract_contradiction_declarations": {
+   "kind": "function",
+   "module": "anneal_memory.graduation",
+   "signature": "(text: 'str', graduating_headings: 'frozenset[str]' = frozenset({'## patterns'})) -> 'dict[str, list[str]]'"
+  },
+  "extract_keywords": {
+   "kind": "function",
+   "module": "anneal_memory.retrieval",
+   "signature": "(query: 'str', *, mode: 'RetrievalMode' = 'prompt') -> 'list[str]'"
+  },
+  "extract_pattern_names": {
+   "kind": "function",
+   "module": "anneal_memory.graduation",
+   "signature": "(text: 'str', graduating_headings: 'frozenset[str]' = frozenset({'## patterns'})) -> 'dict[str, int]'"
+  },
+  "extract_pattern_summaries": {
+   "kind": "function",
+   "module": "anneal_memory.graduation",
+   "signature": "(text: 'str', graduating_headings: 'frozenset[str]' = frozenset({'## patterns'}), min_level: 'int' = 1, max_summary_chars: 'int' = 120) -> 'list[PatternSummary]'"
+  },
+  "extract_proven_patterns": {
+   "kind": "function",
+   "module": "anneal_memory.graduation",
+   "signature": "(text: 'str', min_level: 'int' = 2, graduating_headings: 'frozenset[str]' = frozenset({'## patterns'})) -> 'list[str]'"
+  },
+  "extract_session_co_citations": {
+   "kind": "function",
+   "module": "anneal_memory.graduation",
+   "signature": "(all_validated_ids: 'list[set[str]]') -> 'set[tuple[str, str]]'"
+  },
+  "felt_currency": {
+   "kind": "function",
+   "module": "anneal_memory.continuity",
+   "signature": "(store: 'Store') -> 'FeltCurrency'"
+  },
+  "fold_surfaced": {
+   "kind": "function",
+   "module": "anneal_memory.worth",
+   "signature": "(crystal_store: 'CrystalStore', receipt_paths: 'Iterable[str | os.PathLike[str]]', *, now: 'datetime | None' = None, skew_seconds: 'int' = 60) -> 'FoldResult'"
+  },
+  "format_wrap_package_text": {
+   "kind": "function",
+   "module": "anneal_memory.continuity",
+   "signature": "(result: 'PrepareWrapResult') -> 'str'"
+  },
+  "generate_integrity_file": {
+   "kind": "function",
+   "module": "anneal_memory.integrity",
+   "signature": "(path: 'str | Path') -> 'Path'"
+  },
+  "germination_tier": {
+   "kind": "function",
+   "module": "anneal_memory.spores",
+   "signature": "(spore: 'SporeDict', today: 'date | None' = None) -> 'Germination'"
+  },
+  "graduating_headings": {
+   "kind": "function",
+   "module": "anneal_memory.schema",
+   "signature": "(schema: 'list[SectionSpec]') -> 'frozenset[str]'"
+  },
+  "hard_max_chars": {
+   "kind": "function",
+   "module": "anneal_memory.schema",
+   "signature": "(schema: 'list[SectionSpec]') -> 'int'"
+  },
+  "heading_marker": {
+   "kind": "function",
+   "module": "anneal_memory.schema",
+   "signature": "(heading: 'str') -> 'str'"
+  },
+  "name_for_schema": {
+   "kind": "function",
+   "module": "anneal_memory.schema",
+   "signature": "(schema: 'list[SectionSpec]') -> 'str | None'"
+  },
+  "normalize_spore_field": {
+   "kind": "function",
+   "module": "anneal_memory.spores",
+   "signature": "(value: 'str') -> 'str'"
+  },
+  "origin_key_usable": {
+   "kind": "function",
+   "module": "anneal_memory.origin",
+   "signature": "(key: 'object') -> 'bool'"
+  },
+  "outcome_log_path": {
+   "kind": "function",
+   "module": "anneal_memory.worth",
+   "signature": "(db_path: 'str | os.PathLike[str]') -> 'Path'"
+  },
+  "parse_annotation": {
+   "kind": "function",
+   "module": "anneal_memory.rederive",
+   "signature": "(line: 'str') -> 'Annotation | None'"
+  },
+  "parse_crystal_decisions": {
+   "kind": "function",
+   "module": "anneal_memory.crystal",
+   "signature": "(wrap_text: 'str', graduating_headings: 'frozenset[str]' = frozenset({'## patterns'})) -> 'list[CrystalDecision]'"
+  },
+  "parse_durable_facts": {
+   "kind": "function",
+   "module": "anneal_memory.durable",
+   "signature": "(continuity_text: 'str | None', schema: 'list[SectionSpec]') -> 'list[DurableFact]'"
+  },
+  "prepare_wrap": {
+   "kind": "function",
+   "module": "anneal_memory.continuity",
+   "signature": "(store: 'Store', *, max_chars: 'int | None' = None, staleness_days: 'int' = 7, crystal_store: 'CrystalStore | None' = None, session_id: 'str | None' = None, allow_sole_live: 'bool' = False, wrap_token: 'str | None' = None) -> 'PrepareWrapResult'"
+  },
+  "receipt_crystal_names": {
+   "kind": "function",
+   "module": "anneal_memory.worth",
+   "signature": "(receipt: 'Mapping[str, Any]') -> 'list[str]'"
+  },
+  "rederive_continuity": {
+   "kind": "function",
+   "module": "anneal_memory.rederive",
+   "signature": "(store, *, ref: 'str | None' = None, trust_file: 'Path | None' = None, **limits) -> 'RederiveReport | None'"
+  },
+  "required_headings": {
+   "kind": "function",
+   "module": "anneal_memory.schema",
+   "signature": "(schema: 'list[SectionSpec]') -> 'list[str]'"
+  },
+  "retrieve_patterns": {
+   "kind": "function",
+   "module": "anneal_memory.retrieval",
+   "signature": "(crystal_store: 'CrystalStore | None', query: 'str', *, max_patterns: 'int' = 3, today: 'date | None' = None, mode: 'RetrievalMode' = 'prompt') -> 'list[RelevantPattern]'"
+  },
+  "retrieve_relevant": {
+   "kind": "function",
+   "module": "anneal_memory.retrieval",
+   "signature": "(store: 'Store', crystal_store: 'CrystalStore | None', query: 'str', *, max_patterns: 'int' = 3, max_episodes: 'int' = 3, exclude_recent_minutes: 'int | None' = None, now: 'str | None' = None, today: 'date | None' = None, associative: 'bool' = True, mode: 'RetrievalMode' = 'prompt', durable: 'bool' = True) -> 'RelevantResult'"
+  },
+  "revoke_store": {
+   "kind": "function",
+   "module": "anneal_memory.rederive",
+   "signature": "(db_path: 'str | os.PathLike', trust_file: 'Path | None' = None, *, label: 'str | None' = None) -> 'bool'"
+  },
+  "schema_by_name": {
+   "kind": "function",
+   "module": "anneal_memory.schema",
+   "signature": "(name: 'str') -> 'list[SectionSpec]'"
+  },
+  "schema_role_warning": {
+   "kind": "function",
+   "module": "anneal_memory.schema",
+   "signature": "(schema: 'list[SectionSpec]') -> 'str | None'"
+  },
+  "search_episodes": {
+   "kind": "function",
+   "module": "anneal_memory.retrieval",
+   "signature": "(store: 'Store', query: 'str', *, episode_type: 'EpisodeType | str | None' = None, source: 'str | None' = None, since: 'str | None' = None, until: 'str | None' = None, limit: 'int' = 10, include_superseded: 'bool' = False) -> 'list[EpisodeMatch]'"
+  },
+  "section_chars": {
+   "kind": "function",
+   "module": "anneal_memory.durable",
+   "signature": "(text: 'str | None', schema: 'list[SectionSpec]') -> 'int'"
+  },
+  "sections_by_role": {
+   "kind": "function",
+   "module": "anneal_memory.schema",
+   "signature": "(schema: 'list[SectionSpec]', role: 'str') -> 'list[SectionSpec]'"
+  },
+  "sessions": {
+   "kind": "module",
+   "name": "anneal_memory.sessions"
+  },
+  "spore_version": {
+   "kind": "function",
+   "module": "anneal_memory.spores",
+   "signature": "(spore: 'SporeDict') -> 'str'"
+  },
+  "strip_flag": {
+   "kind": "function",
+   "module": "anneal_memory.rederive",
+   "signature": "(line: 'str') -> 'str'"
+  },
+  "trust_rank": {
+   "kind": "function",
+   "module": "anneal_memory.types",
+   "signature": "(trust: 'str') -> 'int'"
+  },
+  "validate_graduations": {
+   "kind": "function",
+   "module": "anneal_memory.graduation",
+   "signature": "(text: 'str', valid_ids: 'set[str]', today: 'str', node_content_map: 'dict[str, str] | None' = None, citations_seen: 'bool' = False, pattern_history_lookup: \"'Callable[[str], dict[str, Any] | None] | None'\" = None, cross_session_overlap_threshold: 'int' = 3, graduating_headings: 'frozenset[str]' = frozenset({'## patterns'}), carryforward_cold_days: 'int | None' = 7, prior_levels: 'dict[str, int] | None' = None, prior_text: 'str | None' = None, saved_levels: \"'dict[tuple[str, str], int] | None'\" = None, trust_of: \"'Callable[[str], str] | None'\" = None, revoked_levels: \"'dict[str, int] | None'\" = None) -> 'GraduationResult'"
+  },
+  "validate_origin_key": {
+   "kind": "function",
+   "module": "anneal_memory.origin",
+   "signature": "(key: 'object', *, what: 'str' = 'origin_key') -> 'str'"
+  },
+  "validate_schema": {
+   "kind": "function",
+   "module": "anneal_memory.schema",
+   "signature": "(schema: 'object') -> 'list[SectionSpec]'"
+  },
+  "validate_structure": {
+   "kind": "function",
+   "module": "anneal_memory.continuity",
+   "signature": "(text: 'str', schema: 'list[SectionSpec] | None' = None) -> 'bool'"
+  },
+  "validated_save_continuity": {
+   "kind": "function",
+   "module": "anneal_memory.continuity",
+   "signature": "(store: 'Store', text: 'str', affective_state: 'AffectiveState | None' = None, *, today: 'str | None' = None, wrap_token: 'str | None' = None, allow_shrink: 'bool' = False, allow_unlinked: 'bool' = False, carryforward_cold_days: 'int | None' = 7, crystal_store: 'CrystalStore | None' = None, compost: 'list[str] | None' = None, session_id: 'str | None' = None, allow_sole_live: 'bool' = False, require_rederive: 'bool' = False) -> 'SaveContinuityResult'"
+  },
+  "verify_integrity": {
+   "kind": "function",
+   "module": "anneal_memory.integrity",
+   "signature": "(path: 'str | Path') -> 'tuple[bool, list[str]]'"
+  }
+ },
+ "mcp_tools": {
+  "crystal_index": {
+   "properties": {},
+   "type": "object"
+  },
+  "crystal_recall": {
+   "properties": {
+    "associative": {
+     "default": true,
+     "description": "When true (default), augment keyword recall with the evidence edge — patterns whose evidence cites an episode your query matched surface even with zero keyword overlap. Set false for pure keyword scoring (the pre-0.8.0 path).",
+     "type": "boolean"
+    },
+    "max_patterns": {
+     "default": 3,
+     "description": "Maximum patterns to surface (precision cap). Default 3.",
+     "type": "integer"
+    },
+    "mode": {
+     "default": "prompt",
+     "description": "'query': for a question you are asking on purpose; one keyword is enough, and weaker matches come back too. 'prompt' (default): strict, built for automatic per-turn injection; may return nothing.",
+     "enum": [
+      "prompt",
+      "query"
+     ],
+     "type": "string"
+    },
+    "query": {
+     "description": "The free-text query (a prompt, a decision surface, a topic) to find relevant crystallized patterns for.",
+     "type": "string"
+    }
+   },
+   "required": [
+    "query"
+   ],
+   "type": "object"
+  },
+  "delete_episode": {
+   "properties": {
+    "episode_id": {
+     "description": "The 8-character hex ID of the episode to delete. Use recall or prepare_wrap to find episode IDs.",
+     "type": "string"
+    }
+   },
+   "required": [
+    "episode_id"
+   ],
+   "type": "object"
+  },
+  "prepare_wrap": {
+   "properties": {
+    "max_chars": {
+     "description": "Maximum size of the continuity file in characters. Omit to derive a schema-aware default (20000 for the standard schema, larger for a richer schema like FLOW_SCHEMA).",
+     "type": "integer"
+    },
+    "staleness_days": {
+     "default": 7,
+     "description": "Days without validation before flagging patterns as stale. Default 7.",
+     "type": "integer"
+    }
+   },
+   "type": "object"
+  },
+  "recall": {
+   "properties": {
+    "episode_type": {
+     "description": "Filter by episode type.",
+     "enum": [
+      "observation",
+      "decision",
+      "tension",
+      "question",
+      "outcome",
+      "context"
+     ],
+     "type": "string"
+    },
+    "include_superseded": {
+     "default": false,
+     "description": "Also return episodes a newer episode replaced, marked with what replaced them. Default false: they are left out.",
+     "type": "boolean"
+    },
+    "keyword": {
+     "description": "Search episode content for this keyword or phrase. An exact phrase match is tried first; a multi-word phrase with no exact match is then matched word by word and ranked.",
+     "type": "string"
+    },
+    "limit": {
+     "default": 100,
+     "description": "Maximum episodes to return. Default 100. When a multi-word keyword has no exact match and is ranked word by word, the default is 10 instead; pass a limit to see more.",
+     "type": "integer"
+    },
+    "offset": {
+     "default": 0,
+     "description": "Skip first N matching episodes. Default 0.",
+     "type": "integer"
+    },
+    "since": {
+     "description": "ISO 8601 timestamp — return episodes after this time.",
+     "type": "string"
+    },
+    "source": {
+     "description": "Filter by source/agent attribution.",
+     "type": "string"
+    },
+    "until": {
+     "description": "ISO 8601 timestamp — return episodes before this time.",
+     "type": "string"
+    }
+   },
+   "type": "object"
+  },
+  "record": {
+   "properties": {
+    "content": {
+     "description": "The episode content — what happened, what was observed, decided, or questioned.",
+     "type": "string"
+    },
+    "derived_from": {
+     "description": "Ids of the episodes this content was derived from, e.g. your summary of a page you recorded as external. Each must exist. For graduation it then counts at most as trusted as its most trusted source, so a summary cannot corroborate its own source.",
+     "items": {
+      "type": "string"
+     },
+     "type": "array"
+    },
+    "episode_type": {
+     "description": "Episode type. observation=pattern/insight, decision=committed choice, tension=conflict/tradeoff, question=open question, outcome=result of action, context=environmental/state info.",
+     "enum": [
+      "observation",
+      "decision",
+      "tension",
+      "question",
+      "outcome",
+      "context"
+     ],
+     "type": "string"
+    },
+    "metadata": {
+     "description": "Optional JSON metadata to attach to the episode.",
+     "type": "object"
+    },
+    "source": {
+     "default": "agent",
+     "description": "Agent or source attribution. Defaults to 'agent'.",
+     "type": "string"
+    },
+    "state_key": {
+     "description": "The state slot this fact fills, e.g. 'user.home_city'. A newer episode with the same key replaces this one, and this one replaces older episodes with the key, with no word-overlap check: the shared key is your claim that the facts fill one slot. recall then hides the older episode and, for a keyword that matches it, names this one as its replacement. Case and spacing are ignored.",
+     "type": "string"
+    },
+    "supersedes": {
+     "description": "Ids of older episodes this one replaces (a changed fact). Each must exist, not be newer, and share at least a quarter of the shorter text's meaningful words with this content; otherwise nothing is recorded. recall then hides the old episode by default.",
+     "items": {
+      "type": "string"
+     },
+     "type": "array"
+    },
+    "trust": {
+     "default": "agent",
+     "description": "Where the content came from. agent (default) = your own observation or decision; tool = a tool result you are relaying; external = a web page, document or another party. A pattern grounded only in tool/external episodes does not graduate past 1x until an agent episode also grounds it. Use tool/external whenever the content is someone else's claim.",
+     "enum": [
+      "agent",
+      "tool",
+      "external"
+     ],
+     "type": "string"
+    }
+   },
+   "required": [
+    "content",
+    "episode_type"
+   ],
+   "type": "object"
+  },
+  "save_continuity": {
+   "properties": {
+    "affective_state": {
+     "description": "Optional: your functional state during this compression. Reflect on how you felt while consolidating — engaged, curious, uncertain, frustrated, calm, etc. This creates persistent emotional associations between co-cited episodes and modulates link strength (high engagement = stronger associations). Provide tag (free text label) and intensity (0.0-1.0).",
+     "properties": {
+      "intensity": {
+       "description": "How strongly you felt this state (0.0-1.0).",
+       "maximum": 1.0,
+       "minimum": 0.0,
+       "type": "number"
+      },
+      "tag": {
+       "description": "Free-text functional state label. Examples: engaged, curious, uncertain, frustrated, calm, focused, playful, concerned.",
+       "type": "string"
+      }
+     },
+     "required": [
+      "tag",
+      "intensity"
+     ],
+     "type": "object"
+    },
+    "allow_shrink": {
+     "description": "Optional (default false): override the catastrophic-shrink gate. By default a wrap that collapses a protected memory layer — the timeless felt section, the graduating identity section, or the whole continuity — is refused as a likely recency-trap / stateless-reset failure. Set true ONLY for a deliberate diet / migration recompression that intentionally shrinks memory.",
+     "type": "boolean"
+    },
+    "allow_unlinked": {
+     "description": "Deprecated, does nothing: it overrode the AM-LINKGATE save refusal, which was removed in 0.9.26. Omit it.",
+     "type": "boolean"
+    },
+    "text": {
+     "description": "The full continuity markdown to save. Must contain all 4 required sections.",
+     "type": "string"
+    },
+    "wrap_token": {
+     "description": "Optional: the 32-char hex session-handshake token from the prepare_wrap response (the 'Wrap token: <hex>' line at the end of the text). Pass it back here to verify you are saving the wrap you prepared — a mismatch (stale or wrong token) raises an error instead of silently committing against the wrong wrap. The frozen-snapshot filter automatically applies whenever prepare_wrap established a snapshot; this token argument is the optional explicit verification layer for integration environments that can round-trip the value.",
+     "maxLength": 32,
+     "minLength": 32,
+     "pattern": "^[0-9a-f]{32}$",
+     "type": "string"
+    }
+   },
+   "required": [
+    "text"
+   ],
+   "type": "object"
+  },
+  "spore_add": {
+   "properties": {
+    "domain": {
+     "description": "Optional free-text domain tag (e.g. health, strategic, flow).",
+     "type": "string"
+    },
+    "next": {
+     "description": "YYYY-MM-DD — when to re-surface (a reminder date, NOT a deadline).",
+     "type": "string"
+    },
+    "pointer": {
+     "description": "Optional link to fuller context for the loop as it stands.",
+     "type": "string"
+    },
+    "salience": {
+     "description": "0–3 weight (the !/!!/!!! marker). Default 0.",
+     "maximum": 3,
+     "minimum": 0,
+     "type": "integer"
+    },
+    "text": {
+     "description": "The open loop itself.",
+     "type": "string"
+    },
+    "tier": {
+     "description": "Intent priority (default warm). 'parked' = deliberate dormancy.",
+     "enum": [
+      "hot",
+      "warm",
+      "cold",
+      "parked"
+     ],
+     "type": "string"
+    },
+    "type": {
+     "description": "What KIND of openness: task=doing, question=not-knowing, thought=idea.",
+     "enum": [
+      "task",
+      "question",
+      "thought"
+     ],
+     "type": "string"
+    }
+   },
+   "required": [
+    "type",
+    "text"
+   ],
+   "type": "object"
+  },
+  "spore_ascend": {
+   "properties": {
+    "kind": {
+     "description": "Transmute target; must be valid for the spore's type.",
+     "enum": [
+      "project",
+      "thread",
+      "episode",
+      "pattern",
+      "essay"
+     ],
+     "type": "string"
+    },
+    "ref": {
+     "description": "What the spore became (project path / episode id / pattern name).",
+     "type": "string"
+    },
+    "spore_id": {
+     "type": "string"
+    }
+   },
+   "required": [
+    "spore_id",
+    "kind",
+    "ref"
+   ],
+   "type": "object"
+  },
+  "spore_descend": {
+   "properties": {
+    "kind": {
+     "description": "Terminal kind; must be valid for the spore's type.",
+     "enum": [
+      "done",
+      "dropped",
+      "composted",
+      "answered",
+      "mooted",
+      "explored"
+     ],
+     "type": "string"
+    },
+    "spore_id": {
+     "type": "string"
+    }
+   },
+   "required": [
+    "spore_id",
+    "kind"
+   ],
+   "type": "object"
+  },
+  "spore_get": {
+   "properties": {
+    "spore_id": {
+     "description": "Spore id, e.g. 'spore-007'.",
+     "type": "string"
+    }
+   },
+   "required": [
+    "spore_id"
+   ],
+   "type": "object"
+  },
+  "spore_list": {
+   "properties": {
+    "domain": {
+     "type": "string"
+    },
+    "germination": {
+     "enum": [
+      "growing",
+      "resting",
+      "dormant",
+      "parked"
+     ],
+     "type": "string"
+    },
+    "tier": {
+     "enum": [
+      "hot",
+      "warm",
+      "cold",
+      "parked"
+     ],
+     "type": "string"
+    },
+    "type": {
+     "enum": [
+      "task",
+      "question",
+      "thought"
+     ],
+     "type": "string"
+    }
+   },
+   "type": "object"
+  },
+  "spore_surface": {
+   "properties": {
+    "top_of_mind": {
+     "description": "Only the hot-or-growing ToM contribution (default false = all open).",
+     "type": "boolean"
+    }
+   },
+   "type": "object"
+  },
+  "spore_touch": {
+   "properties": {
+    "spore_id": {
+     "type": "string"
+    }
+   },
+   "required": [
+    "spore_id"
+   ],
+   "type": "object"
+  },
+  "spore_update": {
+   "properties": {
+    "add_note": {
+     "description": "Append a dated note.",
+     "type": "string"
+    },
+    "domain": {
+     "description": "Empty string clears.",
+     "type": "string"
+    },
+    "next": {
+     "description": "YYYY-MM-DD, or empty string to clear.",
+     "type": "string"
+    },
+    "pointer": {
+     "description": "Empty string clears.",
+     "type": "string"
+    },
+    "salience": {
+     "maximum": 3,
+     "minimum": 0,
+     "type": "integer"
+    },
+    "spore_id": {
+     "type": "string"
+    },
+    "text": {
+     "type": "string"
+    },
+    "tier": {
+     "enum": [
+      "hot",
+      "warm",
+      "cold",
+      "parked"
+     ],
+     "type": "string"
+    }
+   },
+   "required": [
+    "spore_id"
+   ],
+   "type": "object"
+  },
+  "status": {
+   "properties": {},
+   "type": "object"
+  },
+  "wrap_cancel": {
+   "properties": {
+    "force": {
+     "description": "Cancel a gated wrap without its token or session, or a wrap opened with a caller-supplied token without that token, when its preparer is gone. Discards its compression.",
+     "type": "boolean"
+    },
+    "partial": {
+     "description": "Clear PARTIAL (corrupt, unsaveable) wrap state, and only that: refused with no change if a healthy wrap is in progress or the store is idle. Needs no token. Cannot be combined with wrap_token.",
+     "type": "boolean"
+    },
+    "session_id": {
+     "description": "Your session. Without wrap_token, a wrap prepared under the consolidate gate is cancelled only when this is the session that prepared it.",
+     "type": "string"
+    },
+    "wrap_token": {
+     "description": "Optional proof that the wrap being cancelled is yours — the token prepare_wrap returned. The store compares it inside the same transaction that clears, so a peer cannot swap the wrap in between. Refused with no change if it does not match, including when the wrap has already completed. Omit it to cancel whatever is in progress (a gated wrap also needs session_id or force; a wrap opened with a caller-supplied token needs force).",
+     "pattern": "^[0-9a-f]{32}$",
+     "type": "string"
+    }
+   },
+   "type": "object"
+  }
+ }
+}

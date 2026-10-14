@@ -187,6 +187,16 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
   generation 2 and a 0.9.x writer is refused (0.9.9 measured: "no such function: anneal_writer_schema"), so the edge
   closes with the migration. The sidecar-file cases (the spore registry, the wrap's continuity-moved check) are
   unguarded: run one release on every writer.
+- A new store's baton policy is set in a second transaction after the store is created (`init`, and `serve` on a path
+  that does not exist or is empty). A process killed in that gap, or a second creator racing it, leaves a store without
+  the baton default, which is the policy every existing store already has (`status` shows it). `serve` can also set the
+  default on a store another process created a moment earlier. Nothing is lost.
+- A host that adds its own virtual table (an FTS5 index, say) to an anneal database makes the generation migration fail
+  with "cannot create triggers on virtual tables" and every writable open after it; anneal's own database holds none.
+  The failed attempt leaves its `.gen1` copy beside the store.
+- An episode id is 32 bits drawn under the write lock and checked against live episodes, not against tombstones: a new
+  episode can take a deleted one's id, about 1 in 250,000 per 15,000 episodes with one tombstone, and a later delete of
+  the new one keeps the older tombstone.
 - A raw SQLite error (a locked or full database) raised inside `validated_save_continuity`'s batch by a helper with no
   `_db_boundary` escapes as the SQLite exception rather than `StoreError`. The batch still rolls back the whole
   transaction, so nothing is written (read from the code, not reproduced).

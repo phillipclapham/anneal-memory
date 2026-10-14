@@ -9857,7 +9857,7 @@ class Store:
 
     def _run_pending_erasure_vacuum(self) -> None:
         """Run the one-time VACUUM a pre-existing store is owed (see
-        ``_ERASURE_VACUUM_KEY``), then clear the WAL and drop the marker.
+        ``_ERASURE_VACUUM_KEY``), drop the marker, then clear the WAL.
 
         ``secure_delete`` overwrites content freed from now on; space freed
         before it was on keeps its bytes until the pages are rebuilt, which is

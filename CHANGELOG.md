@@ -101,6 +101,7 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
     disk blocks a filesystem or SSD keeps after a file shrinks, or text that consolidation already wrote into
     continuity, crystal or a team ledger. A host writing to the store with its own `sqlite3` connection must set
     `PRAGMA secure_delete=ON` itself.
+  - The MCP `delete_episode` description now states these mechanics and limits; it no longer says the text is "fully erased" or describes the tombstone in GDPR terms (`tool-integrity.json` regenerated).
 
 ### Changed — consolidation is the operator's act by default (KL-19)
 - ⚠ **Onboarding change.** A store created by `anneal-memory init`, or created fresh by the MCP server on its first

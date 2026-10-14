@@ -112,8 +112,13 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
     ledger hash stays in `team_entries` (it must match across members' stores, so it is not salted) and a saved
     continuity's audit event keeps an unsalted hash of that text. An `export --format sqlite` file is a full copy of
     the database: it carries the salt (a store opened from it shares the salt with the original) and, while the
-    one-time `VACUUM` has not run, the old deleted text. If a reader blocks the WAL clear after that `VACUUM`, the next
-    write-capable open runs it again. A host writing to the store with its own `sqlite3` connection must set
+    one-time `VACUUM` has not run, the old deleted text.
+  - Known edges: the owed WAL clear is held in memory, so a process that dies after a delete whose clear was deferred
+    (a reader, or a batch) leaves those frames until SQLite next checkpoints the WAL (at the next open or the last
+    close); the clear sets the connection's busy timeout to 0 for its duration, so a `Store` shared across threads
+    can see one spurious "database is locked" meanwhile; a team replace that rewrites an episode's text in place
+    does not clear the WAL (that text is in the shared ledger); and under `-W error` a failed one-time `VACUUM`
+    fails the open instead of warning. A host writing to the store with its own `sqlite3` connection must set
     `PRAGMA secure_delete=ON` itself.
   - The MCP `delete_episode` description now states these mechanics and limits; it no longer says the text is "fully erased" or describes the tombstone in GDPR terms (`tool-integrity.json` regenerated).
 

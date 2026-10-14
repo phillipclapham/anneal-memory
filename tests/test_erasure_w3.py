@@ -285,6 +285,44 @@ class TestSalt:
         assert {e.id for e in d.recall(limit=10).episodes} == ids
         d.close()
 
+    def test_an_imported_id_held_by_another_episodes_tombstone_is_reminted(self, tmp_path):
+        """L3 r1 codex (run): reusing it made the tombstone the existence proof
+        of a different episode."""
+        s = Store(tmp_path / "m.db")
+        gone = s.record("first text", "observation")
+        s.delete(gone.id)
+        ep = s._import_record(gone.id, content="other text", episode_type="observation",
+                              timestamp="2026-10-14T00:00:00.000000+00:00")
+        assert ep.id != gone.id
+        s.close()
+
+    def test_a_reimport_after_a_delete_keeps_the_id(self, tmp_path):
+        s = Store(tmp_path / "m.db")
+        ep = s.record("kept text", "observation")
+        s.delete(ep.id)
+        back = s._import_record(ep.id, content="kept text", episode_type="observation",
+                                timestamp=ep.timestamp)
+        assert back.id == ep.id
+        s.close()
+
+    def test_a_record_nested_in_an_audit_callback_does_not_reuse_the_import_id(self, tmp_path):
+        """L3 r1 codex (run): the nested record took the carried id, collided
+        and was lost inside the swallowed callback."""
+        nested: list[str] = []
+        holder: dict = {}
+
+        def on_event(entry):
+            if entry.get("event") == "record" and "s" in holder and not holder.get("busy"):
+                holder["busy"] = True
+                nested.append(holder["s"].record("nested note", "observation").id)
+
+        s = Store(tmp_path / "m.db", on_audit_event=on_event)
+        holder["s"] = s
+        ep = s._import_record("deadbeef", content="imported", episode_type="observation")
+        assert ep.id == "deadbeef"
+        assert nested and nested[0] != "deadbeef" and s.get(nested[0]) is not None
+        s.close()
+
     def test_a_read_only_handle_has_no_salt_and_cannot_hash(self, tmp_path):
         db = tmp_path / "m.db"
         Store(db).close()

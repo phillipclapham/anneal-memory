@@ -5927,7 +5927,9 @@ class Store:
         # ⛔ POST-COMMIT: the row is DELETED. A bare emit raised a raw OSError
         # with the episode already gone (measured 2026-09-04) — the caller is
         # told the delete failed while the content is unrecoverable.
-        self._wal_clear_owed = True  # cleared below; owed if the audit emit raises
+        # Before the audit emit: an on_audit_event callback must not find the
+        # erased text still in the WAL (L3 r1 codex).
+        self._clear_wal_after_erasure()
         self._audit_log_after_commit("delete", {
             "episode_id": row["id"],
             "type": row["type"],
@@ -5936,7 +5938,6 @@ class Store:
             **({"supersessions_removed": trust_removed} if trust_removed else {}),
             **({"team_supersessions_left": team_left} if team_left else {}),
         }, method="delete", committed="the deletion")
-        self._clear_wal_after_erasure()
 
         return True
 
@@ -6103,7 +6104,7 @@ class Store:
                 self._conn.commit()
         if result.outcome == "deleted" and row is not None:
             # ⛔ POST-COMMIT, as delete()'s: the row is gone; an audit failure warns.
-            self._wal_clear_owed = True  # cleared below; owed if the audit emit raises
+            self._clear_wal_after_erasure()  # before the audit emit (L3 r1 codex)
             self._audit_log_after_commit("delete", {
                 "episode_id": row["id"],
                 "type": row["type"],
@@ -6115,7 +6116,6 @@ class Store:
                 **({"supersessions_removed": result.trust_removed} if result.trust_removed else {}),
                 **({"team_supersessions_left": result.team_left} if result.team_left else {}),
             }, method="delete_by_origin_key", committed="the deletion")
-            self._clear_wal_after_erasure()
         return result
 
     def read_section(self, heading: str) -> tuple[str, str] | None:
@@ -9151,13 +9151,12 @@ class Store:
             # telling the caller prune failed after it had destroyed data — and
             # ``validated_save_continuity`` calls prune AFTER the wrap commit,
             # so it reached the canonical pipeline.
-            self._wal_clear_owed = True  # cleared below; owed if the audit emit raises
+            self._clear_wal_after_erasure()  # before the audit emit (L3 r1 codex)
             self._audit_log_after_commit("prune", {
                 "count": pruned,
                 "older_than_days": days,
                 **({"supersession_links_removed": links_removed} if links_removed else {}),
             }, method="prune", committed="the prune", batch_aware=False)
-            self._clear_wal_after_erasure()
 
         return pruned
 
@@ -9882,12 +9881,13 @@ class Store:
         store's salt, so it is stable within the store and not a guessable
         verifier of the content once the episode is deleted. Under
         :meth:`_import_record` it is the imported id instead, tried once: a
-        taken id is an IntegrityError, never a different id."""
-        if self._import_id is not None:
-            if nonce:
-                raise sqlite3.IntegrityError(
-                    f"episode id {self._import_id} is already taken")
-            return self._import_id
+        taken id falls through to a minted one."""
+        if self._import_id is not None and nonce == 0:
+            # Used once, then gone: a retry mints as usual (its insert raises the
+            # real constraint if that is what failed), and a record() nested in
+            # an audit callback never reuses it (L3 r1 codex, complement).
+            carried, self._import_id = self._import_id, None
+            return carried
         if self._content_salt is None:
             raise sqlite3.OperationalError("attempt to write a readonly database")
         return _episode_id(content, timestamp, nonce, self._content_salt)
@@ -9901,15 +9901,35 @@ class Store:
         as :meth:`record` would."""
         if not (isinstance(episode_id, str) and _EPISODE_ID_SHAPE.fullmatch(episode_id)):
             return self.record(**record_kwargs)
+        stone = self._conn.execute(
+            "SELECT timestamp, type, content_hash FROM tombstones WHERE id = ?",
+            (episode_id,)).fetchone()
+        if stone is not None and not self._tombstone_is_of(stone, record_kwargs):
+            # A tombstone of other content holds the id: reusing it would make
+            # the tombstone the existence proof of a different episode (L3 r1
+            # codex, run). Same episode (a re-import after a delete): kept.
+            return self.record(**record_kwargs)
         self._import_id = episode_id
         try:
             return self.record(**record_kwargs)
         finally:
             self._import_id = None
 
+    def _tombstone_is_of(self, stone: sqlite3.Row, rec: dict[str, Any]) -> bool:
+        """Whether a tombstone records the episode ``rec`` describes: same
+        timestamp and type, and a content hash that is this store's keyed one or
+        the unsalted sha256 written before the store had a salt."""
+        etype = rec.get("episode_type")
+        etype = etype.value if isinstance(etype, EpisodeType) else etype
+        content = rec.get("content", "")
+        return (stone["timestamp"] == rec.get("timestamp") and stone["type"] == etype
+                and stone["content_hash"] in (
+                    self._content_hash(content),
+                    hashlib.sha256(content.encode("utf-8")).hexdigest()))
+
     def _run_pending_erasure_vacuum(self) -> None:
         """Run the one-time VACUUM a pre-existing store is owed (see
-        ``_ERASURE_VACUUM_KEY``), clear the WAL, then drop the marker.
+        ``_ERASURE_VACUUM_KEY``), drop the marker, then clear the WAL.
 
         ``secure_delete`` overwrites content freed from now on; space freed
         before it was on keeps its bytes until the pages are rebuilt, which is
@@ -9927,6 +9947,9 @@ class Store:
             return
         try:
             self._conn.execute("VACUUM")
+            self._conn.execute(
+                "DELETE FROM metadata WHERE key = ?", (_ERASURE_VACUUM_KEY,))
+            self._conn.commit()
         except sqlite3.Error as exc:
             try:
                 self._conn.rollback()
@@ -9939,23 +9962,11 @@ class Store:
                 UserWarning, stacklevel=4,
             )
             return
-        # The rebuilt pages are in the WAL until a checkpoint; the old bytes stay
-        # in the file until then. The marker goes only once the WAL is clear, so
-        # a reader blocking the clear and a process killed before close() leave
-        # the VACUUM owed to the next open (L1 1014+22) rather than lost.
+        # The rebuilt pages are in the WAL; any checkpoint writes them over the
+        # old bytes, so a clear a reader blocks here is only late, not lost, and
+        # the marker can go with the VACUUM (L3 r1 complement: holding it re-ran
+        # a full VACUUM at every open while a reader was live).
         self._clear_wal_after_erasure()
-        if self._wal_clear_owed:
-            return
-        try:
-            self._conn.execute(
-                "DELETE FROM metadata WHERE key = ?", (_ERASURE_VACUUM_KEY,))
-            self._conn.commit()
-        except sqlite3.Error as exc:
-            try:
-                self._conn.rollback()
-            except sqlite3.Error:
-                pass
-            _LOG.info("anneal-memory: dropping the erasure VACUUM marker failed: %s", exc)
 
     def _clear_wal_after_erasure(self) -> None:
         """Best effort, never raises, never waits: a TRUNCATE checkpoint so the
@@ -9981,7 +9992,10 @@ class Store:
                 busy = self._conn.execute(
                     "PRAGMA wal_checkpoint(TRUNCATE)").fetchone()[0]
             finally:
-                self._conn.execute(f"PRAGMA busy_timeout={int(budget)}")
+                try:
+                    self._conn.execute(f"PRAGMA busy_timeout={int(budget)}")
+                except sqlite3.Error as exc:
+                    _LOG.warning("anneal-memory: restoring busy_timeout failed: %s", exc)
         except sqlite3.Error as exc:
             _LOG.info("anneal-memory: WAL clear after erasure failed: %s", exc)
             self._wal_clear_owed = True

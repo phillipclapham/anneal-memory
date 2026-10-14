@@ -836,6 +836,10 @@ class SaveContinuityResult(_SaveContinuityOptional):
     # when no new Provens graduated this wrap, or all new Provens
     # carried explicit contradiction-stance declarations.
     proven_without_contradicts_declaration: list[dict[str, Any]]
+    # Every pattern line of the saved text that declares ``[contradicts: ...]``:
+    # ``{"pattern": str, "contradicts": [str, ...]}``. A pattern declaring
+    # ``[no-contradicts]`` or nothing is not listed. Empty when none declare.
+    contradictions: list[dict[str, Any]]
     # AM-CARRYFORWARD (v0.4.6): patterns HELD at their graduation level this
     # wrap instead of demoted, because they are at/below their earned
     # ``max_level_reached`` high-water mark AND were grounded recently (warm).

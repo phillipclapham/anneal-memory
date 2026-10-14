@@ -5779,6 +5779,7 @@
      "citation_reuse_max": "ForwardRef('int', module='anneal_memory.types')",
      "citation_spread": "ForwardRef('int', module='anneal_memory.types')",
      "composted": "ForwardRef('dict[str, int]', module='anneal_memory.types')",
+     "contradictions": "ForwardRef('list[dict[str, Any]]', module='anneal_memory.types')",
      "cross_session_collisions": "ForwardRef('list[dict[str, Any]]', module='anneal_memory.types')",
      "demoted": "ForwardRef('int', module='anneal_memory.types')",
      "drift": "ForwardRef('dict[str, Any]', module='anneal_memory.types')",
@@ -5818,6 +5819,7 @@
      "chars",
      "citation_reuse_max",
      "citation_spread",
+     "contradictions",
      "cross_session_collisions",
      "demoted",
      "episodes_compressed",
@@ -6439,7 +6441,7 @@
     },
     "wrap_completed": {
      "kind": "method",
-     "signature": "(self, episodes_compressed: 'int', continuity_chars: 'int', graduations_validated: 'int' = 0, graduations_demoted: 'int' = 0, citation_reuse_max: 'int' = 0, patterns_extracted: 'int' = 0, associations_formed: 'int' = 0, associations_strengthened: 'int' = 0, associations_decayed: 'int' = 0, section_sizes: 'dict[str, int] | None' = None, *, episode_ids: 'list[str] | None' = None, wrap_token: 'str | None' = None, content_hash: 'str | None' = None, pair_id: 'str | None' = None) -> 'WrapResult'"
+     "signature": "(self, episodes_compressed: 'int', continuity_chars: 'int', graduations_validated: 'int' = 0, graduations_demoted: 'int' = 0, citation_reuse_max: 'int' = 0, patterns_extracted: 'int' = 0, associations_formed: 'int' = 0, associations_strengthened: 'int' = 0, associations_decayed: 'int' = 0, section_sizes: 'dict[str, int] | None' = None, *, episode_ids: 'list[str] | None' = None, wrap_token: 'str | None' = None, content_hash: 'str | None' = None, pair_id: 'str | None' = None, continuity_text: 'str | None' = None, unattended: 'bool' = False, model: 'str | None' = None) -> 'WrapResult'"
     },
     "wrap_derive_roots": {
      "kind": "method",
@@ -7573,7 +7575,7 @@
   "validated_save_continuity": {
    "kind": "function",
    "module": "anneal_memory.continuity",
-   "signature": "(store: 'Store', text: 'str', affective_state: 'AffectiveState | None' = None, *, today: 'str | None' = None, wrap_token: 'str | None' = None, allow_shrink: 'bool' = False, allow_unlinked: 'bool' = False, carryforward_cold_days: 'int | None' = 7, crystal_store: 'CrystalStore | None' = None, compost: 'list[str] | None' = None, session_id: 'str | None' = None, allow_sole_live: 'bool' = False, require_rederive: 'bool' = False) -> 'SaveContinuityResult'"
+   "signature": "(store: 'Store', text: 'str', affective_state: 'AffectiveState | None' = None, *, today: 'str | None' = None, wrap_token: 'str | None' = None, allow_shrink: 'bool' = False, allow_unlinked: 'bool' = False, carryforward_cold_days: 'int | None' = 7, crystal_store: 'CrystalStore | None' = None, compost: 'list[str] | None' = None, session_id: 'str | None' = None, allow_sole_live: 'bool' = False, require_rederive: 'bool' = False, unattended: 'bool' = False, model: 'str | None' = None) -> 'SaveContinuityResult'"
   },
   "verify_integrity": {
    "kind": "function",

@@ -45,6 +45,7 @@ from .graduation import (
     PatternSummary,
     detect_pattern_omissions,
     detect_stale_patterns,
+    extract_contradiction_declarations,
     extract_pattern_names,
     extract_pattern_summaries,
     CAP_REASON_REVOKED,
@@ -2711,8 +2712,14 @@ def validated_save_continuity(
     session_id: str | None = None,
     allow_sole_live: bool = False,
     require_rederive: bool = False,
+    unattended: bool = False,
+    model: str | None = None,
 ) -> SaveContinuityResult:
     """Save continuity with the full validation pipeline.
+
+    ``unattended`` and ``model`` are recorded on the wrap's row (an unattended
+    consolidation names itself and the model that composed it); they change
+    nothing about validation. The row also keeps the saved text.
 
     **This is the canonical save_continuity pipeline.** The MCP server and
     the ``save-continuity`` CLI subcommand both call this function — they
@@ -3625,6 +3632,9 @@ def validated_save_continuity(
                 # Layer 1 L3 flagged as a TOCTOU-within-TOCTOU-fix
                 # pattern.
                 wrap_token=snapshot["token"],
+                continuity_text=grad_result.text,
+                unattended=unattended,
+                model=model,
                 # AM-SNAPSHOT ① durable recovery oracle: persist the content
                 # hash + tmp pair id in the wraps row, atomic with this wrap's
                 # commit (inside wrap_completed's _db_boundary). Durable before
@@ -4373,6 +4383,13 @@ def validated_save_continuity(
         omitted_patterns=omitted_patterns_payload,
         cross_session_collisions=cross_session_collisions_payload,
         proven_without_contradicts_declaration=proven_without_declaration_payload,
+        contradictions=[
+            {"pattern": name, "contradicts": list(names)}
+            for name, names in extract_contradiction_declarations(
+                grad_result.text, grad_headings
+            ).items()
+            if names
+        ],
         carried_forward=carried_forward_payload,
         uncorroborated=[asdict(u) for u in grad_result.uncorroborated],
         pattern_trust=dict(grad_result.pattern_trust),

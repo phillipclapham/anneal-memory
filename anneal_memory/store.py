@@ -1729,7 +1729,10 @@ CREATE TABLE IF NOT EXISTS wraps (
     graduations_demoted INTEGER DEFAULT 0,
     citation_reuse_max INTEGER DEFAULT 0,
     continuity_chars INTEGER,
-    patterns_extracted INTEGER DEFAULT 0
+    patterns_extracted INTEGER DEFAULT 0,
+    continuity_text TEXT,
+    unattended INTEGER NOT NULL DEFAULT 0,
+    model TEXT
 );
 
 CREATE TABLE IF NOT EXISTS metadata (
@@ -3193,6 +3196,17 @@ class Store:
             self._conn.execute(
                 "ALTER TABLE wraps ADD COLUMN pair_id TEXT"
             )
+        # Dreaming primitives (Phill 10-14): the saved text of each wrap, whether
+        # it ran unattended, and the model that composed it. NULL / 0 for every
+        # wrap written before these columns existed.
+        if "continuity_text" not in existing_cols:
+            self._conn.execute("ALTER TABLE wraps ADD COLUMN continuity_text TEXT")
+        if "unattended" not in existing_cols:
+            self._conn.execute(
+                "ALTER TABLE wraps ADD COLUMN unattended INTEGER NOT NULL DEFAULT 0"
+            )
+        if "model" not in existing_cols:
+            self._conn.execute("ALTER TABLE wraps ADD COLUMN model TEXT")
         # ``commit=False`` from ``_init_schema_locked``: a commit there
         # releases the writer lock that method holds across the version
         # check and every migration (``spore-773``).
@@ -7799,8 +7813,17 @@ class Store:
         wrap_token: str | None = None,
         content_hash: str | None = None,
         pair_id: str | None = None,
+        continuity_text: str | None = None,
+        unattended: bool = False,
+        model: str | None = None,
     ) -> WrapResult:
         """Record a completed wrap and clear the in-progress flag.
+
+        ``continuity_text`` is stored on the wraps row as the text this wrap
+        saved (NULL when not passed); ``unattended`` marks a wrap no operator
+        watched, and ``model`` names the model that composed it. Nothing reads
+        them back yet: they are recorded for an unattended consolidation to be
+        reviewed and reverted from.
 
         Args:
             episode_ids: The exact set of episode IDs that participated
@@ -7970,8 +7993,8 @@ class Store:
                    (wrapped_at, episodes_compressed, continuity_chars, graduations_validated,
                     graduations_demoted, citation_reuse_max, patterns_extracted,
                     associations_formed, associations_strengthened, associations_decayed,
-                    content_hash, pair_id)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    content_hash, pair_id, continuity_text, unattended, model)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     _now_utc(),
                     episodes_compressed,
@@ -7985,6 +8008,9 @@ class Store:
                     associations_decayed,
                     content_hash,
                     pair_id,
+                    continuity_text,
+                    1 if unattended else 0,
+                    model,
                 ),
             )
             # Update session_id for episodes in this wrap cycle.

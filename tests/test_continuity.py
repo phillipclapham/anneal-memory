@@ -434,6 +434,7 @@ class TestTypedDictReturnShapes:
                 # operator-review (Diogenes) to know which new Provens
                 # need semantic-opposition inspection.
                 "proven_without_contradicts_declaration",
+                "contradictions",
                 # AM-CARRYFORWARD (v0.4.6): graduated patterns HELD at level
                 # this wrap instead of demoted (at/below earned high-water mark
                 # AND warm). Audit signal; empty when nothing was held.
@@ -4165,6 +4166,43 @@ class TestMove4LibraryLayerIntegration:
             assert result["proven_without_contradicts_declaration"] == [
                 {"name": "new_proven_no_declaration", "level": 2}
             ]
+        finally:
+            store.close()
+
+    def test_save_lists_contradictions_and_records_the_wrap_row(self, tmp_path):
+        """The save result lists declared contradictions, and the wraps row keeps the
+        saved text, the unattended mark and the model (dreaming primitives, Phill 10-14)."""
+        from anneal_memory import Store, prepare_wrap, validated_save_continuity
+
+        store = Store(tmp_path / "store.db", project_name="DreamPrims")
+        try:
+            _seed_prior_levels(store, {"opposes_old": 1, "quiet": 1})
+            ep_ids = self._record_episodes(store)
+            text = self._render(
+                "## State\nfirst session.\n\n"
+                "## Patterns\n"
+                "- opposes_old | 2x (2026-05-21) "
+                '[evidence: {ep0} "substrate observation discipline"] [contradicts: old_rule]\n'
+                "- quiet | 2x (2026-05-21) "
+                '[evidence: {ep0} "substrate observation discipline"] [no-contradicts]\n\n'
+                "## Decisions\n- decided.\n\n"
+                "## Context\n- context.\n",
+                ep_ids,
+            )
+            wrap = prepare_wrap(store, max_chars=20000)
+            result = validated_save_continuity(
+                store, text, today="2026-05-21", wrap_token=wrap["wrap_token"],
+                unattended=True, model="test-model",
+            )
+            assert result["contradictions"] == [
+                {"pattern": "opposes_old", "contradicts": ["old_rule"]}
+            ]
+            row = store._conn.execute(
+                "SELECT continuity_text, unattended, model FROM wraps"
+            ).fetchone()
+            assert row["unattended"] == 1 and row["model"] == "test-model"
+            assert "opposes_old" in row["continuity_text"]
+            assert len(row["continuity_text"]) == result["chars"]
         finally:
             store.close()
 

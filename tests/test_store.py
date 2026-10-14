@@ -4545,6 +4545,28 @@ class TestGenerationGuards:
             Store(db)
         guards, _ = self._guards(db)
         assert guards and all(g.startswith(f"anneal_gen{_SCHEMA_VERSION + 1}_") for g in guards)
+        # a refused open copies nothing (L3 r2 10-14, complement: one copy per retry)
+        assert not list(tmp_path.glob("*.bak"))
+
+    def test_one_planted_guard_name_does_not_skip_the_copy(self, tmp_path):
+        # L3 r2 10-14 (codex): the copy decision trusted one name; it now asks
+        # the installer's question (the full set, exact SQL)
+        from anneal_memory.store import _SCHEMA_VERSION
+
+        db = tmp_path / "m.db"
+        with Store(db) as s:
+            s.record("one", episode_type="observation")
+        self._as_generation_1(db)
+        conn = sqlite3.connect(str(db))
+        conn.execute("UPDATE metadata SET value = 'garbled' WHERE key = 'format_version'")
+        conn.execute(
+            f'CREATE TRIGGER "anneal_gen{_SCHEMA_VERSION}_guard_episodes_insert" '
+            "BEFORE INSERT ON episodes BEGIN SELECT 1; END"
+        )
+        conn.commit()
+        conn.close()
+        Store(db).close()
+        assert len(list(tmp_path.glob("m.db.genunknown-*.bak"))) == 1
 
     def test_a_same_named_trigger_that_is_not_the_guard_is_replaced(self, tmp_path):
         # L3 r1 10-14 (codex, reproduced): a name alone was trusted

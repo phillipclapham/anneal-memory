@@ -1521,6 +1521,39 @@ def _gen_guard_sql(table: str, op: str, generation: int) -> tuple[str, str]:
     return name, sql
 
 
+def _generation_guard_state(
+    conn: sqlite3.Connection, generation: int,
+) -> tuple[dict[str, str], dict[str, str], str | None]:
+    """(expected guards, present guards, the name of a newer-generation guard
+    or None), each guard as name -> SQL. The ONE reading of "is this store
+    guarded at ``generation``": the installer and the pre-migration copy
+    decision both use it (L3 r2 10-14, codex: the copy decision trusted one
+    name while the installer compared the full set)."""
+    tables = [] if generation < _FIRST_GUARDED_GENERATION else [
+        row[0] for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table' "
+            "AND name NOT LIKE 'sqlite\\_%' ESCAPE '\\'"
+        )
+    ]
+    want = dict(
+        _gen_guard_sql(table, op, generation)
+        for table in tables for op in _GEN_GUARD_OPS
+    )
+    have: dict[str, str] = {}
+    newer: str | None = None
+    for name, sql in conn.execute(
+        "SELECT name, sql FROM sqlite_master WHERE type = 'trigger'"
+    ).fetchall():
+        match = _GEN_GUARD_NAME_RE.fullmatch(name)
+        if match is None:
+            continue
+        if int(match.group(1)) > generation:
+            newer = newer or name
+            continue
+        have[name] = sql
+    return want, have, newer
+
+
 def _install_generation_guards(
     conn: sqlite3.Connection, generation: int | None = None,
 ) -> None:
@@ -1540,31 +1573,14 @@ def _install_generation_guards(
     it (L3 r1 10-14, complement)."""
     if generation is None:
         generation = _SCHEMA_VERSION
-    tables = [] if generation < _FIRST_GUARDED_GENERATION else [
-        row[0] for row in conn.execute(
-            "SELECT name FROM sqlite_master WHERE type = 'table' "
-            "AND name NOT LIKE 'sqlite\\_%' ESCAPE '\\'"
+    want, have, newer = _generation_guard_state(conn, generation)
+    if newer is not None:
+        raise StoreError(
+            f"this store carries schema generation guards newer than {generation} "
+            f"({newer}); refusing to open it with this anneal-memory, which writes "
+            f"generation {generation}. Upgrade anneal-memory.",
+            operation="schema_init",
         )
-    ]
-    want = dict(
-        _gen_guard_sql(table, op, generation)
-        for table in tables for op in _GEN_GUARD_OPS
-    )
-    have: dict[str, str] = {}
-    for name, sql in conn.execute(
-        "SELECT name, sql FROM sqlite_master WHERE type = 'trigger'"
-    ).fetchall():
-        match = _GEN_GUARD_NAME_RE.fullmatch(name)
-        if match is None:
-            continue
-        if int(match.group(1)) > generation:
-            raise StoreError(
-                f"this store carries schema generation {match.group(1)} guards "
-                f"({name}) and this anneal-memory writes generation {generation}; "
-                "refusing to open it. Upgrade anneal-memory.",
-                operation="schema_init",
-            )
-        have[name] = sql
     for name in sorted(have):
         if want.get(name) != have[name]:
             conn.execute(f'DROP TRIGGER IF EXISTS "{name}"')
@@ -9711,20 +9727,22 @@ class Store:
         once, not on every open."""
         if _SCHEMA_VERSION < _FIRST_GUARDED_GENERATION:
             return None
-        names = {
+        tables = {
             row[0] for row in self._conn.execute(
-                "SELECT name FROM sqlite_master WHERE type IN ('table', 'trigger')"
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
             )
         }
-        if "episodes" not in names:
+        if "episodes" not in tables:
             return None
-        if any(
-            (m := _GEN_GUARD_NAME_RE.fullmatch(n)) and int(m.group(1)) == _SCHEMA_VERSION
-            for n in names
-        ):
+        want, have, newer = _generation_guard_state(self._conn, _SCHEMA_VERSION)
+        if newer is not None:
+            # a newer generation's store: the open refuses; copying it on every
+            # refused attempt would only pile up backups (L3 r2 10-14, complement)
+            return None
+        if all(have.get(name) == sql for name, sql in want.items()):
             return None
         marker: int | None = None
-        if "metadata" in names:
+        if "metadata" in tables:
             row = self._conn.execute(
                 "SELECT value FROM metadata WHERE key = 'format_version'"
             ).fetchone()

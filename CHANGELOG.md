@@ -19,7 +19,8 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
   be made (disk full, permissions), nothing migrates and the open fails with the reason. A store whose
   `format_version` is missing or garbled is copied too, as `<name>.genunknown-<UTC time>.bak`. The copy holds the
   write lock while it runs, so on a large store a peer opening at that moment can time out with "database is locked"
-  and should be retried.
+  and should be retried. A store whose guards were dropped by hand is copied again on its next open, which restores
+  them. A process killed mid-copy leaves a `.<name>.copy-*.tmp` file beside the database, never a `.bak`; delete it.
 - **Writing to a store with plain `sqlite3`** now fails with "no such function: anneal_writer_schema". Reads are
   unaffected. A host that must write registers the function with `anneal_memory.store.register_writer_schema(conn)`;
   the alternative is to drop the `anneal_gen2_guard_*` triggers by hand, which also removes the protection. Its
@@ -27,7 +28,8 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
   anneal_writer_schema()". anneal's own connections set it.
 - Known edges: the copy reopens the database by its path, so a same-user process that renames or replaces the file
   between the open and the copy gets a copy of the replacement. A host that registers `anneal_writer_schema` returning
-  text or NULL is not refused by the guards.
+  text or NULL is not refused by the guards. On a filesystem without hard links the copy is published by a checked
+  rename, which a process creating the same timestamped name in between would lose.
 - Gen 2 changes no table or column. A store-attached file format change (continuity meta, audit manifest) raises the
   generation from here on, so this guard covers it.
 

@@ -2254,14 +2254,25 @@ def _normalize_supersedes(ids: list[str] | tuple[str, ...] | None) -> list[str]:
     return out
 
 
-def _episode_id(content: str, timestamp: str, nonce: int = 0) -> str:
+def _episode_id(content: str, timestamp: str, nonce: int = 0,
+                salt: bytes | None = None) -> str:
     """Generate 8-char hex ID from content + timestamp + optional nonce.
 
     Uses 8 hex chars (32 bits). Birthday collision expected around ~65k episodes.
     The nonce parameter handles same-content-same-timestamp edge cases.
     Microsecond-precision timestamps make natural collisions extremely unlikely.
+
+    With ``salt`` the id is HMAC-SHA256 keyed by the store's content salt (W3
+    erasure): the id outlives a delete in the tombstone and the audit trail, and
+    an unkeyed id is a 32-bit verifier of the content, so a short deleted value
+    is guessed back from it (L2 1014+22, run: 0.006 s for "my SSN is ..." from
+    the tombstone id and timestamp). Without ``salt`` it is the plain sha256 id:
+    team-imported episodes keep it, because every member's store must derive the
+    same id for the same ledger entry, and that text is in the shared ledger.
     """
     raw = f"{content}{timestamp}{nonce}".encode("utf-8")
+    if salt is not None:
+        return hmac.new(salt, raw, hashlib.sha256).hexdigest()[:8]
     return hashlib.sha256(raw).hexdigest()[:8]
 
 
@@ -2276,6 +2287,8 @@ _ERASURE_VACUUM_KEY = "erasure_vacuum_pending"
 # The prefix that marks a salted content hash. A bare 64-hex value is an
 # unsalted sha256 written before the salt existed; the value says which it is.
 _SALTED_HASH_PREFIX = "hmac-sha256:"
+# The shape of an episode id an import may carry over (``Store._import_record``).
+_EPISODE_ID_SHAPE = re.compile(r"[0-9a-f]{8}")
 
 
 def _content_hash(content: str, salt: bytes) -> str:
@@ -2724,6 +2737,9 @@ class Store:
         # still owed (see ``_clear_wal_after_erasure``).
         self._content_salt: bytes | None = None
         self._wal_clear_owed: bool = False
+        # The id an import carries over, for the one ``record`` call it wraps
+        # (``_import_record``); None everywhere else.
+        self._import_id: str | None = None
         try:
             with self._db_boundary("schema_init"):
                 self._conn = connect(self._path)
@@ -3441,7 +3457,7 @@ class Store:
                 # tie), so a refused key link is undone back to here.
                 self._conn.execute("SAVEPOINT record_state_key")
                 for nonce in range(max_retries):
-                    ep_id = _episode_id(content, ts, nonce)
+                    ep_id = self._minted_episode_id(content, ts, nonce)
                     try:
                         self._conn.execute(
                             """INSERT INTO episodes (id, timestamp, type, content, source, session_id, metadata, origin_key)
@@ -5854,10 +5870,13 @@ class Store:
         (default), a tombstone row is inserted recording the episode ID,
         original timestamp, episode type, and a content hash keyed by the
         store's salt (``hmac-sha256:...``); the audit trail's events carry the
-        same hash. Without the salt, which is in the database and never in the
-        audit trail, the hash cannot be guessed back to short content; whoever
-        holds the database file holds the salt too. Tombstones and audit events
-        written before this store had a salt carry a bare unsalted sha256.
+        same hash, and an episode :meth:`record` minted has an id keyed by the
+        salt too (the id outlives the delete in both). Without the salt, which is
+        in the database and never in the audit trail, a guess at short content
+        cannot be checked against them; whoever holds the database file holds
+        the salt too. Tombstones and audit events written before this store had
+        a salt carry a bare unsalted sha256, and episodes recorded before it, or
+        imported from a team ledger, carry an unkeyed id.
         An imported team entry's ledger id and hash stay in ``team_entries`` either
         way, so a later v2 team import does not bring it back. A v3 replace brings
         back an entry its stream enforces unless ``team_operator=True``: only the
@@ -5908,6 +5927,7 @@ class Store:
         # ⛔ POST-COMMIT: the row is DELETED. A bare emit raised a raw OSError
         # with the episode already gone (measured 2026-09-04) — the caller is
         # told the delete failed while the content is unrecoverable.
+        self._wal_clear_owed = True  # cleared below; owed if the audit emit raises
         self._audit_log_after_commit("delete", {
             "episode_id": row["id"],
             "type": row["type"],
@@ -6083,6 +6103,7 @@ class Store:
                 self._conn.commit()
         if result.outcome == "deleted" and row is not None:
             # ⛔ POST-COMMIT, as delete()'s: the row is gone; an audit failure warns.
+            self._wal_clear_owed = True  # cleared below; owed if the audit emit raises
             self._audit_log_after_commit("delete", {
                 "episode_id": row["id"],
                 "type": row["type"],
@@ -9130,6 +9151,7 @@ class Store:
             # telling the caller prune failed after it had destroyed data — and
             # ``validated_save_continuity`` calls prune AFTER the wrap commit,
             # so it reached the canonical pipeline.
+            self._wal_clear_owed = True  # cleared below; owed if the audit emit raises
             self._audit_log_after_commit("prune", {
                 "count": pruned,
                 "older_than_days": days,
@@ -9855,9 +9877,39 @@ class Store:
             raise sqlite3.OperationalError("attempt to write a readonly database")
         return _content_hash(content, self._content_salt)
 
+    def _minted_episode_id(self, content: str, timestamp: str, nonce: int) -> str:
+        """The id :meth:`record` gives a new episode: ``_episode_id`` keyed by this
+        store's salt, so it is stable within the store and not a guessable
+        verifier of the content once the episode is deleted. Under
+        :meth:`_import_record` it is the imported id instead, tried once: a
+        taken id is an IntegrityError, never a different id."""
+        if self._import_id is not None:
+            if nonce:
+                raise sqlite3.IntegrityError(
+                    f"episode id {self._import_id} is already taken")
+            return self._import_id
+        if self._content_salt is None:
+            raise sqlite3.OperationalError("attempt to write a readonly database")
+        return _episode_id(content, timestamp, nonce, self._content_salt)
+
+    def _import_record(self, episode_id: Any, **record_kwargs: Any) -> Episode:
+        """:meth:`record`, keeping the id an export file carries when it has the
+        shape of one. An episode id is keyed by its store's salt (W3), so a
+        second store cannot re-derive it; the CLI import skips an episode whose
+        id already exists, and without the carried id a re-import duplicates
+        every episode (L1 1014+22, run). A missing or malformed id is minted
+        as :meth:`record` would."""
+        if not (isinstance(episode_id, str) and _EPISODE_ID_SHAPE.fullmatch(episode_id)):
+            return self.record(**record_kwargs)
+        self._import_id = episode_id
+        try:
+            return self.record(**record_kwargs)
+        finally:
+            self._import_id = None
+
     def _run_pending_erasure_vacuum(self) -> None:
         """Run the one-time VACUUM a pre-existing store is owed (see
-        ``_ERASURE_VACUUM_KEY``), drop the marker, then clear the WAL.
+        ``_ERASURE_VACUUM_KEY``), clear the WAL, then drop the marker.
 
         ``secure_delete`` overwrites content freed from now on; space freed
         before it was on keeps its bytes until the pages are rebuilt, which is
@@ -9875,9 +9927,6 @@ class Store:
             return
         try:
             self._conn.execute("VACUUM")
-            self._conn.execute(
-                "DELETE FROM metadata WHERE key = ?", (_ERASURE_VACUUM_KEY,))
-            self._conn.commit()
         except sqlite3.Error as exc:
             try:
                 self._conn.rollback()
@@ -9890,7 +9939,23 @@ class Store:
                 UserWarning, stacklevel=4,
             )
             return
+        # The rebuilt pages are in the WAL until a checkpoint; the old bytes stay
+        # in the file until then. The marker goes only once the WAL is clear, so
+        # a reader blocking the clear and a process killed before close() leave
+        # the VACUUM owed to the next open (L1 1014+22) rather than lost.
         self._clear_wal_after_erasure()
+        if self._wal_clear_owed:
+            return
+        try:
+            self._conn.execute(
+                "DELETE FROM metadata WHERE key = ?", (_ERASURE_VACUUM_KEY,))
+            self._conn.commit()
+        except sqlite3.Error as exc:
+            try:
+                self._conn.rollback()
+            except sqlite3.Error:
+                pass
+            _LOG.info("anneal-memory: dropping the erasure VACUUM marker failed: %s", exc)
 
     def _clear_wal_after_erasure(self) -> None:
         """Best effort, never raises, never waits: a TRUNCATE checkpoint so the

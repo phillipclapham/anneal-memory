@@ -84,7 +84,10 @@ class TestToolDefinitions:
         assert "timestamp" in desc
         assert "type" in desc
         assert "hash" in desc
-        assert "GDPR" in desc
+        # Ruling (a), Phill 10-14: precise mechanics, no GDPR claim (W3 erasure).
+        assert "GDPR" not in desc
+        assert "fully erased" not in desc
+        assert "salt" in desc
 
 
 class TestHashTool:

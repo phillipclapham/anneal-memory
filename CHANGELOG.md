@@ -79,16 +79,25 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
   - After each committed `delete`, `delete_by_origin_key` and `prune`, anneal empties the WAL (a TRUNCATE checkpoint),
     because the WAL keeps copies of pages written while the text was live. This never waits: if another connection
     is reading at that moment, the WAL is emptied at the store's next delete or at `close()` instead, and until then
-    it still holds those copies. A delete inside a batch is cleared at the next delete or `close()` the same way.
+    the WAL, and possibly the database file (the zeroed pages are still waiting in the WAL), hold the deleted text. A delete inside a batch is cleared at the next delete or `close()` the same way.
   - Each store gets a random salt (`content_hash_salt` in its metadata table, 32 random bytes), minted once: when the
     store is created, or at the first open by this release. Tombstones and audit events now carry
-    `hmac-sha256:<hex>`, a hash keyed by that salt. The salt is never written to the audit trail, so the audit trail
-    can be kept or shared without its hashes being guessable. **The salt is in the database file**, so someone who has
-    the database can still guess a short deleted value from its tombstone; construct the store with
-    `keep_tombstones=False` if no hash at all should stay in it.
+    `hmac-sha256:<hex>`, a hash keyed by that salt, and the 8-character id of a newly recorded episode is keyed by it
+    too: the id stays in the tombstone and in every audit event, and an unkeyed id is itself a short hash of the text
+    and its timestamp (measured: a deleted "my SSN is 078-05-1120" guessed back from its tombstone id and timestamp in
+    0.006 s). The salt is never written to the audit trail, so for episodes recorded after the upgrade neither the
+    hashes nor the ids in the trail can be checked against a guess. **The salt is in the database file**, so someone
+    who has the database can still guess a short deleted value from its tombstone; construct the store with
+    `keep_tombstones=False` if no hash should stay in it. The audit trail still carries each event's `source`, its
+    time and the episode type in clear.
   - **Tombstones and audit events written before the upgrade keep their unsalted SHA-256** (a bare 64-character hex
-    value; salted ones start with `hmac-sha256:`). anneal cannot salt them: the text they hash is gone. The audit
-    chain verifies across both.
+    value; salted ones start with `hmac-sha256:`), and episodes recorded before the upgrade keep their unkeyed ids, so
+    short content recorded before the upgrade can still be guessed back from the audit trail after it is deleted.
+    anneal cannot rekey them: ids are referenced everywhere, and the text an old hash covers is gone. Episodes imported
+    from a team ledger also keep unkeyed ids, because every member's store must give an entry the same id; their text
+    is in the shared ledger. The audit chain verifies across both. `import` keeps the id an exported episode
+    carries (a second store cannot re-derive a salted id), so re-importing the same file still skips what is
+    already there.
   - **The first open of an existing store runs `VACUUM` once**, which clears text deleted before this release. It
     needs free disk up to twice the size of the store and took 31 ms on a 3.7 MB store and 214 ms on a 34 MB one. If it
     fails (disk full, another process writing), the open warns and works, the old deleted text stays in the file, and
@@ -99,7 +108,12 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
     the `VACUUM`, so it holds any deleted text that was still in the file: delete it once the upgrade is settled.
     Nor does it reach backups, filesystem snapshots or copies other tools took (`export`, a host's snapshots), the
     disk blocks a filesystem or SSD keeps after a file shrinks, or text that consolidation already wrote into
-    continuity, crystal or a team ledger. A host writing to the store with its own `sqlite3` connection must set
+    continuity, crystal, a team ledger, or the explanations a wrap stores with a graduated pattern. A team entry's
+    ledger hash stays in `team_entries` (it must match across members' stores, so it is not salted) and a saved
+    continuity's audit event keeps an unsalted hash of that text. An `export --format sqlite` file is a full copy of
+    the database: it carries the salt (a store opened from it shares the salt with the original) and, while the
+    one-time `VACUUM` has not run, the old deleted text. If a reader blocks the WAL clear after that `VACUUM`, the next
+    write-capable open runs it again. A host writing to the store with its own `sqlite3` connection must set
     `PRAGMA secure_delete=ON` itself.
   - The MCP `delete_episode` description now states these mechanics and limits; it no longer says the text is "fully erased" or describes the tombstone in GDPR terms (`tool-integrity.json` regenerated).
 

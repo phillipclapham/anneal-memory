@@ -1025,10 +1025,10 @@ class TestD3Redesign:
         """p1d: B (external page) and A (agent summary derived from B); B deleted
         and recorded again under its id, now derived from A. ``b_first`` picks
         the lexical order of the two ids, which the old walk answered by."""
-        from anneal_memory.store import _episode_id
+        mint = store._minted_episode_id  # the store's salted id (W3 erasure)
         for k in range(400):
             b_text, a_text = f"{CLAIM} #{k}", f"My summary: {EXPLANATION} #{k}"
-            if (_episode_id(b_text, self.TS, 0) < _episode_id(a_text, self.TS, 0)) == b_first:
+            if (mint(b_text, self.TS, 0) < mint(a_text, self.TS, 0)) == b_first:
                 break
         b = store.record(b_text, EpisodeType.OBSERVATION, timestamp=self.TS, trust="external")
         a = store.record(a_text, EpisodeType.OBSERVATION, timestamp=self.TS,

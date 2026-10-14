@@ -236,6 +236,55 @@ class TestSalt:
                        for x in cands)
         assert [x for x in cands if _hmac(salt, x) == stored] == [SECRET]
 
+    def test_the_id_cannot_be_guessed_back_without_the_salt(self, tmp_path):
+        """L2 1014+22's attack (run, 0.006 s before the fix): the tombstone keeps
+        the id and the timestamp, and an unkeyed id is sha256(content+ts+nonce)[:8],
+        a verifier for a guess. A recorded episode's id is keyed by the salt."""
+        db = tmp_path / "m.db"
+        s = Store(db)
+        ep = s.record(SECRET, "observation")
+        s.delete(ep.id)
+        s.close()
+        c = sqlite3.connect(str(db))
+        tid, ts = c.execute("SELECT id, timestamp FROM tombstones").fetchone()
+        c.close()
+        assert tid == ep.id
+        cands = [f"my SSN is 078-{g:02d}-{n:04d}" for g in range(0, 10) for n in range(1100, 1130)]
+        assert not any(hashlib.sha256(f"{x}{ts}0".encode()).hexdigest()[:8] == tid
+                       for x in cands)
+        key = _salt(db).encode("utf-8")
+        assert [x for x in cands
+                if hmac.new(key, f"{x}{ts}0".encode(), hashlib.sha256).hexdigest()[:8] == tid
+                ] == [SECRET]
+
+    def test_import_keeps_the_exported_id_so_a_reimport_skips(self, tmp_path):
+        """L1 1014+22 (run): with salted ids a second store re-derived different
+        ids, so a re-import of the same file duplicated every episode."""
+        import os
+        import subprocess
+        import sys
+        src, dst, out = tmp_path / "a.db", tmp_path / "b.db", tmp_path / "e.json"
+        s = Store(src)
+        ids = {s.record(f"kept note {i}", "observation").id for i in range(3)}
+        s.close()
+        repo = Path(__file__).resolve().parent.parent
+        env = {k: v for k, v in os.environ.items() if k != "ANNEAL_OPERATOR"}
+
+        def cli(db, *args):
+            r = subprocess.run([sys.executable, "-m", "anneal_memory.cli", "--db", str(db), *args],
+                               capture_output=True, text=True, env=env, cwd=str(repo),
+                               stdin=subprocess.DEVNULL)
+            assert r.returncode == 0, r.stderr
+            return r
+        cli(src, "export", "--format", "json", "--output", str(out))
+        Store(dst).close()
+        first = json.loads(cli(dst, "import", str(out), "--json").stdout)
+        again = json.loads(cli(dst, "import", str(out), "--json").stdout)
+        assert (first["imported"], again["imported"], again["skipped"]) == (3, 0, 3)
+        d = Store(dst)
+        assert {e.id for e in d.recall(limit=10).episodes} == ids
+        d.close()
+
     def test_a_read_only_handle_has_no_salt_and_cannot_hash(self, tmp_path):
         db = tmp_path / "m.db"
         Store(db).close()

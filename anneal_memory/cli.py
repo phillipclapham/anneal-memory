@@ -2752,7 +2752,8 @@ def cmd_import(args: argparse.Namespace) -> None:
                     skipped += 1
                     continue
 
-                recorded = store.record(
+                recorded = store._import_record(
+                    ep_data.get("id"),
                     content=ep_data["content"],
                     episode_type=ep_data["type"],
                     source=ep_data.get("source", "import"),

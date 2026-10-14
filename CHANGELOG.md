@@ -4,6 +4,10 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
 
 ## [Unreleased]
 
+## [1.0.0rc1] — 2026-10-14
+
+Release candidate for 1.0.0: the API freeze, schema generation 2, the erasure fix and the dreaming primitives below. Pre-releases are not installed by default (`pip install --pre anneal-memory`).
+
 ### Added — public names promoted into `anneal_memory.__all__`
 - The public names that flow and Levain already import from submodules are now exported at the top level and listed in
   the defining module's `__all__` where it has one: `validate_origin_key`, `hard_max_chars`, `section_chars`,

@@ -4197,6 +4197,19 @@ class TestMove4LibraryLayerIntegration:
             assert result["contradictions"] == [
                 {"pattern": "opposes_old", "contradicts": ["old_rule"]}
             ]
+            from anneal_memory.graduation import _contradiction_entries
+
+            both = (
+                "## Patterns\n"
+                "- alpha | 1x [contradicts: first]\n"
+                "- alpha | 1x [contradicts: second]\n"
+                "- beta | 1x [no-contradicts] [contradicts: old]\n"
+            )
+            assert _contradiction_entries(both) == [
+                {"pattern": "alpha", "contradicts": ["first"]},
+                {"pattern": "alpha", "contradicts": ["second"]},
+                {"pattern": "beta", "contradicts": ["old"]},
+            ]
             row = store._conn.execute(
                 "SELECT continuity_text, unattended, model FROM wraps"
             ).fetchone()

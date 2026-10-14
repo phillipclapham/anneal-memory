@@ -2427,6 +2427,35 @@ def extract_contradiction_declarations(
     return declarations
 
 
+def _contradiction_entries(
+    text: str, graduating_headings: frozenset[str] = DEFAULT_GRADUATING
+) -> list[dict[str, object]]:
+    """Every ``[contradicts: ...]`` on a pattern line, one entry per occurrence.
+
+    Unlike :func:`extract_contradiction_declarations` (name-keyed, one stance per
+    pattern: last line wins, ``[no-contradicts]`` beats ``[contradicts: ...]``), this
+    reports each declaration where it was written, so a pattern named on two lines
+    or carrying both annotations loses none. Each entry is
+    ``{"pattern": name, "contradicts": [name, ...]}``.
+    """
+    entries: list[dict[str, object]] = []
+    in_patterns = False
+    for line in text.split("\n"):
+        if line.startswith("## "):
+            in_patterns = _is_graduating_heading(line, graduating_headings)
+            continue
+        if not in_patterns:
+            continue
+        name_match = _NAMED_PATTERN_RE.match(line)
+        if not name_match:
+            continue
+        stripped = _PATTERN_LINE_WITH_EVIDENCE_RE.sub("", line)
+        for m in _CONTRADICTS_RE.finditer(stripped):
+            names = [n.strip() for n in m.group(1).split(",") if n.strip()]
+            entries.append({"pattern": name_match.group(1), "contradicts": names})
+    return entries
+
+
 def detect_proven_without_declaration(
     prior_text: str,
     new_text: str,

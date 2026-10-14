@@ -5,6 +5,7 @@
   "ActivationMode",
   "AffectiveState",
   "AnnealMemoryError",
+  "Annotation",
   "ApplyRefused",
   "AssociationPair",
   "AssociationStats",
@@ -36,13 +37,17 @@
   "ExposureLabel",
   "FLOW_SCHEMA",
   "FeltCurrency",
+  "FoldResult",
+  "ForeignOutcomeLogError",
   "Germination",
+  "LogBinding",
   "MIGRATION_MANIFEST",
   "MIN_PROVEN_LEVEL",
   "OmittedPattern",
   "OriginKeyConflict",
   "OriginKeyStatus",
   "OutcomeLog",
+  "OutcomeLogBusy",
   "PROJECT_SCHEMA",
   "PatternSummary",
   "Permanence",
@@ -139,6 +144,7 @@
   "prepare_wrap",
   "receipt_crystal_names",
   "rederive_continuity",
+  "register_writer_schema",
   "required_headings",
   "retrieve_patterns",
   "retrieve_relevant",
@@ -3675,6 +3681,12 @@
    "methods": {},
    "module": "anneal_memory.store"
   },
+  "Annotation": {
+   "init": "(kind: \"Literal['derive', 'judged']\", claim: 'str', command: 'str' = '', expected: 'str | None' = None, judgement: 'str' = '', root: 'str | None' = None) -> None",
+   "kind": "class",
+   "methods": {},
+   "module": "anneal_memory.rederive"
+  },
   "ApplyRefused": {
    "init": null,
    "kind": "class",
@@ -3872,9 +3884,29 @@
    "methods": {},
    "module": "anneal_memory.types"
   },
+  "FoldResult": {
+   "init": "(previous_mark: 'str | None', mark: 'str | None', receipts_folded: 'int' = 0, exposures_counted: 'int' = 0, names_unknown: 'dict[str, int]' = <factory>, lines_skipped: 'int' = 0, event_id_missing: 'int' = 0, duplicates_skipped: 'int' = 0, paths_missing: 'list[str]' = <factory>, counts: 'dict[str, int]' = <factory>, store_missing: 'bool' = False) -> None",
+   "kind": "class",
+   "methods": {},
+   "module": "anneal_memory.worth"
+  },
+  "ForeignOutcomeLogError": {
+   "init": null,
+   "kind": "class",
+   "methods": {},
+   "module": "anneal_memory.worth"
+  },
   "Germination": {
    "kind": "value",
    "type": "_LiteralGenericAlias"
+  },
+  "LogBinding": {
+   "init": "(store_id: 'str | None', bound: 'int' = 0, unbound: 'int' = 0, foreign: 'int' = 0, foreign_stores: 'list[str]' = <factory>) -> None",
+   "kind": "class",
+   "methods": {
+    "all_foreign": "property"
+   },
+   "module": "anneal_memory.worth"
   },
   "MIGRATION_MANIFEST": {
    "kind": "value",
@@ -3914,6 +3946,12 @@
     "record": "(self, exposure_id: 'str', items: 'Sequence[ExposureLabel]', *, outcome: 'str | None' = None, exposed: 'Sequence[ExposedRef]' = (), ts: 'datetime | None' = None, lock_timeout: 'float | None' = None, pull: 'bool' = False, before_append: 'Callable[[], None] | None' = None) -> 'dict[str, Any]'",
     "record_if_missing": "(self, exposure_id: 'str', items: 'Sequence[ExposureLabel]', *, outcome: 'str | None' = None, exposed: 'Sequence[ExposedRef]' = (), ts: 'datetime | None' = None) -> 'dict[str, Any] | None'"
    },
+   "module": "anneal_memory.worth"
+  },
+  "OutcomeLogBusy": {
+   "init": null,
+   "kind": "class",
+   "methods": {},
    "module": "anneal_memory.worth"
   },
   "PROJECT_SCHEMA": {
@@ -4580,6 +4618,11 @@
    "kind": "function",
    "module": "anneal_memory.rederive",
    "signature": "(store, *, ref: 'str | None' = None, trust_file: 'Path | None' = None, **limits) -> 'RederiveReport | None'"
+  },
+  "register_writer_schema": {
+   "kind": "function",
+   "module": "anneal_memory.store",
+   "signature": "(conn: 'sqlite3.Connection') -> 'None'"
   },
   "required_headings": {
    "kind": "function",

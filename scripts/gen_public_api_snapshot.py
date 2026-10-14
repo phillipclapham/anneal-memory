@@ -31,7 +31,8 @@ from typing import Any
 ROOT = Path(__file__).resolve().parent.parent
 SNAPSHOT_PATH = ROOT / "tests" / "data" / "public_api_snapshot.json"
 
-_ADDR_RE = re.compile(r" at 0x[0-9a-f]+")
+# only the address inside a repr (it ends at the repr's ">"), never text in a string
+_ADDR_RE = re.compile(r" at 0x[0-9a-fA-F]+>")
 _PRIMITIVES = (str, int, float, bool, type(None))
 _ENV_VARS = ("ANNEAL_MEMORY_DB", "ANNEAL_MEMORY_SOURCE")
 _PKG = "anneal_memory"
@@ -40,14 +41,14 @@ _PKG = "anneal_memory"
 def _signature(obj: Any) -> str | None:
     try:
         # a sentinel default reprs with its address; the address is not the API
-        return _ADDR_RE.sub("", str(inspect.signature(obj)))
+        return _ADDR_RE.sub(">", str(inspect.signature(obj)))
     except (TypeError, ValueError):
         return None
 
 
 def _home_canon(text: str) -> str:
     home = str(Path.home())
-    if home and text.startswith(home):
+    if home and (text == home or text.startswith(home + os.sep) or text.startswith(home + "/")):
         return "~" + text[len(home):].replace("\\", "/")
     return text
 
@@ -69,7 +70,7 @@ def _canon(value: Any, where: str) -> Any:
     if isinstance(value, re.Pattern):
         return {"pattern": value.pattern, "flags": int(value.flags)}
     if typing.get_origin(value) is not None or type(value).__module__ == "typing":
-        return _ADDR_RE.sub("", str(value))
+        return _ADDR_RE.sub(">", str(value))
     raise TypeError(
         f"public API snapshot cannot represent {where}: {type(value).__module__}.{type(value).__qualname__}; "
         "add a serializer to _canon"
@@ -127,7 +128,7 @@ def _describe_class(cls: type) -> dict[str, Any]:
         out["enum_members"] = enum_members
     if typing.is_typeddict(cls):
         out["typed_dict"] = {
-            "annotations": {k: _ADDR_RE.sub("", str(v)) for k, v in sorted(cls.__annotations__.items())},
+            "annotations": {k: _ADDR_RE.sub(">", str(v)) for k, v in sorted(cls.__annotations__.items())},
             "required": sorted(cls.__required_keys__),
             "optional": sorted(cls.__optional_keys__),
         }
@@ -151,7 +152,7 @@ def _type_name(t: Any) -> str | None:
     if qual:
         mod = getattr(t, "__module__", "builtins")
         return qual if mod == "builtins" else f"{mod}.{qual}"
-    return _ADDR_RE.sub("", repr(t))
+    return _ADDR_RE.sub(">", repr(t))
 
 
 def _parser_tree(parser: argparse.ArgumentParser, path: str = "cli") -> dict[str, Any]:
@@ -176,7 +177,7 @@ def _parser_tree(parser: argparse.ArgumentParser, path: str = "cli") -> dict[str
                 "default": _canon(action.default, where),
                 "const": _canon(action.const, where),
                 "metavar": _canon(action.metavar, where),
-                "choices": [str(c) for c in action.choices] if action.choices is not None else None,
+                "choices": _canon(list(action.choices), where) if action.choices is not None else None,
                 "type": _type_name(action.type),
                 "action": type(action).__name__,
             }
@@ -192,8 +193,12 @@ def _parser_tree(parser: argparse.ArgumentParser, path: str = "cli") -> dict[str
         ),
         key=lambda g: g["options"],
     )
+    # set_defaults: which handler a command dispatches to (L3 r2 codex)
+    defaults = {k: (f"{v.__module__}.{v.__qualname__}" if callable(v) else _canon(v, f"{path} {k}"))
+                for k, v in sorted(parser._defaults.items())}
     return {
         "options": options,
+        "defaults": defaults,
         "subparsers": subparsers,
         "exclusive_groups": exclusive,
         "subcommands": subcommands,

@@ -166,6 +166,7 @@
   "verify_integrity"
  ],
  "cli": {
+  "defaults": {},
   "exclusive_groups": [],
   "options": [
    {
@@ -227,6 +228,9 @@
   ],
   "subcommands": {
    "associations": {
+    "defaults": {
+     "func": "anneal_memory.cli.cmd_associations"
+    },
     "exclusive_groups": [],
     "options": [
      {
@@ -304,6 +308,9 @@
     "subparsers": null
    },
    "audit": {
+    "defaults": {
+     "func": "anneal_memory.cli.cmd_audit"
+    },
     "exclusive_groups": [],
     "options": [
      {
@@ -367,6 +374,9 @@
     "subparsers": null
    },
    "audit-repair": {
+    "defaults": {
+     "func": "anneal_memory.cli.cmd_audit_repair"
+    },
     "exclusive_groups": [],
     "options": [
      {
@@ -402,10 +412,14 @@
     "subparsers": null
    },
    "baton": {
+    "defaults": {},
     "exclusive_groups": [],
     "options": [],
     "subcommands": {
      "claim": {
+      "defaults": {
+       "func": "anneal_memory.cli.cmd_baton"
+      },
       "exclusive_groups": [],
       "options": [
        {
@@ -453,6 +467,9 @@
       "subparsers": null
      },
      "release": {
+      "defaults": {
+       "func": "anneal_memory.cli.cmd_baton"
+      },
       "exclusive_groups": [],
       "options": [
        {
@@ -486,6 +503,9 @@
       "subparsers": null
      },
      "status": {
+      "defaults": {
+       "func": "anneal_memory.cli.cmd_baton"
+      },
       "exclusive_groups": [],
       "options": [
        {
@@ -513,6 +533,9 @@
     }
    },
    "continuity": {
+    "defaults": {
+     "func": "anneal_memory.cli.cmd_continuity"
+    },
     "exclusive_groups": [],
     "options": [
      {
@@ -562,10 +585,16 @@
     "subparsers": null
    },
    "crystal": {
+    "defaults": {
+     "func": "anneal_memory.cli._require_crystal_subcommand"
+    },
     "exclusive_groups": [],
     "options": [],
     "subcommands": {
      "crystallize": {
+      "defaults": {
+       "func": "anneal_memory.cli.cmd_crystal_crystallize"
+      },
       "exclusive_groups": [],
       "options": [
        {
@@ -705,6 +734,9 @@
       "subparsers": null
      },
      "fold-surfaced": {
+      "defaults": {
+       "func": "anneal_memory.cli.cmd_crystal_fold_surfaced"
+      },
       "exclusive_groups": [],
       "options": [
        {
@@ -754,6 +786,9 @@
       "subparsers": null
      },
      "get": {
+      "defaults": {
+       "func": "anneal_memory.cli.cmd_crystal_get"
+      },
       "exclusive_groups": [],
       "options": [
        {
@@ -801,6 +836,9 @@
       "subparsers": null
      },
      "ground-evidence": {
+      "defaults": {
+       "func": "anneal_memory.cli.cmd_crystal_ground_evidence"
+      },
       "exclusive_groups": [],
       "options": [
        {
@@ -850,6 +888,9 @@
       "subparsers": null
      },
      "index": {
+      "defaults": {
+       "func": "anneal_memory.cli.cmd_crystal_index"
+      },
       "exclusive_groups": [],
       "options": [
        {
@@ -871,6 +912,9 @@
       "subparsers": null
      },
      "list": {
+      "defaults": {
+       "func": "anneal_memory.cli.cmd_crystal_list"
+      },
       "exclusive_groups": [],
       "options": [
        {
@@ -974,6 +1018,9 @@
       "subparsers": null
      },
      "recall": {
+      "defaults": {
+       "func": "anneal_memory.cli.cmd_crystal_recall"
+      },
       "exclusive_groups": [],
       "options": [
        {
@@ -1035,6 +1082,9 @@
       "subparsers": null
      },
      "retire": {
+      "defaults": {
+       "func": "anneal_memory.cli.cmd_crystal_retire"
+      },
       "exclusive_groups": [],
       "options": [
        {
@@ -1101,6 +1151,9 @@
       "subparsers": null
      },
      "rewarm": {
+      "defaults": {
+       "func": "anneal_memory.cli.cmd_crystal_rewarm"
+      },
       "exclusive_groups": [],
       "options": [
        {
@@ -1122,6 +1175,9 @@
       "subparsers": null
      },
      "touch": {
+      "defaults": {
+       "func": "anneal_memory.cli.cmd_crystal_touch"
+      },
       "exclusive_groups": [],
       "options": [
        {
@@ -1155,6 +1211,9 @@
       "subparsers": null
      },
      "update": {
+      "defaults": {
+       "func": "anneal_memory.cli.cmd_crystal_update"
+      },
       "exclusive_groups": [],
       "options": [
        {
@@ -1312,6 +1371,9 @@
     }
    },
    "delete": {
+    "defaults": {
+     "func": "anneal_memory.cli.cmd_delete"
+    },
     "exclusive_groups": [],
     "options": [
      {
@@ -1360,10 +1422,16 @@
     "subparsers": null
    },
    "derive": {
+    "defaults": {
+     "func": "anneal_memory.cli.cmd_derive"
+    },
     "exclusive_groups": [],
     "options": [],
     "subcommands": {
      "allow": {
+      "defaults": {
+       "func": "anneal_memory.cli.cmd_derive"
+      },
       "exclusive_groups": [],
       "options": [
        {
@@ -1430,6 +1498,9 @@
       "subparsers": null
      },
      "revoke": {
+      "defaults": {
+       "func": "anneal_memory.cli.cmd_derive"
+      },
       "exclusive_groups": [],
       "options": [
        {
@@ -1465,6 +1536,9 @@
       "subparsers": null
      },
      "status": {
+      "defaults": {
+       "func": "anneal_memory.cli.cmd_derive"
+      },
       "exclusive_groups": [],
       "options": [
        {
@@ -1492,6 +1566,9 @@
     }
    },
    "diff": {
+    "defaults": {
+     "func": "anneal_memory.cli.cmd_diff"
+    },
     "exclusive_groups": [],
     "options": [
      {
@@ -1527,6 +1604,9 @@
     "subparsers": null
    },
    "episodes": {
+    "defaults": {
+     "func": "anneal_memory.cli.cmd_episodes"
+    },
     "exclusive_groups": [],
     "options": [
      {
@@ -1667,6 +1747,9 @@
     "subparsers": null
    },
    "export": {
+    "defaults": {
+     "func": "anneal_memory.cli.cmd_export"
+    },
     "exclusive_groups": [],
     "options": [
      {
@@ -1722,6 +1805,9 @@
     "subparsers": null
    },
    "get": {
+    "defaults": {
+     "func": "anneal_memory.cli.cmd_get"
+    },
     "exclusive_groups": [],
     "options": [
      {
@@ -1755,6 +1841,9 @@
     "subparsers": null
    },
    "graph": {
+    "defaults": {
+     "func": "anneal_memory.cli.cmd_graph"
+    },
     "exclusive_groups": [],
     "options": [
      {
@@ -1823,6 +1912,9 @@
     "subparsers": null
    },
    "history": {
+    "defaults": {
+     "func": "anneal_memory.cli.cmd_history"
+    },
     "exclusive_groups": [],
     "options": [
      {
@@ -1858,6 +1950,9 @@
     "subparsers": null
    },
    "import": {
+    "defaults": {
+     "func": "anneal_memory.cli.cmd_import"
+    },
     "exclusive_groups": [],
     "options": [
      {
@@ -1891,6 +1986,9 @@
     "subparsers": null
    },
    "init": {
+    "defaults": {
+     "func": "anneal_memory.cli.cmd_init"
+    },
     "exclusive_groups": [],
     "options": [
      {
@@ -1944,10 +2042,16 @@
     "subparsers": null
    },
    "migrate": {
+    "defaults": {
+     "func": "anneal_memory.cli._require_migrate_subcommand"
+    },
     "exclusive_groups": [],
     "options": [],
     "subcommands": {
      "ack": {
+      "defaults": {
+       "func": "anneal_memory.cli.cmd_migrate_ack"
+      },
       "exclusive_groups": [],
       "options": [
        {
@@ -1981,6 +2085,9 @@
       "subparsers": null
      },
      "check": {
+      "defaults": {
+       "func": "anneal_memory.cli.cmd_migrate_check"
+      },
       "exclusive_groups": [],
       "options": [
        {
@@ -2008,6 +2115,9 @@
     }
    },
    "outcome": {
+    "defaults": {
+     "func": "anneal_memory.cli.cmd_outcome"
+    },
     "exclusive_groups": [],
     "options": [
      {
@@ -2102,6 +2212,9 @@
     "subparsers": null
    },
    "pattern-associations": {
+    "defaults": {
+     "func": "anneal_memory.cli.cmd_pattern_associations"
+    },
     "exclusive_groups": [],
     "options": [
      {
@@ -2179,6 +2292,9 @@
     "subparsers": null
    },
    "prepare-wrap": {
+    "defaults": {
+     "func": "anneal_memory.cli.cmd_prepare_wrap"
+    },
     "exclusive_groups": [],
     "options": [
      {
@@ -2256,10 +2372,14 @@
     "subparsers": null
    },
    "probe": {
+    "defaults": {},
     "exclusive_groups": [],
     "options": [],
     "subcommands": {
      "add": {
+      "defaults": {
+       "func": "anneal_memory.cli.cmd_probe"
+      },
       "exclusive_groups": [
        {
         "options": [
@@ -2359,6 +2479,9 @@
       "subparsers": null
      },
      "list": {
+      "defaults": {
+       "func": "anneal_memory.cli.cmd_probe"
+      },
       "exclusive_groups": [],
       "options": [
        {
@@ -2394,6 +2517,9 @@
       "subparsers": null
      },
      "retire": {
+      "defaults": {
+       "func": "anneal_memory.cli.cmd_probe"
+      },
       "exclusive_groups": [],
       "options": [
        {
@@ -2427,6 +2553,9 @@
       "subparsers": null
      },
      "status": {
+      "defaults": {
+       "func": "anneal_memory.cli.cmd_probe"
+      },
       "exclusive_groups": [],
       "options": [
        {
@@ -2454,6 +2583,9 @@
     }
    },
    "prune": {
+    "defaults": {
+     "func": "anneal_memory.cli.cmd_prune"
+    },
     "exclusive_groups": [],
     "options": [
      {
@@ -2503,6 +2635,9 @@
     "subparsers": null
    },
    "recall": {
+    "defaults": {
+     "func": "anneal_memory.cli.cmd_search"
+    },
     "exclusive_groups": [],
     "options": [
      {
@@ -2613,6 +2748,9 @@
     "subparsers": null
    },
    "record": {
+    "defaults": {
+     "func": "anneal_memory.cli.cmd_record"
+    },
     "exclusive_groups": [],
     "options": [
      {
@@ -2756,6 +2894,9 @@
     "subparsers": null
    },
    "save-continuity": {
+    "defaults": {
+     "func": "anneal_memory.cli.cmd_save_continuity"
+    },
     "exclusive_groups": [],
     "options": [
      {
@@ -2901,6 +3042,9 @@
     "subparsers": null
    },
    "search": {
+    "defaults": {
+     "func": "anneal_memory.cli.cmd_search"
+    },
     "exclusive_groups": [],
     "options": [
      {
@@ -3011,6 +3155,9 @@
     "subparsers": null
    },
    "serve": {
+    "defaults": {
+     "func": "anneal_memory.cli.cmd_serve"
+    },
     "exclusive_groups": [],
     "options": [
      {
@@ -3116,6 +3263,9 @@
     "subparsers": null
    },
    "set-schema": {
+    "defaults": {
+     "func": "anneal_memory.cli.cmd_set_schema"
+    },
     "exclusive_groups": [],
     "options": [
      {
@@ -3153,10 +3303,16 @@
     "subparsers": null
    },
    "spore": {
+    "defaults": {
+     "func": "anneal_memory.cli._require_spore_subcommand"
+    },
     "exclusive_groups": [],
     "options": [],
     "subcommands": {
      "add": {
+      "defaults": {
+       "func": "anneal_memory.cli.cmd_spore_add"
+      },
       "exclusive_groups": [],
       "options": [
        {
@@ -3218,10 +3374,10 @@
        {
         "action": "_StoreAction",
         "choices": [
-         "0",
-         "1",
-         "2",
-         "3"
+         0,
+         1,
+         2,
+         3
         ],
         "const": null,
         "default": 0,
@@ -3290,6 +3446,9 @@
       "subparsers": null
      },
      "ascend": {
+      "defaults": {
+       "func": "anneal_memory.cli.cmd_spore_ascend"
+      },
       "exclusive_groups": [],
       "options": [
        {
@@ -3357,6 +3516,9 @@
       "subparsers": null
      },
      "descend": {
+      "defaults": {
+       "func": "anneal_memory.cli.cmd_spore_descend"
+      },
       "exclusive_groups": [],
       "options": [
        {
@@ -3411,6 +3573,9 @@
       "subparsers": null
      },
      "get": {
+      "defaults": {
+       "func": "anneal_memory.cli.cmd_spore_get"
+      },
       "exclusive_groups": [],
       "options": [
        {
@@ -3444,6 +3609,9 @@
       "subparsers": null
      },
      "list": {
+      "defaults": {
+       "func": "anneal_memory.cli.cmd_spore_list"
+      },
       "exclusive_groups": [],
       "options": [
        {
@@ -3550,6 +3718,9 @@
       "subparsers": null
      },
      "surface": {
+      "defaults": {
+       "func": "anneal_memory.cli.cmd_spore_surface"
+      },
       "exclusive_groups": [],
       "options": [
        {
@@ -3585,6 +3756,9 @@
       "subparsers": null
      },
      "touch": {
+      "defaults": {
+       "func": "anneal_memory.cli.cmd_spore_touch"
+      },
       "exclusive_groups": [],
       "options": [
        {
@@ -3618,6 +3792,9 @@
       "subparsers": null
      },
      "update": {
+      "defaults": {
+       "func": "anneal_memory.cli.cmd_spore_update"
+      },
       "exclusive_groups": [],
       "options": [
        {
@@ -3705,10 +3882,10 @@
        {
         "action": "_StoreAction",
         "choices": [
-         "0",
-         "1",
-         "2",
-         "3"
+         0,
+         1,
+         2,
+         3
         ],
         "const": null,
         "default": null,
@@ -3765,6 +3942,9 @@
     }
    },
    "state": {
+    "defaults": {
+     "func": "anneal_memory.cli.cmd_state"
+    },
     "exclusive_groups": [
      {
       "options": [
@@ -3834,6 +4014,9 @@
     "subparsers": null
    },
    "stats": {
+    "defaults": {
+     "func": "anneal_memory.cli.cmd_stats"
+    },
     "exclusive_groups": [],
     "options": [
      {
@@ -3855,6 +4038,9 @@
     "subparsers": null
    },
    "status": {
+    "defaults": {
+     "func": "anneal_memory.cli.cmd_status"
+    },
     "exclusive_groups": [],
     "options": [
      {
@@ -3876,6 +4062,9 @@
     "subparsers": null
    },
    "supersede": {
+    "defaults": {
+     "func": "anneal_memory.cli.cmd_supersede"
+    },
     "exclusive_groups": [],
     "options": [
      {
@@ -3925,6 +4114,9 @@
     "subparsers": null
    },
    "team-forget-key": {
+    "defaults": {
+     "func": "anneal_memory.cli.cmd_team_forget_key"
+    },
     "exclusive_groups": [],
     "options": [
      {
@@ -3958,6 +4150,9 @@
     "subparsers": null
    },
    "team-import": {
+    "defaults": {
+     "func": "anneal_memory.cli.cmd_team_import"
+    },
     "exclusive_groups": [],
     "options": [
      {
@@ -4033,6 +4228,9 @@
     "subparsers": null
    },
    "team-status": {
+    "defaults": {
+     "func": "anneal_memory.cli.cmd_team_status"
+    },
     "exclusive_groups": [],
     "options": [
      {
@@ -4054,6 +4252,9 @@
     "subparsers": null
    },
    "trust": {
+    "defaults": {
+     "func": "anneal_memory.cli.cmd_trust"
+    },
     "exclusive_groups": [],
     "options": [
      {
@@ -4104,6 +4305,9 @@
     "subparsers": null
    },
    "unsupersede": {
+    "defaults": {
+     "func": "anneal_memory.cli.cmd_unsupersede"
+    },
     "exclusive_groups": [],
     "options": [
      {
@@ -4153,6 +4357,9 @@
     "subparsers": null
    },
    "verify": {
+    "defaults": {
+     "func": "anneal_memory.cli.cmd_verify"
+    },
     "exclusive_groups": [],
     "options": [
      {
@@ -4174,6 +4381,9 @@
     "subparsers": null
    },
    "worth": {
+    "defaults": {
+     "func": "anneal_memory.cli.cmd_worth"
+    },
     "exclusive_groups": [],
     "options": [
      {
@@ -4223,6 +4433,9 @@
     "subparsers": null
    },
    "wrap-cancel": {
+    "defaults": {
+     "func": "anneal_memory.cli.cmd_wrap_cancel"
+    },
     "exclusive_groups": [],
     "options": [
      {
@@ -4300,6 +4513,9 @@
     "subparsers": null
    },
    "wrap-status": {
+    "defaults": {
+     "func": "anneal_memory.cli.cmd_wrap_status"
+    },
     "exclusive_groups": [],
     "options": [
      {
@@ -4321,6 +4537,9 @@
     "subparsers": null
    },
    "wrap-token-current": {
+    "defaults": {
+     "func": "anneal_memory.cli.cmd_wrap_token_current"
+    },
     "exclusive_groups": [],
     "options": [
      {

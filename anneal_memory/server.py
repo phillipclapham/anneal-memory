@@ -773,6 +773,10 @@ class Server:
             )
         except _NewerSidecarError as exc:  # a refusal before any wrap opens
             return _tool_result(f"Error: {exc}", is_error=True)
+        except StoreError as exc:
+            if exc.operation != "load_meta":  # an unreadable meta also refuses before any wrap opens
+                raise
+            return _tool_result(f"Error: {exc}", is_error=True)
 
         text = format_wrap_package_text(result)
         if result["status"] == "ready" and result["wrap_token"]:

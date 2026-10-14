@@ -16,6 +16,7 @@ CLI on the gen-2 branch before the fix):
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import subprocess
@@ -54,6 +55,23 @@ def _cli(db: Path, *args: str, env: dict | None = None) -> subprocess.CompletedP
         [sys.executable, "-m", "anneal_memory.cli", "--db", str(db), *args],
         capture_output=True, text=True, env=full_env, timeout=120,
     )
+
+
+@contextlib.contextmanager
+def _unreadable(path: Path):
+    """Mode 000 for the block; the mode is restored on every exit so tmp_path
+    cleanup works. Skipped where chmod cannot make a file unreadable."""
+    path.chmod(0o000)
+    try:
+        yield
+    finally:
+        path.chmod(0o600)
+
+
+_NO_CHMOD = pytest.mark.skipif(
+    sys.platform == "win32" or (hasattr(os, "geteuid") and os.geteuid() == 0),
+    reason="mode 000 does not block reads on Windows or as root",
+)
 
 
 @pytest.fixture
@@ -183,6 +201,101 @@ class TestContinuityMeta:
         assert store.meta_path.read_bytes() == before
 
 
+    # -- L3 r1: an unreadable meta is not an absent one; a malformed one is -----
+
+    @_NO_CHMOD
+    def test_an_unreadable_meta_is_refused_not_defaulted(self, store):
+        """L3 r1 F-A (codex HIGH), RUN: chmod 000 on a real meta read as the
+        defaults, the wrap opened and the save renamed over the file."""
+        store.meta_path.write_text(json.dumps(
+            {"format_version": 1, "sessions_produced": 5, "citations_seen": True}))
+        with _unreadable(store.meta_path):
+            with pytest.raises(StoreError) as ei:
+                store.load_meta()
+            assert not isinstance(ei.value, _NewerSidecarError)
+            assert ei.value.operation == "load_meta"
+            assert ei.value.path == str(store.meta_path)
+            store.record("first episode", EpisodeType.OBSERVATION)
+            with pytest.raises(StoreError, match="Cannot read"):
+                prepare_wrap(store)
+            assert not store.status().wrap_in_progress
+        assert json.loads(store.meta_path.read_text())["sessions_produced"] == 5
+
+    @_NO_CHMOD
+    def test_a_save_over_an_unreadable_meta_writes_nothing(self, store):
+        self._wrapped(store)
+        store.record("second episode", EpisodeType.OBSERVATION)
+        prepare_wrap(store)
+        before = store.meta_path.read_bytes()
+        cont_before = store.continuity_path.read_bytes()
+        with _unreadable(store.meta_path):
+            with pytest.raises(StoreError) as ei:
+                validated_save_continuity(store, _CONT + "Second.\n")
+            assert ei.value.operation == "load_meta"
+            # MCP: one error result, naming the file, not a raised exception.
+            server = Server(store)
+            result = server._tool_save_continuity({"text": _CONT + "Second.\n"})
+            assert result.get("isError")
+            assert "load_meta" in result["content"][0]["text"]
+            result = server._tool_prepare_wrap({})
+            assert result.get("isError") and "Cannot read" in result["content"][0]["text"]
+        assert store.meta_path.read_bytes() == before
+        assert store.continuity_path.read_bytes() == cont_before
+
+    @_NO_CHMOD
+    def test_cli_paths_print_one_line_for_an_unreadable_meta(self, store, tmp_path):
+        self._wrapped(store)
+        db = store.path
+        store.close()
+        _cli(db, "baton", "claim", "S2")
+        assert _cli(db, "record", "second episode", "--type", "observation").returncode == 0
+        token = _cli(db, "prepare-wrap", "--session-id", "S2").stdout.split(
+            "Wrap token:")[1].split()[0]
+        before = store.meta_path.read_bytes()
+        (tmp_path / "c.md").write_text(_CONT + "Again.\n")
+        with _unreadable(store.meta_path):
+            runs = [
+                _cli(db, "--json", "continuity"),
+                _cli(db, "export", "--output", str(tmp_path / "out.json")),
+                _cli(db, "prepare-wrap", "--session-id", "S2"),
+                _cli(db, "save-continuity", str(tmp_path / "c.md"), "--session-id", "S2",
+                     "--wrap-token", token),
+            ]
+        for r in runs:
+            assert r.returncode == 1, r.stderr
+            assert "Cannot read" in r.stderr or "load_meta" in r.stderr
+            assert "Traceback" not in r.stderr
+        assert not (tmp_path / "out.json").exists()
+        assert store.meta_path.read_bytes() == before
+
+    @pytest.mark.parametrize("content", [b"[]", b"null", b"42", b'"text"', b"\xff\xfe\x00{"])
+    def test_a_meta_that_is_not_a_json_object_reads_as_defaults(self, store, content):
+        """L3 r1 F-C, RUN: `[]`/`null` crashed `{**defaults, **data}` with a
+        TypeError, non-UTF-8 bytes with a UnicodeDecodeError, at the top of
+        prepare_wrap and in `continuity --json` / `export`."""
+        store.meta_path.write_bytes(content)
+        defaults = {"sessions_produced": 0, "citations_seen": False, "format_version": 1}
+        assert store.load_meta() == defaults
+        store.record("first episode", EpisodeType.OBSERVATION)
+        prepare_wrap(store)
+        validated_save_continuity(store, _CONT)
+        assert store.load_meta()["sessions_produced"] == 1
+
+    def test_cli_json_continuity_and_export_survive_a_malformed_meta(self, store, tmp_path):
+        self._wrapped(store)
+        db = store.path
+        store.close()
+        for content in (b"[]", b"\xff\xfe\x00{"):
+            store.meta_path.write_bytes(content)
+            r = _cli(db, "--json", "continuity")
+            assert r.returncode == 0, r.stderr
+            assert json.loads(r.stdout)["meta"]["format_version"] == 1
+            out = tmp_path / "out.json"
+            r = _cli(db, "export", "--output", str(out))
+            assert r.returncode == 0, r.stderr
+            out.unlink()
+
+
 # -- audit manifest ---------------------------------------------------------
 
 
@@ -257,9 +370,14 @@ class TestAuditManifest:
         db, before = self._trail_with_newer_manifest(tmp_path, reshape=False)
         trail = AuditTrail(db)
         active = db.parent / f"{db.stem}.audit.jsonl"
+        trail.log("record", {"id": "2"})  # initializes: _initialize sets _last_week itself
         active_before = active.read_bytes()
-        trail._last_week = "1999-W01"  # the week rolled over
-        trail.log("record", {"id": "2"})
+        trail._last_week = "1999-W01"  # the week rolled over, AFTER the init
+        reached = []
+        real = trail._rotate_locked
+        trail._rotate_locked = lambda *a, **k: (reached.append(a), real(*a, **k))[1]
+        trail.log("record", {"id": "3"})
+        assert len(reached) == 1, "the log must reach the rotation body, or this proves nothing"
         assert _manifest(db).read_bytes() == before
         assert list(db.parent.glob("*.jsonl.gz")) == []
         assert active.read_bytes().startswith(active_before)  # not sealed away
@@ -285,6 +403,35 @@ class TestAuditManifest:
         assert "newer anneal-memory" in result.error and "nothing was written" in result.error
         assert _manifest(db).read_bytes() == before
         assert marker.exists()
+
+    @_NO_CHMOD
+    def test_audit_repair_refuses_an_unreadable_manifest_beside_a_marker(self, tmp_path):
+        """L3 r1 F-B (codex HIGH), RUN: the marker peek swallowed every error, so a
+        mode-000 manifest beside a marker was rebuilt over."""
+        db, before = self._trail_with_newer_manifest(tmp_path, reshape=False)
+        marker = db.parent / f"{_manifest(db).name}.corrupt-20261014T000000000000Z"
+        marker.write_text("{not json")
+        with _unreadable(_manifest(db)):
+            result = AuditTrail.repair_manifest(db)
+        assert not result.repaired
+        assert "could not be read" in result.error and "nothing was rebuilt" in result.error
+        assert _manifest(db).read_bytes() == before
+        assert marker.exists() and not list(db.parent.glob("*.repaired"))
+
+    @pytest.mark.parametrize("manifest", [None, b"{not json", b"[]"])
+    def test_audit_repair_still_rebuilds_an_absent_or_invalid_manifest_beside_a_marker(
+        self, tmp_path, manifest
+    ):
+        db = tmp_path / "mem.db"
+        AuditTrail(db).log("record", {"id": "1"})
+        if manifest is None:
+            _manifest(db).unlink()
+        else:
+            _manifest(db).write_bytes(manifest)
+        marker = db.parent / f"{_manifest(db).name}.corrupt-20261014T000000000000Z"
+        marker.write_text("{not json")
+        result = AuditTrail.repair_manifest(db)
+        assert result.repaired, result.error
 
     def test_cli_audit_says_newer_not_corrupt(self, tmp_path):
         db, _ = self._trail_with_newer_manifest(tmp_path, reshape=True)

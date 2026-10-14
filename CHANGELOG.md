@@ -66,7 +66,9 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
     not re-check the version (wrap, CLI and MCP do); `derive status` reports "not enabled" for a newer trust file
     without saying why; under a newer manifest an append into an already-started active file continues in this
     release's entry format (only a store copied beside a sidecar it does not match reaches it: the store generation
-    refuses an older process first).
+    refuses an older process first); a newer meta copied in by hand between a wrap's version check and its
+    post-commit rename is overwritten by that wrap (a real newer anneal raises the store generation first, so this
+    release's database commit is refused by the guard triggers before the rename).
 
 ### Changed — consolidation is the operator's act by default (KL-19)
 - ⚠ **Onboarding change.** A store created by `anneal-memory init`, or created fresh by the MCP server on its first

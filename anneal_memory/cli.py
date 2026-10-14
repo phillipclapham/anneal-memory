@@ -796,11 +796,15 @@ def cmd_get(args: argparse.Namespace) -> None:
 
 def _load_meta_or_exit(store: Store) -> dict:
     """``store.load_meta()``, or a one-line refusal and exit 1 when the meta
-    sidecar was written by a newer anneal-memory (``_NewerSidecarError``, the
-    one ``StoreError`` it raises), instead of a traceback from a read command."""
+    sidecar was written by a newer anneal-memory (``_NewerSidecarError``) or
+    cannot be read (``StoreError``, operation ``load_meta``), instead of a
+    traceback from a read command."""
     try:
         return store.load_meta()
     except _NewerSidecarError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        sys.exit(1)
+    except StoreError as exc:
         print(f"Error: {exc}", file=sys.stderr)
         sys.exit(1)
 
@@ -1600,6 +1604,11 @@ def cmd_prepare_wrap(args: argparse.Namespace) -> None:
                 crystal_store=_open_crystal_store_for_wrap(args),
             )
         except _NewerSidecarError as exc:  # a refusal before any wrap opens
+            print(f"Error: {exc}", file=sys.stderr)
+            sys.exit(1)
+        except StoreError as exc:
+            if exc.operation != "load_meta":  # an unreadable meta also refuses before any wrap opens
+                raise
             print(f"Error: {exc}", file=sys.stderr)
             sys.exit(1)
         except WrapInProgressError as exc:

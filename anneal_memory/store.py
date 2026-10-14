@@ -9240,9 +9240,14 @@ class Store:
     def load_meta(self) -> dict:
         """Load continuity metadata from the JSON sidecar.
 
-        A missing or unparseable sidecar reads as the defaults, as before.
+        A missing sidecar, or one whose content is not a JSON object (invalid
+        JSON, valid JSON of another type, bytes that are not UTF-8), reads as the
+        defaults. A sidecar that exists but cannot be read is not absent.
 
         Raises:
+            StoreError: ``.operation == "load_meta"`` when the sidecar exists but
+                cannot be read (``OSError`` other than not-found), so a write path
+                never proceeds over a file it could not see.
             StoreError: ``.operation == "load_meta"`` when the sidecar's
                 ``format_version`` is an integer greater than
                 ``_META_FORMAT_VERSION``: it was written by a newer
@@ -9253,13 +9258,29 @@ class Store:
         """
         defaults = {"sessions_produced": 0, "citations_seen": False,
                     "format_version": _META_FORMAT_VERSION}
-        if not self.meta_path.exists():
-            return defaults
         try:
-            data = json.loads(self.meta_path.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError):
+            raw = self.meta_path.read_text(encoding="utf-8")
+        except FileNotFoundError:
             return defaults
-        found = data.get("format_version") if isinstance(data, dict) else None
+        except UnicodeDecodeError:
+            return defaults
+        except OSError as exc:
+            # Present but unreadable (permissions, I/O error): not "absent". Reading
+            # it as the defaults would let the wrap's save rename over a file this
+            # process could not see (counters reset; a newer meta's fields lost).
+            raise StoreError(
+                f"Cannot read {self.meta_path}: {exc}; refusing to treat an "
+                "unreadable meta as empty, so the next wrap does not overwrite it.",
+                operation="load_meta",
+                path=str(self.meta_path),
+            ) from exc
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError:
+            return defaults
+        if not isinstance(data, dict):
+            return defaults
+        found = data.get("format_version")
         if (isinstance(found, int) and not isinstance(found, bool)
                 and found > _META_FORMAT_VERSION):
             raise _NewerSidecarError(

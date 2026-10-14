@@ -2093,8 +2093,19 @@ class AuditTrail:
                 _parse_manifest_bytes(_read_regular_bytes(trail._manifest_path), stem)
             except _ManifestNewer as e:
                 return AuditRepairResult(repaired=False, error=f"{e}; {nothing}")
-            except Exception:
-                pass  # absent or invalid: the rebuild below is what repairs it
+            except FileNotFoundError:
+                pass  # absent: the rebuild below is what repairs it
+            except _UNPARSEABLE_JSON + (KeyError,):
+                pass  # invalid: the rebuild below is what repairs it
+            except Exception as e:
+                # Present but unreadable (OSError: mode 000, EIO) or failing in a way
+                # not recognised above: its contents are unknown, and it may be a
+                # newer manifest. Never rebuilt over.
+                return AuditRepairResult(
+                    repaired=False,
+                    error=(f"The manifest {trail._manifest_path.name} could not be read "
+                           f"({e}); nothing was rebuilt."),
+                )
 
         current: dict[str, Any] | None = None
         if not markers and trail._manifest_path.exists():

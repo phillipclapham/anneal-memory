@@ -171,6 +171,10 @@ class TestSecureDelete:
         with s._batch():
             s.delete(ep.id)
             assert s._wal_clear_owed
+        # Paid at the batch's exit, before its replayed audit callbacks (L3 r2 codex).
+        assert not s._wal_clear_owed
+        wal = tmp_path / "m.db-wal"
+        assert not wal.exists() or _bytes_in(wal) == 0
         s.close()
         assert _bytes_in(tmp_path / "m.db") == 0
 

@@ -79,7 +79,7 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
   - After each committed `delete`, `delete_by_origin_key` and `prune`, anneal empties the WAL (a TRUNCATE checkpoint),
     because the WAL keeps copies of pages written while the text was live. This never waits: if another connection
     is reading at that moment, the WAL is emptied at the store's next delete or at `close()` instead, and until then
-    the WAL, and possibly the database file (the zeroed pages are still waiting in the WAL), hold the deleted text. A delete inside a batch is cleared at the next delete or `close()` the same way.
+    the WAL, and possibly the database file (the zeroed pages are still waiting in the WAL), hold the deleted text. A delete inside a batch is cleared when the batch commits.
   - Each store gets a random salt (`content_hash_salt` in its metadata table, 32 random bytes), minted once: when the
     store is created, or at the first open by this release. Tombstones and audit events now carry
     `hmac-sha256:<hex>`, a hash keyed by that salt, and the 8-character id of a newly recorded episode is keyed by it
@@ -117,7 +117,8 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
     (a reader, or a batch) leaves those frames until SQLite next checkpoints the WAL (at the next open or the last
     close); the clear sets the connection's busy timeout to 0 for its duration, so a `Store` shared across threads
     can see one spurious "database is locked" meanwhile; a team replace that rewrites an episode's text in place
-    does not clear the WAL (that text is in the shared ledger); and under `-W error` a failed one-time `VACUUM`
+    does not clear the WAL (that text is in the shared ledger); an import's tombstone check runs before its write
+    lock, so a second writer importing and deleting the same id with other content in that window is not caught; and under `-W error` a failed one-time `VACUUM`
     fails the open instead of warning. A host writing to the store with its own `sqlite3` connection must set
     `PRAGMA secure_delete=ON` itself.
   - The MCP `delete_episode` description now states these mechanics and limits; it no longer says the text is "fully erased" or describes the tombstone in GDPR terms (`tool-integrity.json` regenerated).

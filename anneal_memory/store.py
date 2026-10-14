@@ -9980,8 +9980,9 @@ class Store:
         under the store's busy timeout that cost the delete 5.2 s and still
         failed, so the timeout is 0 for this call. When it cannot complete the
         store owes it (``_wal_clear_owed``) and retries at its next erasing
-        write and at ``close()``. Skipped inside a ``_batch`` (nothing is
-        committed yet); the batch's own commit does not retry it."""
+        write and at ``close()``. Inside a ``_batch`` (nothing is committed
+        yet) it is owed, and the batch's exit pays it after the commit, before
+        replaying the deferred audit events."""
         try:
             if self._defer_commit or self._conn.in_transaction:
                 self._wal_clear_owed = True
@@ -11331,6 +11332,13 @@ class Store:
         # ⚠ THE COST, STATED: a Ctrl+C during this replay is not delivered.
         # The region is a few audit appends wide, and the trade is a deferred
         # interrupt against a permanently lost wrap. Deliberate.
+        # A delete inside the batch owed its WAL clear (W3); pay it before the
+        # replayed audit callbacks can see the frames (L3 r2 codex). Never raises.
+        if commit_succeeded and self._wal_clear_owed:
+            try:
+                self._clear_wal_after_erasure()
+            except BaseException:
+                pass
         try:
             self._replay_deferred_audits(deferred, commit_succeeded)
         except BaseException:

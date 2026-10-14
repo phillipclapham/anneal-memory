@@ -1599,6 +1599,9 @@ def cmd_prepare_wrap(args: argparse.Namespace) -> None:
                 # None ⇒ byte-identical pre-crystal wrap (no crystallize-OUT proposals).
                 crystal_store=_open_crystal_store_for_wrap(args),
             )
+        except _NewerSidecarError as exc:  # a refusal before any wrap opens
+            print(f"Error: {exc}", file=sys.stderr)
+            sys.exit(1)
         except WrapInProgressError as exc:
             # AM-PREPARE-GUARD (0.4.2): a wrap is already open. main()
             # has no top-level handler, so catch here and exit cleanly

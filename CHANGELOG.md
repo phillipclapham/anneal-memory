@@ -46,8 +46,8 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
 - **A sidecar written by a newer anneal-memory is refused, never read as this release's format.** Until now this
   anneal wrote the version fields below and never read them back; it now checks each one. In the normal case the store's
   own generation check refuses first; these catch a sidecar copied or left beside a store it does not match:
-  - Continuity meta (`<name>.continuity.meta.json`) with a `format_version` above 1: `save-continuity` (CLI and MCP)
-    fails with "written by a newer anneal-memory", nothing is written and the wrap stays open; `continuity --json`
+  - Continuity meta (`<name>.continuity.meta.json`) with a `format_version` above 1: `prepare-wrap` and `save-continuity` (CLI and MCP)
+    fail with "written by a newer anneal-memory", nothing is written and the wrap stays open; `continuity --json`
     and `export` fail the same way (plain `continuity` does not read the meta and still works). Before, a wrap read
     the newer meta as its own and wrote it back.
   - Audit manifest with a `version` above 1: treated as unavailable, never as corrupt. It is not quarantined and not
@@ -56,10 +56,17 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
     active file that already has entries continue; an append that must read the manifest to start the file is
     refused and counted as a dropped audit write. Before, a newer manifest this release could not parse was
     quarantined on the next write and `audit-repair` rebuilt a version-1 manifest over it.
-  - `derive-trust.json` (per user, not per store) with a `version` that is not a whole number up to 2: re-derive
+  - `derive-trust.json` (per user, not per store) with a `version` greater than 2 ("written by a newer anneal-memory"; a `version` that is not an integer
+    reads as unrecognised and is refused the same way): re-derive
     trusts nothing in it, and `derive allow` / `derive revoke` fail with "written by a newer anneal-memory" instead
     of rewriting it. A file with no `version` reads as before. `crystal.json` and `spores.json` already refused a
     newer `schema_version` and are unchanged.
+  - Known edges: a string or float version in the meta or manifest reads as current (every writer emits an integer);
+    the trust file accepts 0 or negative versions; the public `Store.save_meta` called directly by a library host does
+    not re-check the version (wrap, CLI and MCP do); `derive status` reports "not enabled" for a newer trust file
+    without saying why; under a newer manifest an append into an already-started active file continues in this
+    release's entry format (only a store copied beside a sidecar it does not match reaches it: the store generation
+    refuses an older process first).
 
 ### Changed — consolidation is the operator's act by default (KL-19)
 - ⚠ **Onboarding change.** A store created by `anneal-memory init`, or created fresh by the MCP server on its first

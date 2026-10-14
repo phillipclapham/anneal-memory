@@ -1946,6 +1946,9 @@ def prepare_wrap(
                 "prepare_wrap: wrap_token must be 32 lowercase hex characters, the "
                 "form uuid.uuid4().hex produces."
             )
+    # A meta written by a newer anneal-memory refuses HERE, before any wrap is opened or a
+    # compose spent: the save would be refused at load_meta anyway (gen 2 sidecar rule).
+    store.load_meta()
     # Observe the wrap in progress (if any) BEFORE reading the episode window. The empty-window
     # path below cancels only the wrap observed here, by compare-and-swap on its token, so a
     # wrap another session starts after this point has a different token (or, if it finished

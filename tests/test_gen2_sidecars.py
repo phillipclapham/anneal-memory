@@ -101,11 +101,11 @@ class TestContinuityMeta:
         """RUN case M: the save read format_version 99 as its own and wrote it
         back with sessions_produced 8."""
         self._wrapped(store)
+        store.record("second episode", EpisodeType.OBSERVATION)
+        prepare_wrap(store)
         store.meta_path.write_text(json.dumps(_NEWER_META))
         meta_before = store.meta_path.read_bytes()
         cont_before = store.continuity_path.read_bytes()
-        store.record("second episode", EpisodeType.OBSERVATION)
-        prepare_wrap(store)
         with pytest.raises(_NewerSidecarError):
             validated_save_continuity(store, _CONT + "Second wrap.\n")
         assert store.meta_path.read_bytes() == meta_before
@@ -115,22 +115,56 @@ class TestContinuityMeta:
 
     def test_mcp_save_returns_the_refusal_not_an_io_failure(self, store):
         self._wrapped(store)
-        store.meta_path.write_text(json.dumps(_NEWER_META))
         server = Server(store)
         server._tool_record({"content": "second", "episode_type": "observation"})
         server._tool_prepare_wrap({})
+        store.meta_path.write_text(json.dumps(_NEWER_META))
         result = server._tool_save_continuity({"text": _CONT + "Second.\n"})
         assert result.get("isError")
         text = result["content"][0]["text"]
         assert "written by a newer anneal-memory" in text
         assert "I/O failure" not in text
 
-    def test_cli_save_continuity_json_continuity_and_export_refuse(self, store, tmp_path):
+    def test_prepare_wrap_refuses_before_any_wrap_opens(self, store):
         self._wrapped(store)
         store.meta_path.write_text(json.dumps(_NEWER_META))
         before = store.meta_path.read_bytes()
+        store.record("second episode", EpisodeType.OBSERVATION)
+        with pytest.raises(_NewerSidecarError):
+            prepare_wrap(store)
+        assert not store.status().wrap_in_progress
+        assert store.meta_path.read_bytes() == before
+        # The MCP tool returns the refusal, not an I/O failure.
+        result = Server(store)._tool_prepare_wrap({})
+        assert result.get("isError")
+        text = result["content"][0]["text"]
+        assert "written by a newer anneal-memory" in text and "I/O failure" not in text
+        assert not store.status().wrap_in_progress
+
+    def test_cli_prepare_wrap_refuses_and_opens_no_wrap(self, store):
+        self._wrapped(store)
+        store.record("second episode", EpisodeType.OBSERVATION)
+        store.meta_path.write_text(json.dumps(_NEWER_META))
         db = store.path
         store.close()
+        _cli(db, "baton", "claim", "S2")
+        r = _cli(db, "prepare-wrap", "--session-id", "S2")
+        assert r.returncode == 1
+        assert r.stderr.startswith("Error: ") and "written by a newer anneal-memory" in r.stderr
+        assert "Traceback" not in r.stderr and "I/O failure" not in r.stderr
+        with Store(db) as again:
+            assert not again.status().wrap_in_progress
+
+    def test_cli_save_continuity_json_continuity_and_export_refuse(self, store, tmp_path):
+        self._wrapped(store)
+        db = store.path
+        store.close()
+        _cli(db, "baton", "claim", "S2")
+        assert _cli(db, "record", "second episode", "--type", "observation").returncode == 0
+        out = _cli(db, "prepare-wrap", "--session-id", "S2").stdout
+        token = out.split("Wrap token:")[1].split()[0]
+        store.meta_path.write_text(json.dumps(_NEWER_META))
+        before = store.meta_path.read_bytes()
         r = _cli(db, "--json", "continuity")
         assert r.returncode == 1 and "written by a newer anneal-memory" in r.stderr
         assert "Traceback" not in r.stderr
@@ -140,10 +174,6 @@ class TestContinuityMeta:
         # The plain text read does not touch the meta and still works.
         assert _cli(db, "continuity").returncode == 0
         # The CLI wrap: refused as a refusal, not "store I/O failure".
-        _cli(db, "baton", "claim", "S2")
-        assert _cli(db, "record", "second episode", "--type", "observation").returncode == 0
-        out = _cli(db, "prepare-wrap", "--session-id", "S2").stdout
-        token = out.split("Wrap token:")[1].split()[0]
         (tmp_path / "c.md").write_text(_CONT + "Again.\n")
         r = _cli(db, "save-continuity", str(tmp_path / "c.md"), "--session-id", "S2",
                  "--wrap-token", token)
@@ -223,6 +253,18 @@ class TestAuditManifest:
         assert _manifest(db).read_bytes() == before
         assert _markers(db) == []
 
+    def test_a_week_rotation_under_a_newer_manifest_seals_nothing(self, tmp_path):
+        db, before = self._trail_with_newer_manifest(tmp_path, reshape=False)
+        trail = AuditTrail(db)
+        active = db.parent / f"{db.stem}.audit.jsonl"
+        active_before = active.read_bytes()
+        trail._last_week = "1999-W01"  # the week rolled over
+        trail.log("record", {"id": "2"})
+        assert _manifest(db).read_bytes() == before
+        assert list(db.parent.glob("*.jsonl.gz")) == []
+        assert active.read_bytes().startswith(active_before)  # not sealed away
+        assert _markers(db) == []
+
     @pytest.mark.parametrize("reshape", [False, True])
     def test_audit_repair_refuses(self, tmp_path, reshape):
         db, before = self._trail_with_newer_manifest(tmp_path, reshape)
@@ -281,13 +323,20 @@ class TestDeriveTrust:
         assert json.loads(tf.read_text())["version"] == 2
         assert trusted_roots(db)
 
-    @pytest.mark.parametrize("value", [3, 99, True, "2", 2.0, None])
-    def test_a_version_not_an_int_le_2_trusts_nothing(self, trust, value):
+    @pytest.mark.parametrize("value,message", [
+        (3, "written by a newer anneal-memory"),
+        (99, "written by a newer anneal-memory"),
+        (True, "unrecognised version"),
+        ("2", "unrecognised version"),
+        (2.0, "unrecognised version"),
+        (None, "unrecognised version"),
+    ])
+    def test_a_version_not_an_int_le_2_trusts_nothing(self, trust, value, message):
         tf, db, _ = trust
         self._set_version(tf, value)
         assert _load_trust(tf) == []
         assert trusted_roots(db) == {}
-        with pytest.raises(ValueError, match="written by a newer anneal-memory"):
+        with pytest.raises(ValueError, match=message):
             _load_trust(tf, strict=True)
 
     @pytest.mark.parametrize("value", [1, 2])
@@ -316,3 +365,18 @@ class TestDeriveTrust:
         with pytest.raises(ValueError, match="written by a newer anneal-memory"):
             revoke_store(db)
         assert tf.read_bytes() == before
+
+
+# -- the generation ties the sidecar formats together -----------------------
+
+
+def test_a_sidecar_format_constant_moves_only_with_a_generation_decision():
+    from anneal_memory import store as store_module
+    from anneal_memory.rederive import _TRUST_VERSION
+
+    assert (store_module._SCHEMA_VERSION, store_module._META_FORMAT_VERSION,
+            audit_module._MANIFEST_VERSION, _TRUST_VERSION) == (2, 1, 1, 2), (
+        "changing a store-attached sidecar constant (meta, manifest) requires "
+        "raising _SCHEMA_VERSION; _TRUST_VERSION is per-user, not covered by "
+        "the generation, and needs its own newer-refusal kept."
+    )

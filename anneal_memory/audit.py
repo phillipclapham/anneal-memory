@@ -420,6 +420,12 @@ def _parse_manifest_bytes(raw: bytes, stem: str) -> dict[str, Any]:
     ``.get("files", [])`` reader sites. Normalized here instead: missing
     ``"files"`` degrades to ``[]``, matching ``_load_manifest()``'s own
     from-scratch default.
+
+    A manifest whose integer ``version`` is greater than ``_MANIFEST_VERSION``
+    raises ``_ManifestNewer``: unavailable, never quarantined. That check must
+    stay BEFORE the field checks (``test_the_version_is_checked_before_any_field``
+    catches a reordering): a newer shape the field checks reject would
+    otherwise read as invalid and be quarantined.
     """
     manifest = json.loads(raw.decode("utf-8"))
     if not isinstance(manifest, dict):
@@ -3232,6 +3238,10 @@ class AuditTrail:
                 "first_prev_hash": prev if isinstance(prev, str) else "",
             }
             self._save_manifest(manifest)
+        except _ManifestNewer as e:
+            _log(logging.WARNING,
+                "could not record the existing active audit file in the manifest: %s", e,
+            )
         except Exception:
             _log(logging.WARNING,
                 "could not record the existing active audit file in the manifest; "
@@ -4221,6 +4231,11 @@ class AuditTrail:
           with nothing renamed, so a flaky read can neither quarantine nor
           overwrite.
         - Absent -> a fresh manifest, as before.
+        - Newer (an integer ``version`` > ``_MANIFEST_VERSION``) -> raises
+          ``_ManifestNewer``: unavailable, never quarantined, nothing renamed or
+          written. The version check in ``_parse_manifest_bytes`` must stay
+          before its field checks (``test_the_version_is_checked_before_any_field``
+          catches a reordering).
         """
         stem = self._db_path.stem
         # ⛔ A DIRECTORY THAT CANNOT BE LISTED CANNOT RULE OUT A MARKER (rebase

@@ -1224,6 +1224,7 @@ def trust_file_path() -> Path:
 _SUPPORTED = os.name == "posix"  # ownership, O_NOFOLLOW, flock, killpg
 # The trust file format this release writes; ``_load_trust`` trusts nothing from
 # a file whose "version" is greater, or is not an integer.
+# Per-user, not covered by the store generation: it keeps its own newer-refusal.
 _TRUST_VERSION = 2
 
 
@@ -1278,12 +1279,14 @@ def _load_trust(path: Path, *, strict: bool = False) -> list[dict]:
     # lacks it.
     if isinstance(data, dict) and "version" in data:
         version = data["version"]
-        if not (isinstance(version, int) and not isinstance(version, bool)
-                and version <= _TRUST_VERSION):
+        is_int = isinstance(version, int) and not isinstance(version, bool)
+        if is_int and version > _TRUST_VERSION:
             return untrusted(
-                f"written by a newer anneal-memory (version {version!r}, this "
+                f"written by a newer anneal-memory (version {version}, this "
                 f"release reads up to {_TRUST_VERSION}); upgrade anneal-memory"
             )
+        if not is_int:
+            return untrusted(f"has an unrecognised version ({version!r}); fix or remove it")
     stores = data.get("stores") if isinstance(data, dict) else None
     if not isinstance(stores, list):
         return untrusted("has no 'stores' list")

@@ -762,14 +762,17 @@ class Server:
         max_chars = args.get("max_chars")
         staleness_days = args.get("staleness_days", 7)
 
-        result = _lib_prepare_wrap(
-            self._store,
-            max_chars=max_chars,
-            staleness_days=staleness_days,
-            # AM-CRYSTAL-OPTIN: opt-in gate — pass the store only when it exists.
-            crystal_store=self._crystal_store_for_wrap(),
-            session_id=self._wrap_session(saving=False),
-        )
+        try:
+            result = _lib_prepare_wrap(
+                self._store,
+                max_chars=max_chars,
+                staleness_days=staleness_days,
+                # AM-CRYSTAL-OPTIN: opt-in gate — pass the store only when it exists.
+                crystal_store=self._crystal_store_for_wrap(),
+                session_id=self._wrap_session(saving=False),
+            )
+        except _NewerSidecarError as exc:  # a refusal before any wrap opens
+            return _tool_result(f"Error: {exc}", is_error=True)
 
         text = format_wrap_package_text(result)
         if result["status"] == "ready" and result["wrap_token"]:

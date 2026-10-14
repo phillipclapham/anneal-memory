@@ -1520,35 +1520,42 @@ def register_writer_schema(conn: sqlite3.Connection) -> None:
     on a raw connection that lacked it). Exported for hosts that open a store
     with plain ``sqlite3`` and must write to it.
 
-    It also sets ``PRAGMA trusted_schema=ON`` on ``conn`` (the guards need it)
-    and raises ``sqlite3.NotSupportedError`` if the connection does not take it.
+    The connection must have ``PRAGMA trusted_schema=ON`` (SQLite's default):
+    the guards call a Python function, which SQLite does not mark innocuous, so
+    under OFF every guarded write fails "unsafe use of anneal_writer_schema()".
+    A connection with it OFF is refused here, with ``sqlite3.NotSupportedError``,
+    before anything is registered, and its setting is left as the host chose it
+    (rc1 L3 --final, codex MED: the write failed later; rc2 L3 r1, codex HIGH:
+    turning it ON for the host re-arms every schema-resident function the host
+    turned it OFF to block). :func:`connect` sets it ON on anneal's own
+    connections before calling this.
 
     The generation is captured HERE, once: the connection reports the
     generation of the code that opened it for its whole life (L3 r1 10-14,
     codex: a closure over the module global changed its answer when the global
     did)."""
+    # Read through a cursor of plain tuples: a host's row_factory may return
+    # mappings, where row[0] is a KeyError (rc2 L3 r1, codex). An SQLite older
+    # than the pragma (3.31) answers no row and has no such restriction.
+    cur = conn.cursor()
+    cur.row_factory = None
+    try:
+        row = cur.execute("PRAGMA trusted_schema").fetchone()
+    finally:
+        cur.close()
+    if row is not None and row[0] != 1:
+        raise sqlite3.NotSupportedError(
+            "anneal-memory: this connection has trusted_schema OFF, so its writes to "
+            "an anneal store would fail the generation guards (\"unsafe use of "
+            f"{_WRITER_SCHEMA_FUNCTION}()\"). anneal-memory does not change that "
+            "setting for you. Use a connection with PRAGMA trusted_schema=ON (the "
+            "SQLite default) to write to the store, or open it with "
+            "anneal_memory.Store."
+        )
     generation = _SCHEMA_VERSION
     conn.create_function(
         _WRITER_SCHEMA_FUNCTION, 0, lambda: generation, deterministic=True,
     )
-    # The guards call a Python function, which SQLite does not mark innocuous:
-    # under trusted_schema=OFF (a build option on hardened hosts, or a host's
-    # own PRAGMA) every guarded write fails "unsafe use of
-    # anneal_writer_schema()". MEASURED 2026-10-14 on sqlite 3.53.4; ON is
-    # SQLite's default and fixes it (L3 r1, codex). Set HERE, not only in
-    # :func:`connect`, so a host connection gets it too (rc1 L3 --final, codex
-    # MED). Read back, so a connection that will not take it is refused now,
-    # not at its first write. An SQLite older than the pragma (3.31) answers
-    # no row and has no such check to fail.
-    conn.execute("PRAGMA trusted_schema=ON")
-    row = conn.execute("PRAGMA trusted_schema").fetchone()
-    if row is not None and row[0] != 1:
-        raise sqlite3.NotSupportedError(
-            "anneal-memory: this connection keeps trusted_schema OFF, so its writes "
-            "to an anneal store would fail the generation guards (\"unsafe use of "
-            f"{_WRITER_SCHEMA_FUNCTION}()\"). Open the store with a connection "
-            "that allows PRAGMA trusted_schema=ON."
-        )
 
 
 def _gen_guard_sql(table: str, op: str, generation: int) -> tuple[str, str]:
@@ -1585,7 +1592,7 @@ def _generation_guard_state(
     tables = [] if generation < _FIRST_GUARDED_GENERATION else [
         row[0] for row in conn.execute(
             "SELECT name FROM sqlite_master WHERE type = 'table'"
-        ) if row[0] in _ANNEAL_TABLES
+        ) if row[0].lower() in _ANNEAL_TABLES  # SQLite names are case-insensitive
     ]
     want = dict(
         _gen_guard_sql(table, op, generation)
@@ -2455,9 +2462,14 @@ def connect(
         conn = sqlite3.connect(_existing_file_uri(full, "ro" if read_only else "rw"), uri=True, **kwargs)
     else:
         conn = sqlite3.connect(target, **kwargs)
+    # The guards call a Python function, which SQLite does not mark innocuous:
+    # under trusted_schema=OFF (a build option on hardened hosts) every guarded
+    # write fails "unsafe use of anneal_writer_schema()". MEASURED 2026-10-14 on
+    # sqlite 3.53.4; ON is SQLite's default and fixes it (L3 r1, codex). Set on
+    # anneal's own connections only; a host's is checked, never changed.
+    conn.execute("PRAGMA trusted_schema=ON")
     # Every connection, read-only included (harmless there): a write through
     # one that lacked it fails a migrated store's generation guards.
-    # It also sets trusted_schema=ON, which the guards need.
     register_writer_schema(conn)
     # Deleted content is overwritten with zeros, not left in freed space (W3
     # erasure, ruled "fix both" 10-13). Per connection, not stored in the file: a
@@ -3014,7 +3026,8 @@ class Store:
         # Read before the DDL below creates the tables: a store with episodes
         # already in place may hold content freed before secure_delete was on.
         pre_existing = self._conn.execute(
-            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'episodes'"
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' "
+            "AND name = 'episodes' COLLATE NOCASE"
         ).fetchone() is not None
         for script in (
             _SCHEMA_SQL,
@@ -7647,7 +7660,9 @@ class Store:
     @property
     def created(self) -> bool:
         """True when this open created the store; False when it opened an
-        existing one (or opened read-only).
+        existing one (or opened read-only). A store exists when its file holds
+        anneal's ``episodes`` table, so opening a database file without one
+        (empty, or another program's) creates the store in it.
 
         Decided under the writer lock that creates the schema, so of two
         processes opening one new path at once, exactly one sees True. A
@@ -10116,7 +10131,7 @@ class Store:
         if _SCHEMA_VERSION < _FIRST_GUARDED_GENERATION:
             return None
         tables = {
-            row[0] for row in self._conn.execute(
+            row[0].lower() for row in self._conn.execute(
                 "SELECT name FROM sqlite_master WHERE type = 'table'"
             )
         }

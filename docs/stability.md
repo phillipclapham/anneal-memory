@@ -44,7 +44,7 @@ This section states what 1.0 will promise. It takes effect when the schema gener
 - The migration is forward-only, additive and idempotent, and it copies the database before changing it.
 - A store written by 1.x is refused by an older writer. The refusal is deliberate: it keeps an older release from writing into a store whose format it does not know.
 - The sidecar files and the per-record formats (the audit log, the outcome log) are versioned. A record written by one release stays readable by every later release.
-- A program that writes to a store with plain `sqlite3` calls `anneal_memory.register_writer_schema(conn)` on its connection first; it also sets `PRAGMA trusted_schema=ON` on that connection, and raises `sqlite3.NotSupportedError` if the connection will not take it. Reading needs nothing.
+- A program that writes to a store with plain `sqlite3` calls `anneal_memory.register_writer_schema(conn)` on its connection first. That connection needs `PRAGMA trusted_schema=ON` (SQLite's default); with it OFF the call raises `sqlite3.NotSupportedError` and leaves the setting alone. Reading needs nothing.
 
 The mechanism of the migration is described in the CHANGELOG entry for the release that ships it.
 

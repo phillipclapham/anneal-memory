@@ -18,9 +18,11 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
   virtual tables", and every writable open after it, each attempt leaving another `.gen1` copy. Measured on a store
   written by 0.9.43 with an FTS5 table: two failed opens and two copies under rc1; under this release one migration,
   one copy, and writable on reopen. A guard rc1 put on a host's own table is dropped at the next open.
-- **`register_writer_schema(conn)` sets `PRAGMA trusted_schema=ON` on the connection** and raises
-  `sqlite3.NotSupportedError` at once if the connection does not take it. In rc1 a host connection with it OFF failed
-  its first guarded write with "unsafe use of anneal_writer_schema()".
+- **`register_writer_schema(conn)` refuses a connection with `PRAGMA trusted_schema=OFF`** at once, with
+  `sqlite3.NotSupportedError`, and leaves the setting as the host chose it. In rc1 it registered and the first guarded
+  write failed with "unsafe use of anneal_writer_schema()". Turning it ON for the host would re-arm the schema-resident
+  functions a host turns it OFF to block, so anneal does not; its own connections set it ON. The read also works on a
+  connection whose `row_factory` returns mappings, and table names match the list case-insensitively, as SQLite does.
 - Known edge: `init --schema NAME` that loses the creation race to another process has already written its section
   schema onto that process's store when it refuses, as any `Store(section_schema=...)` open of an existing store does.
 

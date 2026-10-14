@@ -209,33 +209,43 @@ class TestGenerationGuardsCoverOnlyAnnealTables:
 
 
 class TestRegisterWriterSchemaUnderUntrustedSchema:
-    def test_a_host_connection_with_trusted_schema_off_can_write(self, tmp_path):
+    def test_a_host_connection_with_trusted_schema_off_is_refused_and_left_off(self, tmp_path):
+        # rc1: registered, then the first guarded write failed "unsafe use of
+        # anneal_writer_schema()". rc2 r1 turned it ON for the host, which
+        # re-armed what the host had turned it OFF to block (codex HIGH). Now:
+        # refused at once, the host's setting untouched, nothing registered.
         db = tmp_path / "m.db"
         Store(db).close()
         conn = sqlite3.connect(str(db))
         try:
             conn.execute("PRAGMA trusted_schema=OFF")
-            register_writer_schema(conn)
-            conn.execute("INSERT INTO metadata (key, value) VALUES ('host_key', 'v')")
-            conn.commit()
-            assert conn.execute("PRAGMA trusted_schema").fetchone()[0] == 1
+            with pytest.raises(sqlite3.NotSupportedError, match="trusted_schema"):
+                register_writer_schema(conn)
+            assert conn.execute("PRAGMA trusted_schema").fetchone()[0] == 0
+            with pytest.raises(sqlite3.OperationalError, match="no such function"):
+                conn.execute("SELECT anneal_writer_schema()")
         finally:
             conn.close()
 
-    def test_a_connection_that_will_not_take_it_is_refused_at_once(self):
-        class _Stuck:
-            """A connection whose trusted_schema read-back stays 0."""
+    def test_a_host_connection_with_a_mapping_row_factory_can_write(self, tmp_path):
+        db = tmp_path / "m.db"
+        Store(db).close()
+        conn = sqlite3.connect(str(db))
+        try:
+            conn.row_factory = lambda cur, row: {d[0]: v for d, v in zip(cur.description, row)}
+            register_writer_schema(conn)
+            conn.execute("INSERT INTO metadata (key, value) VALUES ('host_key', 'v')")
+            conn.commit()
+        finally:
+            conn.close()
 
-            def __init__(self):
-                self._c = sqlite3.connect(":memory:")
 
-            def create_function(self, *a, **k):
-                return self._c.create_function(*a, **k)
-
-            def execute(self, sql, *a):
-                if sql.strip().upper() == "PRAGMA TRUSTED_SCHEMA":
-                    return self._c.execute("SELECT 0")
-                return self._c.execute(sql, *a)
-
-        with pytest.raises(sqlite3.NotSupportedError, match="trusted_schema"):
-            register_writer_schema(_Stuck())  # type: ignore[arg-type]
+class TestTableNamesMatchCaseInsensitively:
+    def test_a_differently_cased_anneal_table_is_still_guarded(self):
+        conn = sqlite3.connect(":memory:")
+        try:
+            conn.execute("CREATE TABLE Metadata (key TEXT PRIMARY KEY, value TEXT)")
+            want, _, _ = store_mod._generation_guard_state(conn, store_mod._FIRST_GUARDED_GENERATION)
+            assert {n for n in want if "_Metadata_" in n} and len(want) == 3
+        finally:
+            conn.close()

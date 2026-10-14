@@ -1222,6 +1222,9 @@ def trust_file_path() -> Path:
 
 
 _SUPPORTED = os.name == "posix"  # ownership, O_NOFOLLOW, flock, killpg
+# The trust file format this release writes; ``_load_trust`` trusts nothing from
+# a file whose "version" is greater, or is not an integer.
+_TRUST_VERSION = 2
 
 
 def _load_trust(path: Path, *, strict: bool = False) -> list[dict]:
@@ -1266,6 +1269,21 @@ def _load_trust(path: Path, *, strict: bool = False) -> list[dict]:
         return untrusted("unreadable")
     finally:
         os.close(fd)
+    # A version greater than this release writes (or not an integer) is read as
+    # a newer anneal's file: trust nothing from it, and (strict) never
+    # overwrite it (gen 2 sidecar rule;
+    # 1014+17 S2 RUN: allow and revoke rewrote a version-99 file as version 2).
+    # No "version" key keeps the old reading: every release that wrote the
+    # file wrote one (1 from 0.9.16, 2 from 0.9.19), so only a hand-made file
+    # lacks it.
+    if isinstance(data, dict) and "version" in data:
+        version = data["version"]
+        if not (isinstance(version, int) and not isinstance(version, bool)
+                and version <= _TRUST_VERSION):
+            return untrusted(
+                f"written by a newer anneal-memory (version {version!r}, this "
+                f"release reads up to {_TRUST_VERSION}); upgrade anneal-memory"
+            )
     stores = data.get("stores") if isinstance(data, dict) else None
     if not isinstance(stores, list):
         return untrusted("has no 'stores' list")
@@ -1276,7 +1294,7 @@ def _write_trust(path: Path, stores: list[dict]) -> None:
     fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=".derive-trust.", suffix=".tmp")
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
-            json.dump({"version": 2, "stores": stores}, f, indent=2)
+            json.dump({"version": _TRUST_VERSION, "stores": stores}, f, indent=2)
             f.flush()
             os.fsync(f.fileno())
         os.chmod(tmp, 0o600)

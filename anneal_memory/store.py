@@ -350,6 +350,7 @@ StoreOperation = Literal[
     # File-write + integrity surfaces (10.5c.3 / 10.5c.4 / 10.5c.5)
     "save_continuity",
     "save_meta",
+    "load_meta",  # gen 2: a meta sidecar written by a newer anneal-memory
     "load_wrap_snapshot",
     "wrap_completed",
     # Two-phase commit tmp sidecar writes (10.5c.5 — pre-existing
@@ -684,6 +685,13 @@ def _reconstruct_store_error(
         path=path,
         cause_type_name=cause_type_name,
     )
+
+
+class _NewerSidecarError(StoreError):
+    """A store-attached sidecar was written by a newer anneal-memory
+    (:meth:`Store.load_meta`). A refusal, not an I/O failure: transports that
+    print ``StoreError`` as "store I/O failure" print this one's message as it
+    is. Still a :class:`StoreError`, so every existing handler catches it."""
 
 
 class StoreDatabaseError(StoreError):
@@ -1462,6 +1470,11 @@ _NEW_FORMAT_PAIR_ID_RE = re.compile(r"[0-9a-f]{12}-[0-9a-f]{8}")
 # (Phill 2026-10-13, "yes, let's have it in 1.0"); it changes no layout, it
 # arms the write guard below (tests/test_store.py, ``TestGenerationGuards``).
 _SCHEMA_VERSION = 2
+# The continuity meta sidecar's own ``format_version`` (every wrap writes it
+# from ``load_meta``'s defaults): ``load_meta`` refuses a greater one rather
+# than reading it as this format. A
+# change to the meta format raises this AND ``_SCHEMA_VERSION`` (rule above).
+_META_FORMAT_VERSION = 1
 # ⛔ THE SQL FUNCTION THE GENERATION GUARD CALLS (Phill 2026-10-03, "3A").
 # Every connection the package opens registers it (in :func:`connect`), returning
 # ``_SCHEMA_VERSION``. A store at generation N carries BEFORE INSERT/UPDATE/DELETE
@@ -9225,15 +9238,39 @@ class Store:
         return str(path)
 
     def load_meta(self) -> dict:
-        """Load continuity metadata from the JSON sidecar."""
-        defaults = {"sessions_produced": 0, "citations_seen": False, "format_version": 1}
+        """Load continuity metadata from the JSON sidecar.
+
+        A missing or unparseable sidecar reads as the defaults, as before.
+
+        Raises:
+            StoreError: ``.operation == "load_meta"`` when the sidecar's
+                ``format_version`` is an integer greater than
+                ``_META_FORMAT_VERSION``: it was written by a newer
+                anneal-memory. Never defaulted and never rewritten; the wrap
+                that would have saved it back is refused with nothing written
+                (gen 2 sidecar rule, 1014+17 S2 RUN: this release's wrap read a
+                ``format_version`` 99 sidecar as its own and wrote it back).
+        """
+        defaults = {"sessions_produced": 0, "citations_seen": False,
+                    "format_version": _META_FORMAT_VERSION}
         if not self.meta_path.exists():
             return defaults
         try:
             data = json.loads(self.meta_path.read_text(encoding="utf-8"))
-            return {**defaults, **data}
         except (json.JSONDecodeError, OSError):
             return defaults
+        found = data.get("format_version") if isinstance(data, dict) else None
+        if (isinstance(found, int) and not isinstance(found, bool)
+                and found > _META_FORMAT_VERSION):
+            raise _NewerSidecarError(
+                f"{self.meta_path} was written by a newer anneal-memory "
+                f"(continuity meta format_version {found} > {_META_FORMAT_VERSION}); "
+                "refusing to read it so fields this version does not understand "
+                "are not misread or dropped on the next wrap. Upgrade anneal-memory.",
+                operation="load_meta",
+                path=str(self.meta_path),
+            )
+        return {**defaults, **data}
 
     def save_meta(self, meta: dict) -> str:
         """Save continuity metadata. Atomic write.

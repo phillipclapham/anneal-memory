@@ -270,6 +270,23 @@ class _ManifestUnavailable(OSError):
     ``_ManifestQuarantined``."""
 
 
+class _ManifestNewer(_ManifestUnavailable):
+    """The manifest was written by a newer anneal-memory (its ``"version"`` is
+    an integer greater than ``_MANIFEST_VERSION``). UNAVAILABLE, never invalid:
+    it is not quarantined, not rewritten, and ``audit-repair`` refuses rather
+    than rebuild over it (gen 2 sidecar rule). Raised by
+    ``_parse_manifest_bytes``; an ``OSError``, so every caller that already
+    reads an unreadable manifest as unavailable reads this one the same way,
+    and none of the ``_UNPARSEABLE_JSON`` catches that lead to quarantine
+    take it."""
+
+
+# The manifest format this release writes and understands. A change to it
+# raises ``store._SCHEMA_VERSION`` too (one generation for the store and its
+# attached sidecars).
+_MANIFEST_VERSION = 1
+
+
 class _ManifestQuarantined(_ManifestUnavailable):
     """The manifest was invalid and is quarantined; only audit-repair clears it.
 
@@ -407,6 +424,17 @@ def _parse_manifest_bytes(raw: bytes, stem: str) -> dict[str, Any]:
     manifest = json.loads(raw.decode("utf-8"))
     if not isinstance(manifest, dict):
         raise TypeError(f"manifest root is {type(manifest).__name__}, not an object")
+    # ⛔ BEFORE ANY FIELD CHECK: a newer manifest whose fields this release
+    # would reject must read as newer, never as invalid, or the quarantine
+    # path renames it and audit-repair rebuilds a version-1 manifest over its
+    # history (1014+17 S2 RUN, reproduced on the gen-2 branch).
+    version = manifest.get("version")
+    if isinstance(version, int) and not isinstance(version, bool) and version > _MANIFEST_VERSION:
+        raise _ManifestNewer(
+            f"the audit manifest was written by a newer anneal-memory (version "
+            f"{version} > {_MANIFEST_VERSION}); it is left as it is. Upgrade "
+            "anneal-memory to read or repair this audit trail."
+        )
     for key in ("chain_anchor", "active_last_hash"):
         if key in manifest and not isinstance(manifest[key], str):
             raise TypeError(f"manifest field {key!r} is not a string")
@@ -1735,6 +1763,12 @@ class AuditTrail:
                         files_to_verify.append(fpath)
                     else:
                         missing_files.append(f["filename"])
+            except _ManifestNewer as e:
+                return AuditVerifyResult(
+                    valid=False, total_entries=0, files_verified=0,
+                    anchor_trusted=False,
+                    error=f"Manifest unavailable: {e}",
+                )
             except _CORRUPT_MANIFEST as e:
                 # OSError added round 6 (complement): the twin of cmd_audit's
                 # round-4 fix — a real read failure (permission, I/O) on
@@ -2045,6 +2079,17 @@ class AuditTrail:
                 error=f"Cannot list the audit directory: {e}; nothing was written.",
             )
 
+        # A marker skips the manifest read below and rebuilds over the path. A
+        # manifest a newer anneal saved there (a repair of its own that did not
+        # release the marker) is refused instead: never rebuilt over.
+        if markers:
+            try:
+                _parse_manifest_bytes(_read_regular_bytes(trail._manifest_path), stem)
+            except _ManifestNewer as e:
+                return AuditRepairResult(repaired=False, error=f"{e}; {nothing}")
+            except Exception:
+                pass  # absent or invalid: the rebuild below is what repairs it
+
         current: dict[str, Any] | None = None
         if not markers and trail._manifest_path.exists():
             try:
@@ -2152,7 +2197,7 @@ class AuditTrail:
                 )
 
         manifest: dict[str, Any] = {
-            "version": 1,
+            "version": _MANIFEST_VERSION,
             "db_path": db_path.name,
             "active_file": trail._active_path.name,
             "active_last_hash": records[-1]["last_hash"] if records else GENESIS_HASH,
@@ -4285,7 +4330,7 @@ class AuditTrail:
 
     def _fresh_manifest(self) -> dict[str, Any]:
         return {
-            "version": 1,
+            "version": _MANIFEST_VERSION,
             "db_path": self._db_path.name,
             "active_file": self._active_path.name,
             "active_last_hash": GENESIS_HASH,

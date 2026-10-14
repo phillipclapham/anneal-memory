@@ -43,6 +43,23 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
   rename, which a process creating the same timestamped name in between would lose.
 - Gen 2 changes no table or column. A store-attached file format change (continuity meta, audit manifest) raises the
   generation from here on, so this guard covers it.
+- **A sidecar written by a newer anneal-memory is refused, never read as this release's format.** Until now this
+  anneal wrote the version fields below and never read them back; it now checks each one. In the normal case the store's
+  own generation check refuses first; these catch a sidecar copied or left beside a store it does not match:
+  - Continuity meta (`<name>.continuity.meta.json`) with a `format_version` above 1: `save-continuity` (CLI and MCP)
+    fails with "written by a newer anneal-memory", nothing is written and the wrap stays open; `continuity --json`
+    and `export` fail the same way (plain `continuity` does not read the meta and still works). Before, a wrap read
+    the newer meta as its own and wrote it back.
+  - Audit manifest with a `version` above 1: treated as unavailable, never as corrupt. It is not quarantined and not
+    rewritten; `verify` reports "Manifest unavailable: ... written by a newer anneal-memory", `audit` shows the
+    active file only with that warning, and `audit-repair` refuses instead of rebuilding over it. Appends to an
+    active file that already has entries continue; an append that must read the manifest to start the file is
+    refused and counted as a dropped audit write. Before, a newer manifest this release could not parse was
+    quarantined on the next write and `audit-repair` rebuilt a version-1 manifest over it.
+  - `derive-trust.json` (per user, not per store) with a `version` that is not a whole number up to 2: re-derive
+    trusts nothing in it, and `derive allow` / `derive revoke` fail with "written by a newer anneal-memory" instead
+    of rewriting it. A file with no `version` reads as before. `crystal.json` and `spores.json` already refused a
+    newer `schema_version` and are unchanged.
 
 ### Changed — consolidation is the operator's act by default (KL-19)
 - ⚠ **Onboarding change.** A store created by `anneal-memory init`, or created fresh by the MCP server on its first

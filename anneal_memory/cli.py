@@ -63,6 +63,7 @@ from ._fsdir import _fsync_dir
 from .audit import (
     AuditTrail,
     _CORRUPT_MANIFEST as _CORRUPT_AUDIT_MANIFEST,
+    _ManifestNewer as _AuditManifestNewer,
     _UNPARSEABLE_JSON as _UNPARSEABLE_AUDIT_JSON,
     _iter_lines as _iter_audit_lines,
     _markers_in as _markers_in_audit,
@@ -143,6 +144,7 @@ from .store import (
     sqlite_path,
     Store,
     StoreDatabaseError,
+    _NewerSidecarError,
     _is_write_lock_contention,
     StoreError,
     WrapInProgressError,
@@ -792,6 +794,17 @@ def cmd_get(args: argparse.Namespace) -> None:
         print(episode.content)
 
 
+def _load_meta_or_exit(store: Store) -> dict:
+    """``store.load_meta()``, or a one-line refusal and exit 1 when the meta
+    sidecar was written by a newer anneal-memory (``_NewerSidecarError``, the
+    one ``StoreError`` it raises), instead of a traceback from a read command."""
+    try:
+        return store.load_meta()
+    except _NewerSidecarError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+
 def cmd_continuity(args: argparse.Namespace) -> None:
     """Print the current continuity file."""
     with _open_store(args) as store:
@@ -822,7 +835,7 @@ def cmd_continuity(args: argparse.Namespace) -> None:
             text = report.text
 
         if args.json:
-            meta = store.load_meta()
+            meta = _load_meta_or_exit(store)
             payload: dict[str, Any] = {
                 "text": text,
                 "chars": len(text),
@@ -1733,6 +1746,9 @@ def cmd_save_continuity(args: argparse.Namespace) -> None:
             print(f"Error: {exc}", file=sys.stderr)
             sys.exit(1)
         except StoreError as exc:
+            if isinstance(exc, _NewerSidecarError):  # a refusal, not an I/O failure
+                print(f"Error: {exc}", file=sys.stderr)
+                sys.exit(1)
             # Surface the structured I/O error with operation + path
             # context so operators see which file / what operation
             # failed rather than a Python traceback.
@@ -2501,7 +2517,7 @@ def cmd_export(args: argparse.Namespace) -> None:
                 ]
         supersessions = store.supersession_links()
         continuity = store.load_continuity()
-        meta = store.load_meta()
+        meta = _load_meta_or_exit(store)
         assoc_stats = store.association_stats()
 
         # Get all associations
@@ -3034,6 +3050,13 @@ def _read_audit_entries(
                     "read (it may have just been quarantined); sealed audit history is "
                     "omitted, showing the active file only."
                 )
+        except _AuditManifestNewer as e:
+            anchor_trusted = False
+            files_to_read = []
+            warnings.append(
+                f"Warning: {e} Sealed audit history is omitted, showing the "
+                "active file only."
+            )
         except _CORRUPT_AUDIT_MANIFEST:
             # codex (L3, round 3): silently degrading to "active file
             # only" presented an INCOMPLETE audit history as if it were

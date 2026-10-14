@@ -58,6 +58,7 @@ from .store import (
     StorePathError,
     Store,
     StoreDatabaseError,
+    _NewerSidecarError,
     _is_write_lock_contention,
     StoreError,
     WrapCancelBoundError,
@@ -872,6 +873,8 @@ class Server:
         except ValueError as exc:
             return _tool_result(f"Error: {exc}", is_error=True)
         except StoreError as exc:
+            if isinstance(exc, _NewerSidecarError):  # a refusal, not an I/O failure
+                return _tool_result(f"Error: {exc}", is_error=True)
             # Surface the structured I/O error with operation + path
             # context so the agent sees which file / what operation
             # failed rather than a bare traceback.

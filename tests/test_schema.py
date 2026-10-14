@@ -40,6 +40,15 @@ from anneal_memory.continuity import (
     validated_save_continuity,
 )
 from anneal_memory.graduation import extract_pattern_names
+from anneal_memory.store import register_writer_schema
+
+
+def _wconnect(*args, **kwargs):
+    """A raw writer fixture: the gen-2 guard triggers need the writer-schema function."""
+    conn = sqlite3.connect(*args, **kwargs)
+    register_writer_schema(conn)
+    return conn
+
 from anneal_memory.types import EpisodeType
 
 
@@ -372,7 +381,7 @@ class TestStoreSectionSchema:
         s = Store(p, section_schema=FLOW_SCHEMA)
         s.close()
         # Simulate a pre-0.3.4 store: drop the metadata key entirely.
-        conn = sqlite3.connect(p)
+        conn = _wconnect(p)
         conn.execute("DELETE FROM metadata WHERE key='section_schema'")
         conn.commit()
         conn.close()
@@ -385,7 +394,7 @@ class TestStoreSectionSchema:
     def test_corrupt_schema_falls_back_not_crash(self, tmp_path):
         p = str(tmp_path / "m.db")
         Store(p).close()
-        conn = sqlite3.connect(p)
+        conn = _wconnect(p)
         conn.execute(
             "INSERT OR REPLACE INTO metadata (key, value) VALUES "
             "('section_schema', '{not valid json')"

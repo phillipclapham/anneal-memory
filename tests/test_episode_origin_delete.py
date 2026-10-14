@@ -9,6 +9,15 @@ import unittest
 from pathlib import Path
 
 from anneal_memory import Store
+from anneal_memory.store import register_writer_schema
+
+
+def _wconnect(*args, **kwargs):
+    """A raw writer fixture: the gen-2 guard triggers need the writer-schema function."""
+    conn = sqlite3.connect(*args, **kwargs)
+    register_writer_schema(conn)
+    return conn
+
 from anneal_memory.store import (
     StoreError,
     _EPISODE_VERSION_COVERED,
@@ -39,7 +48,7 @@ class _Case(unittest.TestCase):
         self._tmp.cleanup()
 
     def raw(self) -> sqlite3.Connection:
-        c = sqlite3.connect(self.path)
+        c = _wconnect(self.path)
         self._conns.append(c)
         return c
 

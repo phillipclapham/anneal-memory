@@ -1455,28 +1455,97 @@ RecoveryVerdict = Literal[
 # ``debris`` (→ a suggested ``rm``). structural_invariants_beat_discipline (L2 L4).
 _NEW_FORMAT_PAIR_ID_RE = re.compile(r"[0-9a-f]{12}-[0-9a-f]{8}")
 
-# Schema version — increment on breaking changes
-_SCHEMA_VERSION = 1
-# ⛔ THE SQL FUNCTION A FUTURE SCHEMA BUMP'S WRITE GUARD CALLS (Phill 2026-10-03).
-# Every connection registers it, returning ``_SCHEMA_VERSION``. The first migration that
-# raises ``_SCHEMA_VERSION`` installs BEFORE INSERT/UPDATE/DELETE triggers that
-# ``RAISE(ABORT, ...)`` when this function is below the stamped
-# ``format_version``, so a process that opened the store before that migration
-# is refused inside its own write transaction instead of writing an older-schema
-# row. A release that does not register it fails those triggers with "no such
-# function", which also refuses. No trigger is installed at schema 1 (asserted
-# in tests/test_store.py, ``TestTheWriterSchemaFunctionLetsABumpRefuseOpenWriters``).
+# The store's schema GENERATION. One number for the database and every
+# store-attached sidecar (continuity meta, audit manifest): a format change to
+# any of them raises it (docs/stability.md). Generation 2 is the 1.0 store
+# (Phill 2026-10-13, "yes, let's have it in 1.0"); it changes no layout, it
+# arms the write guard below (tests/test_store.py, ``TestGenerationGuards``).
+_SCHEMA_VERSION = 2
+# ⛔ THE SQL FUNCTION THE GENERATION GUARD CALLS (Phill 2026-10-03, "3A").
+# Every connection the package opens registers it (in :func:`connect`), returning
+# ``_SCHEMA_VERSION``. A store at generation N carries BEFORE INSERT/UPDATE/DELETE
+# triggers on every table that ``RAISE(ABORT, ...)`` when this function returns
+# less than N, so a process that opened the store before it was migrated is
+# refused inside its own write transaction. A release that never registered it
+# (before 0.9.24) fails the same triggers with "no such function", which also
+# refuses.
 _WRITER_SCHEMA_FUNCTION = "anneal_writer_schema"
+# Guard trigger names are ``anneal_gen<N>_guard_<table>_<op>``; the generation is
+# in the name so a later migration can tell its own guards from stale ones.
+_GEN_GUARD_NAME_RE = re.compile(r"anneal_gen(\d+)_guard_.+_(insert|update|delete)")
+_GEN_GUARD_OPS = ("INSERT", "UPDATE", "DELETE")
+# Generation 1 (every release through 0.9.x) never carried guards, so a store at
+# generation 1 has none: what a test builds by simulating generation 1 is then
+# exactly what those releases left on disk.
+_FIRST_GUARDED_GENERATION = 2
 
 
 def register_writer_schema(conn: sqlite3.Connection) -> None:
-    """Register ``_WRITER_SCHEMA_FUNCTION`` on ``conn``. Every connection that
-    writes a store calls this, ``Store``'s own and any opened directly (L3 r1
-    10-03, codex + complement: the CLI's store-id mint wrote ``metadata`` on a
-    raw connection that would fail the bump's trigger at a matching schema)."""
+    """Register ``_WRITER_SCHEMA_FUNCTION`` on ``conn``. :func:`connect` calls
+    it on every connection it returns, so no call site can forget it (L3 r1
+    10-03, codex + complement: the CLI's store-id mint once wrote ``metadata``
+    on a raw connection that lacked it). Exported for hosts that open a store
+    with plain ``sqlite3`` and must write to it."""
     conn.create_function(
         _WRITER_SCHEMA_FUNCTION, 0, lambda: _SCHEMA_VERSION, deterministic=True,
     )
+
+
+def _gen_guard_sql(table: str, op: str, generation: int) -> tuple[str, str]:
+    """(name, CREATE TRIGGER statement) for one generation guard.
+
+    ⛔ THE GENERATION IS A LITERAL, NOT A READ OF ``format_version``. The 10-03
+    prototype compared against ``CAST(value AS INTEGER)`` of the marker: a
+    second parser of the marker in a second language (the defect
+    ``_parse_format_version`` exists to prevent), under which a garbled marker
+    casts to 0 and disarms the guard. The literal and the stamp are written in
+    one transaction by :meth:`Store._init_schema_locked`."""
+    name = f"anneal_gen{generation}_guard_{table}_{op.lower()}"
+    quoted = '"' + table.replace('"', '""') + '"'
+    message = (
+        f"anneal-memory: this store is schema generation {generation} and this "
+        "process writes an older generation; upgrade anneal-memory"
+    )
+    sql = (
+        f'CREATE TRIGGER "{name}" BEFORE {op} ON {quoted} BEGIN '
+        f"SELECT RAISE(ABORT, '{message}') "
+        f"WHERE {_WRITER_SCHEMA_FUNCTION}() < {int(generation)}; END"
+    )
+    return name, sql
+
+
+def _install_generation_guards(
+    conn: sqlite3.Connection, generation: int | None = None,
+) -> None:
+    """Make every table carry exactly this generation's three guards
+    (``generation`` defaults to ``_SCHEMA_VERSION`` read at call time).
+
+    Runs inside the caller's transaction and never commits. Tables are read
+    from ``sqlite_master`` after all DDL, so a table a later release adds is
+    guarded from its first write-capable open. Guards of any other generation
+    are dropped (a migration replaces the previous generation's)."""
+    if generation is None:
+        generation = _SCHEMA_VERSION
+    tables = [] if generation < _FIRST_GUARDED_GENERATION else [
+        row[0] for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table' "
+            "AND name NOT LIKE 'sqlite\\_%' ESCAPE '\\'"
+        )
+    ]
+    want = dict(
+        _gen_guard_sql(table, op, generation)
+        for table in tables for op in _GEN_GUARD_OPS
+    )
+    have = {
+        row[0] for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'trigger'"
+        )
+        if _GEN_GUARD_NAME_RE.fullmatch(row[0])
+    }
+    for name in sorted(have - want.keys()):
+        conn.execute(f'DROP TRIGGER IF EXISTS "{name}"')
+    for name in sorted(want.keys() - have):
+        conn.execute(want[name])
 
 def _sql_statements(script: str) -> list[str]:
     """Split a DDL script into individual statements.
@@ -2257,8 +2326,13 @@ def connect(
                 f"Database path {target!r} is not valid UTF-8; it cannot be opened as an "
                 "existing-only database. Rename it to a UTF-8 name."
             ) from None
-        return sqlite3.connect(_existing_file_uri(full, "ro" if read_only else "rw"), uri=True, **kwargs)
-    return sqlite3.connect(target, **kwargs)
+        conn = sqlite3.connect(_existing_file_uri(full, "ro" if read_only else "rw"), uri=True, **kwargs)
+    else:
+        conn = sqlite3.connect(target, **kwargs)
+    # Every connection, read-only included (harmless there): a write through
+    # one that lacked it fails a migrated store's generation guards.
+    register_writer_schema(conn)
+    return conn
 
 
 def _existing_file_uri(abs_path: str, mode: str = "rw") -> str:
@@ -2567,7 +2641,6 @@ class Store:
             with self._db_boundary("schema_init"):
                 self._conn = connect(self._path)
                 self._conn.row_factory = sqlite3.Row
-                register_writer_schema(self._conn)
                 # ⛔ FIRST, BEFORE EVERY PERSISTENT WRITE — INCLUDING THE
                 # PRAGMAS. This used to sit just above ``_init_schema``, on the
                 # reasoning that schema init is what mutates the database.
@@ -2698,26 +2771,16 @@ class Store:
         cannot run inside a transaction, so the lock cannot be taken before
         it.
 
-        ⛔ WHAT THIS LOCK DOES **NOT** COVER, STATED SO IT IS NOT INFERRED
-        (codex L3 HIGH, 2026-09-06). It makes OPEN-TIME atomic. It says
-        nothing about a handle that is ALREADY OPEN. Process A opens under
-        generation 1 and goes idle; B opens, migrates, stamps 2 and releases
-        this lock; A then calls ``record()`` or any other writer WITHOUT
-        rechecking the marker, and writes generation-1-shaped data into a
-        generation-2 schema. Under a breaking migration that is silent
-        defaulting or a runtime SQL failure.
-        ⚠ Reading "the check and the migrations are one locked step" as "an
-        older binary can no longer write to a migrated store" is a TRUE
-        statement standing in for a different question — the same shape as the
-        create-time ``format_version`` stamp this guard family already got
-        wrong once. The honest scope is: **open-time, not lifetime.**
-        ▶ NOT BUILT, DELIBERATELY. Closing it means revalidating the
-        generation inside every write transaction — a read per write, on a
-        hazard that requires a BREAKING migration to matter, and
-        ``_SCHEMA_VERSION`` has only ever been 1. It is forward-looking like
-        the rest of this family. Routed rather than built; if a second
-        generation is ever introduced, this becomes a release blocker and must
-        be built WITH it, not after.
+        ⛔ THIS LOCK MAKES OPEN-TIME ATOMIC; IT SAYS NOTHING ABOUT A HANDLE
+        THAT IS ALREADY OPEN (codex L3 HIGH, 2026-09-06). Process A opens
+        under generation 1 and goes idle; B opens, migrates, stamps 2 and
+        releases this lock; A then calls ``record()`` without rechecking the
+        marker. The already-open handle is refused by the GENERATION GUARDS,
+        not by this lock: triggers on every table that compare
+        ``anneal_writer_schema()`` with the store's generation inside A's own
+        write statement (:func:`_install_generation_guards`, installed with
+        the stamp below in this one transaction; spore-846 made them a release
+        blocker for the first second generation, which is 2).
 
         ⚠ THIS TAKES THE WRITE LOCK EARLIER THAN BEFORE, AND THAT IS NOT A
         NEW FAILURE MODE — MEASURED 2026-09-06. Opening a write-capable store
@@ -2781,6 +2844,12 @@ class Store:
         # Re-check UNDER the lock. This is the call that makes the sequence
         # atomic; see the docstring above for why the __init__ call stays too.
         self._refuse_a_newer_schema()
+        # COPY FIRST, before this transaction changes anything: a store that
+        # exists at an older generation is backed up whole before it migrates.
+        # Under the lock, so no writer lands between the copy and the change.
+        before = self._stamped_generation()
+        if before is not None and before < _SCHEMA_VERSION:
+            self._copy_before_migration(before)
         for script in (
             _SCHEMA_SQL,
             _ASSOCIATIONS_SCHEMA_SQL,
@@ -2802,7 +2871,13 @@ class Store:
         self._migrate_episode_origin_key(commit=False)
 
         # Insert default metadata (ignore if already exists)
-        defaults = {**_DEFAULT_METADATA, "project_name": self._project_name}
+        # format_version read now, not from the import-time dict, so the
+        # stamped generation and the guards' literal come from one value.
+        defaults = {
+            **_DEFAULT_METADATA,
+            "project_name": self._project_name,
+            "format_version": str(_SCHEMA_VERSION),
+        }
         for key, value in defaults.items():
             self._conn.execute(
                 "INSERT OR IGNORE INTO metadata (key, value) VALUES (?, ?)",
@@ -2883,6 +2958,9 @@ class Store:
         # check-then-act and needs a CAS on the exact raw value instead.
         # ⚠ It still no-ops when the marker is already current, which was the
         # point of the original predicate.
+        # The generation guards go in with the stamp, in this one transaction,
+        # after every DDL statement above so every table is covered.
+        _install_generation_guards(self._conn)
         stamped = self._conn.execute(
             "SELECT value FROM metadata WHERE key = 'format_version'"
         ).fetchone()
@@ -9588,6 +9666,79 @@ class Store:
                 operation="schema_init",
                 path=str(self._path),
             )
+
+    def _stamped_generation(self) -> int | None:
+        """The stamped ``format_version`` read with the one parser, or None
+        for a brand-new database (no metadata table or no row) or a garbled
+        marker. Called under ``_init_schema``'s lock."""
+        try:
+            row = self._conn.execute(
+                "SELECT value FROM metadata WHERE key = 'format_version'"
+            ).fetchone()
+        except sqlite3.OperationalError as exc:
+            if "no such table" in str(exc).lower():
+                return None
+            raise
+        return None if row is None else _parse_format_version(row["value"])
+
+    def _copy_before_migration(self, generation: int) -> None:
+        """Back the whole database up beside itself before it migrates from
+        ``generation``. Called under ``_init_schema``'s ``BEGIN IMMEDIATE``
+        before this transaction has changed anything, so the copy is the
+        committed store as it stood. Never overwrites; never deleted by
+        anneal. A copy that cannot be made aborts the migration (the store
+        stays at ``generation``, untouched) and the open raises."""
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+        target = self._path.with_name(f"{self._path.name}.gen{generation}-{stamp}.bak")
+        if os.path.lexists(target):
+            raise StoreError(
+                f"{self._path}: the pre-migration copy {target.name} already "
+                "exists; not overwriting it. Nothing was migrated.",
+                operation="schema_init", path=str(self._path),
+            )
+        # ⛔ A SECOND CONNECTION READS THE COPY; ``self._conn.backup`` HANGS.
+        # MEASURED 2026-10-14: a backup whose source is the connection holding
+        # this BEGIN IMMEDIATE never completes (Python retries the locked
+        # source forever). A separate reader is not blocked by our RESERVED
+        # lock, sees exactly the committed store (this transaction has written
+        # nothing yet), and no third writer can commit meanwhile; the copy was
+        # whole in both WAL and rollback-journal mode, against a store a real
+        # 0.9.43 wrote.
+        src: sqlite3.Connection | None = None
+        dst: sqlite3.Connection | None = None
+        try:
+            src = connect(self._path, must_exist=True, timeout=30.0)
+            src.execute("PRAGMA query_only=ON")
+            dst = connect(target)
+            src.backup(dst)
+            dst.close()
+            dst = None
+            src.close()
+            src = None
+            fd = os.open(target, os.O_RDONLY)
+            try:
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+            _fsync_dir(target.parent)
+        except (OSError, sqlite3.Error) as exc:
+            for c in (dst, src):
+                if c is not None:
+                    try:
+                        c.close()
+                    except sqlite3.Error:
+                        pass
+            try:
+                os.unlink(target)
+            except OSError:
+                pass
+            raise StoreError(
+                f"{self._path}: could not copy the store before migrating it "
+                f"from schema generation {generation} to {_SCHEMA_VERSION} "
+                f"({exc}); nothing was migrated. Free space or fix permissions "
+                "beside the database and open it again.",
+                operation="schema_init", path=str(self._path),
+            ) from exc
 
     def _record_prune_failure(self, detail: str) -> None:
         """Count a post-commit auto-prune failure so ``status()`` can see it.

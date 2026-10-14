@@ -4,6 +4,10 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
 
 ## [Unreleased]
 
+## [1.0.0rc2] — 2026-10-14
+
+Second release candidate for 1.0.0: three findings of the rc1 review fixed. Pre-releases are not installed by default (`pip install --pre anneal-memory`).
+
 ### Fixed — three findings of the rc1 whole-diff review (Phill 10-14: "fix the HIGH and MEDs 2 and 4")
 - **A new store's consolidate-baton policy is written in the transaction that creates its schema.** New
   `Store(..., consolidate_requires_baton_on_create=True)`, which `init` and `serve` now use. In rc1 the policy was a
@@ -181,7 +185,7 @@ Release candidate for 1.0.0: the API freeze, schema generation 2, the erasure fi
   config, not a conversation. An MCP server does not register as a live session (closing one would release the
   operator's claim), so a refused server's message calls the holder `stale-baton-holder` and counts 0 live sessions
   even while that server runs. `baton` opens the store write-capable, so it can wait on a peer's write lock. (The
-  edge listed here in rc1, a policy set in a second transaction after creation, is fixed in [Unreleased].) A server started without
+  edge listed here in rc1, a policy set in a second transaction after creation, is fixed in 1.0.0rc2.) A server started without
   `--session-id` still accepts `session_id` on `wrap_cancel` (the 0.9.22 contract), which can discard another
   session's in-flight compression but never consolidates; a server with an id cancels a same-id wrap the operator
   prepared from the CLI, since the id designates the client.

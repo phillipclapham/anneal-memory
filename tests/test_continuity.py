@@ -4170,8 +4170,8 @@ class TestMove4LibraryLayerIntegration:
             store.close()
 
     def test_save_lists_contradictions_and_records_the_wrap_row(self, tmp_path):
-        """The save result lists declared contradictions, and the wraps row keeps the
-        saved text, the unattended mark and the model (dreaming primitives, Phill 10-14)."""
+        """The save result lists declared contradictions, and the wraps row records the
+        unattended mark and the model (dreaming primitives, Phill 10-14)."""
         from anneal_memory import Store, prepare_wrap, validated_save_continuity
 
         store = Store(tmp_path / "store.db", project_name="DreamPrims")
@@ -4211,11 +4211,9 @@ class TestMove4LibraryLayerIntegration:
                 {"pattern": "beta", "contradicts": ["old"]},
             ]
             row = store._conn.execute(
-                "SELECT continuity_text, unattended, model FROM wraps"
+                "SELECT unattended, model FROM wraps"
             ).fetchone()
             assert row["unattended"] == 1 and row["model"] == "test-model"
-            assert "opposes_old" in row["continuity_text"]
-            assert len(row["continuity_text"]) == result["chars"]
         finally:
             store.close()
 

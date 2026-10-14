@@ -6441,7 +6441,7 @@
     },
     "wrap_completed": {
      "kind": "method",
-     "signature": "(self, episodes_compressed: 'int', continuity_chars: 'int', graduations_validated: 'int' = 0, graduations_demoted: 'int' = 0, citation_reuse_max: 'int' = 0, patterns_extracted: 'int' = 0, associations_formed: 'int' = 0, associations_strengthened: 'int' = 0, associations_decayed: 'int' = 0, section_sizes: 'dict[str, int] | None' = None, *, episode_ids: 'list[str] | None' = None, wrap_token: 'str | None' = None, content_hash: 'str | None' = None, pair_id: 'str | None' = None, continuity_text: 'str | None' = None, unattended: 'bool' = False, model: 'str | None' = None) -> 'WrapResult'"
+     "signature": "(self, episodes_compressed: 'int', continuity_chars: 'int', graduations_validated: 'int' = 0, graduations_demoted: 'int' = 0, citation_reuse_max: 'int' = 0, patterns_extracted: 'int' = 0, associations_formed: 'int' = 0, associations_strengthened: 'int' = 0, associations_decayed: 'int' = 0, section_sizes: 'dict[str, int] | None' = None, *, episode_ids: 'list[str] | None' = None, wrap_token: 'str | None' = None, content_hash: 'str | None' = None, pair_id: 'str | None' = None, unattended: 'bool' = False, model: 'str | None' = None) -> 'WrapResult'"
     },
     "wrap_derive_roots": {
      "kind": "method",

@@ -2719,7 +2719,7 @@ def validated_save_continuity(
 
     ``unattended`` and ``model`` are recorded on the wrap's row (an unattended
     consolidation names itself and the model that composed it); they change
-    nothing about validation. The row also keeps the saved text.
+    nothing about validation.
 
     **This is the canonical save_continuity pipeline.** The MCP server and
     the ``save-continuity`` CLI subcommand both call this function — they
@@ -3632,7 +3632,6 @@ def validated_save_continuity(
                 # Layer 1 L3 flagged as a TOCTOU-within-TOCTOU-fix
                 # pattern.
                 wrap_token=snapshot["token"],
-                continuity_text=grad_result.text,
                 unattended=unattended,
                 model=model,
                 # AM-SNAPSHOT ① durable recovery oracle: persist the content

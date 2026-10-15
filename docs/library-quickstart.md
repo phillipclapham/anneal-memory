@@ -371,5 +371,5 @@ If you need the live exception object (for `errno` access or sqlite3 extended er
 
 - **Framework integration:** See [integration guides](integrations/) for LangGraph, CrewAI, OpenAI Agents SDK, and 9 more frameworks
 - **MCP setup:** See the [README](../README.md#mcp-server) for editor configuration
-- **CLI usage:** See [`examples/agent-instructions.cli.example`](../examples/agent-instructions.cli.example) for the full agent workflow
+- **CLI usage:** See [`examples/agent-instructions.lean.cli.example`](../examples/agent-instructions.lean.cli.example) for the full agent workflow
 - **Session hygiene:** See the [README](../README.md#session-hygiene) for why wraps matter

@@ -18,13 +18,13 @@ For the Agent SDK: `pip install claude-agent-sdk`
 
 This is the simplest and most battle-tested integration. Copy the agent-instructions snippet into your project's `CLAUDE.md`, configure anneal-memory as an MCP server or CLI tool, and the agent follows the workflow automatically.
 
-**For MCP (editors like Claude Code, Cursor):**
+**For MCP (Claude Code):**
 1. Add anneal-memory to your MCP config (see [README](../../README.md#mcp-server))
-2. Copy [`examples/agent-instructions.example`](../../examples/agent-instructions.example) into your project's `CLAUDE.md`
+2. Copy [`examples/agent-instructions.lean.example`](../../examples/agent-instructions.lean.example) into your project's `CLAUDE.md`
 
 **For CLI (agents with shell access):**
 1. `pip install anneal-memory`
-2. Copy [`examples/agent-instructions.cli.example`](../../examples/agent-instructions.cli.example) into your project's `CLAUDE.md`
+2. Copy [`examples/agent-instructions.lean.cli.example`](../../examples/agent-instructions.lean.cli.example) into your project's `CLAUDE.md`
 
 The snippet teaches the agent:
 - When to record episodes (during work, at meaningful moments)

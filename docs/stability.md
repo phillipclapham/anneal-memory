@@ -38,7 +38,7 @@ The first deprecation is `allow_unlinked` (the `allow_unlinked` argument of `val
 
 ## On-disk format
 
-This section states what 1.0 will promise. It takes effect when the schema generation 2 migration lands, and it is not true of earlier releases.
+This section states what 1.0 promises. It holds from schema generation 2, which 1.0.0rc1 introduced; the 0.9.x releases (generation 1) do not keep it.
 
 - A store written by any release from 0.9.x on opens under 1.x without operator action.
 - The migration is forward-only, additive and idempotent, and it copies the database before changing it.

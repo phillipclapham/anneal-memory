@@ -4,6 +4,21 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
 
 ## [Unreleased]
 
+### Fixed
+- **An open no longer strips the guards a newer release of the same generation put on a table it added.** rc2 dropped
+  every generation guard on a table off `_ANNEAL_TABLES` at every open, to remove the guards rc1 put on a host's
+  tables. A later 1.x that adds a table without raising the generation guards that table too, and the two look the
+  same, so each rc2 open disarmed the newer table and each newer open after it made another full `.bak` copy that is
+  never deleted. Measured with a simulated 1.1 that adds one table, alternating opens three times: under rc2 the
+  table's guards went 3, 0, 3, 0, 3, 0 and the copies 0, 0, 1, 1, 2, 2; under this release the guards stay at 3 and
+  no copy is made. The drop now runs once per store, while the new `metadata` key `host_guard_cleanup_done` is
+  absent, and sets that key in the same transaction; an rc1 store's host-table guards are still removed at its first
+  open. After that, a guard of this generation on a table this release does not know is left alone. rc2 itself
+  keeps the old rule, so a store shared with an rc2 process still loses those guards at each rc2 open.
+- The `Store` docstring for `keep_tombstones` said the tombstone keeps a "SHA-256 content hash"; since 1.0.0rc1 it
+  is an HMAC keyed by the store's salt (`hmac-sha256:...`). `docs/stability.md` said the on-disk promise "will"
+  take effect; it has held since 1.0.0rc1.
+
 ## [1.0.0rc2] — 2026-10-14
 
 Second release candidate for 1.0.0: three findings of the rc1 review fixed. Pre-releases are not installed by default (`pip install --pre anneal-memory`).

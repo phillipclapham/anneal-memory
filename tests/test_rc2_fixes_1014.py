@@ -192,6 +192,65 @@ class TestGenerationGuardsCoverOnlyAnnealTables:
         finally:
             conn.close()
 
+    @staticmethod
+    def _guards_on(db: Path, table: str) -> int:
+        conn = sqlite3.connect(str(db))
+        try:
+            return conn.execute(
+                "SELECT count(*) FROM sqlite_master WHERE type = 'trigger' "
+                "AND tbl_name = ? AND name LIKE 'anneal\\_gen%' ESCAPE '\\'", (table,),
+            ).fetchone()[0]
+        finally:
+            conn.close()
+
+    def test_a_newer_same_generation_tables_guards_survive_this_releases_open(self, tmp_path, monkeypatch):
+        # diogenes 10-15, reproduced: a later release of this generation that
+        # adds table foo guards it; this release's open stripped those guards,
+        # and every later newer open then copied the store again.
+        db = tmp_path / "m.db"
+        newer_sql = store_mod._SCHEMA_SQL + "\nCREATE TABLE IF NOT EXISTS foo (x INTEGER);\n"
+        for _ in range(3):
+            with monkeypatch.context() as m:
+                m.setattr(store_mod, "_ANNEAL_TABLES", store_mod._ANNEAL_TABLES | {"foo"})
+                m.setattr(store_mod, "_SCHEMA_SQL", newer_sql)
+                Store(db).close()
+            assert self._guards_on(db, "foo") == 3
+            Store(db).close()
+            assert self._guards_on(db, "foo") == 3
+        assert [p.name for p in tmp_path.iterdir() if p.name.endswith(".bak")] == []
+
+    def test_an_rc1_host_table_guard_is_dropped_once_and_the_marker_set(self, tmp_path):
+        db = tmp_path / "m.db"
+        Store(db).close()
+
+        def plant(*, as_rc1: bool) -> None:
+            conn = sqlite3.connect(str(db))
+            store_mod.register_writer_schema(conn)
+            conn.execute("CREATE TABLE IF NOT EXISTS host_notes (x INTEGER)")
+            for op in store_mod._GEN_GUARD_OPS:
+                conn.execute(store_mod._gen_guard_sql("host_notes", op, store_mod._SCHEMA_VERSION)[1])
+            if as_rc1:  # a store rc1 or rc2 last wrote never carried the marker
+                conn.execute("DELETE FROM metadata WHERE key = ?", (store_mod._HOST_GUARD_CLEANUP_KEY,))
+            conn.commit()
+            conn.close()
+
+        plant(as_rc1=True)
+        assert self._guards_on(db, "host_notes") == 3
+        Store(db).close()
+        assert self._guards_on(db, "host_notes") == 0
+        conn = sqlite3.connect(str(db))
+        try:
+            assert conn.execute(
+                "SELECT value FROM metadata WHERE key = ?", (store_mod._HOST_GUARD_CLEANUP_KEY,)
+            ).fetchone() == ("1",)
+        finally:
+            conn.close()
+        # once: after the cleanup, a guard of this generation on a table this
+        # release does not know is some newer release's, and is left alone
+        plant(as_rc1=False)
+        Store(db).close()
+        assert self._guards_on(db, "host_notes") == 3
+
     def test_every_table_a_new_store_creates_is_on_the_guard_list(self, tmp_path):
         # The list is explicit, so a table a later release adds must be added
         # to it; this fails until it is, rather than the table going unguarded.

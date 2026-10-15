@@ -1494,6 +1494,9 @@ _GEN_GUARD_OPS = ("INSERT", "UPDATE", "DELETE")
 # generation 1 has none: what a test builds by simulating generation 1 is then
 # exactly what those releases left on disk.
 _FIRST_GUARDED_GENERATION = 2
+# Present in ``metadata`` once the one-shot drop of off-list guards has run on
+# a store (see :func:`_install_generation_guards`).
+_HOST_GUARD_CLEANUP_KEY = "host_guard_cleanup_done"
 # The tables the guards cover: anneal's own physical tables, by name. A host's
 # table in the same file (an FTS5 index and its shadow tables, say) is the
 # host's: SQLite refuses a trigger on a virtual table, which failed every
@@ -1621,11 +1624,21 @@ def _install_generation_guards(
     ``_SCHEMA_VERSION`` read at call time).
 
     Runs inside the caller's transaction and never commits. Tables are read
-    from ``sqlite_master`` after all DDL. A guard on a table off the list (one
-    an earlier release put on a host's table) is dropped. Guards of an OLDER generation
-    are dropped (a migration replaces them); a guard whose SQL is not exactly
-    this generation's is recreated, so a name alone never counts as a guard
-    (L3 r1 10-14, codex: a same-named no-op trigger was trusted).
+    from ``sqlite_master`` after all DDL. Guards of an OLDER generation are
+    dropped (a migration replaces them); a guard on a listed table whose SQL is
+    not exactly this generation's is recreated, so a name alone never counts as
+    a guard (L3 r1 10-14, codex: a same-named no-op trigger was trusted).
+
+    A guard of THIS generation on a table off the list is dropped ONCE per
+    store, while ``_HOST_GUARD_CLEANUP_KEY`` is absent from ``metadata``, and
+    the key is written in this same transaction. 1.0.0rc1 put guards on a
+    host's tables; a later release of this generation that adds a table puts
+    the same-named guards on a table this release does not know, and the two
+    cannot be told apart. Dropping on every open stripped the newer release's
+    guards and made it copy the store again on each of its next opens
+    (diogenes 10-15, measured; Phill ruled option (a) 10-15). After the one
+    cleanup such a guard is left alone: it belongs to whichever release named
+    the table.
 
     ⛔ A NEWER generation's guard is never dropped: it raises ``StoreError``.
     The marker check can be skipped (a garbled or missing marker opens), so the
@@ -1641,12 +1654,32 @@ def _install_generation_guards(
             f"generation {generation}. Upgrade anneal-memory.",
             operation="schema_init",
         )
+    if generation < _FIRST_GUARDED_GENERATION:
+        cleanup_pending = False  # no guards exist to clean, and none to mark
+    else:
+        cleanup_pending = conn.execute(
+            "SELECT 1 FROM metadata WHERE key = ?", (_HOST_GUARD_CLEANUP_KEY,),
+        ).fetchone() is None
+    off_list = {
+        name for name, table in conn.execute(
+            "SELECT name, tbl_name FROM sqlite_master WHERE type = 'trigger'"
+        ) if table.lower() not in _ANNEAL_TABLES
+    }
     for name in sorted(have):
-        if want.get(name) != have[name]:
-            conn.execute(f'DROP TRIGGER IF EXISTS "{name}"')
+        if want.get(name) == have[name]:
+            continue
+        this_generation = int(_GEN_GUARD_NAME_RE.fullmatch(name).group(1)) == generation
+        if this_generation and name in off_list and not cleanup_pending:
+            continue
+        conn.execute(f'DROP TRIGGER IF EXISTS "{name}"')
     for name in sorted(want):
         if have.get(name) != want[name]:
             conn.execute(want[name])
+    if cleanup_pending:
+        conn.execute(
+            "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, '1')",
+            (_HOST_GUARD_CLEANUP_KEY,),
+        )
 
 def _sql_statements(script: str) -> list[str]:
     """Split a DDL script into individual statements.
@@ -2559,7 +2592,8 @@ class Store:
         path: Path to the SQLite database file. Created if it doesn't exist.
         retention_days: Optional. Prune episodes older than N days. None = keep all.
         keep_tombstones: When pruning or deleting, preserve a tombstone row
-            (episode ID, original timestamp, episode type, SHA-256 content hash)
+            (episode ID, original timestamp, episode type, and a content hash
+            keyed by the store's salt, ``hmac-sha256:...``; see :meth:`delete`)
             as an existence proof for the audit trail. Original text is erased.
             Default True. Either way, an imported team entry's ledger id and hash
             stay in ``team_entries`` (see :meth:`import_team_entries`).

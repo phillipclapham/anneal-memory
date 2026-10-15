@@ -844,9 +844,10 @@ class CrystalStore:
         name, and does not undo :meth:`retire`.
 
         It reverts the named patterns to the snapshot and discards any change made to
-        those names since, by anyone. The caller owns that exclusivity for the span
-        between :meth:`snapshot` and :meth:`restore` (in a wrap, the consolidate
-        baton). On a store file that did not exist it creates the file, empty.
+        those names since, by anyone; a writer that adds or removes other rows in the
+        same span can also shift where a restored row lands. The caller owns the
+        store's exclusivity for the span between :meth:`snapshot` and :meth:`restore`
+        (in a wrap, the consolidate baton). On a store file that did not exist it creates the file, empty.
 
         Raises ``TypeError`` for anything that is not a :class:`CrystalSnapshot`, and
         ``ValueError`` for a snapshot taken from a different store file."""

@@ -10,7 +10,8 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
   a caller that crystallizes as one step of a larger operation and must put the store back when a later step fails.
   It is scoped to the names, not the file, so a pattern another writer crystallized in between survives; a name
   ends up in one place only, and the order of the retired list is kept. It reverts the named patterns to the snapshot
-  and discards any change made to those names since, so the caller owns their exclusivity (in a wrap, the baton). A
+  and discards any change made to those names since, so the caller owns the store's exclusivity for that span (in a
+  wrap, the baton); a concurrent writer can also shift where a restored row lands. A
   snapshot restores only into the store it came from. It does not undo `retire()`.
 - Public names promoted into `anneal_memory.__all__` that flow called from submodules: `trusted_roots`,
   `trust_file_path`, `TRUST_ENV` and `VISIBILITIES` (from `rederive`; `TRUST_ENV` names the environment variable that

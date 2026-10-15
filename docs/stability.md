@@ -24,10 +24,10 @@ Anything not listed here can change in any release.
 A public name, flag or field is deprecated before it is removed:
 
 1. It stays working for at least one MINOR release after the deprecation is announced.
-2. Using it raises a `DeprecationWarning`, and the [CHANGELOG](../CHANGELOG.md) has a line that names the replacement.
+2. Using it emits a warning, and the [CHANGELOG](../CHANGELOG.md) has a line that names the replacement.
 3. It is removed no earlier than the next MAJOR release.
 
-The first deprecation is `allow_unlinked` (the `allow_unlinked` argument of `validated_save_continuity`, the CLI flag `--allow-unlinked`, and the MCP argument of the same name). It is accepted and does nothing today. The MCP tool's result already says it is deprecated and did nothing. The plan is to emit a `DeprecationWarning` from the library and the CLI through 1.x and remove the argument in 2.0.
+The first deprecation is `allow_unlinked` (the `allow_unlinked` argument of `validated_save_continuity`, the CLI flag `--allow-unlinked`, and the MCP argument of the same name). It is accepted and does nothing. The library and the CLI emit a `UserWarning` after the save has committed, which Python shows by default (a `DeprecationWarning` would be hidden from a CLI user), and the MCP tool's result carries a line saying the same. It stays accepted through 1.x and is removed in 2.0.
 
 ## Supported environments
 
@@ -40,9 +40,9 @@ The first deprecation is `allow_unlinked` (the `allow_unlinked` argument of `val
 
 This section states what 1.0 promises. It holds from schema generation 2, which 1.0.0rc1 introduced; the 0.9.x releases (generation 1) do not keep it.
 
-- A store written by any release from 0.9.x on opens under 1.x without operator action.
+- A store written by any published 0.9.x release opens under 1.x without operator action (0.9.0 to 0.9.5 were never published).
 - The migration is forward-only, additive and idempotent, and it copies the database before changing it.
-- A store written by 1.x is refused by an older writer. The refusal is deliberate: it keeps an older release from writing into a store whose format it does not know.
+- An older release refuses a store that 1.x has opened, and writes nothing to it. From 0.9.10 the refusal is a message that names the newer format; 0.9.6 to 0.9.9 stop with an SQLite error. The refusal is deliberate: it keeps an older release from writing into a store whose format it does not know.
 - The sidecar files and the per-record formats (the audit log, the outcome log) are versioned. A record written by one release stays readable by every later release.
 - A program that writes to a store with plain `sqlite3` calls `anneal_memory.register_writer_schema(conn)` on its connection first. That connection needs `PRAGMA trusted_schema=ON` (SQLite's default); with it OFF the call raises `sqlite3.NotSupportedError` and leaves the setting alone. Reading needs nothing.
 

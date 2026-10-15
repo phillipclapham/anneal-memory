@@ -21,6 +21,13 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
 - The `Store` docstring for `keep_tombstones` said the tombstone keeps a "SHA-256 content hash"; since 1.0.0rc1 it
   is an HMAC keyed by the store's salt (`hmac-sha256:...`). `docs/stability.md` said the on-disk promise "will"
   take effect; it has held since 1.0.0rc1.
+- Claims pass (1015+10), docs only. The README no longer says a schema-version bump "is planned for the next
+  schema generation"; generation 2 is this one. The MCP setup text names Claude Code, Codex and Gemini CLI, the three
+  clients run against the server (Claude Code and Codex made real tool calls; Gemini CLI only connected); Cursor and
+  Windsurf are no longer named. `docs/stability.md` says what the run measured: every published 0.9.x release opens
+  under 1.x, and every one of them refuses a store 1.x has opened and writes nothing to it; `allow_unlinked` emits a
+  `UserWarning`, not the `DeprecationWarning` the deprecation rule named, because Python hides a `DeprecationWarning`
+  from a CLI user. The rule now says "a warning".
 
 ## [1.0.0rc2] — 2026-10-14
 

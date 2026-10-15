@@ -1668,7 +1668,8 @@ def _install_generation_guards(
     for name in sorted(have):
         if want.get(name) == have[name]:
             continue
-        this_generation = int(_GEN_GUARD_NAME_RE.fullmatch(name).group(1)) == generation
+        match = _GEN_GUARD_NAME_RE.fullmatch(name)  # never None: ``have`` holds matches only
+        this_generation = match is not None and int(match.group(1)) == generation
         if this_generation and name in off_list and not cleanup_pending:
             continue
         conn.execute(f'DROP TRIGGER IF EXISTS "{name}"')

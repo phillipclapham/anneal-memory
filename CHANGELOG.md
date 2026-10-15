@@ -15,6 +15,9 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
   absent, and sets that key in the same transaction; an rc1 store's host-table guards are still removed at its first
   open. After that, a guard of this generation on a table this release does not know is left alone. rc2 itself
   keeps the old rule, so a store shared with an rc2 process still loses those guards at each rc2 open.
+  Known edge: rc1 guards every table, a host's included. If rc1 opens a store after this release has run the
+  cleanup, the guards rc1 puts on a host's table stay, and a host connection without `register_writer_schema` can
+  no longer write that table. Upgrade off rc1; it was a pre-release, superseded by rc2 the same day.
 - The `Store` docstring for `keep_tombstones` said the tombstone keeps a "SHA-256 content hash"; since 1.0.0rc1 it
   is an HMAC keyed by the store's salt (`hmac-sha256:...`). `docs/stability.md` said the on-disk promise "will"
   take effect; it has held since 1.0.0rc1.

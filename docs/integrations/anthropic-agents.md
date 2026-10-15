@@ -20,7 +20,7 @@ This is the simplest and most battle-tested integration. Copy the agent-instruct
 
 **For MCP (Claude Code):**
 1. Add anneal-memory to your MCP config (see [README](../../README.md#mcp-server))
-2. Copy [`examples/agent-instructions.example`](../../examples/agent-instructions.example) into your project's `CLAUDE.md`
+2. Copy [`examples/agent-instructions.lean.example`](../../examples/agent-instructions.lean.example) into your project's `CLAUDE.md`
 
 **For CLI (agents with shell access):**
 1. `pip install anneal-memory`

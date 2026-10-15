@@ -40,9 +40,9 @@ The first deprecation is `allow_unlinked` (the `allow_unlinked` argument of `val
 
 This section states what 1.0 promises. It holds from schema generation 2, which 1.0.0rc1 introduced; the 0.9.x releases (generation 1) do not keep it.
 
-- A store written by any published 0.9.x release opens under 1.x without operator action (0.9.0 to 0.9.5 were never published).
+- A store written by any published 0.9.x release opens under 1.x without operator action.
 - The migration is forward-only, additive and idempotent, and it copies the database before changing it.
-- An older release refuses a store that 1.x has opened, and writes nothing to it. From 0.9.10 the refusal is a message that names the newer format; 0.9.6 to 0.9.9 stop with an SQLite error. The refusal is deliberate: it keeps an older release from writing into a store whose format it does not know.
+- An older release refuses a store that 1.x has migrated (the first write-capable open under 1.x migrates it) and writes nothing to it. The refusal is deliberate: it keeps an older release from writing into a store whose format it does not know.
 - The sidecar files and the per-record formats (the audit log, the outcome log) are versioned. A record written by one release stays readable by every later release.
 - A program that writes to a store with plain `sqlite3` calls `anneal_memory.register_writer_schema(conn)` on its connection first. That connection needs `PRAGMA trusted_schema=ON` (SQLite's default); with it OFF the call raises `sqlite3.NotSupportedError` and leaves the setting alone. Reading needs nothing.
 

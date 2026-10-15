@@ -25,7 +25,7 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
   schema generation"; generation 2 is this one. The MCP setup text names Claude Code, Codex and Gemini CLI, the three
   clients run against the server (Claude Code and Codex made real tool calls; Gemini CLI only connected); Cursor and
   Windsurf are no longer named. `docs/stability.md` says what the run measured: every published 0.9.x release opens
-  under 1.x, and every one of them refuses a store 1.x has opened and writes nothing to it; `allow_unlinked` emits a
+  under 1.x, and every one of them refuses a store 1.x has migrated and writes nothing to it; `allow_unlinked` emits a
   `UserWarning`, not the `DeprecationWarning` the deprecation rule named, because Python hides a `DeprecationWarning`
   from a CLI user. The rule now says "a warning".
 

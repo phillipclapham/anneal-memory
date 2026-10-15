@@ -4,6 +4,10 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
 
 ## [Unreleased]
 
+## [1.0.0] — 2026-10-15
+
+The 1.0 release: the API freeze, schema generation 2, the erasure fix and the dreaming primitives of [1.0.0rc1](#100rc1--2026-10-14), the three review fixes of [1.0.0rc2](#100rc2--2026-10-14), and the changes below. Final releases are installed by default (`pip install anneal-memory`).
+
 ### Added
 - `CrystalStore.snapshot(names)` and `CrystalStore.restore(snapshot)`, with the opaque type `CrystalSnapshot`: undo a
   `crystallize()` of exactly the named patterns (live, re-warmed from retired, or new) in one locked transaction, for

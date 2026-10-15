@@ -398,15 +398,15 @@ class CrystalSnapshot:
     format, and it is not meant to be stored or edited. ``names`` lists the names it
     covers."""
 
-    __slots__ = ("_priors", "_store_existed")
+    __slots__ = ("_priors", "_store_path")
 
     def __init__(
         self,
         priors: dict[str, tuple[str, int, dict] | None],
-        store_existed: bool,
+        store_path: str,
     ) -> None:
         self._priors = priors
-        self._store_existed = store_existed
+        self._store_path = store_path
 
     @property
     def names(self) -> tuple[str, ...]:
@@ -819,10 +819,11 @@ class CrystalStore:
         string or a non-string name, :class:`CrystalError` for a corrupt store."""
         if isinstance(names, (str, bytes)):
             raise TypeError("names must be an iterable of pattern names, not a string")
-        wanted = list(names)
-        for n in wanted:
+        wanted = []
+        for n in names:
             if not isinstance(n, str):
                 raise TypeError(f"pattern names must be str, got {type(n).__name__}")
+            wanted.append(self._validate_name(n))  # crystallize() stores the stripped name
         data = self._load()
         priors: dict[str, tuple[str, int, dict] | None] = {}
         for n in wanted:
@@ -833,27 +834,34 @@ class CrystalStore:
                 if idx is not None:
                     priors[n] = (bucket, idx, json.loads(json.dumps(rows[idx])))
                     break
-        return CrystalSnapshot(priors, self.path.exists())
+        return CrystalSnapshot(priors, os.path.realpath(self.path))
 
     def restore(self, snapshot: CrystalSnapshot) -> None:
         """Undo what :meth:`crystallize` did to each name in ``snapshot``, in one
-        locked transaction. Per name: drop its live row, then put the recorded row
-        back where it was (live, or retired for a name crystallize had re-warmed). It
-        touches no other name, and does not undo :meth:`retire`. A store file that did
-        not exist when the snapshot was taken is left existing and empty, because
-        deleting it outside the lock could delete another writer's record. Raises
-        ``TypeError`` for anything that is not a :class:`CrystalSnapshot`."""
+        locked transaction: every row carrying the name is removed, then the recorded
+        row goes back where it was (live, or retired for a name crystallize had
+        re-warmed). A name therefore ends up in at most one place. It touches no other
+        name, and does not undo :meth:`retire`.
+
+        It reverts the named patterns to the snapshot and discards any change made to
+        those names since, by anyone. The caller owns that exclusivity for the span
+        between :meth:`snapshot` and :meth:`restore` (in a wrap, the consolidate
+        baton). On a store file that did not exist it creates the file, empty.
+
+        Raises ``TypeError`` for anything that is not a :class:`CrystalSnapshot`, and
+        ``ValueError`` for a snapshot taken from a different store file."""
         if not isinstance(snapshot, CrystalSnapshot):
             raise TypeError("restore() takes the CrystalSnapshot that snapshot() returned")
+        if snapshot._store_path != os.path.realpath(self.path):
+            raise ValueError("this snapshot was taken from a different crystal store")
         with self._transaction() as data:
-            for name, prior in snapshot._priors.items():
-                data["crystal"] = [r for r in data.get("crystal", []) if r.get("name") != name]
-                if prior is None:
-                    continue
-                bucket, idx, record = prior
-                rows = data.setdefault(bucket, [])
-                if record not in rows:
-                    rows.insert(idx, record)
+            for bucket in ("crystal", "retired"):
+                data[bucket] = [
+                    r for r in data.get(bucket, []) if r.get("name") not in snapshot._priors
+                ]
+            # ascending original index per bucket, so a later insert never lands on a shifted slot
+            for bucket, idx, record in sorted(p for p in snapshot._priors.values() if p is not None):
+                data[bucket].insert(idx, record)
 
     def get(self, name: str) -> CrystalDict | None:
         """Fetch a pattern by name, searching the live set first then the retired set

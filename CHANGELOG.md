@@ -8,14 +8,17 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
 - `CrystalStore.snapshot(names)` and `CrystalStore.restore(snapshot)`, with the opaque type `CrystalSnapshot`: undo a
   `crystallize()` of exactly the named patterns (live, re-warmed from retired, or new) in one locked transaction, for
   a caller that crystallizes as one step of a larger operation and must put the store back when a later step fails.
-  It is scoped to the names, not the file, so a pattern another writer crystallized in between survives. It does not
-  undo `retire()`. A store file that did not exist is left existing and empty.
+  It is scoped to the names, not the file, so a pattern another writer crystallized in between survives; a name
+  ends up in one place only, and the order of the retired list is kept. It reverts the named patterns to the snapshot
+  and discards any change made to those names since, so the caller owns their exclusivity (in a wrap, the baton). A
+  snapshot restores only into the store it came from. It does not undo `retire()`.
 - Public names promoted into `anneal_memory.__all__` that flow called from submodules: `trusted_roots`,
   `trust_file_path`, `TRUST_ENV` and `VISIBILITIES` (from `rederive`; `TRUST_ENV` names the environment variable that
   points re-derive at a trust file, and has nothing to do with episode trust classes) and `MAX_PATTERNS` (from
   `retrieval`, the default cap `retrieve_patterns` applies). The module `sessions` now declares its own `__all__`
   (`live_sessions`, `claim_baton`, `release_baton`, `heartbeat`, `baton_holder`, `holds_baton`,
-  `consolidate_authorized`, `DEFAULT_TTL_SECONDS`) and the public API snapshot freezes those members. Nothing is
+  `consolidate_authorized`, `DEFAULT_TTL_SECONDS`, and the types their signatures name) and the public API snapshot
+  freezes those members. Nothing is
   removed or renamed; the rest of `sessions` and `rederive` stays internal.
 
 ### Fixed

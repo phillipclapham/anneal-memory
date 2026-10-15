@@ -4897,7 +4897,7 @@
   },
   "CrystalSnapshot": {
    "bases": [],
-   "init": "(priors: 'dict[str, tuple[str, int, dict] | None]', store_existed: 'bool') -> 'None'",
+   "init": "(priors: 'dict[str, tuple[str, int, dict] | None]', store_path: 'str') -> 'None'",
    "kind": "class",
    "members": {
     "names": {
@@ -7584,10 +7584,103 @@
   "sessions": {
    "kind": "module",
    "members": {
+    "BatonClaim": {
+     "bases": [
+      "builtins.dict"
+     ],
+     "init": null,
+     "kind": "class",
+     "members": {},
+     "module": "anneal_memory.sessions",
+     "typed_dict": {
+      "annotations": {
+       "claimed_at": "ForwardRef('float', module='anneal_memory.sessions')",
+       "previous_holder": "ForwardRef('str | None', module='anneal_memory.sessions')",
+       "session_id": "ForwardRef('str', module='anneal_memory.sessions')"
+      },
+      "optional": [],
+      "required": [
+       "claimed_at",
+       "previous_holder",
+       "session_id"
+      ]
+     }
+    },
+    "BatonHeldError": {
+     "bases": [
+      "anneal_memory.store.AnnealMemoryError"
+     ],
+     "init": "(session_id: 'str', holder: 'str | None', unreadable: 'bool' = False) -> 'None'",
+     "kind": "class",
+     "members": {},
+     "module": "anneal_memory.sessions"
+    },
+    "ConsolidateAuth": {
+     "bases": [
+      "builtins.dict"
+     ],
+     "init": null,
+     "kind": "class",
+     "members": {},
+     "module": "anneal_memory.sessions",
+     "typed_dict": {
+      "annotations": {
+       "authorized": "ForwardRef('bool', module='anneal_memory.sessions')",
+       "baton_holder": "ForwardRef('str | None', module='anneal_memory.sessions')",
+       "live_session_ids": "ForwardRef('list[str]', module='anneal_memory.sessions')",
+       "reason": "ForwardRef('str', module='anneal_memory.sessions')",
+       "session_id": "ForwardRef('str', module='anneal_memory.sessions')"
+      },
+      "optional": [],
+      "required": [
+       "authorized",
+       "baton_holder",
+       "live_session_ids",
+       "reason",
+       "session_id"
+      ]
+     }
+    },
+    "CorruptSidecarError": {
+     "bases": [
+      "json.decoder.JSONDecodeError",
+      "anneal_memory.store.AnnealMemoryError"
+     ],
+     "init": "(path: 'PathLike', why: 'str') -> 'None'",
+     "kind": "class",
+     "members": {},
+     "module": "anneal_memory.sessions"
+    },
     "DEFAULT_TTL_SECONDS": {
      "kind": "value",
      "type": "int",
      "value": 5400
+    },
+    "SessionInfo": {
+     "bases": [
+      "builtins.dict"
+     ],
+     "init": null,
+     "kind": "class",
+     "members": {},
+     "module": "anneal_memory.sessions",
+     "typed_dict": {
+      "annotations": {
+       "label": "ForwardRef('str | None', module='anneal_memory.sessions')",
+       "last_heartbeat": "ForwardRef('float', module='anneal_memory.sessions')",
+       "pid": "ForwardRef('int | None', module='anneal_memory.sessions')",
+       "registered_at": "ForwardRef('float', module='anneal_memory.sessions')",
+       "session_id": "ForwardRef('str', module='anneal_memory.sessions')"
+      },
+      "optional": [],
+      "required": [
+       "label",
+       "last_heartbeat",
+       "pid",
+       "registered_at",
+       "session_id"
+      ]
+     }
     },
     "baton_holder": {
      "kind": "function",

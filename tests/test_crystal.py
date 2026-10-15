@@ -486,3 +486,17 @@ class TestSnapshotRestore:
         assert after["crystal"] == before["crystal"] and after["retired"] == before["retired"]
         with pytest.raises(TypeError):
             store.snapshot("a")
+
+    def test_order_survives_a_reversed_name_list_and_a_foreign_store_is_refused(self, store, tmp_path):
+        for n in ("d", "c", "b", "a"):
+            store.crystallize(name=n, level=2, explanation=f"pattern {n}", today=T0)
+            store.retire(n, kind="obsolete", today=T0)
+        before = json.loads(store.path.read_text())["retired"]
+        snap = store.snapshot([" a ", "b", "c", "d"])  # stripped, as crystallize() strips it
+        assert snap.names == ("a", "b", "c", "d")
+        for n in ("a", "b", "c", "d"):
+            store.crystallize(name=n, level=2, explanation=f"re-warmed {n}", today=T0)
+        store.restore(snap)
+        assert json.loads(store.path.read_text())["retired"] == before
+        with pytest.raises(ValueError):
+            CrystalStore(tmp_path / "other.crystal.json").restore(snap)

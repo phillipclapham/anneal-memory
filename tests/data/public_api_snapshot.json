@@ -21,6 +21,7 @@
   "CrystalDecision",
   "CrystalDict",
   "CrystalError",
+  "CrystalSnapshot",
   "CrystalStore",
   "DEFAULT_GRADUATING",
   "DEFAULT_SCHEMA",
@@ -41,6 +42,7 @@
   "ForeignOutcomeLogError",
   "Germination",
   "LogBinding",
+  "MAX_PATTERNS",
   "MIGRATION_MANIFEST",
   "MIN_PROVEN_LEVEL",
   "OmittedPattern",
@@ -91,6 +93,7 @@
   "StoreStatus",
   "SupersessionError",
   "TOOLS",
+  "TRUST_ENV",
   "TRUST_LEVELS",
   "Tier",
   "Tombstone",
@@ -101,6 +104,7 @@
   "VALID_ROUTES",
   "VALID_TIERS",
   "VALID_TYPES",
+  "VISIBILITIES",
   "WrapCancelBoundError",
   "WrapCancelGatedError",
   "WrapContinuityMovedError",
@@ -157,7 +161,9 @@
   "sessions",
   "spore_version",
   "strip_flag",
+  "trust_file_path",
   "trust_rank",
+  "trusted_roots",
   "validate_graduations",
   "validate_origin_key",
   "validate_schema",
@@ -4889,6 +4895,18 @@
    "members": {},
    "module": "anneal_memory.crystal"
   },
+  "CrystalSnapshot": {
+   "bases": [],
+   "init": "(priors: 'dict[str, tuple[str, int, dict] | None]', store_existed: 'bool') -> 'None'",
+   "kind": "class",
+   "members": {
+    "names": {
+     "kind": "property",
+     "settable": false
+    }
+   },
+   "module": "anneal_memory.crystal"
+  },
   "CrystalStore": {
    "bases": [],
    "init": "(path: 'str | os.PathLike[str]') -> 'None'",
@@ -4914,9 +4932,17 @@
      "kind": "method",
      "signature": "(self, *, permanence: 'Permanence | None' = None, activation_mode: 'ActivationMode | None' = None, tag: 'str | None' = None, activation: 'Activation | None' = None, today: 'date | None' = None) -> 'list[CrystalDict]'"
     },
+    "restore": {
+     "kind": "method",
+     "signature": "(self, snapshot: 'CrystalSnapshot') -> 'None'"
+    },
     "retire": {
      "kind": "method",
      "signature": "(self, name: 'str', *, kind: 'str', reason: 'str | None' = None, today: 'date | None' = None, now: 'datetime | None' = None, expect: 'str | None | _Unset' = <anneal_memory.crystal._Unset object>) -> 'CrystalDict'"
+    },
+    "snapshot": {
+     "kind": "method",
+     "signature": "(self, names: 'Iterable[str]') -> 'CrystalSnapshot'"
     },
     "surface_rewarm_candidates": {
      "kind": "method",
@@ -5250,6 +5276,11 @@
     }
    },
    "module": "anneal_memory.worth"
+  },
+  "MAX_PATTERNS": {
+   "kind": "value",
+   "type": "int",
+   "value": 3
   },
   "MIGRATION_MANIFEST": {
    "kind": "value",
@@ -7085,6 +7116,11 @@
     }
    ]
   },
+  "TRUST_ENV": {
+   "kind": "value",
+   "type": "str",
+   "value": "ANNEAL_MEMORY_DERIVE_TRUST"
+  },
   "TRUST_LEVELS": {
    "kind": "value",
    "type": "tuple",
@@ -7167,6 +7203,14 @@
     "task",
     "question",
     "thought"
+   ]
+  },
+  "VISIBILITIES": {
+   "kind": "value",
+   "type": "tuple",
+   "value": [
+    "public",
+    "private"
    ]
   },
   "WrapCancelBoundError": {
@@ -7539,6 +7583,48 @@
   },
   "sessions": {
    "kind": "module",
+   "members": {
+    "DEFAULT_TTL_SECONDS": {
+     "kind": "value",
+     "type": "int",
+     "value": 5400
+    },
+    "baton_holder": {
+     "kind": "function",
+     "module": "anneal_memory.sessions",
+     "signature": "(continuity_path: 'PathLike') -> 'str | None'"
+    },
+    "claim_baton": {
+     "kind": "function",
+     "module": "anneal_memory.sessions",
+     "signature": "(continuity_path: 'PathLike', session_id: 'str', *, take: 'bool' = False) -> 'BatonClaim'"
+    },
+    "consolidate_authorized": {
+     "kind": "function",
+     "module": "anneal_memory.sessions",
+     "signature": "(continuity_path: 'PathLike', session_id: 'str', *, ttl: 'int' = 5400, allow_sole_live: 'bool' = False) -> 'ConsolidateAuth'"
+    },
+    "heartbeat": {
+     "kind": "function",
+     "module": "anneal_memory.sessions",
+     "signature": "(continuity_path: 'PathLike', session_id: 'str') -> 'None'"
+    },
+    "holds_baton": {
+     "kind": "function",
+     "module": "anneal_memory.sessions",
+     "signature": "(continuity_path: 'PathLike', session_id: 'str') -> 'bool'"
+    },
+    "live_sessions": {
+     "kind": "function",
+     "module": "anneal_memory.sessions",
+     "signature": "(continuity_path: 'PathLike', *, ttl: 'int' = 5400) -> 'list[SessionInfo]'"
+    },
+    "release_baton": {
+     "kind": "function",
+     "module": "anneal_memory.sessions",
+     "signature": "(continuity_path: 'PathLike', session_id: 'str') -> 'bool'"
+    }
+   },
    "name": "anneal_memory.sessions"
   },
   "spore_version": {
@@ -7551,10 +7637,20 @@
    "module": "anneal_memory.rederive",
    "signature": "(line: 'str') -> 'str'"
   },
+  "trust_file_path": {
+   "kind": "function",
+   "module": "anneal_memory.rederive",
+   "signature": "() -> 'Path'"
+  },
   "trust_rank": {
    "kind": "function",
    "module": "anneal_memory.types",
    "signature": "(trust: 'str') -> 'int'"
+  },
+  "trusted_roots": {
+   "kind": "function",
+   "module": "anneal_memory.rederive",
+   "signature": "(db_path: 'str | os.PathLike', trust_file: 'Path | None' = None) -> 'dict[str | None, str]'"
   },
   "validate_graduations": {
    "kind": "function",

@@ -101,7 +101,7 @@ import warnings
 from contextlib import contextmanager
 from datetime import date, datetime, timezone
 from pathlib import Path
-from typing import Any, Iterator, Literal, NamedTuple, TypedDict, cast
+from typing import Any, Iterable, Iterator, Literal, NamedTuple, TypedDict, cast
 
 try:  # POSIX advisory locking; absent on Windows (see CrystalStore._transaction).
     import fcntl
@@ -391,6 +391,27 @@ def activation_tier(crystal: CrystalDict, today: date | None = None) -> Activati
 # ---------------------------------------------------------------------------
 # the store
 # ---------------------------------------------------------------------------
+
+class CrystalSnapshot:
+    """What :meth:`CrystalStore.snapshot` read for some names; hand it back to
+    :meth:`CrystalStore.restore`. Opaque on purpose: its content is not a stable
+    format, and it is not meant to be stored or edited. ``names`` lists the names it
+    covers."""
+
+    __slots__ = ("_priors", "_store_existed")
+
+    def __init__(
+        self,
+        priors: dict[str, tuple[str, int, dict] | None],
+        store_existed: bool,
+    ) -> None:
+        self._priors = priors
+        self._store_existed = store_existed
+
+    @property
+    def names(self) -> tuple[str, ...]:
+        return tuple(self._priors)
+
 
 class CrystalStore:
     """A JSON-backed store of crystallized patterns (the on-demand graduated tier).
@@ -785,6 +806,54 @@ class CrystalStore:
         return cast("CrystalDict", matches[0])
 
     # --- public API: read ---------------------------------------------------
+
+    def snapshot(self, names: Iterable[str]) -> CrystalSnapshot:
+        """Record where each of ``names`` stands (live, retired or absent) so that
+        :meth:`restore` can undo a :meth:`crystallize` of exactly those names.
+
+        A caller that crystallizes as one step of a larger operation and must put the
+        store back when a later step fails takes this first. It is scoped to the names
+        on purpose: a whole-file snapshot restored later would also erase a pattern
+        another writer crystallized in between, so :meth:`restore` touches only these
+        names. Reads lock-free, like :meth:`get`. Raises ``TypeError`` for a bare
+        string or a non-string name, :class:`CrystalError` for a corrupt store."""
+        if isinstance(names, (str, bytes)):
+            raise TypeError("names must be an iterable of pattern names, not a string")
+        wanted = list(names)
+        for n in wanted:
+            if not isinstance(n, str):
+                raise TypeError(f"pattern names must be str, got {type(n).__name__}")
+        data = self._load()
+        priors: dict[str, tuple[str, int, dict] | None] = {}
+        for n in wanted:
+            priors[n] = None
+            for bucket in ("crystal", "retired"):
+                rows = data.get(bucket, [])
+                idx = next((i for i, r in enumerate(rows) if r.get("name") == n), None)
+                if idx is not None:
+                    priors[n] = (bucket, idx, json.loads(json.dumps(rows[idx])))
+                    break
+        return CrystalSnapshot(priors, self.path.exists())
+
+    def restore(self, snapshot: CrystalSnapshot) -> None:
+        """Undo what :meth:`crystallize` did to each name in ``snapshot``, in one
+        locked transaction. Per name: drop its live row, then put the recorded row
+        back where it was (live, or retired for a name crystallize had re-warmed). It
+        touches no other name, and does not undo :meth:`retire`. A store file that did
+        not exist when the snapshot was taken is left existing and empty, because
+        deleting it outside the lock could delete another writer's record. Raises
+        ``TypeError`` for anything that is not a :class:`CrystalSnapshot`."""
+        if not isinstance(snapshot, CrystalSnapshot):
+            raise TypeError("restore() takes the CrystalSnapshot that snapshot() returned")
+        with self._transaction() as data:
+            for name, prior in snapshot._priors.items():
+                data["crystal"] = [r for r in data.get("crystal", []) if r.get("name") != name]
+                if prior is None:
+                    continue
+                bucket, idx, record = prior
+                rows = data.setdefault(bucket, [])
+                if record not in rows:
+                    rows.insert(idx, record)
 
     def get(self, name: str) -> CrystalDict | None:
         """Fetch a pattern by name, searching the live set first then the retired set

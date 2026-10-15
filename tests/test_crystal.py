@@ -17,7 +17,7 @@ from datetime import date, datetime, timezone
 
 import pytest
 
-from anneal_memory import CrystalError, CrystalStore, activation_tier
+from anneal_memory import CrystalError, CrystalSnapshot, CrystalStore, activation_tier
 from anneal_memory import crystal as _crystal
 from anneal_memory.crystal import CRYSTAL_SCHEMA_VERSION
 
@@ -456,3 +456,33 @@ def test_rev_survives_a_lone_surrogate_on_disk(tmp_path):
     doc["crystal"][0]["explanation"] = "a\ud800b"
     p.write_text(json.dumps(doc))  # default ensure_ascii writes the escape
     assert CrystalStore(p).get("x")["rev"]
+
+
+class TestSnapshotRestore:
+    """snapshot()/restore() undo a crystallize for the named patterns only (the flow caller)."""
+
+    def test_undoes_a_new_name_and_leaves_another_writers_row(self, store):
+        store.crystallize(name="kept", level=2, explanation="already here", today=T0)
+        snap = store.snapshot(["fresh"])
+        store.crystallize(name="fresh", level=2, explanation="added by the step that fails", today=T0)
+        # another writer crystallizes between the snapshot and the restore
+        store.crystallize(name="other_writer", level=2, explanation="not ours", today=T0)
+        store.restore(snap)
+        assert store.get("fresh") is None
+        assert store.get("kept") is not None and store.get("other_writer") is not None
+
+    def test_restores_an_upserted_and_a_re_warmed_retired_pattern_in_place(self, store):
+        store.crystallize(name="a", level=2, explanation="first a", today=T0)
+        store.crystallize(name="b", level=2, explanation="first b", today=T0)
+        store.crystallize(name="gone", level=2, explanation="was retired", today=T0)
+        store.retire("gone", kind="obsolete", today=T0)
+        before = json.loads(store.path.read_text())
+        snap = store.snapshot(["a", "gone"])
+        assert isinstance(snap, CrystalSnapshot) and snap.names == ("a", "gone")
+        store.crystallize(name="a", level=3, explanation="sharpened a", today=T0)
+        store.crystallize(name="gone", level=2, explanation="re-warmed", today=T0)
+        store.restore(snap)
+        after = json.loads(store.path.read_text())
+        assert after["crystal"] == before["crystal"] and after["retired"] == before["retired"]
+        with pytest.raises(TypeError):
+            store.snapshot("a")

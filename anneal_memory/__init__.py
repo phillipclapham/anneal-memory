@@ -72,6 +72,8 @@ from .schema import (
     validate_schema,
 )
 from .rederive import (
+    TRUST_ENV,
+    VISIBILITIES,
     Annotation,
     DeriveRefused,
     RederiveReport,
@@ -81,6 +83,8 @@ from .rederive import (
     rederive_continuity,
     revoke_store,
     strip_flag,
+    trust_file_path,
+    trusted_roots,
 )
 from .durable import DROP_DURABLE_RE, DurableFact, parse_durable_facts, section_chars
 from .continuity import (
@@ -147,6 +151,7 @@ from .crystal import (
     CrystalDecision,
     CrystalDict,
     CrystalError,
+    CrystalSnapshot,
     CrystalStore,
     Permanence,
     RetirementDict,
@@ -155,6 +160,7 @@ from .crystal import (
     parse_crystal_decisions,
 )
 from .retrieval import (
+    MAX_PATTERNS,
     EpisodeMatch,
     extract_keywords,
     retrieve_patterns,
@@ -293,6 +299,7 @@ __all__ = [
     "DESCEND_BY_TYPE",
     "ASCEND_BY_TYPE",
     "CrystalStore",
+    "CrystalSnapshot",
     "CrystalError",
     "CrystalConflictError",
     "CrystalDict",
@@ -326,6 +333,11 @@ __all__ = [
     "derived_state_lines",
     "parse_annotation",
     "strip_flag",
+    "trusted_roots",
+    "trust_file_path",
+    "TRUST_ENV",
+    "VISIBILITIES",
+    "MAX_PATTERNS",
     "DROP_DURABLE_RE",
     "section_chars",
     "CRYSTAL_SCHEMA_VERSION",

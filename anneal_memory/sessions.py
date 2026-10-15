@@ -103,6 +103,19 @@ from .store import AnnealMemoryError
 # sole-grant exists, and a claimed baton overrides the TTL inference regardless of the clock.
 DEFAULT_TTL_SECONDS = 5400
 
+# The public names of this module (docs/stability.md): the baton and the liveness registry. Everything
+# else here, `register_session` and `close_session` included, is internal.
+__all__ = [
+    "DEFAULT_TTL_SECONDS",
+    "baton_holder",
+    "claim_baton",
+    "consolidate_authorized",
+    "heartbeat",
+    "holds_baton",
+    "live_sessions",
+    "release_baton",
+]
+
 _SESSIONS_SUFFIX = ".sessions"
 _BATON_SUFFIX = ".baton"
 _BATON_LOCK_SUFFIX = ".baton.lock"

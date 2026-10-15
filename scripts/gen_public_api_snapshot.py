@@ -141,7 +141,11 @@ def _describe(name: str, obj: Any) -> dict[str, Any]:
     if inspect.isroutine(obj):
         return {"kind": "function", "module": obj.__module__, "signature": _signature(obj)}
     if inspect.ismodule(obj):
-        return {"kind": "module", "name": obj.__name__}
+        out: dict[str, Any] = {"kind": "module", "name": obj.__name__}
+        listed = getattr(obj, "__all__", None)
+        if listed is not None:  # a module that declares __all__ freezes exactly those names
+            out["members"] = {m: _describe(m, getattr(obj, m)) for m in sorted(listed)}
+        return out
     return {"kind": "value", "type": type(obj).__name__, "value": _canon(obj, name)}
 
 

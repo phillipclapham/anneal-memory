@@ -6,7 +6,7 @@ anneal-memory follows semantic versioning from 1.0. This page says what the vers
 
 Four things are public, and only these:
 
-1. **The Python API.** Every name in `anneal_memory.__all__`. Each name is also frozen at the module path that defines it, so `from anneal_memory.durable import section_chars` and `from anneal_memory import section_chars` both stay valid. Names that start with an underscore, and public-looking names that are not in `__all__`, are internal and carry no promise, even when a module exposes them.
+1. **The Python API.** Every name in `anneal_memory.__all__`, and the names listed in the own `__all__` of an exported module (today `sessions`: the baton and liveness-registry functions). Each name is also frozen at the module path that defines it, so `from anneal_memory.durable import section_chars` and `from anneal_memory import section_chars` both stay valid. Names that start with an underscore, and public-looking names that are not in `__all__`, are internal and carry no promise, even when a module exposes them.
 2. **The command line.** The subcommands, their flags, and the keys of the `--json` output of each command.
 3. **The MCP server.** The tool names and each tool's input schema. The tool descriptions are guarded separately by the integrity manifest ([tests/test_integrity.py](../tests/test_integrity.py)); the schemas are guarded by the public API snapshot test.
 4. **The files on disk.** See "On-disk format" below.

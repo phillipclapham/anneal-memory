@@ -2,7 +2,7 @@
 rolling-memory baseline, judges, and a scenario-clustered bootstrap.
 
 Everything here runs on scratch stores in a caller-supplied work directory. The wrap loop is the
-one KL-08 used (bench/inmind/run.py on seat/1011-24-kl08), copied so this branch stands alone.
+one the KL-08 in-state benchmark used, copied so this package stands alone.
 """
 
 from __future__ import annotations

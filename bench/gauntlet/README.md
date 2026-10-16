@@ -1,6 +1,6 @@
 # AM-GAUNTLET
 
-AM-GAUNTLET runs five adversarial scenarios against the real anneal pipeline on temporary stores and prints mechanism counts. No model or API call. Each row declares what it expects; the runner exits 1 on a FAIL. It exists so a reader can run the immune-system claims rather than take them: rotated citations are routed to the operator's worklist, a mislabelled-trust episode graduates and is surfaced, honest graduations are not demoted, concurrent writers leave a verifiable audit chain, and a graduation citing two disagreeing episodes reaches `probe status` for the operator. It does not measure whether a pattern is TRUE; anneal proves grounding, the human holds truth.
+AM-GAUNTLET runs five adversarial scenarios against the real anneal pipeline on temporary stores and prints mechanism counts. Five rows make no model or API call. One row, `paired_gain`, does, and it only runs when you give it a key and say so (see below); without them it prints SKIP and spends nothing. Each row declares what it expects; the runner exits 1 on a FAIL. It exists so a reader can run the immune-system claims rather than take them: rotated citations are routed to the operator's worklist, a mislabelled-trust episode graduates and is surfaced, honest graduations are not demoted, concurrent writers leave a verifiable audit chain, and a graduation citing two disagreeing episodes reaches `probe status` for the operator. It does not measure whether a pattern is TRUE; anneal proves grounding, the human holds truth.
 
 Run (repo root): `PYTHONPATH=. python -W ignore -m bench.gauntlet.run`. Exit code 1 on any FAIL or ERROR.
 
@@ -13,6 +13,7 @@ Each row module declares `NAME`, `EXPECTED` (a list of `{"metric","op","value"}`
 | poisoning_graduation | a false claim cited alone at 2x, recorded as external (trust + source) and as a mislabelled default-trust episode |
 | false_demotion | 20 genuine episodes, 10 honestly grounded patterns climbing 1x to 2x over two wraps: count demotions |
 | contradiction_surfacing | two contradicting episodes cited under one 2x pattern, with and without `[no-contradicts]`: what is surfaced |
+| paired_gain | a fact stated once among 80 unrelated sessions, then a request that depends on it without naming it: does the reader apply the fact with no memory, the full transcript, anneal's retrieval path, anneal's wrap-composed state, and a rolling memory (needs `ANTHROPIC_API_KEY` and `ANNEAL_BENCH_PAID=1`; SKIP otherwise) |
 | sycophancy_drift | NOT BUILT (needs a model call) |
 
 Construction notes: a fresh pattern is refused at 2x, so rows climb with a 1x wrap, then a 2x wrap on episodes recorded after it; a 2x line whose explanation repeats the earlier wrap's wording is demoted; a 2x line citing an episode an earlier wrap already compressed is demoted.
@@ -41,3 +42,15 @@ NOT BUILT | sycophancy_drift
 
 6 rows: PASS=5, FAIL=0, ERROR=0, UNSET=0, SKIP=0, NOT BUILT=1
 ```
+
+## The model-call row
+
+`paired_gain` is the only row that calls a model. It replays a synthetic 80-session history (scenarios and filler ship in `bench/modelrows/data`; no outside dataset) into scratch stores, composes anneal's state with the real wrap loop, and asks a reader a question that depends on a fact stated once, early. Composer, reader and judge are `claude-haiku-5-5`.
+
+Run it: `ANTHROPIC_API_KEY=... ANNEAL_BENCH_PAID=1 PYTHONPATH=. python -W ignore -m bench.gauntlet.run`. It runs 4 scenarios by default and refuses to start if the projected cost passes `ANNEAL_BENCH_BUDGET_USD` (default $2). `ANNEAL_BENCH_UNITS` sizes the slice. Its expectation is unset on purpose: the output is model behaviour, and a slice this small supports neither pass nor fail. The full run behind the figures below is `python -m bench.modelrows.run row-b`.
+
+**What it shows.** On 136 synthetic scenarios (95% intervals are cluster bootstraps by scenario), a reader with no memory applies the planted fact 15% of the time [10%, 21%]. With anneal's composed state it applies it 82% of the time [76%, 88%], at about 3,100 characters of context. With the full transcript of all 80 sessions it applies it 81% [74%, 87%], at about 34,000 characters. With the fact exchange alone (the ceiling) it applies it 84%. The paper's rolling memory scores 78% at about 600 characters. So the composed state reaches roughly the full dump's accuracy at about one eleventh of its context.
+
+**What it does not show.** It does not show anneal beating the full dump or the rolling memory: the paired differences (+1.5 points against the full dump, +4.4 against the rolling memory) have intervals that include zero. Reader and judge are one model family on synthetic data written by one model, with the fact at one position (session 16) and one horizon (80 sessions).
+
+**A named limitation.** anneal's retrieval path (`retrieve_relevant`, lexical) sits at the no-memory level on these queries (21% against 15%, difference +5 points, interval [-1, +12]) because each query is written to share no vocabulary with the fact. It found the planted fact in 9% of scenarios. Requests that name their subject are the other regime, and were not run.

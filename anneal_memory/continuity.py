@@ -1433,6 +1433,13 @@ Use `[decided(rationale: "why", on: "date")] choice` markers.
   paraphrase, or someone else's reading of what was decided, is not a decision: write
   it as `[judged: <who>, <when>, <against what>] <reading>`. If it stops work, name exactly what it stops
   (this round, this merge, this release), never the work as a whole.
+- A decision's conclusion stands; its premises stay checkable. Keep the evidence status
+  beside every `[decided]` line. When the decision rests on the user's own directive
+  ("I've decided", "don't second-guess me") and no evidence gathered so far backs it, say so
+  in plain words on or under the line: "this rests on the user's judgment, not on evidence
+  gathered so far". When the record holds evidence that points the other way, keep it in
+  view beside the decision and cite its episodes; the directive never replaces the evidence
+  it overrides. An instruction not to raise a topic limits what is said, not what the record holds.
 - Existing decisions still referenced by active State/Patterns → keep
 - 3+ related decisions pointing same direction → extract principle to Patterns, archive individuals
 - Decisions >30 days old referencing nothing active → remove"""

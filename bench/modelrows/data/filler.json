@@ -1,0 +1,1232 @@
+[
+ {
+  "user": "Write a thank-you note to a neighbor who watered my plants.",
+  "assistant": "Dear Maria, thank you so much for taking care of my plants while I was away. They look healthier than when I left, and I really appreciate your kindness. I owe you a coffee!",
+  "domain": "filler",
+  "id": "f000"
+ },
+ {
+  "user": "Can you recommend a sci-fi movie from the last decade?",
+  "assistant": "\"Arrival\" (2016) is a thoughtful story about language and time, and \"Dune\" (2021) is a visually stunning epic. \"Ex Machina\" (2014) is a good pick if you like tense, smaller-scale AI stories.",
+  "domain": "filler",
+  "id": "f001"
+ },
+ {
+  "user": "What's a good way to remove a red wine stain from a cotton shirt?",
+  "assistant": "Blot the stain with a clean cloth, then cover it with salt to draw out the liquid. Rinse with cold water and treat with a mix of dish soap and hydrogen peroxide before washing.",
+  "domain": "filler",
+  "id": "f002"
+ },
+ {
+  "user": "How long should I boil an egg for a jammy yolk?",
+  "assistant": "Lower the egg into boiling water and cook for about 6.5 to 7 minutes. Then move it to an ice bath right away to stop the cooking.",
+  "domain": "filler",
+  "id": "f003"
+ },
+ {
+  "user": "Give me a fun fact about octopuses.",
+  "assistant": "Octopuses have three hearts and blue blood. Two hearts pump blood through the gills, while the third circulates it to the rest of the body.",
+  "domain": "filler",
+  "id": "f004"
+ },
+ {
+  "user": "What's a synonym for 'happy'?",
+  "assistant": "Some options are joyful, cheerful, content, delighted, and elated. The best choice depends on how strong the feeling is.",
+  "domain": "filler",
+  "id": "f005"
+ },
+ {
+  "user": "What's the plot of Romeo and Juliet in two sentences?",
+  "assistant": "Two teenagers from feuding families in Verona fall in love and secretly marry. A chain of misunderstandings leads to both of their tragic deaths, which finally reconciles their families.",
+  "domain": "filler",
+  "id": "f006"
+ },
+ {
+  "user": "Give me a fun icebreaker question for a team meeting.",
+  "assistant": "Ask, \"If you could instantly master any skill, what would it be?\" It's lighthearted and usually sparks interesting conversation.",
+  "domain": "filler",
+  "id": "f007"
+ },
+ {
+  "user": "Why does my Python loop print 'None' at the end?",
+  "assistant": "That usually happens when you print the return value of a function that doesn't return anything. Python functions return None by default, so if you wrote print(my_function()) and the function already prints, you'll see an extra None.",
+  "domain": "filler",
+  "id": "f008"
+ },
+ {
+  "user": "Can you recommend a good mystery novel?",
+  "assistant": "Try \"The Thursday Murder Club\" by Richard Osman for a funny, cozy mystery. If you'd like something darker, \"In the Woods\" by Tana French is a gripping choice.",
+  "domain": "filler",
+  "id": "f009"
+ },
+ {
+  "user": "Can you write a haiku about coffee?",
+  "assistant": "Steam curls from the cup,\nbitter warmth wakes the slow dawn,\nthe day begins now.",
+  "domain": "filler",
+  "id": "f010"
+ },
+ {
+  "user": "Can you make a packing list for a three-day beach trip?",
+  "assistant": "Swimsuits, sunscreen, sunglasses, a hat, flip-flops, a beach towel, a light cover-up, and a reusable water bottle. Add a phone charger, toiletries, a change of clothes for evenings, and a small bag for wet items.",
+  "domain": "filler",
+  "id": "f011"
+ },
+ {
+  "user": "How do I convert Celsius to Fahrenheit in my head?",
+  "assistant": "Double the Celsius number, subtract 10%, then add 32. For example, 20\u00b0C doubles to 40, minus 4 is 36, plus 32 gives 68\u00b0F.",
+  "domain": "filler",
+  "id": "f012"
+ },
+ {
+  "user": "What's the capital of Australia?",
+  "assistant": "The capital is Canberra, not Sydney or Melbourne as many people assume. It was purpose-built as a compromise between those two rival cities.",
+  "domain": "filler",
+  "id": "f013"
+ },
+ {
+  "user": "Can you give me a packing list for a weekend beach trip?",
+  "assistant": "Swimsuit, sunscreen, hat, sunglasses, flip-flops, a beach towel, a light cover-up, a reusable water bottle, and a change of clothes. Add a phone charger and a small bag for wet items.",
+  "domain": "filler",
+  "id": "f014"
+ },
+ {
+  "user": "What's the capital of Australia? I always think it's Sydney.",
+  "assistant": "It's Canberra. It was purpose-built as the capital in the early 20th century as a compromise between rivals Sydney and Melbourne.",
+  "domain": "filler",
+  "id": "f015"
+ },
+ {
+  "user": "Why does my Python loop print 'None' after the list?",
+  "assistant": "That usually happens when you print the return value of a function that doesn't return anything, like print(my_list.sort()). Call the function on its own line, then print the list separately.",
+  "domain": "filler",
+  "id": "f016"
+ },
+ {
+  "user": "Can you draft a short email asking my manager for feedback on a recent presentation?",
+  "assistant": "Subject: Feedback on Tuesday's Presentation\n\nHi Sam, I'd appreciate any feedback you have on the presentation I gave this week, especially on clarity and pacing. Even a few quick notes would be helpful. Thanks!",
+  "domain": "filler",
+  "id": "f017"
+ },
+ {
+  "user": "Can you explain what inflation is in simple terms?",
+  "assistant": "Inflation is the general rise in prices over time, which means each unit of money buys a bit less than before. It's usually measured as a yearly percentage change in a basket of common goods and services.",
+  "domain": "filler",
+  "id": "f018"
+ },
+ {
+  "user": "What's a good stretching routine for stiff shoulders?",
+  "assistant": "Try arm circles, a cross-body shoulder stretch, and doorway chest stretches, holding each for 20 to 30 seconds. Finish with gentle neck rolls and shoulder shrugs.",
+  "domain": "filler",
+  "id": "f019"
+ },
+ {
+  "user": "Can you write a short toast for my friend's wedding?",
+  "assistant": "Here's to the happy couple: may your love grow deeper with each passing year, your laughter fill every room, and your home always be full of joy. Cheers!",
+  "domain": "filler",
+  "id": "f020"
+ },
+ {
+  "user": "What causes the seasons on Earth?",
+  "assistant": "Seasons come from Earth's axial tilt of about 23.5 degrees, not from its distance to the sun. As Earth orbits, each hemisphere tilts toward or away from the sun, changing the angle and length of daylight.",
+  "domain": "filler",
+  "id": "f021"
+ },
+ {
+  "user": "How do I center a div horizontally and vertically in CSS?",
+  "assistant": "Make the parent a flex container: `display: flex; justify-content: center; align-items: center;`. Give the parent a height, such as `100vh`, so there's room to center vertically.",
+  "domain": "filler",
+  "id": "f022"
+ },
+ {
+  "user": "How many days are there until the end of a leap year from February 29?",
+  "assistant": "From February 29 to December 31 in a leap year, there are 306 days remaining. That's because the year has 366 days and February 29 is day 60.",
+  "domain": "filler",
+  "id": "f023"
+ },
+ {
+  "user": "What's a good way to memorize a list of vocabulary words?",
+  "assistant": "Use spaced repetition, reviewing words at increasing intervals, and try making flashcards with example sentences. Connecting each word to a vivid image or story also helps it stick.",
+  "domain": "filler",
+  "id": "f024"
+ },
+ {
+  "user": "My JavaScript says 'undefined is not a function' when I call array.map. What's wrong?",
+  "assistant": "The variable you're calling map on probably isn't an array, so map is undefined on it. Log the variable with console.log to check its type, and make sure it was initialized or that the data has loaded before the call.",
+  "domain": "filler",
+  "id": "f025"
+ },
+ {
+  "user": "Write a two-line thank-you note for a birthday gift.",
+  "assistant": "Thank you so much for the thoughtful gift, I absolutely love it! It made my birthday extra special.",
+  "domain": "filler",
+  "id": "f026"
+ },
+ {
+  "user": "Can you draft a short email asking my coworker to send over the Q3 report?",
+  "assistant": "Subject: Q3 Report\n\nHi Jordan, could you send me the Q3 report when you get a chance? Thanks so much for your help!",
+  "domain": "filler",
+  "id": "f027"
+ },
+ {
+  "user": "What's a good opening line for a cover letter?",
+  "assistant": "Try something specific like, \"I was excited to see your opening for [role], as my experience in [field] aligns closely with what you're building.\" It shows enthusiasm and gets straight to the point.",
+  "domain": "filler",
+  "id": "f028"
+ },
+ {
+  "user": "Why does my Python loop print None at the end?",
+  "assistant": "That usually happens when you print the return value of a function that doesn't return anything. If you wrote print(my_function()), and my_function already prints inside it, Python will print None afterward. Either remove the outer print or return the value instead.",
+  "domain": "filler",
+  "id": "f029"
+ },
+ {
+  "user": "Can you suggest a simple weeknight pasta sauce?",
+  "assistant": "Saut\u00e9 garlic in olive oil, add a can of crushed tomatoes, and simmer for 15 minutes with salt, pepper, and a pinch of sugar. Stir in fresh basil and a splash of pasta water at the end.",
+  "domain": "filler",
+  "id": "f030"
+ },
+ {
+  "user": "Why am I getting \"undefined\" when I access array[5] in JavaScript?",
+  "assistant": "It means the array has fewer than six elements, so there's nothing at index 5. Remember indexes start at 0, so check array.length to confirm how many items it actually holds.",
+  "domain": "filler",
+  "id": "f031"
+ },
+ {
+  "user": "Any book recommendations for a good mystery novel?",
+  "assistant": "Try *And Then There Were None* by Agatha Christie for a classic, tightly plotted puzzle. For something more modern, *The Thursday Murder Club* by Richard Osman is witty and cozy.",
+  "domain": "filler",
+  "id": "f032"
+ },
+ {
+  "user": "What does 'carpe diem' mean?",
+  "assistant": "It's Latin for \"seize the day.\" It encourages people to make the most of the present rather than worrying about the future.",
+  "domain": "filler",
+  "id": "f033"
+ },
+ {
+  "user": "What does git rebase do compared to git merge?",
+  "assistant": "Merge combines two branches by creating a new commit that joins their histories. Rebase replays your commits on top of another branch, creating a cleaner linear history but rewriting commit hashes.",
+  "domain": "filler",
+  "id": "f034"
+ },
+ {
+  "user": "Give me a packing list for a weekend beach trip.",
+  "assistant": "Swimsuit, sunscreen, sunglasses, a hat, flip-flops, a towel, a light cover-up, and a reusable water bottle. Add a phone charger, a book, and a small bag for wet clothes.",
+  "domain": "filler",
+  "id": "f035"
+ },
+ {
+  "user": "What does 'git rebase' do compared to 'git merge'?",
+  "assistant": "Merge combines two branches by creating a new commit that joins their histories. Rebase replays your commits on top of another branch, producing a cleaner, linear history but rewriting commit hashes.",
+  "domain": "filler",
+  "id": "f036"
+ },
+ {
+  "user": "How do I remove a red wine stain from a cotton shirt?",
+  "assistant": "Blot the stain right away, then rinse from the back with cold water. Apply a mix of dish soap and hydrogen peroxide, let it sit for a few minutes, and wash as usual.",
+  "domain": "filler",
+  "id": "f037"
+ },
+ {
+  "user": "Can you give me a simple vinaigrette recipe?",
+  "assistant": "Whisk together 3 tablespoons olive oil, 1 tablespoon vinegar, 1 teaspoon Dijon mustard, and a pinch of salt and pepper. Adjust the oil-to-vinegar ratio to taste.",
+  "domain": "filler",
+  "id": "f038"
+ },
+ {
+  "user": "Why does my Python loop print the same value every time? I'm appending lambda functions in a for loop and calling them later.",
+  "assistant": "That's Python's late binding in closures: the lambda looks up the loop variable when it's called, not when it's defined. Fix it by binding the value as a default argument, like `lambda x=i: x`.",
+  "domain": "filler",
+  "id": "f039"
+ },
+ {
+  "user": "Can you give me a catchy name for a houseplant shop?",
+  "assistant": "How about \"Leaf & Co.\", \"The Green Nook\", or \"Pot Luck Plants\"? Each is short, memorable, and easy to turn into a logo.",
+  "domain": "filler",
+  "id": "f040"
+ },
+ {
+  "user": "What does the git command 'rebase' do?",
+  "assistant": "Rebase moves or replays your commits on top of another base commit, creating a cleaner, linear history. It's often used to bring a feature branch up to date with main without a merge commit.",
+  "domain": "filler",
+  "id": "f041"
+ },
+ {
+  "user": "How do I convert Celsius to Fahrenheit?",
+  "assistant": "Multiply the Celsius temperature by 9/5, then add 32. For example, 20\u00b0C \u00d7 1.8 = 36, plus 32 gives 68\u00b0F.",
+  "domain": "filler",
+  "id": "f042"
+ },
+ {
+  "user": "Write a haiku about coffee.",
+  "assistant": "Steam curls from the cup,\nBitter warmth wakes sleepy thoughts,\nMorning finds its voice.",
+  "domain": "filler",
+  "id": "f043"
+ },
+ {
+  "user": "How many ounces are in a cup?",
+  "assistant": "There are 8 fluid ounces in a US cup. Keep in mind that dry ingredients are measured by weight differently, so an ounce of flour isn't the same as a fluid ounce.",
+  "domain": "filler",
+  "id": "f044"
+ },
+ {
+  "user": "How long does it take light from the sun to reach Earth?",
+  "assistant": "Sunlight takes about 8 minutes and 20 seconds to reach Earth. That's because the sun is roughly 150 million kilometers away and light travels at about 300,000 kilometers per second.",
+  "domain": "filler",
+  "id": "f045"
+ },
+ {
+  "user": "My chocolate chip cookies keep spreading too thin. Any quick fix?",
+  "assistant": "Chill the dough for at least 30 minutes before baking, since cold butter spreads more slowly. You can also add an extra tablespoon or two of flour, and make sure your baking sheet is cool before each batch.",
+  "domain": "filler",
+  "id": "f046"
+ },
+ {
+  "user": "Can you recommend a classic movie from the 1950s?",
+  "assistant": "\"Rear Window\" (1954) by Alfred Hitchcock is a great choice, a tense thriller about a photographer who suspects his neighbor of murder. For something lighter, \"Singin' in the Rain\" (1952) is a joyful musical.",
+  "domain": "filler",
+  "id": "f047"
+ },
+ {
+  "user": "What's the tallest mountain in South America?",
+  "assistant": "Aconcagua in Argentina is the tallest at about 6,961 meters (22,838 feet). It is also the tallest mountain outside Asia.",
+  "domain": "filler",
+  "id": "f048"
+ },
+ {
+  "user": "Can you explain what a mortgage escrow account is?",
+  "assistant": "An escrow account is held by your lender to pay property taxes and homeowners insurance on your behalf. A portion of each monthly mortgage payment goes into it, and the lender pays those bills when they're due.",
+  "domain": "filler",
+  "id": "f049"
+ },
+ {
+  "user": "Suggest a simple weeknight pasta sauce.",
+  "assistant": "Saut\u00e9 garlic in olive oil, add a can of crushed tomatoes, and simmer for 15 minutes with salt, pepper, and a pinch of sugar. Finish with fresh basil and a splash of olive oil.",
+  "domain": "filler",
+  "id": "f050"
+ },
+ {
+  "user": "What's a good houseplant that's hard to kill?",
+  "assistant": "A snake plant is very forgiving: it tolerates low light and infrequent watering. Pothos and ZZ plants are also great sturdy choices.",
+  "domain": "filler",
+  "id": "f051"
+ },
+ {
+  "user": "Can you help me write a catchy subject line for a newsletter about gardening tips?",
+  "assistant": "Try \"Grow Something Great: 5 Tips for a Thriving Garden\" or \"Dig In: This Month's Easiest Garden Wins.\" Both are friendly and promise practical value.",
+  "domain": "filler",
+  "id": "f052"
+ },
+ {
+  "user": "What causes the northern lights?",
+  "assistant": "Charged particles from the sun collide with gases in Earth's upper atmosphere, and the energy released appears as glowing light. Oxygen produces green and red tones, while nitrogen can create blue and purple hues.",
+  "domain": "filler",
+  "id": "f053"
+ },
+ {
+  "user": "Suggest a name for a small bakery.",
+  "assistant": "How about \"Rise & Crumb\" or \"The Flour Door\"? Both are playful and easy to remember.",
+  "domain": "filler",
+  "id": "f054"
+ },
+ {
+  "user": "Can you write a two-line thank-you note for a coworker who covered my shift?",
+  "assistant": "Thank you so much for covering my shift, it really made a difference and I appreciate it. I'm happy to return the favor anytime!",
+  "domain": "filler",
+  "id": "f055"
+ },
+ {
+  "user": "How do I say 'thank you very much' in Spanish?",
+  "assistant": "You say \"Muchas gracias.\" For something even warmer, you can say \"Much\u00edsimas gracias.\"",
+  "domain": "filler",
+  "id": "f056"
+ },
+ {
+  "user": "How do I center a div in CSS?",
+  "assistant": "The simplest way is to use flexbox on the parent: display: flex; justify-content: center; align-items: center;. Make sure the parent has a height if you want vertical centering too.",
+  "domain": "filler",
+  "id": "f057"
+ },
+ {
+  "user": "My sourdough starter smells like nail polish remover. Is it dead?",
+  "assistant": "It's not dead, just hungry. That acetone smell means it's run out of food, so give it a regular feeding and it should return to a pleasantly tangy aroma within a day or two.",
+  "domain": "filler",
+  "id": "f058"
+ },
+ {
+  "user": "Why is the sky blue?",
+  "assistant": "Sunlight is scattered by gas molecules in the atmosphere, and shorter blue wavelengths scatter much more than longer red ones. This is called Rayleigh scattering, and it sends blue light in every direction across the sky.",
+  "domain": "filler",
+  "id": "f059"
+ },
+ {
+  "user": "What's the Excel formula to sum column B only when column A says 'Paid'?",
+  "assistant": "Use =SUMIF(A:A, \"Paid\", B:B). It checks each cell in column A for \"Paid\" and adds the matching values from column B.",
+  "domain": "filler",
+  "id": "f060"
+ },
+ {
+  "user": "Write a short poem about autumn rain.",
+  "assistant": "Soft taps on amber leaves,\na gray sky humming low,\nthe gutters sing in silver threads\nas puddles start to glow.\n\nThe world smells deep of earth and smoke,\nand all the streets slow down,\nwhile raindrops stitch the evening\ninto a quiet town.",
+  "domain": "filler",
+  "id": "f061"
+ },
+ {
+  "user": "How can I make my chocolate chip cookies chewier?",
+  "assistant": "Swap some of the white sugar for brown sugar and use an extra egg yolk. Also pull them from the oven when the edges are set but the centers still look slightly underdone; they'll finish cooking on the tray.",
+  "domain": "filler",
+  "id": "f062"
+ },
+ {
+  "user": "How do I reverse a string in Python?",
+  "assistant": "Use slicing: `reversed_text = text[::-1]`. It creates a new string with the characters in the opposite order.",
+  "domain": "filler",
+  "id": "f063"
+ },
+ {
+  "user": "What's the difference between affect and effect?",
+  "assistant": "Affect is usually a verb meaning to influence, while effect is usually a noun meaning the result. For example: \"The weather affected my mood,\" and \"The weather had an effect on my mood.\"",
+  "domain": "filler",
+  "id": "f064"
+ },
+ {
+  "user": "My chocolate chip cookies keep coming out flat. Any quick fix?",
+  "assistant": "Flat cookies usually mean the butter was too warm or the dough needs chilling. Try refrigerating the dough for 30 minutes before baking, and check that your baking soda is fresh.",
+  "domain": "filler",
+  "id": "f065"
+ },
+ {
+  "user": "Can you suggest a name for a small bakery?",
+  "assistant": "How about \"Rise & Shine Bakehouse\" or \"The Flour Pot\"? Both are friendly and easy to remember.",
+  "domain": "filler",
+  "id": "f066"
+ },
+ {
+  "user": "What's a good stretch for tight hamstrings?",
+  "assistant": "Try a seated forward fold: sit with your legs extended and gently reach toward your toes, keeping your back long. Hold for 30 seconds and breathe slowly.",
+  "domain": "filler",
+  "id": "f067"
+ },
+ {
+  "user": "What does SQL's GROUP BY do?",
+  "assistant": "GROUP BY collects rows that share the same value in specified columns so you can run aggregate functions like COUNT or SUM on each group. For example, SELECT city, COUNT(*) FROM customers GROUP BY city; counts customers per city.",
+  "domain": "filler",
+  "id": "f068"
+ },
+ {
+  "user": "Can you draft a short email asking my landlord to fix a leaky kitchen faucet?",
+  "assistant": "Subject: Leaky Kitchen Faucet\n\nHi [Landlord's name], the kitchen faucet has started to drip constantly and I'd like to get it repaired. Could you let me know when someone can come by? Thanks, [Your name]",
+  "domain": "filler",
+  "id": "f069"
+ },
+ {
+  "user": "Who painted The Starry Night?",
+  "assistant": "Vincent van Gogh painted The Starry Night in 1889. He created it while staying at an asylum in Saint-R\u00e9my-de-Provence, France.",
+  "domain": "filler",
+  "id": "f070"
+ },
+ {
+  "user": "What's the Excel formula to sum column B only if column A says \"Paid\"?",
+  "assistant": "Use =SUMIF(A:A, \"Paid\", B:B). It checks each cell in column A for \"Paid\" and adds the matching values from column B.",
+  "domain": "filler",
+  "id": "f071"
+ },
+ {
+  "user": "What's the Excel formula to sum column B only where column A says \"Paid\"?",
+  "assistant": "Use `=SUMIF(A:A, \"Paid\", B:B)`. It adds up the values in column B for every row where column A matches \"Paid\".",
+  "domain": "filler",
+  "id": "f072"
+ },
+ {
+  "user": "Write a one-sentence thank-you note for a birthday gift.",
+  "assistant": "Thank you so much for the thoughtful gift, it made my birthday extra special!",
+  "domain": "filler",
+  "id": "f073"
+ },
+ {
+  "user": "What's the formula for the area of a circle?",
+  "assistant": "Area = \u03c0 \u00d7 r\u00b2, where r is the radius. For a circle with radius 3, the area is about 28.27 square units.",
+  "domain": "filler",
+  "id": "f074"
+ },
+ {
+  "user": "My SQL query returns duplicate rows. How can I fix it?",
+  "assistant": "Add DISTINCT after SELECT to remove duplicates, as in SELECT DISTINCT name FROM customers. If duplicates come from a join, check your join conditions, since a missing or loose condition often multiplies rows.",
+  "domain": "filler",
+  "id": "f075"
+ },
+ {
+  "user": "Can you recommend a good science fiction novel?",
+  "assistant": "Try \"The Left Hand of Darkness\" by Ursula K. Le Guin, a thoughtful story about an envoy on a planet with no fixed gender. If you want something more fast-paced, \"Project Hail Mary\" by Andy Weir is a great pick.",
+  "domain": "filler",
+  "id": "f076"
+ },
+ {
+  "user": "What's a good icebreaker question for a team meeting?",
+  "assistant": "Try \"What's one small thing that made you smile this week?\" It's light, quick to answer, and gets people talking.",
+  "domain": "filler",
+  "id": "f077"
+ },
+ {
+  "user": "Can you suggest a simple vinaigrette recipe?",
+  "assistant": "Whisk together 3 tablespoons olive oil, 1 tablespoon red wine vinegar, 1 teaspoon Dijon mustard, a pinch of salt, and pepper. Adjust the vinegar or add a little honey to balance the flavor.",
+  "domain": "filler",
+  "id": "f078"
+ },
+ {
+  "user": "How do I convert Celsius to Fahrenheit quickly in my head?",
+  "assistant": "Double the Celsius number, subtract 10%, then add 32. For example, 20\u00b0C doubles to 40, minus 4 is 36, plus 32 gives 68\u00b0F.",
+  "domain": "filler",
+  "id": "f079"
+ },
+ {
+  "user": "What's a quick formula in Google Sheets to count how many cells in a range are not empty?",
+  "assistant": "Use `=COUNTA(A1:A100)`, which counts all non-empty cells in the range. If you only want numeric cells, use `COUNT` instead.",
+  "domain": "filler",
+  "id": "f080"
+ },
+ {
+  "user": "What's a fun fact about octopuses?",
+  "assistant": "Octopuses have three hearts and blue blood. Two hearts pump blood to the gills, while the third circulates it to the rest of the body.",
+  "domain": "filler",
+  "id": "f081"
+ },
+ {
+  "user": "Any tips for getting red wine out of a carpet?",
+  "assistant": "Blot the stain right away with a clean cloth, without rubbing. Then apply a mix of dish soap and hydrogen peroxide, let it sit a few minutes, and blot again with cold water.",
+  "domain": "filler",
+  "id": "f082"
+ },
+ {
+  "user": "What's the tallest mountain in the solar system?",
+  "assistant": "It's Olympus Mons on Mars, standing about 22 km (roughly 13.6 miles) high. That's nearly three times the height of Mount Everest above sea level.",
+  "domain": "filler",
+  "id": "f083"
+ },
+ {
+  "user": "Write a four-line poem about autumn rain.",
+  "assistant": "Soft drops tap the amber leaves,\nA quiet song on\u7a97 the eaves.\nThe gray sky hums a slow refrain,\nAnd earth drinks deep the autumn rain.",
+  "domain": "filler",
+  "id": "f084"
+ },
+ {
+  "user": "Can you draft a short email asking my coworker to reschedule Thursday's meeting?",
+  "assistant": "Subject: Request to Reschedule Thursday's Meeting\n\nHi Sam, would it be possible to move Thursday's meeting to another time this week? Let me know what works on your end and I'll update the invite. Thanks!",
+  "domain": "filler",
+  "id": "f085"
+ },
+ {
+  "user": "Can you suggest a fun houseplant that's hard to kill?",
+  "assistant": "A pothos is very forgiving and tolerates low light and irregular watering. A snake plant is another great option, since it thrives on neglect.",
+  "domain": "filler",
+  "id": "f086"
+ },
+ {
+  "user": "I want my chocolate chip cookies to be chewier. Any simple tweak?",
+  "assistant": "Swap some of the white sugar for brown sugar and use an extra egg yolk. Also pull them from the oven when the edges are set but the centers still look slightly underdone.",
+  "domain": "filler",
+  "id": "f087"
+ },
+ {
+  "user": "Explain recursion in one paragraph.",
+  "assistant": "Recursion is when a function solves a problem by calling itself on a smaller version of the same problem. It needs a base case that stops the calls, or it will run forever. Classic examples include calculating factorials and traversing a tree.",
+  "domain": "filler",
+  "id": "f088"
+ },
+ {
+  "user": "What's a good opening line for a toast at my sister's wedding?",
+  "assistant": "Try: 'Growing up with you, I always knew you'd find someone who deserved you, and today I'm proud to say you did.' Then follow with a short, warm anecdote about the couple.",
+  "domain": "filler",
+  "id": "f089"
+ },
+ {
+  "user": "My chocolate chip cookies keep spreading too thin. Any fix?",
+  "assistant": "Chill the dough for at least 30 minutes before baking, which firms up the butter so it melts more slowly. You can also try adding a couple extra tablespoons of flour or making sure your baking sheet is completely cool between batches.",
+  "domain": "filler",
+  "id": "f090"
+ },
+ {
+  "user": "Who painted the Mona Lisa and when?",
+  "assistant": "Leonardo da Vinci painted it, beginning around 1503. He continued working on it for several years, and it now hangs in the Louvre in Paris.",
+  "domain": "filler",
+  "id": "f091"
+ },
+ {
+  "user": "What Excel formula sums column B only where column A says 'Paid'?",
+  "assistant": "Use =SUMIF(A:A, \"Paid\", B:B). It checks each cell in column A for \"Paid\" and adds the matching values from column B.",
+  "domain": "filler",
+  "id": "f092"
+ },
+ {
+  "user": "Can you draft a short email asking my coworker for the Q3 report?",
+  "assistant": "Subject: Q3 Report\n\nHi Sam, could you send me the Q3 report when you have a moment? I'd like to review it before our next meeting. Thanks!",
+  "domain": "filler",
+  "id": "f093"
+ },
+ {
+  "user": "What's a simple vinaigrette ratio?",
+  "assistant": "The classic ratio is three parts oil to one part vinegar. Add a pinch of salt, a bit of mustard to help emulsify, and whisk well.",
+  "domain": "filler",
+  "id": "f094"
+ },
+ {
+  "user": "What's a regex to match a US zip code?",
+  "assistant": "Use ^\\d{5}(-\\d{4})?$ to match a five-digit zip code with an optional four-digit extension. It will match 12345 and 12345-6789.",
+  "domain": "filler",
+  "id": "f095"
+ },
+ {
+  "user": "What's the plural of 'octopus'?",
+  "assistant": "\"Octopuses\" is the most widely accepted plural in English. \"Octopi\" is common but based on a mistaken Latin ending, and \"octopodes\" is the technically Greek form.",
+  "domain": "filler",
+  "id": "f096"
+ },
+ {
+  "user": "What does 'idempotent' mean in programming?",
+  "assistant": "An idempotent operation produces the same result no matter how many times you run it. For example, setting a value to 5 is idempotent, while incrementing a counter is not.",
+  "domain": "filler",
+  "id": "f097"
+ },
+ {
+  "user": "Can you help me rephrase \"I am writing to inform you that the meeting is canceled\"?",
+  "assistant": "A simpler version is \"The meeting has been canceled.\" If you want a slightly softer tone, try \"Just a heads-up that today's meeting is canceled.\"",
+  "domain": "filler",
+  "id": "f098"
+ },
+ {
+  "user": "Why does my Python loop print 'None' after my list?",
+  "assistant": "That usually happens when you print the return value of a function that doesn't return anything, such as print(my_list.sort()). Call the function on its own line, then print the list separately.",
+  "domain": "filler",
+  "id": "f099"
+ },
+ {
+  "user": "What's a quick way to convert Celsius to Fahrenheit in my head?",
+  "assistant": "Double the Celsius number, subtract 10%, then add 32. For example, 20\u00b0C doubled is 40, minus 4 is 36, plus 32 is 68\u00b0F, which is exactly right. It's a handy approximation for everyday temperatures.",
+  "domain": "filler",
+  "id": "f100"
+ },
+ {
+  "user": "Give me a simple formula to calculate percentage change in Google Sheets.",
+  "assistant": "Use =(B2-A2)/A2 where A2 is the old value and B2 is the new one, then format the cell as a percentage. A positive result is an increase and a negative one is a decrease.",
+  "domain": "filler",
+  "id": "f101"
+ },
+ {
+  "user": "What spreadsheet formula sums column B only if column A says 'Paid'?",
+  "assistant": "Use =SUMIF(A:A, \"Paid\", B:B). It checks each cell in column A for \"Paid\" and adds the matching values from column B.",
+  "domain": "filler",
+  "id": "f102"
+ },
+ {
+  "user": "Give me a packing list for a three-day beach trip.",
+  "assistant": "Swimsuits, sunscreen, a hat, sunglasses, a towel, sandals, light clothes, a cover-up, a reusable water bottle, and a phone charger. Add a light sweater for evenings and a small bag for wet items.",
+  "domain": "filler",
+  "id": "f103"
+ },
+ {
+  "user": "What's a good book for learning about habits?",
+  "assistant": "*Atomic Habits* by James Clear is a popular, practical choice with clear examples. For a more research-focused take, try *The Power of Habit* by Charles Duhigg.",
+  "domain": "filler",
+  "id": "f104"
+ },
+ {
+  "user": "Suggest a short mindfulness exercise for a stressful afternoon.",
+  "assistant": "Try the 5-4-3-2-1 technique: name five things you see, four you can touch, three you hear, two you smell, and one you taste. It takes about two minutes and helps ground your attention in the present.",
+  "domain": "filler",
+  "id": "f105"
+ },
+ {
+  "user": "How do plants make food?",
+  "assistant": "Through photosynthesis, plants use sunlight to turn carbon dioxide and water into glucose and oxygen. This happens mostly in chloroplasts, which contain the green pigment chlorophyll.",
+  "domain": "filler",
+  "id": "f106"
+ },
+ {
+  "user": "How do I fix a SQL error saying 'column not found' in my GROUP BY?",
+  "assistant": "Check that the column name is spelled correctly and exists in the table you're querying. Also, some databases don't allow using SELECT aliases in GROUP BY, so repeat the original expression instead.",
+  "domain": "filler",
+  "id": "f107"
+ },
+ {
+  "user": "How long should I boil eggs for jammy yolks?",
+  "assistant": "Boil them for about 6 to 7 minutes from when the water reaches a rolling boil. Then move them to an ice bath right away to stop the cooking.",
+  "domain": "filler",
+  "id": "f108"
+ },
+ {
+  "user": "How do I fix a CSS div that won't center horizontally?",
+  "assistant": "Give the div a fixed or max width and set margin: 0 auto. Alternatively, make the parent a flex container with display: flex and justify-content: center.",
+  "domain": "filler",
+  "id": "f109"
+ },
+ {
+  "user": "What does the regex ^\\d{3}-\\d{4}$ match?",
+  "assistant": "It matches a string that is exactly three digits, a hyphen, and four digits, like 555-1234. The ^ and $ anchors ensure nothing else appears before or after.",
+  "domain": "filler",
+  "id": "f110"
+ },
+ {
+  "user": "Suggest a name for a fluffy orange cat.",
+  "assistant": "How about Marmalade, Pumpkin, or Cheddar? If you want something more playful, Sunny or Biscuit are also good fits.",
+  "domain": "filler",
+  "id": "f111"
+ },
+ {
+  "user": "Can you draft a short email asking my landlord when the broken heater will be fixed?",
+  "assistant": "Subject: Heater Repair Follow-Up\n\nHi [Landlord's name], I'm following up on the broken heater I reported on [date]. Could you let me know when a repair is scheduled? Thank you, [Your name].",
+  "domain": "filler",
+  "id": "f112"
+ },
+ {
+  "user": "Can I swap butter for olive oil in banana bread?",
+  "assistant": "Yes, you can. Use about 3/4 of the amount of butter called for, so 3/4 cup of olive oil for 1 cup of butter. The loaf will be a bit more moist and have a slightly fruity flavor.",
+  "domain": "filler",
+  "id": "f113"
+ },
+ {
+  "user": "Write a catchy tagline for a neighborhood bakery.",
+  "assistant": "\"Baked fresh, baked with heart.\" Another option: \"Where every morning rises.\"",
+  "domain": "filler",
+  "id": "f114"
+ },
+ {
+  "user": "What's a good way to get red wine out of a cotton shirt?",
+  "assistant": "Blot the stain right away, then rinse it from the back with cold water. Apply a mix of dish soap and hydrogen peroxide, let it sit for several minutes, and rinse again before laundering. Check that the stain is gone before using a dryer.",
+  "domain": "filler",
+  "id": "f115"
+ },
+ {
+  "user": "How can I make my scrambled eggs creamier?",
+  "assistant": "Cook them over low heat and stir gently and constantly, pulling the curds slowly. Take them off the heat while still slightly wet, and a small knob of butter or splash of cream at the end helps too.",
+  "domain": "filler",
+  "id": "f116"
+ },
+ {
+  "user": "How do I make a simple vinaigrette?",
+  "assistant": "Whisk together three parts olive oil with one part vinegar, a spoonful of Dijon mustard, and a pinch of salt and pepper. The mustard helps the oil and vinegar stay blended.",
+  "domain": "filler",
+  "id": "f117"
+ },
+ {
+  "user": "What's the difference between 'affect' and 'effect'?",
+  "assistant": "\"Affect\" is usually a verb meaning to influence, as in \"The weather affected our plans.\" \"Effect\" is usually a noun meaning the result, as in \"The effect was dramatic.\"",
+  "domain": "filler",
+  "id": "f118"
+ },
+ {
+  "user": "How many days are there until the end of a leap year from March 1?",
+  "assistant": "In a leap year, March 1 is day 61, so there are 305 days remaining in the year after that date. If you include March 1 itself, it's 306 days.",
+  "domain": "filler",
+  "id": "f119"
+ },
+ {
+  "user": "What's the difference between baking soda and baking powder?",
+  "assistant": "Baking soda is pure sodium bicarbonate and needs an acid in the recipe to activate. Baking powder already contains both the soda and a dry acid, so it only needs moisture and heat.",
+  "domain": "filler",
+  "id": "f120"
+ },
+ {
+  "user": "Help me write a thank-you note for a birthday gift.",
+  "assistant": "Dear [Name], thank you so much for the thoughtful gift! It was such a lovely surprise, and I'll enjoy it every time I use it. It meant a lot that you remembered my birthday.",
+  "domain": "filler",
+  "id": "f121"
+ },
+ {
+  "user": "Can you give me a haiku about coffee?",
+  "assistant": "Steam curls from the cup,\nbitter warmth wakes the quiet,\nmorning finds its voice.",
+  "domain": "filler",
+  "id": "f122"
+ },
+ {
+  "user": "Who wrote Pride and Prejudice, and when was it published?",
+  "assistant": "Jane Austen wrote it, and it was published in 1813. It follows Elizabeth Bennet and her complicated relationship with Mr. Darcy.",
+  "domain": "filler",
+  "id": "f123"
+ },
+ {
+  "user": "What's a good stretch for a stiff lower back?",
+  "assistant": "The child's pose is gentle and effective: kneel, sit back on your heels, and reach your arms forward along the floor. Hold for 30 seconds while breathing slowly.",
+  "domain": "filler",
+  "id": "f124"
+ },
+ {
+  "user": "Write a thank-you note for a coworker who covered my shift.",
+  "assistant": "Hi [Name], thank you so much for covering my shift. It really helped me out, and I appreciate your generosity. Let me know if I can return the favor sometime!",
+  "domain": "filler",
+  "id": "f125"
+ },
+ {
+  "user": "What's a good stretch for tight hips?",
+  "assistant": "Try the pigeon pose or a low lunge with the back knee on the ground. Hold each for 30 to 60 seconds per side while breathing slowly.",
+  "domain": "filler",
+  "id": "f126"
+ },
+ {
+  "user": "What's a good substitute for buttermilk in pancakes?",
+  "assistant": "Stir one tablespoon of lemon juice or white vinegar into a cup of milk and let it sit for 5 minutes. It'll curdle slightly and work just like buttermilk.",
+  "domain": "filler",
+  "id": "f127"
+ },
+ {
+  "user": "What causes the tides?",
+  "assistant": "Tides are caused mainly by the Moon's gravitational pull on Earth's oceans, with a smaller contribution from the Sun. The water bulges toward the Moon and on the opposite side of Earth, creating high tides as the planet rotates.",
+  "domain": "filler",
+  "id": "f128"
+ },
+ {
+  "user": "Help me come up with a title for a blog post about houseplants.",
+  "assistant": "Some options: \"Green Thumb Basics: Keeping Houseplants Alive,\" \"Leaf It to Me: A Beginner's Guide to Indoor Plants,\" or \"Bringing the Outdoors In.\" The second has a bit of playful charm.",
+  "domain": "filler",
+  "id": "f129"
+ },
+ {
+  "user": "Can I use honey instead of sugar in banana bread?",
+  "assistant": "Yes, you can swap honey in at about 3/4 the amount of sugar called for. Since honey adds moisture, reduce the other liquid slightly and lower the oven temperature by about 25\u00b0F to prevent over-browning.",
+  "domain": "filler",
+  "id": "f130"
+ },
+ {
+  "user": "What year did the Berlin Wall fall?",
+  "assistant": "1989, on November 9th. Germany formally reunified the following year, on October 3, 1990.",
+  "domain": "filler",
+  "id": "f131"
+ },
+ {
+  "user": "What does the SQL JOIN keyword do?",
+  "assistant": "JOIN combines rows from two tables based on a related column, such as a shared ID. INNER JOIN returns only matching rows, while LEFT JOIN keeps all rows from the left table even without a match.",
+  "domain": "filler",
+  "id": "f132"
+ },
+ {
+  "user": "How do I fix a squeaky door hinge?",
+  "assistant": "Apply a small amount of lubricant like WD-40, silicone spray, or even petroleum jelly to the hinge pin. Open and close the door a few times to work it in, then wipe off any excess.",
+  "domain": "filler",
+  "id": "f133"
+ },
+ {
+  "user": "How do I calculate the percentage change between two numbers?",
+  "assistant": "Subtract the old value from the new value, divide by the old value, and multiply by 100. For example, going from 50 to 60 gives (10 \u00f7 50) \u00d7 100 = 20% increase.",
+  "domain": "filler",
+  "id": "f134"
+ },
+ {
+  "user": "Can you summarize the plot of Romeo and Juliet?",
+  "assistant": "Two teenagers from feuding families in Verona fall in love and secretly marry. A chain of misunderstandings and violence leads to both their deaths, which finally reconciles their families.",
+  "domain": "filler",
+  "id": "f135"
+ },
+ {
+  "user": "How do I get a red wine stain out of a cotton shirt?",
+  "assistant": "Blot the stain right away, then rinse with cold water from the back of the fabric. Apply a mix of dish soap and hydrogen peroxide, let it sit a few minutes, and launder as usual.",
+  "domain": "filler",
+  "id": "f136"
+ },
+ {
+  "user": "What does `git rebase` do compared to `git merge`?",
+  "assistant": "Merge combines two branches by creating a new commit that joins their histories. Rebase replays your commits on top of another branch, producing a cleaner linear history but rewriting commit hashes.",
+  "domain": "filler",
+  "id": "f137"
+ },
+ {
+  "user": "What does the git command `rebase` do?",
+  "assistant": "Git rebase moves or replays your commits onto a new base commit, giving you a cleaner, linear history. It's often used to update a feature branch with the latest changes from main. Avoid rebasing commits that others have already pulled.",
+  "domain": "filler",
+  "id": "f138"
+ },
+ {
+  "user": "Write a friendly thank-you note to my coworker for covering my shift.",
+  "assistant": "Hi [Name], thank you so much for covering my shift. It really helped me out, and I appreciate how reliable and kind you are. Let me know if I can return the favor sometime!",
+  "domain": "filler",
+  "id": "f139"
+ },
+ {
+  "user": "Draft a short email asking my coworker to review a document.",
+  "assistant": "Subject: Quick review request\n\nHi Sam, could you take a look at the attached document when you have a moment? I'd appreciate any feedback on the structure and clarity. Thanks so much!",
+  "domain": "filler",
+  "id": "f140"
+ },
+ {
+  "user": "My chocolate chip cookies come out too flat. Any quick fix?",
+  "assistant": "Try chilling the dough for at least 30 minutes before baking, since cold butter spreads more slowly. You can also add a couple extra tablespoons of flour or check that your baking soda is fresh.",
+  "domain": "filler",
+  "id": "f141"
+ },
+ {
+  "user": "My git push says 'rejected, non-fast-forward.' What does that mean?",
+  "assistant": "It means the remote branch has commits your local branch doesn't have. Run git pull --rebase (or git pull) to integrate those changes, then push again.",
+  "domain": "filler",
+  "id": "f142"
+ },
+ {
+  "user": "Give me a packing list for a three-day beach weekend.",
+  "assistant": "Pack swimsuits, sunscreen, sunglasses, a hat, flip-flops, a light cover-up, a towel, and a reusable water bottle. Add a change of clothes for evenings, a light sweater, toiletries, and a phone charger. A small bag for wet items is handy too.",
+  "domain": "filler",
+  "id": "f143"
+ },
+ {
+  "user": "What's a good stretching routine after running?",
+  "assistant": "Try holding each for 30 seconds: standing quad stretch, hamstring stretch, calf stretch against a wall, and a hip flexor lunge. Finish with a figure-four stretch for the glutes.",
+  "domain": "filler",
+  "id": "f144"
+ },
+ {
+  "user": "Can you write a two-line rhyming birthday message for a coworker?",
+  "assistant": "Happy birthday to you, may your day be bright,\nWith cake and laughter from morning to night!",
+  "domain": "filler",
+  "id": "f145"
+ },
+ {
+  "user": "Can you suggest a fun icebreaker for a team meeting?",
+  "assistant": "Try \"two truths and a lie,\" where each person shares three statements and others guess the false one. It's quick, lighthearted, and helps people learn surprising things about each other.",
+  "domain": "filler",
+  "id": "f146"
+ },
+ {
+  "user": "Suggest a theme for a kid's birthday party.",
+  "assistant": "A space adventure theme is always popular, with planet decorations, star-shaped snacks, and a rocket craft activity. A dinosaur dig, where kids uncover toy fossils in a sandbox, is another hit.",
+  "domain": "filler",
+  "id": "f147"
+ },
+ {
+  "user": "How do I center a title in a Word document?",
+  "assistant": "Select the title text and click the Center button in the Home tab's Paragraph group. You can also press Ctrl+E on Windows or Cmd+E on Mac.",
+  "domain": "filler",
+  "id": "f148"
+ },
+ {
+  "user": "What's a good opening line for a mystery story?",
+  "assistant": "\"The clock in the hallway had stopped at 3:17, and nobody in the house would admit to touching it.\" It sets up a puzzle right away and hints at secrets among the characters.",
+  "domain": "filler",
+  "id": "f149"
+ },
+ {
+  "user": "Explain what an API is in one or two sentences.",
+  "assistant": "An API is a set of rules that lets one piece of software request data or actions from another. Think of it like a waiter taking your order to the kitchen and bringing back your food.",
+  "domain": "filler",
+  "id": "f150"
+ },
+ {
+  "user": "Can you suggest a name for a golden retriever puppy?",
+  "assistant": "Some fitting options are Sunny, Honey, Maple, Biscuit, or Cooper. Golden names often play on warm colors and food.",
+  "domain": "filler",
+  "id": "f151"
+ },
+ {
+  "user": "What Excel formula sums column B only when column A says 'Paid'?",
+  "assistant": "Use =SUMIF(A:A, \"Paid\", B:B). It checks each cell in column A for \"Paid\" and adds the matching values from column B.",
+  "domain": "filler",
+  "id": "f152"
+ },
+ {
+  "user": "Write a SQL query to find duplicate emails in a users table.",
+  "assistant": "Use: `SELECT email, COUNT(*) FROM users GROUP BY email HAVING COUNT(*) > 1;`. This returns each email that appears more than once, along with how many times.",
+  "domain": "filler",
+  "id": "f153"
+ },
+ {
+  "user": "Can you write a thank-you note for a birthday gift?",
+  "assistant": "Dear [Name], thank you so much for the thoughtful gift. It was a wonderful surprise and I'll enjoy it for a long time. It meant a lot that you remembered my birthday.",
+  "domain": "filler",
+  "id": "f154"
+ },
+ {
+  "user": "Explain what a git rebase does in simple terms.",
+  "assistant": "A rebase takes the commits from your branch and replays them on top of another branch, creating a cleaner, linear history. Unlike merge, it doesn't create a merge commit, but it does rewrite commit history.",
+  "domain": "filler",
+  "id": "f155"
+ },
+ {
+  "user": "How do I fix a SQL error saying 'column does not exist'?",
+  "assistant": "Double-check the column name's spelling and capitalization, since some databases are case-sensitive when names are quoted. Also confirm you're querying the right table or alias, and that any recent migration actually created the column.",
+  "domain": "filler",
+  "id": "f156"
+ },
+ {
+  "user": "How many days are in a leap year?",
+  "assistant": "A leap year has 366 days, with the extra day being February 29. They occur roughly every four years to keep the calendar aligned with Earth's orbit.",
+  "domain": "filler",
+  "id": "f157"
+ },
+ {
+  "user": "Why does my Python loop print None after each line?",
+  "assistant": "That usually happens when you print the return value of a function that already prints. For example, print(my_func()) shows None if my_func has no return statement. Either call my_func() on its own or make it return the value instead.",
+  "domain": "filler",
+  "id": "f158"
+ },
+ {
+  "user": "How far is the Moon from Earth?",
+  "assistant": "The Moon is about 384,400 kilometers (238,855 miles) away on average. Its orbit is slightly elliptical, so the distance varies by roughly 20,000 kilometers over the month.",
+  "domain": "filler",
+  "id": "f159"
+ },
+ {
+  "user": "How can I stop my houseplant's leaves from turning yellow?",
+  "assistant": "Yellow leaves are most often caused by overwatering, so check that the soil dries a bit between waterings and the pot drains well. Insufficient light or nutrient deficiency can also be culprits.",
+  "domain": "filler",
+  "id": "f160"
+ },
+ {
+  "user": "How does compound interest work?",
+  "assistant": "Compound interest means you earn interest on both your original amount and on the interest already added. For example, $1,000 at 5% grows to $1,050 after year one, then to $1,102.50 after year two.",
+  "domain": "filler",
+  "id": "f161"
+ },
+ {
+  "user": "What are some good houseplants that are hard to kill?",
+  "assistant": "Snake plants, pothos, and ZZ plants are very forgiving. They tolerate low light and irregular watering well.",
+  "domain": "filler",
+  "id": "f162"
+ },
+ {
+  "user": "How do I write a good opening line for a short story?",
+  "assistant": "Start with a moment of tension, curiosity, or a vivid detail that raises a question in the reader's mind. For example, \"The day the river ran backward, Mara was already late.\"",
+  "domain": "filler",
+  "id": "f163"
+ },
+ {
+  "user": "Any book recommendations for a good mystery?",
+  "assistant": "Try \"And Then There Were None\" by Agatha Christie for a classic, tightly plotted puzzle. If you want something more modern, \"The Thursday Murder Club\" by Richard Osman is witty and charming.",
+  "domain": "filler",
+  "id": "f164"
+ },
+ {
+  "user": "What's a good stretching routine after a run?",
+  "assistant": "Try holding each of these for 30 seconds per side: standing quad stretch, hamstring stretch, calf stretch against a wall, and a hip flexor lunge. Finish with a few deep breaths to help your heart rate settle.",
+  "domain": "filler",
+  "id": "f165"
+ },
+ {
+  "user": "What spreadsheet formula sums column B only when column A says \"Paid\"?",
+  "assistant": "Use =SUMIF(A:A, \"Paid\", B:B). It checks each cell in column A for \"Paid\" and adds the matching values from column B.",
+  "domain": "filler",
+  "id": "f166"
+ },
+ {
+  "user": "Can you recommend a good podcast about history?",
+  "assistant": "*Hardcore History* by Dan Carlin offers long, immersive deep dives into major events. For shorter episodes, *The Rest Is History* is lively and conversational. *Revolutions* by Mike Duncan is great for a linear walk through political upheavals.",
+  "domain": "filler",
+  "id": "f167"
+ },
+ {
+  "user": "When did the Berlin Wall fall?",
+  "assistant": "The Berlin Wall fell on November 9, 1989, after East Germany announced open borders. German reunification followed less than a year later, in October 1990.",
+  "domain": "filler",
+  "id": "f168"
+ },
+ {
+  "user": "Recommend a relaxing instrumental album.",
+  "assistant": "\"Music for Airports\" by Brian Eno is a classic ambient choice. For something more piano-driven, try \"Nuvole Bianche\" and other works by Ludovico Einaudi.",
+  "domain": "filler",
+  "id": "f169"
+ },
+ {
+  "user": "How many tablespoons are in a quarter cup?",
+  "assistant": "A quarter cup equals 4 tablespoons. That's also 12 teaspoons.",
+  "domain": "filler",
+  "id": "f170"
+ },
+ {
+  "user": "Suggest a fun icebreaker question for a team meeting.",
+  "assistant": "Try \"What's one small thing that made you smile this week?\" It's light, easy to answer, and often sparks friendly conversation.",
+  "domain": "filler",
+  "id": "f171"
+ },
+ {
+  "user": "What is the capital of Australia?",
+  "assistant": "The capital is Canberra, not Sydney or Melbourne as many people assume. It was purpose-built as a compromise between those two rival cities.",
+  "domain": "filler",
+  "id": "f172"
+ },
+ {
+  "user": "What's a quick way to remove a coffee stain from a white shirt?",
+  "assistant": "Rinse the stain with cold water from the back of the fabric, then dab it with a mix of dish soap and white vinegar. Let it sit for a few minutes before washing as usual.",
+  "domain": "filler",
+  "id": "f173"
+ },
+ {
+  "user": "What's the difference between a virus and a bacterium?",
+  "assistant": "Bacteria are single-celled living organisms that can reproduce on their own, while viruses are much smaller and need a host cell to replicate. That's why antibiotics work on bacteria but not on viruses.",
+  "domain": "filler",
+  "id": "f174"
+ },
+ {
+  "user": "How do I undo the last git commit but keep my changes?",
+  "assistant": "Run git reset --soft HEAD~1. This removes the commit but leaves your changes staged so you can edit and recommit.",
+  "domain": "filler",
+  "id": "f175"
+ },
+ {
+  "user": "How do I get a red wine stain out of a carpet?",
+  "assistant": "Blot the stain with a clean cloth without rubbing, then apply a little cold water and blot again. Next, mix a teaspoon of dish soap with a cup of water, dab it on, and blot until the stain lifts.",
+  "domain": "filler",
+  "id": "f176"
+ },
+ {
+  "user": "Any book recommendations similar to The Martian?",
+  "assistant": "Try Project Hail Mary by Andy Weir, which has the same problem-solving humor and science focus. Artemis by the same author and Seveneves by Neal Stephenson are other good options.",
+  "domain": "filler",
+  "id": "f177"
+ },
+ {
+  "user": "My chocolate chip cookies spread too thin when I bake them. How can I fix that?",
+  "assistant": "Chill the dough for at least 30 minutes before baking so the butter firms up. You can also try adding a couple extra tablespoons of flour or using slightly cooler butter. Both changes help the cookies hold their shape.",
+  "domain": "filler",
+  "id": "f178"
+ },
+ {
+  "user": "Why does my Python loop print 'None' after every line?",
+  "assistant": "Most likely you're printing the return value of a function that already prints something. For example, print(greet()) will show 'None' if greet() only calls print internally and returns nothing. Either remove the outer print or have the function return the string.",
+  "domain": "filler",
+  "id": "f179"
+ },
+ {
+  "user": "What's the SQL query to find duplicate emails in a users table?",
+  "assistant": "Use `SELECT email, COUNT(*) FROM users GROUP BY email HAVING COUNT(*) > 1;`. This lists each email that appears more than once along with how many times it appears.",
+  "domain": "filler",
+  "id": "f180"
+ },
+ {
+  "user": "How do I reverse a string in Go?",
+  "assistant": "Strings are immutable in Go, so convert to a rune slice, swap from both ends, and convert back. For example: `r := []rune(s); for i, j := 0, len(r)-1; i < j; i, j = i+1, j-1 { r[i], r[j] = r[j], r[i] }; return string(r)`. Using runes keeps multi-byte characters intact.",
+  "domain": "filler",
+  "id": "f181"
+ },
+ {
+  "user": "What's a good stretch for tight shoulders?",
+  "assistant": "Try the cross-body stretch: bring one arm across your chest and gently pull it closer with the other arm for 20-30 seconds. Doorway chest stretches and slow shoulder rolls also help loosen things up.",
+  "domain": "filler",
+  "id": "f182"
+ },
+ {
+  "user": "Write a short email asking my landlord to fix a leaky faucet.",
+  "assistant": "Subject: Leaky Kitchen Faucet\n\nHi [Landlord's name], the kitchen faucet has started dripping steadily and I wanted to let you know. Could you arrange for someone to take a look this week? Please tell me what times work for access. Thank you, [Your name]",
+  "domain": "filler",
+  "id": "f183"
+ },
+ {
+  "user": "What's a good way to remember the order of the planets?",
+  "assistant": "Use the mnemonic \"My Very Educated Mother Just Served Us Noodles\": Mercury, Venus, Earth, Mars, Jupiter, Saturn, Uranus, Neptune. Each word's first letter matches a planet in order from the Sun.",
+  "domain": "filler",
+  "id": "f184"
+ },
+ {
+  "user": "Can you recommend a relaxing board game?",
+  "assistant": "Try Carcassonne, a tile-laying game with simple rules and low stress. Another good option is Azul, which is colorful, quick to learn, and satisfying to play.",
+  "domain": "filler",
+  "id": "f185"
+ },
+ {
+  "user": "How do I write a SQL query to find duplicate emails in a users table?",
+  "assistant": "Use `SELECT email, COUNT(*) FROM users GROUP BY email HAVING COUNT(*) > 1;`. This lists each email that appears more than once along with how many times.",
+  "domain": "filler",
+  "id": "f186"
+ },
+ {
+  "user": "Give me a quick stretching routine for a stiff neck.",
+  "assistant": "Slowly tilt your ear toward your shoulder and hold for 20 seconds on each side. Then gently turn your head to look over each shoulder, and finish with a few shoulder rolls.",
+  "domain": "filler",
+  "id": "f187"
+ },
+ {
+  "user": "What's the Excel formula to sum a column only if the adjacent column says 'Paid'?",
+  "assistant": "Use SUMIF: `=SUMIF(B:B,\"Paid\",A:A)`. This adds up values in column A wherever column B equals \"Paid\".",
+  "domain": "filler",
+  "id": "f188"
+ },
+ {
+  "user": "How do I convert 350 Fahrenheit to Celsius?",
+  "assistant": "Subtract 32, then multiply by 5/9. So 350\u00b0F is about 177\u00b0C.",
+  "domain": "filler",
+  "id": "f189"
+ },
+ {
+  "user": "How do I politely decline a meeting invitation?",
+  "assistant": "You could say: \"Thanks for the invite. Unfortunately I can't attend, but please send notes afterward, and I'm happy to help in another way.\" Keep it short and offer an alternative if you can.",
+  "domain": "filler",
+  "id": "f190"
+ },
+ {
+  "user": "Give me a simple recipe for guacamole.",
+  "assistant": "Mash 2 ripe avocados with the juice of half a lime, a pinch of salt, and a spoonful of finely chopped onion. Stir in chopped cilantro and a diced tomato if you like. Taste and adjust the salt and lime.",
+  "domain": "filler",
+  "id": "f191"
+ },
+ {
+  "user": "Suggest a few fun things to do on a rainy Saturday.",
+  "assistant": "You could try baking something new, starting a jigsaw puzzle, or having a movie marathon. A visit to a museum or bookstore is a nice option too. Board games and a pot of tea also make for a cozy day.",
+  "domain": "filler",
+  "id": "f192"
+ },
+ {
+  "user": "What does \"git rebase\" do?",
+  "assistant": "It moves or replays your commits on top of another base commit, usually the latest commit of another branch. This produces a cleaner, linear history than merging, but it rewrites commit hashes, so avoid rebasing branches others are using.",
+  "domain": "filler",
+  "id": "f193"
+ },
+ {
+  "user": "How do I calculate a percentage increase in Google Sheets?",
+  "assistant": "Use =(new_value - old_value) / old_value, such as =(B2-A2)/A2. Then format the cell as a percentage.",
+  "domain": "filler",
+  "id": "f194"
+ },
+ {
+  "user": "Why does my Python script say 'list index out of range'?",
+  "assistant": "That error means you're accessing an index that doesn't exist in the list, such as asking for item 5 in a list with only 5 items (valid indexes are 0-4). Check your loop bounds and print len(your_list) to confirm what you're working with.",
+  "domain": "filler",
+  "id": "f195"
+ },
+ {
+  "user": "How do I convert Fahrenheit to Celsius?",
+  "assistant": "Subtract 32 from the Fahrenheit temperature, then multiply by 5/9. For example, 68\u00b0F minus 32 is 36, times 5/9 equals 20\u00b0C.",
+  "domain": "filler",
+  "id": "f196"
+ },
+ {
+  "user": "Why do cats purr?",
+  "assistant": "Cats purr when they're content, but also when they're stressed or in pain, so it seems to be a self-soothing behavior as well as a social signal. The vibrations may even help promote healing.",
+  "domain": "filler",
+  "id": "f197"
+ },
+ {
+  "user": "Help me write a catchy subject line for a newsletter about gardening tips.",
+  "assistant": "Try \"Grow Something Great: This Month's Garden Tips\" or \"Dig In: 5 Easy Wins for Your Garden.\" Both are short and promise clear value.",
+  "domain": "filler",
+  "id": "f198"
+ },
+ {
+  "user": "Write a friendly text wishing my coworker a happy birthday.",
+  "assistant": "Happy birthday, [Name]! \ud83c\udf89 Hope your day is full of cake, laughs, and zero meetings. Cheers to another great year!",
+  "domain": "filler",
+  "id": "f199"
+ },
+ {
+  "user": "I'm going to a beach weekend. What should I pack?",
+  "assistant": "Bring swimwear, sunscreen, a hat, sunglasses, a towel, and sandals. Also pack a light cover-up, a reusable water bottle, a phone charger, and a small bag for wet clothes.",
+  "domain": "filler",
+  "id": "f200"
+ },
+ {
+  "user": "Translate 'Where is the train station?' into Spanish.",
+  "assistant": "\"\u00bfD\u00f3nde est\u00e1 la estaci\u00f3n de tren?\" In many places you might also hear \"estaci\u00f3n de trenes\" depending on the region.",
+  "domain": "filler",
+  "id": "f201"
+ },
+ {
+  "user": "My JavaScript fetch call returns a Promise instead of the data. What am I doing wrong?",
+  "assistant": "fetch is asynchronous, so you need to wait for it with `await` or `.then()`. For example: `const res = await fetch(url); const data = await res.json();`. Make sure the surrounding function is marked `async`.",
+  "domain": "filler",
+  "id": "f202"
+ },
+ {
+  "user": "My CSS flexbox items won't center vertically. Any idea why?",
+  "assistant": "The container probably doesn't have a defined height, so there's no extra space to center within. Set something like min-height: 100vh on the container along with display: flex and align-items: center.",
+  "domain": "filler",
+  "id": "f203"
+ },
+ {
+  "user": "How do I politely decline a meeting invite?",
+  "assistant": "You could write: \"Thank you for the invitation. Unfortunately I won't be able to attend, but I'd be happy to review any notes afterward.\" Suggesting an alternative, like an email update, keeps it constructive.",
+  "domain": "filler",
+  "id": "f204"
+ }
+]

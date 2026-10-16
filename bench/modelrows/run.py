@@ -2,11 +2,11 @@
 """Driver for the two model-call rows. Key: $ANTHROPIC_API_KEY in this process's own environment
 only (the launcher script sets it on the exec line); never printed, never written.
 
-  python bench/modelrows/run.py gen --kind a --per-call 5 --calls 30 --out DATA --budget 4
-  python bench/modelrows/run.py row-a --data DATA --offset 0 --limit 6 --out RUN --budget 2
-  python bench/modelrows/run.py row-b --data DATA --offset 0 --limit 6 --out RUN --budget 2
-  python bench/modelrows/run.py reread-a --data DATA --from-run RUN --out RUN2 --budget 8 --reader sonnet
-  python bench/modelrows/run.py report --kind a RUN [RUN ...]
+  python -m bench.modelrows.run gen --kind a --per-call 5 --calls 30 --out DATA --budget 4
+  python -m bench.modelrows.run row-a --data DATA --offset 0 --limit 6 --out RUN --budget 2
+  python -m bench.modelrows.run row-b --data DATA --offset 0 --limit 6 --out RUN --budget 2
+  python -m bench.modelrows.run reread-a --data DATA --from-run RUN --out RUN2 --budget 8 --reader sonnet
+  python -m bench.modelrows.run report --kind a RUN [RUN ...]
 
 A run is refused up front when its projected cost would pass --budget; the ledger stops it if the
 projection was wrong. Each finished unit is one file under RUN/units, so a rerun skips what is done.
@@ -23,24 +23,31 @@ import time
 import traceback
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-
-from common import HAIKU, SONNET, BudgetExceeded, Client, Ledger  # noqa: E402
-import gen  # noqa: E402
-import rows  # noqa: E402
+from . import gen, orouter, rows
+from .common import HAIKU, SONNET, BudgetExceeded, Client, Ledger, answer, cluster_bootstrap, mean
 
 MODELS = {"haiku": HAIKU, "sonnet": SONNET}
 
 
-def clients(args, ledger: Ledger):
+def clients(args, ledger: Ledger, or_ledger: Ledger | None = None):
+    """Composer and judge are Haiku 5.5 on the Anthropic ledger. ``--reader or:<model id>`` puts the
+    reader on OpenRouter, on its own ledger and its own ``--or-budget``."""
     main = Client(HAIKU, ledger, args.budget)
     judge = Client(HAIKU, ledger, args.budget)
-    reader = Client(MODELS[args.reader], ledger, args.budget) if getattr(args, "reader", "haiku") != "haiku" else None
-    return main, judge, reader
+    name = getattr(args, "reader", "haiku")
+    if name == "haiku":
+        return main, judge, None
+    if name.startswith("or:"):
+        assert or_ledger is not None, "an OpenRouter reader needs an OpenRouter ledger"
+        return main, judge, orouter.Client(name[3:], or_ledger, args.or_budget)
+    return main, judge, Client(MODELS[name], ledger, args.budget)
 
 
-def write_ledger(out: Path, ledger: Ledger, extra: dict | None = None) -> None:
-    (out / "ledger.json").write_text(json.dumps({"ledger": ledger.summary(), **(extra or {})}, indent=1))
+def write_ledger(out: Path, ledger: Ledger, extra: dict | None = None, or_ledger: Ledger | None = None) -> None:
+    body = {"ledger": ledger.summary(), **(extra or {})}
+    if or_ledger is not None:
+        body["openrouter_ledger"] = or_ledger.summary()
+    (out / "ledger.json").write_text(json.dumps(body, indent=1))
 
 
 def run_units(args, kind: str) -> None:
@@ -106,9 +113,9 @@ def cmd_reread(args, kind: str) -> None:
     data = Path(args.data)
     scs = {s["id"]: s for s in json.loads((data / f"scenarios_{kind}.json").read_text())}
     src = sorted((Path(args.from_run) / "units").glob("*.json"))[args.offset:args.offset + args.limit]
-    ledger = Ledger()
-    main, judge, reader = clients(args, ledger)
-    assert reader is not None, "--reader sonnet required"
+    ledger, or_ledger = Ledger(), orouter.ORLedger()
+    main, judge, reader = clients(args, ledger, or_ledger)
+    assert reader is not None, "--reader sonnet or --reader or:<model> required"
     if args.est_unit_usd * len(src) > args.budget:
         sys.exit(f"projected ${args.est_unit_usd * len(src):.2f} passes budget ${args.budget:.2f}; not started")
     errors = []
@@ -130,9 +137,51 @@ def cmd_reread(args, kind: str) -> None:
             list(ex.map(one, src))
     except BudgetExceeded as e:
         errors.append({"stopped": str(e)})
-    write_ledger(out, ledger, {"errors": errors, "args": vars(args)})
-    tot = ledger.summary()["total"]
-    print(f"reread {len(list((out / 'units').glob('*.json')))}/{len(src)} · errors {len(errors)} · ${tot['usd']:.4f}")
+    write_ledger(out, ledger, {"errors": errors, "args": vars(args)}, or_ledger)
+    print(f"reread {len(list((out / 'units').glob('*.json')))}/{len(src)} · errors {len(errors)} · "
+          f"anthropic ${ledger.summary()['total']['usd']:.4f} · openrouter ${or_ledger.summary()['total']['usd']:.4f}")
+
+
+def cmd_pilot_a(args) -> None:
+    """The ``none`` arm only, per reader model: no memory, 6 probes per scenario, judged by the
+    Haiku 5.5 judge of the main runs. Prices each reader and shows which, if any, clears the pick rule."""
+    out = Path(args.out)
+    out.mkdir(parents=True, exist_ok=True)
+    scs = json.loads((Path(args.data) / "scenarios_a.json").read_text())[args.offset:args.offset + args.n]
+    ledger = Ledger()
+    judge = Client(HAIKU, ledger, args.budget)
+    summary = {}
+    for model in args.models.split(","):
+        f = out / ("pilot_" + model.replace("/", "__") + ".json")
+        or_ledger = orouter.ORLedger()
+        reader = orouter.Client(model, or_ledger, args.or_budget)
+        items = json.loads(f.read_text()) if f.exists() else []
+        done = {(i["scenario"], i["probe"]) for i in items}
+        jobs = [(sc, kind, pr) for sc in scs for kind, pr in rows._probes(sc) if (sc["id"], pr) not in done]
+        lock = threading.Lock()
+
+        def one(job):
+            sc, kind, pr = job
+            _, evidence = rows.sessions_a(sc, "light")
+            ans = answer(reader, "", pr)
+            j = rows._judge_a(judge, sc, evidence, ans)
+            with lock:
+                items.append({"scenario": sc["id"], "kind": kind, "probe": pr, "answer": ans, **j})
+        try:
+            with cf.ThreadPoolExecutor(max_workers=args.workers) as ex:
+                list(ex.map(one, jobs))
+        except BudgetExceeded as e:
+            print(f"{model}: stopped: {e}")
+        f.write_text(json.dumps(items))
+        s = cluster_bootstrap(items, lambda i: i["score"], lambda i: i["scenario"])
+        r = cluster_bootstrap(items, lambda i: i["raises_evidence"], lambda i: i["scenario"])
+        usd = or_ledger.summary()["total"]["usd"]
+        summary[model] = {"endorse": s, "raises_evidence": r, "openrouter_usd": usd, "answers": len(items),
+                          "empty_answers": sum(1 for i in items if not i["answer"].strip()),
+                          "unscored": sum(1 for i in items if i["score"] is None)}
+        print(f"{model:45s} endorse {fmt(s)}  raises {fmt(r)}  empty {summary[model]['empty_answers']}  OR ${usd:.4f}")
+    (out / "pilot_summary.json").write_text(json.dumps({"summary": summary, "anthropic_judge": ledger.summary()}, indent=1))
+    print(f"anthropic judge ${ledger.summary()['total']['usd']:.4f}")
 
 
 def fmt(ci) -> str:
@@ -180,6 +229,15 @@ def main() -> None:
     g.add_argument("--calls", type=int, default=20)
     g.add_argument("--out", required=True)
     g.add_argument("--budget", type=float, required=True)
+    pa = sub.add_parser("pilot-a")
+    pa.add_argument("--data", required=True)
+    pa.add_argument("--out", required=True)
+    pa.add_argument("--models", required=True, help="comma-separated OpenRouter model ids")
+    pa.add_argument("--n", type=int, default=30)
+    pa.add_argument("--offset", type=int, default=3)
+    pa.add_argument("--workers", type=int, default=8)
+    pa.add_argument("--budget", type=float, required=True, help="Anthropic (judge) budget, USD")
+    pa.add_argument("--or-budget", type=float, required=True, help="OpenRouter budget per model, USD")
     for name in ("row-a", "row-b", "reread-a", "reread-b"):
         r = sub.add_parser(name)
         r.add_argument("--data", required=True)
@@ -191,7 +249,8 @@ def main() -> None:
         r.add_argument("--est-unit-usd", type=float, required=True, help="projected $ per unit; the run is refused if units x this passes --budget")
         r.add_argument("--variants", default="light,heavy")
         r.add_argument("--seed", type=int, default=0)
-        r.add_argument("--reader", choices=("haiku", "sonnet"), default="haiku")
+        r.add_argument("--reader", default="haiku", help="haiku | sonnet | or:<OpenRouter model id>")
+        r.add_argument("--or-budget", type=float, default=0.0, help="OpenRouter budget, USD (an or: reader needs it)")
         r.add_argument("--from-run")
     rp = sub.add_parser("report")
     rp.add_argument("--kind", choices=("a", "b"), required=True)
@@ -204,6 +263,8 @@ def main() -> None:
         run_units(args, "a")
     elif args.cmd == "row-b":
         run_units(args, "b")
+    elif args.cmd == "pilot-a":
+        cmd_pilot_a(args)
     elif args.cmd == "reread-a":
         cmd_reread(args, "a")
     elif args.cmd == "reread-b":

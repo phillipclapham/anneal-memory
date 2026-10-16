@@ -11,17 +11,12 @@ import hashlib
 import json
 import random
 import re
-import sys
 from pathlib import Path
 
-HERE = Path(__file__).resolve().parent
-sys.path.insert(0, str(HERE))
-sys.path.insert(0, str(HERE.parents[1]))
+from anneal_memory import EpisodeType, Store, prepare_wrap, validated_save_continuity
+from anneal_memory.continuity import format_wrap_package_text
 
-from anneal_memory import EpisodeType, Store, prepare_wrap, validated_save_continuity  # noqa: E402
-from anneal_memory.continuity import format_wrap_package_text  # noqa: E402
-
-from ant import BudgetExceeded, Client, Ledger  # noqa: E402,F401
+from .ant import BudgetExceeded, Client, Ledger  # noqa: F401
 
 PROJECT_NAME = "Assistant"
 HAIKU = "claude-haiku-5-5"

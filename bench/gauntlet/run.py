@@ -1,9 +1,10 @@
 """AM-GAUNTLET runner: python -m bench.gauntlet.run  (from the repo root, PYTHONPATH=.)
 
 Each row module declares NAME, EXPECTED (list of {"metric","op","value"} or None) and
-run(tmpdir) -> dict of counts. No model or API calls anywhere. A row with EXPECTED=None prints
-UNSET with its measured value; a row that declares missing inputs prints SKIP with the path; a row
-that raises prints ERROR with the exception. Nothing fails silently."""
+run(tmpdir) -> dict of counts. No row calls a model unless the caller has opted in: paired_gain is
+the one row that does, and it prints SKIP without its API key and its opt-in. A row with
+EXPECTED=None prints UNSET with its measured value; a row that declares missing inputs prints SKIP
+with the path; a row that raises prints ERROR with the exception. Nothing fails silently."""
 import importlib
 import operator
 import sys
@@ -11,7 +12,7 @@ import tempfile
 import traceback
 
 ROWS = ["rotated_pairs", "audit_multiwriter", "poisoning_graduation", "false_demotion",
-        "contradiction_surfacing"]
+        "contradiction_surfacing", "paired_gain"]
 NOT_BUILT = [("sycophancy_drift", "needs a model call")]
 OPS = {"==": operator.eq, "!=": operator.ne, "<=": operator.le, ">=": operator.ge,
        "<": operator.lt, ">": operator.gt}

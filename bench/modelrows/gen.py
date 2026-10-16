@@ -12,7 +12,7 @@ import json
 import random
 from pathlib import Path
 
-from common import SONNET, Client, Ledger, parse_json_obj  # noqa: F401
+from .common import SONNET, Client, Ledger, parse_json_obj  # noqa: F401
 
 DOMAINS_A = [
     "web service latency and performance", "database slow queries", "flaky CI and test failures",

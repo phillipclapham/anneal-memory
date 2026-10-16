@@ -1,0 +1,1280 @@
+[
+ {
+  "fact_user": "I'd like to understand backlinks better for my consulting firm's site. We're a registered financial advisory, so our compliance team forbids us from paying for links or sponsored posts of any kind. What makes a backlink valuable in the first place?",
+  "fact_assistant": "A valuable backlink comes from a relevant, authoritative site and is placed editorially within useful content. Understood on the compliance rule; we'll focus on earned links only.",
+  "fact": "The user's compliance team forbids paying for links or sponsored posts.",
+  "query": "What are some concrete tactics to get more sites linking to us over the next quarter?",
+  "rubric": "The answer must suggest only earned or organic link-building tactics (e.g., original research, guest expertise, PR) and must not recommend buying links, sponsored posts, or paid placements.",
+  "domain": "website SEO and search ranking",
+  "id": "b000"
+ },
+ {
+  "fact_user": "Thinking about when to start my lettuce and spinach this year. I only get to work in the garden on Sundays since I have a 60-hour week at the hospital otherwise. I'm in a cool climate with last frost around mid-April.",
+  "fact_assistant": "For cool-season greens you can sow a few weeks before last frost, so late March works well. Since Sundays are your only garden day, we can plan everything around that.",
+  "fact": "The user can only work in the garden on Sundays.",
+  "query": "Can you put together a weekly maintenance routine for my raised beds for the next month?",
+  "rubric": "The answer must schedule all garden tasks on Sundays only, rather than spreading chores across multiple weekdays.",
+  "domain": "vegetable gardening",
+  "id": "b001"
+ },
+ {
+  "fact_user": "Could you recommend a few podcasts about history? I commute for an hour each day. I should mention I'm using a Mac-free setup, meaning I only use Linux at home, so nothing Windows-only works for me. I like narrative storytelling styles.",
+  "fact_assistant": "Try Hardcore History, Revolutions, and The Rest Is History, all of which are strong on narrative. Noted that you run Linux, so I'll avoid anything Windows-only in future tech answers.",
+  "fact": "The user runs only Linux at home and cannot use Windows-only software.",
+  "query": "My computer's fan is loud and it feels hot all the time. Is there a program I can use to monitor the temperatures?",
+  "rubric": "The answer must recommend temperature monitoring tools that work on Linux (such as lm-sensors, psensor, or htop) and must not recommend Windows-only tools like HWMonitor, Core Temp, or SpeedFan.",
+  "domain": "a slow or failing PC",
+  "id": "b002"
+ },
+ {
+  "fact_user": "Do you have tips for handling class imbalance in a fraud detection dataset with 0.5% positives? One thing, I can't install anything that needs a GPL license, since legal at my company bans it. I'm using scikit-learn right now.",
+  "fact_assistant": "Class weights, threshold tuning, and careful resampling are good starting points for 0.5% positives. I'll stick to permissively licensed tools so nothing GPL gets in.",
+  "fact": "The user cannot use GPL-licensed software because their company's legal team bans it.",
+  "query": "What libraries should I use to build an explainability report for my final model?",
+  "rubric": "The answer must recommend only libraries with permissive (e.g., MIT, BSD, Apache) licenses and must not recommend GPL-licensed packages.",
+  "domain": "training a machine-learning model",
+  "id": "b003"
+ },
+ {
+  "fact_user": "Our Playwright tests keep failing on the checkout flow only on Mondays, which is weird. By the way, I don't work on Fridays at all, so I need anything I start to be wrapped up by Thursday evening. Any idea what might cause day-specific flakiness?",
+  "fact_assistant": "Day-specific failures often come from date-dependent test data, like a promo that expires weekly or a cutoff calculation based on the current weekday. I'll keep in mind that Thursday evening is your deadline for wrapping things up.",
+  "fact": "The user does not work on Fridays and needs work finished by Thursday evening.",
+  "query": "I'm going to start a cleanup of all our quarantined flaky tests this week, ideally ending with the fixes merged and verified through a full CI run. Can you lay out a day-by-day plan for me?",
+  "rubric": "The plan must schedule all work, including merge and the full CI verification run, to finish by Thursday and must not assign any tasks to Friday.",
+  "domain": "flaky CI and test failures",
+  "id": "b004"
+ },
+ {
+  "fact_user": "Quick question on image optimization: should I use WebP or JPEG for my travel photography portfolio? I'm legally blind in one eye and use a screen reader with high-contrast mode for most of my admin work, so I lean on tools that work well with that. Mostly I care about page speed.",
+  "fact_assistant": "WebP generally gives smaller files at similar quality, so it's usually better for speed, with JPEG as a fallback for very old browsers. Noted on the screen reader; I'll favor tools and workflows that are accessible with it.",
+  "fact": "The user relies on a screen reader and high-contrast mode, so tools must be accessible to those.",
+  "query": "I need a way to audit my whole site for SEO problems and see the results. What do you suggest?",
+  "rubric": "The answer must recommend tools or report formats that are screen-reader accessible (e.g., text or CSV exports, accessible interfaces) and avoid relying on color-coded or purely visual dashboards and charts.",
+  "domain": "website SEO and search ranking",
+  "id": "b005"
+ },
+ {
+  "fact_user": "I need a plan to pay off my credit card by spring. I'm Muslim and I avoid anything involving interest, so I won't take a loan or balance transfer that charges it. I owe about $3,200 on one card.",
+  "fact_assistant": "Understood, so we'll skip interest-bearing options and focus on paying the $3,200 down directly from your income. Cutting spending and putting extra toward the card each month can get you there by spring.",
+  "fact": "The user avoids anything involving interest, so they won't take loans or balance transfers that charge it.",
+  "query": "I'm $600 short on my car repair bill this month. What are my best options for covering it?",
+  "rubric": "The answer must avoid recommending interest-bearing loans, credit cards, or payday advances, and instead suggest interest-free options such as payment plans without interest, family help, selling items, or trimming other expenses.",
+  "domain": "personal budgeting and saving",
+  "id": "b006"
+ },
+ {
+  "fact_user": "Could you explain what a good click-through rate is for a local plumbing business? I'm Dmitri, by the way, and I'm legally blind, so I rely on a screen reader for everything I read, which is why I can't work with image-heavy reports.",
+  "fact_assistant": "For local service ads, a click-through rate of roughly 3-6% is typically solid. Thanks, Dmitri, I'll keep things in plain text that works with a screen reader.",
+  "fact": "The user is legally blind and uses a screen reader, so he needs text-based content rather than image-dependent material.",
+  "query": "Can you summarize last month's ad performance trends for me in a format I can review with my accountant? I'll paste in the numbers: spend $850, 120 leads, 34 booked jobs.",
+  "rubric": "The summary must be in plain, screen-reader-friendly text (simple lists or sentences, no reliance on charts, images or complex visuals).",
+  "domain": "small-business marketing spend",
+  "id": "b007"
+ },
+ {
+  "fact_user": "Thanks for the help with my cron schedule. One thing: I'm on call only Monday to Thursday, since I have my kid every Friday through Sunday and I won't touch work then. The backup job should run at 3 AM.",
+  "fact_assistant": "Got it, 3 AM works for the backup cron entry. I'll remember that you're only available Monday to Thursday.",
+  "fact": "The user is only available for work Monday to Thursday and will not handle anything Friday through Sunday.",
+  "query": "We detected ransomware indicators on a file server and need a response plan with deadlines for each step, like containment, forensics, and restoring from backup. Can you lay it out with dates starting today, which is Wednesday?",
+  "rubric": "The answer must schedule the user's own tasks only on Monday to Thursday, avoiding Friday to Sunday assignments for them (or explicitly delegating weekend work to others), so the timeline does not require the user to work Friday through Sunday.",
+  "domain": "a security incident on a server",
+  "id": "b008"
+ },
+ {
+  "fact_user": "I think the outlet in my garage is dead, and the breaker doesn't seem to be tripped. I only ever work in metric, so my tape and tools are all in millimeters and please give me numbers that way. Where should I start checking?",
+  "fact_assistant": "Start by checking for a tripped GFCI outlet elsewhere on the same circuit, then test the outlet with a voltage tester after confirming power is off at the panel. I'll give any measurements in millimeters.",
+  "fact": "The user requires all measurements to be given in metric units (millimeters, not inches).",
+  "query": "I'm going to run a new cable along the wall to a shed light. How deep should I bury it and how far apart should I clip it if part of it runs along the fence?",
+  "rubric": "The answer must give depths and spacing in metric units (mm or cm/m) and not rely on inches or feet as the primary units.",
+  "domain": "home repair (leaks, wiring, damp)",
+  "id": "b009"
+ },
+ {
+  "fact_user": "I'm trying to figure out why my bakery blog's traffic dipped after the last Google update. I only have Tuesday and Thursday mornings free to work on the site since I'm at the bakery every other day. Could you walk me through what a core update actually changes?",
+  "fact_assistant": "A core update re-evaluates how Google assesses content quality and relevance across the whole index, so dips often reflect relative changes rather than penalties. Since you only have Tuesday and Thursday mornings, we can break recovery work into small chunks for those slots.",
+  "fact": "The user can only work on the website on Tuesday and Thursday mornings.",
+  "query": "Can you put together a four-week plan for improving my blog's content and fixing technical issues?",
+  "rubric": "The plan must schedule all tasks only on Tuesdays and Thursdays (mornings) and must not assign work on other weekdays or weekends.",
+  "domain": "website SEO and search ranking",
+  "id": "b010"
+ },
+ {
+  "fact_user": "Quick question about parental controls: how do I block certain sites at the router level? I work night shifts at the hospital, so I'm asleep from about 8 AM to 4 PM and can't take calls or deal with anything during that time. My daughter Mina is 11.",
+  "fact_assistant": "Most routers let you set up per-device profiles with a blocklist or category filter in the parental controls menu. I'll keep in mind that you're unavailable 8 AM to 4 PM.",
+  "fact": "The user sleeps from about 8 AM to 4 PM and cannot handle calls or tasks during those hours.",
+  "query": "I want to schedule my router's firmware update and a full restart so it doesn't disrupt anyone. When should I set it?",
+  "rubric": "The answer must pick a time outside 8 AM to 4 PM or otherwise avoid scheduling the restart during the user's sleeping hours when they cannot respond if something goes wrong.",
+  "domain": "home wifi and networking",
+  "id": "b011"
+ },
+ {
+  "fact_user": "I need help structuring a 10-minute presentation on renewable energy for my class. Oh, and I'm deaf in one ear and rely on captions, so I can't use anything that's audio-only. Mostly I need an outline.",
+  "fact_assistant": "Outline: intro and the problem, solar, wind, storage, then costs and takeaways, with about two minutes per section. I'll keep in mind you rely on captions rather than audio.",
+  "fact": "The user is deaf in one ear and relies on captions, so audio-only content is unusable for them.",
+  "query": "My laptop has been freezing a lot and I'd like to learn how to troubleshoot it properly. Where should I start learning?",
+  "rubric": "The answer must point to learning resources that are text-based or captioned (written guides, articles, captioned videos) and must not recommend audio-only resources like podcasts or phone calls.",
+  "domain": "a slow or failing PC",
+  "id": "b012"
+ },
+ {
+  "fact_user": "Can you help me rewrite this nested subquery that's dragging on our MySQL reporting box? I only get a maintenance window on Sunday nights between 2 and 4 a.m., so anything that changes the schema has to fit in there. The table has about 80 million rows.",
+  "fact_assistant": "Rewriting the nested subquery as a join with a derived table should help a lot, and I'll keep any schema changes small enough for your Sunday 2-4 a.m. window. Share the query and the table definition and I'll draft it.",
+  "fact": "The user can only make schema changes during a Sunday night maintenance window from 2 to 4 a.m.",
+  "query": "I think adding a composite index on the events table would fix our slowest lookup. When and how should I roll that out?",
+  "rubric": "The answer must schedule the index creation for the Sunday 2-4 a.m. window and account for fitting the build on a large table within two hours (e.g., online DDL or testing the duration beforehand).",
+  "domain": "database slow queries",
+  "id": "b013"
+ },
+ {
+  "fact_user": "I'm setting up drip irrigation for my vegetable patch and need to pick a timer. I'm on a strict water budget of 40 gallons a day because of our drought restrictions here. The patch is about 200 square feet.",
+  "fact_assistant": "A basic battery timer with drip emitters will do it, and 40 gallons a day is workable on 200 square feet if you water efficiently. I'll keep that cap in mind.",
+  "fact": "The user is limited to 40 gallons of water per day because of drought restrictions.",
+  "query": "I'd like to add a big bed of squash and corn, plus a few new fruit trees next spring. Can you help me plan the watering for everything?",
+  "rubric": "The answer must keep the total planned watering within 40 gallons per day, using water-saving measures like mulch, drip, or limiting the expansion, and must not propose a plan that exceeds that cap.",
+  "domain": "vegetable gardening",
+  "id": "b014"
+ },
+ {
+  "fact_user": "Our Redis cache hit rate dropped to 62% and API latency is creeping up. Our budget for infrastructure is capped at $300 a month total, so I can't just throw bigger instances at it. What could cause the hit rate drop?",
+  "fact_assistant": "Common causes are shorter TTLs, key churn from new cache key formats, or memory eviction under maxmemory pressure. With the $300 monthly cap, we'll focus on tuning rather than scaling up.",
+  "fact": "The user's total infrastructure budget is capped at $300 per month.",
+  "query": "We're expecting traffic to triple next quarter. How should we prepare our backend to handle it?",
+  "rubric": "The answer must offer low-cost approaches (caching, query optimization, autoscaling limits, efficient resource use) that stay within a $300/month total budget and must not recommend large expensive infrastructure upgrades without addressing cost.",
+  "domain": "web service latency and performance",
+  "id": "b015"
+ },
+ {
+  "fact_user": "I'm revising my essay on the ethics of gene editing and want to strengthen my counterargument section. Citation-wise, my instructor only accepts sources published in the last five years, so I'm limited there. I'd like some solid opposing viewpoints.",
+  "fact_assistant": "A strong counterargument could address the 'slippery slope' concern about designer babies, and we'll look for recent sources to support it, within your five-year window.",
+  "fact": "The user's instructor only accepts sources published within the last five years.",
+  "query": "Can you suggest a few well-known studies or books I could cite to back up my claim that public trust in science has shifted over time?",
+  "rubric": "The answer must recommend only sources from roughly the last five years, or flag that older classic sources would not be acceptable, rather than suggesting older landmark works as citations.",
+  "domain": "editing and structuring an essay",
+  "id": "b016"
+ },
+ {
+  "fact_user": "Could you review my outline for a post on 'how to choose hiking boots'? I'm colorblind, red-green specifically, so please don't rely on color alone when you describe any charts or design suggestions to me. The outline has seven headings and I think it's too long.",
+  "fact_assistant": "Seven headings is fine if each section is distinct, but you could merge the fit and sizing sections to tighten it. I'll make sure any visual suggestions don't depend on color alone.",
+  "fact": "The user has red-green colorblindness and needs visual suggestions that don't rely on color alone.",
+  "query": "Can you suggest a way to display a comparison table of five boot brands on the page, showing which ones are waterproof and which aren't, so readers can scan it quickly?",
+  "rubric": "The answer must indicate waterproof status with something other than red/green color, such as text labels, checkmarks and crosses, or icons with labels, and must not rely on red versus green coding.",
+  "domain": "website SEO and search ranking",
+  "id": "b017"
+ },
+ {
+  "fact_user": "Our upstairs bathroom fan is making a rattling noise and I'd like to replace it. Just so you know, my wife is a night-shift nurse and sleeps from 9am to 4pm, so the house has to stay quiet during those hours. What type of fan should I look at?",
+  "fact_assistant": "Look for a fan rated 1.0 sone or lower with a CFM that matches your bathroom size, as those run very quietly. Noting the daytime sleep hours, you can schedule the actual installation outside 9am to 4pm.",
+  "fact": "The user's wife sleeps from 9am to 4pm, so the house must be quiet during those hours.",
+  "query": "I've got to chisel out some old tile and drill into the wall studs in the hallway. When should I plan to do this on Saturday?",
+  "rubric": "The answer must recommend scheduling the loud work outside 9am to 4pm, such as early morning before 9 or late afternoon/evening after 4.",
+  "domain": "home repair (leaks, wiring, damp)",
+  "id": "b018"
+ },
+ {
+  "fact_user": "A section of my hallway has a flickering light and the switch feels warm to the touch. I have a hard budget of $150 for all repairs this month, so I can't hire anyone expensive. Should I be worried?",
+  "fact_assistant": "A warm switch with flickering is worth taking seriously, as it often signals a loose connection or overloaded switch, so turn off that circuit until it's checked. Swapping a switch is cheap, so it should fit your $150 budget.",
+  "fact": "The user has a hard budget of $150 for all home repairs this month.",
+  "query": "The window in the spare room has a draft and the sill is slightly rotting. What's the plan to fix both properly?",
+  "rubric": "The answer must propose low-cost options that fit within roughly $150 total, such as weatherstripping, caulk, and wood hardener or filler, and avoid recommending full window replacement or costly contractor work.",
+  "domain": "home repair (leaks, wiring, damp)",
+  "id": "b019"
+ },
+ {
+  "fact_user": "GitHub Actions keeps rerunning our Cypress suite and the same two specs fail maybe 10% of the time. Just so you know, my team lead has a hard rule that we never add automatic retries to tests because they hide real bugs. Screenshots show the button isn't rendered yet when the click happens.",
+  "fact_assistant": "That sounds like a race between render and click, so wait explicitly for the element to be visible and enabled before interacting rather than relying on timing. That fixes the root cause without needing any retry logic.",
+  "fact": "The user's team has a hard rule against adding automatic test retries.",
+  "query": "We've got another spec that fails intermittently on checkout. What's the quickest way to get the pipeline green again so people stop getting blocked?",
+  "rubric": "The answer must not recommend retry configuration (such as Cypress retries or rerun-on-failure plugins) and should instead propose root-cause fixes like explicit waits or isolating state.",
+  "domain": "flaky CI and test failures",
+  "id": "b020"
+ },
+ {
+  "fact_user": "I'm trying to figure out why my tomato leaves are curling up at the edges even though the weather's been mild. I can't use anything with synthetic pesticides because my daughter Priya has a severe chemical sensitivity and she plays in the yard. The plants get morning sun and I water every other day.",
+  "fact_assistant": "Leaf curl in mild weather is often from uneven watering or too much nitrogen, so try deep, less frequent soaking and check your fertilizer. Good to know about Priya, I'll keep any suggestions to non-synthetic options.",
+  "fact": "The user cannot use synthetic pesticides or chemicals in the garden because their daughter has a severe chemical sensitivity.",
+  "query": "Aphids have shown up all over my pepper plants this week. What should I do about them?",
+  "rubric": "The answer must recommend only non-synthetic methods (e.g., water spray, insecticidal soap, beneficial insects, hand removal) and must not suggest synthetic chemical pesticides.",
+  "domain": "vegetable gardening",
+  "id": "b021"
+ },
+ {
+  "fact_user": "My zucchini plants are producing like crazy and I'm drowning in them. I measure everything in metric because I grew up in Portugal and never got used to inches or pounds. Anyway, any ideas for using them up?",
+  "fact_assistant": "You could grate and freeze them for baking, make zucchini fritters, or pickle some slices. I'll stick with metric units in anything I give you.",
+  "fact": "The user requires metric units (no inches, feet, pounds, or Fahrenheit).",
+  "query": "How far apart should I space my new carrot rows, and how deep should I sow the seeds? Also, what soil temperature do they like for germination?",
+  "rubric": "The answer must give spacing, depth and temperature in metric units (cm/mm, \u00b0C) and not rely on imperial units.",
+  "domain": "vegetable gardening",
+  "id": "b022"
+ },
+ {
+  "fact_user": "I'm planning a pasta night for friends and need a sauce that feeds six. By the way, I only get to touch my desktop on weekends because it's in my dad's office and he's there all week. Keep the sauce vegetarian please.",
+  "fact_assistant": "A roasted tomato, garlic and basil sauce scales well for six, and you can simmer it with a splash of olive oil and a pinch of sugar. Good to know the desktop is weekend-only, I'll keep that in mind for tech stuff.",
+  "fact": "The user can only physically access their desktop computer on weekends.",
+  "query": "My PC keeps blue-screening and I want to run a full hardware diagnostic on it. When should I plan to do this, and how should I schedule it?",
+  "rubric": "The answer must schedule or plan the diagnostic around weekend-only access to the PC, for example by planning it for Saturday or Sunday and not suggesting weekday hands-on steps.",
+  "domain": "a slow or failing PC",
+  "id": "b023"
+ },
+ {
+  "fact_user": "My kitchen faucet drips constantly and I want to fix it myself. I rent, and my lease says I can't make any permanent changes or drill into anything without the landlord's written okay, so I need to keep things reversible. What's usually wrong with a dripping faucet?",
+  "fact_assistant": "A steady drip is most often a worn cartridge, O-ring, or washer, all of which can be swapped without altering the fixture. That fits your lease, since it's a reversible repair.",
+  "fact": "The user rents and cannot make permanent changes or drill into walls without written landlord approval.",
+  "query": "I want a shelf unit above the washing machine in the laundry nook to hold detergent and a drip tray. What's the best way to set that up?",
+  "rubric": "The answer must avoid drilling or permanent mounting and suggest non-permanent options such as a freestanding over-the-washer rack, tension-mounted shelving, or adhesive-free solutions.",
+  "domain": "home repair (leaks, wiring, damp)",
+  "id": "b024"
+ },
+ {
+  "fact_user": "I'm confused about how often Google recrawls a site. My site is a hobby forum for vintage synthesizers, and I pay for hosting out of pocket, so my total budget for any SEO tools or services is zero dollars a month. Does submitting a sitemap speed anything up?",
+  "fact_assistant": "Submitting a sitemap helps Google discover URLs but doesn't guarantee faster crawling; fresh content and internal links matter more. Good that you're keeping costs at zero, since Search Console and its sitemap tools are free.",
+  "fact": "The user has no budget for paid SEO tools or services.",
+  "query": "What should I use to track my keyword rankings and spot broken links over the next few months?",
+  "rubric": "The answer must recommend only free tools or free tiers (such as Google Search Console) and must not suggest paid subscriptions or services.",
+  "domain": "website SEO and search ranking",
+  "id": "b025"
+ },
+ {
+  "fact_user": "Hey, I'm trying to plan a team offsite for next month and need ideas for activities. Just so you know, I can't run anything on our production Postgres server outside the Tuesday 2-4 AM maintenance window, so keep that in mind for scheduling stuff. Anyway, anything fun for a group of 12 that isn't bowling?",
+  "fact_assistant": "Escape rooms, cooking classes, or a group hike are all good for 12 people. And noted on the Tuesday 2-4 AM window for production work.",
+  "fact": "The user can only run operations on their production Postgres server during the Tuesday 2-4 AM maintenance window.",
+  "query": "I've got a query on our orders table that's taking about 40 seconds, and I think adding a composite index on customer_id and created_at would fix it. Can you walk me through how to roll that out?",
+  "rubric": "The answer must schedule or instruct creating the index on production only during the Tuesday 2-4 AM window (e.g., using CREATE INDEX CONCURRENTLY timed within that window) rather than suggesting running it immediately or at any time.",
+  "domain": "database slow queries",
+  "id": "b026"
+ },
+ {
+  "fact_user": "I'm planning how to split my paycheck among rent, bills, and savings. I live in Toronto and get paid in Canadian dollars, so please give me every figure in CAD. My take-home is about 2,800 a month.",
+  "fact_assistant": "With 2,800 CAD a month, a rough split could be 1,400 for rent, 700 for bills and groceries, 400 for savings, and 300 for flexible spending. I'll keep everything in CAD.",
+  "fact": "The user requires all monetary figures to be in Canadian dollars (CAD).",
+  "query": "What's a reasonable amount to aim for in an emergency fund, and how long might it take me to get there?",
+  "rubric": "The answer must express dollar amounts in Canadian dollars (CAD) and not use US dollars or leave the currency ambiguous.",
+  "domain": "personal budgeting and saving",
+  "id": "b027"
+ },
+ {
+  "fact_user": "I'm applying for a food truck permit and trying to understand the inspection step. I have a hard rule that I won't share my home address publicly, since I had a stalker a few years ago, so I use a P.O. box for everything. Does the health department inspect the truck itself or the commissary kitchen?",
+  "fact_assistant": "Usually both: the truck is inspected for equipment and the commissary kitchen for storage and prep. I'll keep in mind that you use a P.O. box and not your home address.",
+  "fact": "The user will not share their home address publicly and uses a P.O. box for everything.",
+  "query": "Now I'm on the business registration form and it has fields for the mailing address and for the principal place of business. What should I put in each?",
+  "rubric": "The answer must advise using the P.O. box for the mailing address and avoid putting the home address in public-facing fields, suggesting alternatives like a commissary or registered agent address for the business location, or asking whether a confidential address option exists.",
+  "domain": "a bureaucratic filing or permit process",
+  "id": "b028"
+ },
+ {
+  "fact_user": "Our GitHub Actions workflow for the Android build randomly fails at the Gradle step with out-of-memory errors. Just so you know, my team's CI budget is capped at 400 minutes a month, so I can't be burning minutes on big matrix runs. Do you have any ideas on what's eating the memory?",
+  "fact_assistant": "Gradle OOMs on hosted runners often come from the default JVM heap being too small or the daemon sticking around across steps, so set org.gradle.jvmargs and disable the daemon in CI. With a 400-minute cap, I'll keep suggestions lean on extra runs.",
+  "fact": "The user's CI budget is capped at 400 minutes per month, so they can't afford heavy or wide matrix runs.",
+  "query": "I'd like to verify that a fix for an intermittent test failure really works. How should I go about proving it's gone for good?",
+  "rubric": "The answer must offer a verification strategy that is economical with CI time (e.g., reproducing locally, repeating only the affected test, running a limited number of targeted reruns) rather than recommending hundreds of full-suite or large matrix CI runs.",
+  "domain": "flaky CI and test failures",
+  "id": "b029"
+ },
+ {
+  "fact_user": "My router's admin page is timing out again when I try to change the DNS. I can only use my phone for this since my desktop is in storage, and my phone is an iPhone, so no Android-only apps please. What should I check first?",
+  "fact_assistant": "Try the router's IP directly in Safari, clear the site data, and make sure you're on its Wi-Fi rather than cellular. I'll stick to iPhone-compatible options.",
+  "fact": "The user only has an iPhone available and cannot use Android-only apps.",
+  "query": "Is there a good app that would let me scan my home network and see what devices are connected?",
+  "rubric": "The answer must recommend only apps available on iOS (iPhone) and must not suggest Android-only apps.",
+  "domain": "home wifi and networking",
+  "id": "b030"
+ },
+ {
+  "fact_user": "A few of our JUnit tests fail on CI at random, mostly ones that compare timestamps. I write all my code comments and docs in Portuguese because that's what my whole team reads, so keep that in mind. The CI box is in UTC and my machine is in S\u00e3o Paulo time.",
+  "fact_assistant": "The timezone mismatch is likely the culprit, so pin tests to a fixed clock or explicit zone instead of the system default. I'll keep any comments in Portuguese for your team.",
+  "fact": "The user writes all code comments and documentation in Portuguese.",
+  "query": "Could you write a short helper for our test utils that freezes the clock, with a note explaining how to use it?",
+  "rubric": "The code comments and usage note must be written in Portuguese rather than English.",
+  "domain": "flaky CI and test failures",
+  "id": "b031"
+ },
+ {
+  "fact_user": "Can you help me build a simple grocery list for the week? I get paid every other Friday and I only do my shopping on Saturdays, since that's the only day I have a car. I like eggs, rice, and frozen veggies.",
+  "fact_assistant": "Sure, a base of eggs, rice, and frozen veggies stretches well, and I can add beans and oats for cheap protein. Since you shop only on Saturdays, I'll plan it around a single weekly trip.",
+  "fact": "The user can only shop on Saturdays because that's the only day they have a car.",
+  "query": "I just found out my favorite store is running a one-day clearance on bulk pantry items this Wednesday. Should I plan to take advantage of it?",
+  "rubric": "The answer must account for the user having a car only on Saturdays, noting that going Wednesday is impractical and suggesting alternatives such as checking whether the sale runs through the weekend or using delivery/transit.",
+  "domain": "personal budgeting and saving",
+  "id": "b032"
+ },
+ {
+  "fact_user": "I want to make a plan for my CPA exam prep, which is in 12 weeks. My budget is tight, so I can't spend anything beyond what I already own, no new subscriptions or paid courses. What should my first step be?",
+  "fact_assistant": "Start by taking a diagnostic test to see which sections need the most work. Free resources like library books and open practice questions can cover a lot without any new spending.",
+  "fact": "The user cannot spend any money on new study subscriptions or paid courses.",
+  "query": "What resources should I use to get ready for the auditing section?",
+  "rubric": "The answer must recommend only free or already-owned resources (library books, free videos, open materials) and must not suggest paid courses, subscriptions, or purchases.",
+  "domain": "studying for an exam",
+  "id": "b033"
+ },
+ {
+  "fact_user": "Can you help me figure out how to rotate the SSH host keys on our staging box? I can't use any command that needs sudo on the production hosts because our compliance team locks that down, so I'm just practicing on staging first. Also the keys are RSA 2048 right now.",
+  "fact_assistant": "Sure, on staging you can regenerate the host keys with ssh-keygen and restart sshd, and I'll keep in mind that production is off-limits for sudo commands. Moving from RSA 2048 to Ed25519 is a good upgrade too.",
+  "fact": "The user cannot run sudo commands on production hosts because of compliance restrictions.",
+  "query": "We just spotted a rogue process eating CPU on our main web server. Give me the step-by-step commands to investigate and kill it.",
+  "rubric": "The answer must give investigation and remediation steps that do not rely on sudo (e.g., not prefixing commands with sudo or requiring root escalation), or explicitly route privileged actions through an alternative such as the compliance/ops team.",
+  "domain": "a security incident on a server",
+  "id": "b034"
+ },
+ {
+  "fact_user": "I'm putting together my small claims court filing against my old landlord for the deposit. I don't own a printer and can't get to the library because of my work hours, so everything has to be done on my phone. Is $2,400 under the limit for small claims here?",
+  "fact_assistant": "Most states set the small claims limit between $5,000 and $12,500, so $2,400 should be fine, but confirm your state's cap. I'll keep in mind that you need to do everything from your phone without printing.",
+  "fact": "The user has no printer and cannot go to a library, so everything must be done on their phone without printing.",
+  "query": "What's the best way to get the complaint form signed, filed, and a copy to the landlord?",
+  "rubric": "The answer must propose phone-only methods (e-filing, e-signature, digital or emailed service where allowed) and must not require printing, or visiting a library or print shop.",
+  "domain": "a bureaucratic filing or permit process",
+  "id": "b035"
+ },
+ {
+  "fact_user": "I'm helping my mom renew her business license for the bakery, and the renewal fee seems to have gone up this year. She only gets paid in cash on Fridays from the farmers market, so we can't pay anything before then. Do you know if there's usually a grace period on renewals?",
+  "fact_assistant": "Many jurisdictions allow a short grace period, often 30 days, before late fees kick in, but check your city's rules. I'll keep in mind that payments can only happen on or after Fridays.",
+  "fact": "The user's mother can only make payments on Fridays or later in the week after getting cash from the market, so nothing can be paid before then.",
+  "query": "The renewal notice says it's due on Tuesday the 14th. Can you help me plan out when we should do the steps to get this finished?",
+  "rubric": "The answer must schedule any payment for a Friday (the Friday before the 14th, not after it) and not suggest paying earlier in the week, or else flag that the deadline requires asking for an extension.",
+  "domain": "a bureaucratic filing or permit process",
+  "id": "b036"
+ },
+ {
+  "fact_user": "Can you help me tune our nginx upstream keepalive settings? I only get to touch infrastructure on Sunday mornings between 5 and 7 UTC, that's the only change window ops gives my team. We're seeing lots of connection resets under load.",
+  "fact_assistant": "Resets under load often come from keepalive timeouts mismatched between nginx and the upstream, so we should align those values. I'll make sure the plan fits in your Sunday 5-7 UTC window.",
+  "fact": "The user can only make infrastructure changes on Sunday mornings between 05:00 and 07:00 UTC.",
+  "query": "I want to roll out a CDN cache rule change and also bump our database connection pool size. Can you lay out a rollout plan with timing?",
+  "rubric": "The answer must schedule any production changes within Sunday 05:00-07:00 UTC and not propose making changes at other times.",
+  "domain": "web service latency and performance",
+  "id": "b037"
+ },
+ {
+  "fact_user": "I'm debugging slow GraphQL resolvers in our app. I'm colorblind (red-green), so please keep that in mind when you describe anything visual. Why would a resolver that fetches a list of users with their posts be so slow?",
+  "fact_assistant": "That's the classic N+1 query problem: one query for users and then one per user for posts. Batching with DataLoader or a join fixes it, and I'll avoid red/green-dependent visuals.",
+  "fact": "The user is red-green colorblind and needs visual descriptions to avoid relying on red/green distinctions.",
+  "query": "Can you design a Grafana dashboard layout for tracking our API's error rates and latency, including the panel colors?",
+  "rubric": "The answer must choose colors that are distinguishable for red-green colorblind users (e.g., blue/orange, shapes, labels) and must not rely on red versus green to convey status.",
+  "domain": "web service latency and performance",
+  "id": "b038"
+ },
+ {
+  "fact_user": "I need a formula to flag rows where discount exceeds 15% in my sales sheet. Heads up, I use a screen reader because I'm blind, so I rely on text and cell content rather than visual cues. Please keep that in mind.",
+  "fact_assistant": "Try =IF(D2>0.15,\"High discount\",\"OK\") in a new column, which gives a text flag a screen reader will read out rather than depending on visuals.",
+  "fact": "The user is blind and uses a screen reader, so outputs must not depend on visual cues.",
+  "query": "I'd like to show how sales trended across the twelve months of last year and point out the best and worst months. What's the best way to present that?",
+  "rubric": "The answer must offer a non-visual-dependent presentation, such as a table with text labels, summary sentences naming best and worst months, or explicitly labeled cells, rather than relying only on a chart or color highlighting.",
+  "domain": "analysing a sales spreadsheet",
+  "id": "b039"
+ },
+ {
+  "fact_user": "Our Android instrumentation tests on Jenkins are flaky, with the emulator sometimes failing to boot in under 5 minutes. Budget-wise, my manager capped our CI spend at $200 a month, and we're already close to it. Any idea how to stabilize emulator startup?",
+  "fact_assistant": "Cache the AVD snapshot and use hardware acceleration so boot is faster and more predictable, which also cuts minutes billed. That should help stability without raising your spend near the $200 cap.",
+  "fact": "The user's CI spending is capped at $200 per month and they are already near the limit.",
+  "query": "Our tests are still slow, so I'm thinking about how to speed up the pipeline by next sprint. What should I do?",
+  "rubric": "The answer must prioritize low or zero-cost optimizations and must not recommend solutions that significantly increase monthly CI spend, such as paying for larger runners or many more parallel machines.",
+  "domain": "flaky CI and test failures",
+  "id": "b040"
+ },
+ {
+  "fact_user": "I'm trying to decide between flashcards and practice tests for my organic chemistry final next month. I can't look at screens after 8pm because of my migraines, so evenings are paper only. Which method tends to stick better?",
+  "fact_assistant": "Practice tests generally beat flashcards for retention, especially if you mix in a few cards for reaction mechanisms. Since evenings are paper only for you, you could print your practice exams and do them then.",
+  "fact": "The user cannot use screens after 8pm because of migraines, so evening study must be on paper.",
+  "query": "Can you put together a study schedule for my final week, with a session slotted in for every evening?",
+  "rubric": "The answer must make every evening session paper-based (printed materials, handwritten work, no apps, videos, or online quizzes) and keep any screen-based work to before 8pm.",
+  "domain": "studying for an exam",
+  "id": "b041"
+ },
+ {
+  "fact_user": "I'm benchmarking our Node.js API and getting around 1,200 requests per second on a single instance. Everything I write has to be in Go or plain shell scripts since that's all my team of four maintains, so I can't add Python or JavaScript tooling. Is that throughput reasonable?",
+  "fact_assistant": "For a typical JSON API on one instance that's decent, though it depends on payload size and downstream calls. Noted on Go and shell only for tooling.",
+  "fact": "The user's team only maintains Go and shell scripts, so any tooling or code must be in Go or shell.",
+  "query": "Can you write me a script that hammers our /search endpoint with concurrent requests and reports latency percentiles?",
+  "rubric": "The script must be written in Go or shell (e.g., bash with curl, or a Go program) and must not use Python, JavaScript, or other languages.",
+  "domain": "web service latency and performance",
+  "id": "b042"
+ },
+ {
+  "fact_user": "I'm restructuring my essay on school lunch policy and can't decide on the order of my points. I'm dyslexic, so long dense blocks of text are really hard for me to scan. Right now I have five points in a jumble.",
+  "fact_assistant": "Let's group them into three clear themes and order them from cost to nutrition to equity. I'll keep my suggestions short and easy to scan.",
+  "fact": "The user is dyslexic and finds long dense blocks of text hard to read.",
+  "query": "Please give me feedback on my conclusion and explain what I should change.",
+  "rubric": "The answer must be formatted for easy reading, with short paragraphs or bullet points, clear headings or numbered steps, and plain concise wording rather than long dense blocks of text.",
+  "domain": "editing and structuring an essay",
+  "id": "b043"
+ },
+ {
+  "fact_user": "I need help with the transitions in my sociology paper on remote work. I write all my papers in British English because my university in Leeds requires it. The jumps between sections feel abrupt.",
+  "fact_assistant": "Adding a one-sentence bridge at the end of each section that previews the next idea should smooth them out, and I'll stick to British spellings.",
+  "fact": "The user must write in British English because their university requires it.",
+  "query": "Here's my paragraph: 'Employers often organize schedules around productivity metrics, and workers criticize this approach.' Can you rewrite it to sound more academic and add a sentence on how this affects the neighborhood economy?",
+  "rubric": "The rewritten text must use British English spelling and conventions (e.g., organise, neighbourhood), not American forms.",
+  "domain": "editing and structuring an essay",
+  "id": "b044"
+ },
+ {
+  "fact_user": "Help me write a short README for our patching script. I only speak and read Portuguese comfortably, so please keep the explanations in Portuguese even though the code comments are in English. The script updates openssl on 14 servers.",
+  "fact_assistant": "Claro! Aqui est\u00e1 um README curto em portugu\u00eas explicando que o script atualiza o openssl nos 14 servidores, mantendo os coment\u00e1rios do c\u00f3digo em ingl\u00eas.",
+  "fact": "The user only reads Portuguese comfortably and needs explanations written in Portuguese.",
+  "query": "Someone left a backdoor user account on our server and I need to understand what to check and how to clean it up. Can you explain the process?",
+  "rubric": "The answer must be written in Portuguese (code and commands may remain in English), explaining how to find and remove the unauthorized account.",
+  "domain": "a security incident on a server",
+  "id": "b045"
+ },
+ {
+  "fact_user": "Can you help me tidy up the wording on my bakery's loyalty card? We do a stamp for every coffee and a free pastry at ten. Also, I can't spend more than $400 a month on any marketing, that's a hard cap my business partner set.",
+  "fact_assistant": "Sure, 'Collect 10 stamps, enjoy a free pastry on us' reads cleanly and fits on a small card. Good to know about the $400 monthly cap; I'll keep suggestions within that.",
+  "fact": "The user's total marketing spend cannot exceed $400 per month.",
+  "query": "I want to grow our customer base in the next quarter. Can you put together a plan with a few channels and what each would cost?",
+  "rubric": "The plan's combined monthly cost must stay at or below $400, with per-channel costs shown that add up within that limit.",
+  "domain": "small-business marketing spend",
+  "id": "b046"
+ },
+ {
+  "fact_user": "Looking for ways to cut down on status-update chatter in our team. One thing: I can't use Slack at all because our client contracts forbid it on company devices, so we're on email and Microsoft Teams only. Any ideas?",
+  "fact_assistant": "Consider a short async weekly digest and a shared tracker so people don't need to ping each other for updates. I'll stick to email and Teams for any tooling suggestions.",
+  "fact": "The user cannot use Slack; the team is limited to email and Microsoft Teams.",
+  "query": "I'd like to set up a quick channel where new interns can ask questions and get fast answers from the team. What's the best way to do this?",
+  "rubric": "The answer must recommend a setup using Microsoft Teams or email and must not recommend Slack.",
+  "domain": "hiring and team productivity",
+  "id": "b047"
+ },
+ {
+  "fact_user": "I'm trying to figure out why my sourdough starter smells like nail polish remover after I skip a feeding. Also, I can't have gluten-free flours that contain almond or any tree nuts because my daughter Priya has a severe nut allergy and she eats everything that comes out of my kitchen. Is the smell a sign it's dead?",
+  "fact_assistant": "That acetone smell usually means the starter is hungry, not dead, so feed it more often and it should recover. Good to know about Priya's allergy, so I'll steer clear of any nut-based flours.",
+  "fact": "The user's kitchen must be completely free of tree nuts, including almond flour, because their daughter has a severe nut allergy.",
+  "query": "I want to bake a batch of fancy French macaron-style cookies for a class bake sale next week. What base ingredients and flavor ideas would you suggest?",
+  "rubric": "The answer must not recommend almond flour or any tree nut ingredients or nut-based flavorings, and should offer nut-free alternatives such as sunflower seed flour or plain-cookie bases.",
+  "domain": "baking and cooking technique",
+  "id": "b048"
+ },
+ {
+  "fact_user": "What's a reasonable way to think about keyword difficulty scores? I'm doing SEO for my dental clinic in Lyon, and all my patients and site content are in French, so everything I publish has to be in French. I've seen scores from 0 to 100 and don't know what's decent.",
+  "fact_assistant": "Keyword difficulty estimates how hard it is to outrank current results; for a local clinic, scores under about 30 are usually realistic targets. I'll keep French-language content in mind as we look at terms.",
+  "fact": "All of the user's website content must be written in French.",
+  "query": "Give me five blog post ideas with sample titles and meta descriptions that would bring in new patients for teeth whitening.",
+  "rubric": "The titles and meta descriptions must be written in French rather than English.",
+  "domain": "website SEO and search ranking",
+  "id": "b049"
+ },
+ {
+  "fact_user": "Can you help me figure out why my bakery's blog posts aren't showing up in Google after two weeks? I can't install any WordPress plugins because my host, a tiny shared plan, blocks them all. I've submitted the sitemap already.",
+  "fact_assistant": "Two weeks is within normal indexing lag, so check Search Console's URL Inspection for the blog posts and make sure they're linked internally from your homepage. Since plugins are off the table, we'll stick to built-in settings and manual edits.",
+  "fact": "The user cannot install any WordPress plugins because their shared host blocks them.",
+  "query": "I want to add structured data so my recipe posts get those rich cards in search results. What's the best way to set that up?",
+  "rubric": "The answer must provide a method that does not rely on installing a plugin, such as hand-written JSON-LD pasted into the theme or post HTML, and must not recommend a plugin like Yoast or Rank Math.",
+  "domain": "website SEO and search ranking",
+  "id": "b050"
+ },
+ {
+  "fact_user": "I'm trying to figure out why my pivot table shows duplicate customer names for Acme and ACME Corp. By the way, I'm colorblind (red-green), so I can't tell most red/green conditional formatting apart. Any idea how to merge those entries?",
+  "fact_assistant": "You can standardize the names with a helper column using a lookup table or Find & Replace, then refresh the pivot; I'll keep color choices in mind going forward given the red-green colorblindness.",
+  "fact": "The user is red-green colorblind and cannot distinguish red and green formatting.",
+  "query": "I want to make the monthly sales dashboard easier to scan so my manager can instantly see which reps hit quota and which fell short. What formatting would you suggest?",
+  "rubric": "The answer must avoid relying on a red versus green color distinction and should suggest alternatives such as icons, symbols, bold/shape differences, or colorblind-safe palettes like blue/orange.",
+  "domain": "analysing a sales spreadsheet",
+  "id": "b051"
+ },
+ {
+  "fact_user": "Our nightly report generation endpoint times out after 30 seconds and I want to speed it up. I always work in metric units and UTC for everything, so please report sizes and times that way, my ops team gets confused otherwise. Where would you look first?",
+  "fact_assistant": "Profile the query plan first, since large aggregations without proper indexes are the usual culprit, then consider moving it to an async job. I'll stick to metric units and UTC.",
+  "fact": "The user requires metric units and UTC for all sizes and times.",
+  "query": "Write up a short incident summary for the slowdown we had Tuesday afternoon, starting at 3:15pm Eastern and lasting 90 minutes, with a payload of about 2 gigabytes per request.",
+  "rubric": "The summary must express times in UTC (e.g., converting 3:15pm Eastern to UTC) and sizes in metric units (e.g., GB/MB) and avoid local time zones or imperial units.",
+  "domain": "web service latency and performance",
+  "id": "b052"
+ },
+ {
+  "fact_user": "I'm studying for the MCAT and want to get better at physics problems. One thing: I'm in the US but my prep course is all in metric-free mode, I mean I need everything in imperial units because that's what my tutor insists on for consistency. Any advice on tackling kinematics?",
+  "fact_assistant": "Start by listing knowns and unknowns, then pick the kinematic equation that connects them. I'll keep all examples in imperial units like feet, pounds, and miles per hour for you.",
+  "fact": "The user requires all examples and calculations to be in imperial units rather than metric.",
+  "query": "Give me three practice problems on projectile motion with worked solutions.",
+  "rubric": "All problems and solutions must use imperial units (feet, miles per hour, pounds, etc.) and must not use metric units such as meters or kilograms.",
+  "domain": "studying for an exam",
+  "id": "b053"
+ },
+ {
+  "fact_user": "What's the quickest way to find the top 10 deals in a column of 4,000 rows? Also, I only check work stuff between 9 and 5 and my phone is off after that, so I'm hoping to get this done today before I leave. I'm using Google Sheets.",
+  "fact_assistant": "Use =SORT(A2:C4001, 3, FALSE) wrapped in ARRAY_CONSTRAIN(..., 10, 3) or just =LARGE(C:C, n); that takes a couple of minutes, so you'll be done well before 5.",
+  "fact": "The user is only available for work between 9am and 5pm and is unreachable after hours.",
+  "query": "I'm going to ask my colleague Priya to review my forecast model and I want to set up a quick call to walk her through it. When should I propose we meet?",
+  "rubric": "The answer must suggest meeting times within the user's 9am\u20135pm working hours and not propose evenings or other after-hours slots.",
+  "domain": "analysing a sales spreadsheet",
+  "id": "b054"
+ },
+ {
+  "fact_user": "Could you help me calculate year-over-year growth for each product line in my sheet? I report everything to our Munich headquarters, and they only accept figures in euros, never dollars. My data is currently in a column of USD amounts.",
+  "fact_assistant": "Growth is (This Year \u2212 Last Year) / Last Year per product line, and we can convert your USD column to euros first since Munich needs euros.",
+  "fact": "The user must present all financial figures in euros, not US dollars.",
+  "query": "Can you help me draft a short summary of our top five products by total revenue that I can paste into the weekly update email?",
+  "rubric": "The answer must express revenue amounts in euros (using the \u20ac symbol or EUR), not in dollars, or explicitly note the conversion to euros.",
+  "domain": "analysing a sales spreadsheet",
+  "id": "b055"
+ },
+ {
+  "fact_user": "Our nightly ETL on SQL Server keeps timing out on a big MERGE statement. I'm on a team where everyone reads and writes in metric and ISO formats, so please don't give me anything in imperial units or US-style dates, and our server has 64 GB of RAM. Any idea where to start?",
+  "fact_assistant": "Start by checking the execution plan for a scan on the MERGE target and see whether statistics are stale. I'll keep everything in metric and ISO dates from here on.",
+  "fact": "The user requires metric units and ISO-format dates, with no imperial units or US-style dates.",
+  "query": "Give me a sample schedule and a sizing estimate for archiving old rows from our 500 GB-ish log table, with example dates for the first three monthly runs.",
+  "rubric": "The answer must use metric units (e.g., GB/TB without miles, pounds, etc. where relevant) and write all example dates in ISO YYYY-MM-DD format, not MM/DD/YYYY or month-name US style.",
+  "domain": "database slow queries",
+  "id": "b056"
+ },
+ {
+  "fact_user": "I'm trying to understand what a VPN actually does for my home network. Also, I only read metric and Celsius and so on, so please don't give me feet or inches, my brain just won't convert. We have a pretty big house.",
+  "fact_assistant": "A VPN encrypts your traffic and routes it through another server, which hides your browsing from your ISP but doesn't extend your Wi-Fi coverage. I'll stick to metric units for you.",
+  "fact": "The user requires metric units and cannot work with feet or inches.",
+  "query": "Where should I place my router and extenders in a two-story house to get the best coverage? Give me some rough spacing guidance.",
+  "rubric": "The answer must give distances, heights and spacing in metric units (meters/centimeters) and must not use feet or inches.",
+  "domain": "home wifi and networking",
+  "id": "b057"
+ },
+ {
+  "fact_user": "I need a recipe-style checklist for hardening a new Debian server. Budget-wise, I have exactly zero dollars for software this year, so it has to be free and open source only. I've got about 8 servers to cover.",
+  "fact_assistant": "Here's a checklist covering SSH hardening, ufw, unattended-upgrades and auditd, all free and open source so it fits your zero budget across the 8 servers.",
+  "fact": "The user has no budget and can only use free, open-source software.",
+  "query": "A compromised server leaked some customer data, and we want to set up intrusion detection and forensic tooling so this can't happen again. What should we deploy?",
+  "rubric": "The answer must recommend only free, open-source tools (e.g., Snort/Suricata, OSSEC/Wazuh, Autopsy, Volatility) and not suggest paid commercial products or licenses.",
+  "domain": "a security incident on a server",
+  "id": "b058"
+ },
+ {
+  "fact_user": "I need a hotel in Osaka for the first week of April, ideally near a subway line. Budget-wise, I never spend more than $120 a night on lodging, that's my hard cap. I'd like a place with a desk to work at.",
+  "fact_assistant": "Osaka has good options near the Midosuji and Chuo lines within that range, and many business hotels include a desk. I'll keep everything at or under $120 a night.",
+  "fact": "The user's hard cap for lodging is $120 per night.",
+  "query": "I'm going to Lisbon for five nights in June with my sister. Can you suggest three places to stay in different neighborhoods?",
+  "rubric": "All suggested accommodations must be priced at or below $120 per night, or the answer must clearly stay within that cap rather than recommending pricier options.",
+  "domain": "travel logistics and bookings",
+  "id": "b059"
+ },
+ {
+  "fact_user": "Can you recommend a good podcast about personal finance? I should mention I'm deaf in my right ear and mostly wear a single hearing aid, so I can't really use earbuds or listen while there's a lot of background noise. Something with transcripts would be a bonus.",
+  "fact_assistant": "Try 'Money with Katie' or 'Afford Anything', both of which publish full transcripts. Reading along is easy when audio isn't ideal.",
+  "fact": "The user is deaf in one ear, wears a hearing aid, cannot use earbuds, and struggles with audio in noisy settings.",
+  "query": "I want to keep up my running motivation while I train for a 10K. What are some ways to stay pumped on my runs, especially on busy city streets?",
+  "rubric": "The answer must not rely on earbuds or audio cues like music/podcasts/coaching apps as the main motivation tool, and should offer non-audio alternatives (e.g., visual, tracking, running partner, watch haptics).",
+  "domain": "a fitness or running plan",
+  "id": "b060"
+ },
+ {
+  "fact_user": "I'm trying to decide whether to renew my yoga studio's lease, but first, can you suggest a tagline for our new beginners' series? One more thing: I only sign marketing contracts for one month at a time, nothing longer, since my cash flow is unpredictable.",
+  "fact_assistant": "Try 'Start where you are, breathe from here.' Got it on the month-to-month approach for any marketing contracts.",
+  "fact": "The user only agrees to marketing contracts with a one-month term, never longer.",
+  "query": "A local agency offered to run our email newsletters and promotions. They gave me options for a 3-month, 6-month, or 12-month package. Which should I pick?",
+  "rubric": "The answer must not recommend the 3-, 6-, or 12-month packages as-is, and should suggest negotiating a one-month term or declining.",
+  "domain": "small-business marketing spend",
+  "id": "b061"
+ },
+ {
+  "fact_user": "Our cucumbers keep getting powdery mildew toward the end of summer. We're a vegan household so I won't use anything animal-derived in the garden, which rules out stuff like bone meal and fish emulsion. Do you have a fix for the mildew?",
+  "fact_assistant": "A baking soda or diluted milk spray is common, but since you avoid animal products, try potassium bicarbonate or a neem oil spray and improve airflow. I'll keep suggestions plant-based.",
+  "fact": "The user is vegan and will not use animal-derived products (bone meal, blood meal, fish emulsion, manure) in the garden.",
+  "query": "My garlic beds look pale and I think they need a nutrient boost this fall. What should I feed them?",
+  "rubric": "The answer must recommend only plant-based or mineral fertilizers (e.g., compost, kelp, alfalfa meal, green manure) and must not suggest bone meal, blood meal, fish emulsion, or manure.",
+  "domain": "vegetable gardening",
+  "id": "b062"
+ },
+ {
+  "fact_user": "I need help reading my loss curves, the training loss is noisy but trending down over 50 epochs. Please always give me numbers in metric units and use Celsius, since I'm in Lisbon and I log GPU temps and power from my rig. Peak temp looked high but I'm not sure what's normal.",
+  "fact_assistant": "Noisy but declining loss is normal with small batches, and smoothing with a moving average will make the trend clearer. I'll use Celsius for any temperature talk, and GPUs commonly run fine in the 65-80\u00b0C range under load.",
+  "fact": "The user requires metric units and Celsius for temperatures in answers.",
+  "query": "My training box is in a small closet and I'm worried about it overheating during long runs. What thresholds should I watch and how can I keep it cool?",
+  "rubric": "The answer must express temperatures in Celsius (and any distances or sizes in metric units) and must not use Fahrenheit or imperial units.",
+  "domain": "training a machine-learning model",
+  "id": "b063"
+ },
+ {
+  "fact_user": "I'm trying to understand why our Go tests fail only on the shared CI box, maybe 1 in 15 runs with a data race warning. I'm blind and use a screen reader, so long screenshots or graph-heavy dashboards don't help me much. Plain text logs are best.",
+  "fact_assistant": "A race warning in only some runs suggests two goroutines touching shared state, so run with -race and plain text output and read the two stack traces the detector prints. Those logs are fully text-based, so they should work well with your screen reader.",
+  "fact": "The user is blind and uses a screen reader, so they need text-based output rather than visual or graphical formats.",
+  "query": "How should I compare the flakiness of our test suites across the last month to see which ones are the worst offenders?",
+  "rubric": "The answer must suggest text-based or tabular outputs (CLI commands, plain text or CSV reports) and must not depend on charts, graphs, screenshots or visual dashboards.",
+  "domain": "flaky CI and test failures",
+  "id": "b064"
+ },
+ {
+  "fact_user": "My pie crust keeps shrinking in the pan when I blind bake it. I only have a 9-inch tart pan and a toaster oven since I live in a dorm, so nothing bigger than about 8 inches wide fits. What am I doing wrong?",
+  "fact_assistant": "Shrinking usually comes from overworked dough or skipping a proper chill, so rest the crust for at least 30 minutes before baking. Your toaster oven setup is workable if you use pie weights and watch the edges.",
+  "fact": "The user only has a toaster oven, and nothing wider than about 8 inches fits inside it.",
+  "query": "I'd like to roast a whole chicken this weekend for some friends. Can you give me a method with temperature and timing?",
+  "rubric": "The answer must adapt to a toaster oven with an interior of roughly 8 inches wide, such as suggesting a very small chicken or spatchcocked parts, and must not assume a full-size oven or large roasting pan.",
+  "domain": "baking and cooking technique",
+  "id": "b065"
+ },
+ {
+  "fact_user": "Can you help me scale my brownie recipe for a party? I work with grams only because my kitchen scale has no ounce or cup setting and I honestly find cups confusing. The current recipe makes 12 and I need about 30.",
+  "fact_assistant": "To go from 12 to 30 brownies, multiply everything by 2.5, so I'll give amounts in grams only. Bake in a larger pan or two pans and check doneness a bit early.",
+  "fact": "The user measures ingredients in grams only and does not want cups or ounces.",
+  "query": "What's a good ratio for a simple vanilla pound cake that I can make tomorrow morning?",
+  "rubric": "The answer must give all ingredient quantities in grams, without relying on cups, tablespoons, or ounces.",
+  "domain": "baking and cooking technique",
+  "id": "b066"
+ },
+ {
+  "fact_user": "Our pytest job keeps failing randomly on test_order_sync and I'm out of ideas. I only get to look at CI problems between 6 and 8 in the morning before my kids wake up, so I need things I can fix in a short window. The failure message is just 'connection reset by peer'.",
+  "fact_assistant": "A connection reset in test_order_sync usually points to a mocked or real network call being torn down early, so start by adding a retry or checking fixture teardown order. That's a quick change that fits your early morning window.",
+  "fact": "The user can only work on CI problems between 6 and 8 in the morning.",
+  "query": "Can you put together a plan for tracking down and fixing all our flaky tests over the next couple of weeks, with when I should do each step?",
+  "rubric": "The plan must schedule all of the user's work within 6-8 AM windows and avoid assigning tasks at other times of day.",
+  "domain": "flaky CI and test failures",
+  "id": "b067"
+ },
+ {
+  "fact_user": "I'm putting together a scorecard for evaluating sales candidates. By the way, I'm legally blind in one eye and rely on a screen reader for long documents, so I can't deal with dense PDFs. Can you outline what criteria to include?",
+  "fact_assistant": "Core criteria could be prospecting skill, discovery questioning, objection handling, coachability, and CRM discipline, each rated 1-5. I'll keep formats screen-reader friendly, avoiding dense PDFs.",
+  "fact": "The user relies on a screen reader and cannot work with dense PDFs, so documents should be in screen-reader-friendly formats.",
+  "query": "Can you put together the full onboarding handbook for our new hires so I can review it tonight?",
+  "rubric": "The answer must deliver the handbook as plain, well-structured text (headings, simple lists) suitable for a screen reader, and must not rely on PDFs, images, dense tables, or complex layouts.",
+  "domain": "hiring and team productivity",
+  "id": "b068"
+ },
+ {
+  "fact_user": "Can you help me think through how to run a skills assessment for engineering applicants? I should say that I only ever communicate with candidates in Portuguese or English, since I don't read anything else well, so the process has to work for that. Mostly I want something fair and short.",
+  "fact_assistant": "A 60-90 minute take-home or live pairing exercise with a clear rubric keeps things fair and short. I'll keep everything in Portuguese or English.",
+  "fact": "The user can only communicate in Portuguese or English and does not read other languages well.",
+  "query": "We just received a pile of applications from candidates in several countries, and I'd like you to draft the instructions and follow-up message to send to the shortlisted ones.",
+  "rubric": "The answer must write the candidate-facing instructions and message in English or Portuguese only, and must not provide them in or rely on other languages.",
+  "domain": "hiring and team productivity",
+  "id": "b069"
+ },
+ {
+  "fact_user": "I'm reading about HTTP/2 vs HTTP/3 for our API gateway. I'm blind and use a screen reader, so long ASCII-art diagrams and dense tables are painful for me. What's the practical latency difference on mobile networks?",
+  "fact_assistant": "HTTP/3 generally helps most on lossy mobile links because QUIC avoids head-of-line blocking across streams. I'll explain in plain prose rather than diagrams or tables.",
+  "fact": "The user is blind and uses a screen reader, so they need answers without ASCII diagrams or dense tables.",
+  "query": "Can you compare Redis, Memcached, and an in-process cache for our session lookups, covering speed, memory use, and operational effort?",
+  "rubric": "The answer must present the comparison in plain prose or simple lists, avoiding tables and ASCII-art diagrams.",
+  "domain": "web service latency and performance",
+  "id": "b070"
+ },
+ {
+  "fact_user": "I need to speed up my online shop's product pages because Core Web Vitals are bad. I run everything off a Raspberry Pi at home and my monthly budget for tools is exactly $0, so I only use free stuff. LCP is about 4.8 seconds right now.",
+  "fact_assistant": "A 4.8s LCP usually comes from oversized hero images or slow server response, so compress images and enable caching first. I'll stick to free tools only.",
+  "fact": "The user has a $0 tool budget and can only use free tools.",
+  "query": "I'd like to keep an eye on my rankings for about 30 keywords every week. What should I use?",
+  "rubric": "The answer must recommend only free options (e.g. Google Search Console, free tiers, or a spreadsheet-based approach) and must not suggest paid subscriptions like Ahrefs or SEMrush as the main solution.",
+  "domain": "website SEO and search ranking",
+  "id": "b071"
+ },
+ {
+  "fact_user": "I'm trying to figure out why our checkout API p99 jumped after Tuesday's deploy. Just so you know, our company policy bans any agent-based APM tools like Datadog or New Relic on production hosts, so I'm stuck with what's in the logs. Anyway, the p99 went from 380ms to about 900ms.",
+  "fact_assistant": "A p99 jump like that after a deploy often points to a new slow query or a changed timeout, and we can dig for it in your access logs without any agent. I'll keep everything log-based since APM agents are off the table.",
+  "fact": "The user cannot install agent-based APM tools such as Datadog or New Relic on production hosts.",
+  "query": "We have a new internal search service going live next month and I want to see where its time goes per request in prod. What should I set up?",
+  "rubric": "The answer must recommend approaches that do not require installing an APM agent on production hosts (e.g., structured logging, request timing logs, or similar agentless methods) and must not suggest Datadog, New Relic, or similar agents.",
+  "domain": "web service latency and performance",
+  "id": "b072"
+ },
+ {
+  "fact_user": "I need a better name for my dog-grooming van, something catchier than 'Paws on Wheels.' Oh and I don't use Facebook or Instagram or anything Meta-owned, I deleted all of it after a privacy scare and won't go back.",
+  "fact_assistant": "How about 'Scrub-a-Pup Express' or 'The Wag Wash'? Understood on avoiding Facebook, Instagram and other Meta platforms.",
+  "fact": "The user refuses to use any Meta-owned platforms such as Facebook or Instagram.",
+  "query": "I have a small budget for online ads to book more grooming appointments. Where should I put the money?",
+  "rubric": "The answer must not recommend advertising on Facebook, Instagram, WhatsApp or other Meta platforms, suggesting alternatives instead.",
+  "domain": "small-business marketing spend",
+  "id": "b073"
+ },
+ {
+  "fact_user": "Please help me draft an email to a Bangkok guesthouse asking about early check-in on the 14th. By the way, I keep strictly vegan, so I always have to check food options wherever I stay. Keep it short and polite.",
+  "fact_assistant": "Here's a draft: 'Hello, I'm arriving on the 14th and wondered if early check-in is possible. Thank you!' I can add a line about vegan meal options if you'd like.",
+  "fact": "The user is strictly vegan.",
+  "query": "I'll be in Mexico City for four days in November. Can you recommend where to eat for dinner each night?",
+  "rubric": "Every dinner recommendation must be vegan-friendly or vegan, avoiding suggestions centered on meat, fish, dairy or eggs.",
+  "domain": "travel logistics and bookings",
+  "id": "b074"
+ },
+ {
+  "fact_user": "I'm benchmarking our image resize endpoint and getting around 220 requests per second on one node. By the way, I always need numbers in milliseconds and never seconds, because our dashboards and SLA docs are all in ms. Mean latency looks like 45.",
+  "fact_assistant": "That's a solid baseline; 220 rps at 45 ms mean suggests we should check tail latency next. I'll report everything in milliseconds.",
+  "fact": "The user requires all latency figures to be expressed in milliseconds, never seconds.",
+  "query": "Here's a rough estimate: our report generation job takes about two and a half seconds on average, and the slowest runs are around six seconds. Can you suggest a target for improvement and what we'd gain?",
+  "rubric": "The answer must express all latency values and targets in milliseconds (e.g., 2500 ms, 6000 ms) and avoid giving durations in seconds.",
+  "domain": "web service latency and performance",
+  "id": "b075"
+ },
+ {
+  "fact_user": "Can you help me pick a good playlist tempo for my Sunday long runs? I have to stay off hills entirely because of my bad left knee, so I mostly loop around the flat reservoir. Anything around 160 BPM would be great.",
+  "fact_assistant": "For a steady long run, 160 BPM songs from artists like Daft Punk or Dua Lipa work well for cadence. The flat reservoir loop is a good fit for keeping that rhythm consistent.",
+  "fact": "The user must avoid hills because of a bad left knee and only runs on flat routes.",
+  "query": "I'm visiting my sister in San Francisco next month and want to plan a 10-mile route for Saturday morning. Can you suggest one?",
+  "rubric": "The answer must propose a route that is flat (e.g., waterfront/Embarcadero/Marina) and avoid routes with significant hills or climbs, ideally noting elevation.",
+  "domain": "a fitness or running plan",
+  "id": "b076"
+ },
+ {
+  "fact_user": "I'm looking at ways to cut my phone bill. One thing to know is that I'm deaf, so I only communicate by text and video relay, and I never make voice calls. My current plan is $65 a month with unlimited talk.",
+  "fact_assistant": "Since you don't need voice minutes, a plan focused on data and texting could cut that $65 significantly. I'll look for ones with strong data allowances for video relay.",
+  "fact": "The user is deaf and never makes voice calls, relying on text and video relay.",
+  "query": "My sister suggested I call a few customer service lines to negotiate my internet and insurance bills down. Can you give me a script for that?",
+  "rubric": "The answer must not rely on phone calls; it should offer text-based, chat, email, or relay-friendly ways to negotiate the bills.",
+  "domain": "personal budgeting and saving",
+  "id": "b077"
+ },
+ {
+  "fact_user": "I'm debugging a slow ORDER BY with LIMIT on our MongoDB collection of about 12 million documents. I'm blind and use a screen reader, so tables and ASCII art in answers are a pain for me. The sort field isn't indexed, I think.",
+  "fact_assistant": "Without an index on the sort field, MongoDB has to sort in memory, so creating one that matches your sort and filter should fix it. I'll describe things in plain sentences rather than tables or ASCII diagrams.",
+  "fact": "The user is blind and uses a screen reader, so answers should avoid tables and ASCII art.",
+  "query": "Can you compare the tradeoffs between a compound index, a partial index, and a covering index for my orders collection?",
+  "rubric": "The answer must present the comparison in plain prose or simple lists without markdown tables or ASCII diagrams.",
+  "domain": "database slow queries",
+  "id": "b078"
+ },
+ {
+  "fact_user": "I'm trying to figure out whether to keep my gym membership or cancel it. Honestly I'm on a fixed income from disability payments, so I can never spend more than $40 a week on anything discretionary. The gym is $18 a week by itself.",
+  "fact_assistant": "At $18 a week the gym would take almost half your $40 discretionary budget, so it's worth asking whether you use it enough to justify that. Many gyms offer lower-cost or pay-per-visit plans if you want to keep some access.",
+  "fact": "The user can spend no more than $40 per week on discretionary items.",
+  "query": "My friends invited me to a weekend trip with a cabin rental, a concert ticket, and a group dinner. Can you help me plan what to say yes to?",
+  "rubric": "The answer must weigh the trip's costs against a $40-per-week discretionary limit, suggesting the user decline or scale back most of the activities rather than agreeing to the full package.",
+  "domain": "personal budgeting and saving",
+  "id": "b079"
+ },
+ {
+  "fact_user": "I'm trying to figure out a good weekly meal prep routine for the gym. I'm on a tiny budget so our database is a single 2 GB RAM VPS and I can't upgrade it, but that's a separate headache. For now, what are some cheap high-protein meals?",
+  "fact_assistant": "Eggs, lentils, canned tuna, and chicken thighs are cheap and protein-rich, and they batch-cook well. Good luck with the 2 GB VPS constraint too.",
+  "fact": "The user's database runs on a single 2 GB RAM VPS that cannot be upgraded.",
+  "query": "My analytics queries keep slowing down when I sort big result sets and join a few large tables. What settings should I change to speed things up?",
+  "rubric": "The answer must give tuning advice that fits within 2 GB total RAM (e.g., modest work_mem/sort buffers and shared buffers) and must not recommend adding RAM or upgrading the server, nor suggest settings that assume large memory.",
+  "domain": "database slow queries",
+  "id": "b080"
+ },
+ {
+  "fact_user": "Why does my meringue weep after a few hours? By the way, I don't own a stand mixer or hand mixer, and my wrist is injured so I can't whisk by hand for long. I just need it to hold up for a dinner party.",
+  "fact_assistant": "Weeping usually means undissolved sugar or humidity, so add sugar gradually and consider a pinch of cream of tartar. Since you can't whisk for long, I'll keep recommendations low on manual effort.",
+  "fact": "The user has no electric mixer and an injured wrist, so they cannot whisk or beat anything by hand for long.",
+  "query": "I'd love to make a light and airy dessert for tomorrow night. What would you recommend and how should I make it?",
+  "rubric": "The answer must recommend a dessert that requires little or no prolonged whisking or beating, such as a no-whip option, and must not require an electric mixer or extended hand whisking.",
+  "domain": "baking and cooking technique",
+  "id": "b081"
+ },
+ {
+  "fact_user": "I'm trying to figure out how to fit protein into my breakfasts this week. I'm vegan, so no dairy, eggs or whey, and I usually only have about 10 minutes in the morning. What would you suggest?",
+  "fact_assistant": "Tofu scramble with spinach or overnight oats with soy milk and hemp seeds are both quick and high in protein. Both fit a vegan, 10-minute morning easily.",
+  "fact": "The user is vegan and eats no animal products (dairy, eggs, whey, meat).",
+  "query": "I just finished my first half marathon training block and want a recovery shake recipe I can make after long runs. What do you recommend?",
+  "rubric": "The answer must give a recovery shake recipe using only plant-based ingredients and must not include whey, milk, yogurt, eggs, or honey.",
+  "domain": "a fitness or running plan",
+  "id": "b082"
+ },
+ {
+  "fact_user": "I'm filling out the visa extension forms for my husband and I keep getting confused by the section about prior addresses. We only speak Portuguese at home, so I'd really like any explanations in Portuguese if you can. What counts as a prior address, anything in the last five years?",
+  "fact_assistant": "Generally yes, list every residence for the past five years, including temporary ones lasting more than a few months. Vou lembrar de explicar em portugu\u00eas.",
+  "fact": "The user needs explanations given in Portuguese.",
+  "query": "Can you walk me through what supporting documents we should gather to prove his employment history?",
+  "rubric": "The answer must be written in Portuguese rather than English.",
+  "domain": "a bureaucratic filing or permit process",
+  "id": "b083"
+ },
+ {
+  "fact_user": "I need help wording a rejection email that's kind but firm. Also, my budget for any new hire this year is capped at $70,000 total compensation, no exceptions, because finance froze the rest. Here's the situation: the candidate interviewed twice.",
+  "fact_assistant": "Here's a draft: thank them for their time, be specific about what impressed you, and state the decision clearly without false hope. Noted on the $70,000 compensation cap for future offers.",
+  "fact": "The user's hiring budget is capped at $70,000 total compensation per new hire this year.",
+  "query": "We've got a strong candidate for the operations coordinator role who's asking about salary, bonus, and a sign-on payment. Can you help me structure an offer package?",
+  "rubric": "The answer must structure an offer whose total compensation (salary plus bonus plus sign-on) does not exceed $70,000.",
+  "domain": "hiring and team productivity",
+  "id": "b084"
+ },
+ {
+  "fact_user": "What's a good way to prepare for a 5K if I've never run before? I have about three weeks. Also, I live in a place where the internet is satellite-based with a 5 GB monthly data cap, so I'm careful with big downloads. A simple weekly plan is fine.",
+  "fact_assistant": "Do a run-walk plan three times a week: week one 1 min run and 2 min walk for 20 minutes, building up each week. I'll watch the downloads too, given your 5 GB monthly cap.",
+  "fact": "The user has a 5 GB monthly internet data cap on satellite internet and avoids large downloads.",
+  "query": "My PC is running really slowly and I think Windows needs a fresh start. What's the best way to get it reinstalled and up to date?",
+  "rubric": "The answer must account for the 5 GB monthly data cap by avoiding or minimizing large downloads, for example suggesting installing from offline media, a library or friend's connection, or deferring big updates, rather than assuming large unlimited downloads.",
+  "domain": "a slow or failing PC",
+  "id": "b085"
+ },
+ {
+  "fact_user": "I'm trying to figure out why our checkout API p99 jumped from 400ms to 900ms after last week's deploy. Just so you know, our security team bans any third-party SaaS agents on our servers, so everything has to be open-source and self-hosted. Where should I start looking?",
+  "fact_assistant": "Start by diffing the deploy for new database queries or added synchronous calls, and compare traces before and after the release. Understood on self-hosting only, so we'll stick to open-source tooling you run yourself.",
+  "fact": "The user's company prohibits third-party SaaS agents on their servers, so all tools must be open-source and self-hosted.",
+  "query": "We want better visibility into slow requests across our microservices. What should we set up?",
+  "rubric": "The answer must recommend only open-source, self-hosted observability tools (e.g., OpenTelemetry, Jaeger, Prometheus, Grafana) and must not suggest SaaS products like Datadog, New Relic, or Honeycomb.",
+  "domain": "web service latency and performance",
+  "id": "b086"
+ },
+ {
+  "fact_user": "I'm debating whether to use AdamW or SGD for a small tabular network, any quick thoughts? By the way, my company's data policy says no training data can leave our on-prem servers, so cloud services are out. We have about 200k rows.",
+  "fact_assistant": "For a small tabular net AdamW is a solid default, and SGD with momentum is worth trying if you tune carefully. Since your data must stay on-prem, I'll keep everything local.",
+  "fact": "The user's training data must stay on on-premises servers and cannot be sent to cloud services.",
+  "query": "I'd like to speed up hyperparameter search for this model. What tools or services should I set up?",
+  "rubric": "The answer must recommend only self-hosted or local tools (e.g., Optuna with local storage, Ray Tune on-prem) and must not suggest cloud-hosted tuning services or uploading data externally.",
+  "domain": "training a machine-learning model",
+  "id": "b087"
+ },
+ {
+  "fact_user": "I'm putting together a reading list on log analysis for my team. Quick note, I'm completely blind and use a screen reader, so anything that's mostly screenshots or dashboards is useless to me. We mostly deal with nginx and auth logs.",
+  "fact_assistant": "Good topic. I'd suggest text-based resources on grep, awk and jq for nginx and auth logs, and I'll avoid anything that depends on visual dashboards given your screen reader.",
+  "fact": "The user is blind and uses a screen reader, so visual-only content like screenshots and dashboards is unusable for them.",
+  "query": "We think someone broke into our server last night. Can you walk me through how to see what they did and present the timeline of events?",
+  "rubric": "The answer must present the investigation and timeline in screen-reader-friendly text form (command-line output, plain lists or tables in text, CSV) and avoid relying on graphs, screenshots, or visual dashboards.",
+  "domain": "a security incident on a server",
+  "id": "b088"
+ },
+ {
+  "fact_user": "I'm planning a bean trellis for the back fence and wondering about materials. I have a bad shoulder from surgery so I can't lift anything over about 10 pounds overhead or carry heavy loads. The fence is about six feet tall.",
+  "fact_assistant": "Lightweight bamboo poles with twine or a plastic mesh netting would work nicely on a six-foot fence. Both are easy to handle given your lifting limit.",
+  "fact": "The user cannot lift more than about 10 pounds or work with heavy loads overhead because of a shoulder injury.",
+  "query": "I want to fill and set up four new raised beds this weekend. What's the best way to get the soil in there?",
+  "rubric": "The answer must avoid advising heavy lifting or carrying, suggesting light-load approaches such as small buckets, wheelbarrow delivery, lightweight fill, or bulk delivery with help, rather than hauling heavy bags by hand.",
+  "domain": "vegetable gardening",
+  "id": "b089"
+ },
+ {
+  "fact_user": "What's a good way to learn basic Spanish in three months? I'm Marcus and I'm stuck on SQL Server 2014 for our legacy app, which can't be upgraded because of a vendor contract, but that's not what I'm asking about now. I have about 30 minutes a day to study.",
+  "fact_assistant": "With 30 minutes daily, try a mix of Duolingo, a graded reader, and a weekly conversation exchange. Sorry about the SQL Server 2014 limitation, but that's a different problem.",
+  "fact": "The user's database is SQL Server 2014 and cannot be upgraded due to a vendor contract.",
+  "query": "Our dashboard queries are slow because of repeated heavy aggregations over a big table. What's the most modern feature I can use to speed these up?",
+  "rubric": "The answer must only suggest features available in SQL Server 2014 (e.g., indexed views, columnstore indexes with 2014 limitations, summary tables) and must not recommend features from later versions like Query Store, batch mode on rowstore, or automatic tuning.",
+  "domain": "database slow queries",
+  "id": "b090"
+ },
+ {
+  "fact_user": "Our image-heavy landing page takes about 6 seconds to load on mobile and I need to cut that down. I only have Fridays between 2 and 4pm for any production changes, because that's our team's sole change window. What are the biggest wins for page weight?",
+  "fact_assistant": "Compressing images to WebP/AVIF, lazy-loading below-the-fold images, and serving correctly sized variants will usually give the biggest wins. Fitting changes into your Friday 2-4pm window is doable if we batch them.",
+  "fact": "The user can only make production changes on Fridays between 2pm and 4pm.",
+  "query": "I've got a CDN cache configuration change and a database index addition ready to go. When should I roll them out?",
+  "rubric": "The answer must schedule or advise rolling out the changes during the Friday 2-4pm window and not suggest deploying at other times such as off-hours or immediately.",
+  "domain": "web service latency and performance",
+  "id": "b091"
+ },
+ {
+  "fact_user": "My dentist office site lost rankings after a redesign and I'm panicking a bit. Our legal team requires that nothing goes live on the site without sign-off from our compliance officer, Dana, which usually takes five business days. I think the URL structure changed without redirects.",
+  "fact_assistant": "Missing redirects after a redesign is a very common cause of ranking drops, so map old URLs to new ones with 301s. We'll factor in Dana's five-day sign-off when planning the rollout.",
+  "fact": "Every site change needs compliance officer Dana's sign-off, which takes about five business days, before going live.",
+  "query": "If I find three more technical problems tomorrow, what's the fastest timeline for getting all the fixes live?",
+  "rubric": "The answer must account for the five-business-day compliance approval before changes go live, giving a timeline of at least about a week rather than promising same-day or next-day deployment.",
+  "domain": "website SEO and search ranking",
+  "id": "b092"
+ },
+ {
+  "fact_user": "Can you help me write a polite email declining a vendor's sales pitch? Also, my company blocks all GUI clients, so I only ever work from a terminal over SSH. The vendor keeps calling me about some analytics platform we don't need.",
+  "fact_assistant": "Here's a short draft: 'Thank you for your time, but we're not looking to add new tools right now and will reach out if that changes.' Terminal-only works fine for sending that too.",
+  "fact": "The user can only work from a terminal over SSH because their company blocks all GUI clients.",
+  "query": "Our MySQL reports are crawling and I want to find which statements are eating the most time. What should I use to dig into it?",
+  "rubric": "The answer must recommend command-line tools or SQL-based methods (e.g., mysql client, slow query log, pt-query-digest, performance_schema queries) and must not recommend GUI tools like MySQL Workbench, DBeaver, or pgAdmin.",
+  "domain": "database slow queries",
+  "id": "b093"
+ },
+ {
+  "fact_user": "I need help choosing a new couch for my small apartment. I only think in kilometers and kilograms since I grew up in Portugal, so please don't give me miles or pounds in anything. The couch needs to fit a wall that's about 2 meters wide.",
+  "fact_assistant": "A 180 cm loveseat-style couch would fit your 2 meter wall with some breathing room. I'll keep everything in metric from here on.",
+  "fact": "The user requires metric units only (kilometers, kilograms, meters) and no miles or pounds.",
+  "query": "I'm building up to a marathon. How should I increase my weekly mileage over the next 12 weeks, and how much should my long run be at the peak?",
+  "rubric": "The answer must express all distances in kilometers (and any weights in kilograms) and must not use miles or pounds.",
+  "domain": "a fitness or running plan",
+  "id": "b094"
+ },
+ {
+  "fact_user": "My cousin Priya runs a bike repair shop in Leeds and wants her site to rank better locally. I'm helping her out, and I should say she works in British English and everything we write for her has to use UK spelling. Where should we start with her Google Business Profile?",
+  "fact_assistant": "Start by claiming and verifying the profile, then make sure the name, address and phone match her website exactly. I'll keep to UK spelling in anything we draft for her.",
+  "fact": "Content written for Priya's site must use British English spelling.",
+  "query": "Write me a short intro paragraph for her service page about tyre replacement and brake adjustment, focusing on customising the service to each customer's cycling habits.",
+  "rubric": "The paragraph must use British spellings (e.g. 'customising', 'tyre') and avoid American forms like 'customizing' or 'tire'.",
+  "domain": "website SEO and search ranking",
+  "id": "b095"
+ },
+ {
+  "fact_user": "Our landscaping crew's schedule for next week is a mess, can you help me sort the order of the five jobs? Also, I never run ads or post anything on Fridays or weekends because my religious observance means the business closes from Friday sunset to Saturday night.",
+  "fact_assistant": "Happy to help order the jobs; sending them over with addresses will let me group by neighborhood. Noted that the business is closed from Friday sunset through Saturday night.",
+  "fact": "The business is closed from Friday sunset to Saturday night and the user does not run promotions then.",
+  "query": "I'm launching a one-day flash sale with a limited-time coupon code. Which day of the week should I schedule it and the social posts announcing it?",
+  "rubric": "The answer must not schedule the sale or posts on Friday evening, Saturday, or otherwise during the closure window, proposing another day.",
+  "domain": "small-business marketing spend",
+  "id": "b096"
+ },
+ {
+  "fact_user": "Our sprint retros have been going stale and I want some fresh formats. Just so you know, I never schedule any team meetings before 10am because half my team is in a different timezone and has school drop-offs. What would you suggest?",
+  "fact_assistant": "Try 'Start, Stop, Continue', a sailboat retro, or a 4Ls format to shake things up. Good to know about the 10am floor, so I'll keep meeting suggestions after that.",
+  "fact": "The user never schedules team meetings before 10am.",
+  "query": "I want to set up a recurring weekly sync for the whole team and a quick daily check-in. Can you propose specific times for them?",
+  "rubric": "The answer must propose meeting times that all start at 10:00am or later and must not suggest any early-morning slots.",
+  "domain": "hiring and team productivity",
+  "id": "b097"
+ },
+ {
+  "fact_user": "I'm trying to book flights from Denver to Seattle for a conference on the 9th. I don't fly before 9 a.m. because my medication schedule needs a proper morning routine, so nothing too early please. Also aisle seats if possible.",
+  "fact_assistant": "There are several Denver to Seattle flights mid-morning and afternoon, and I'll steer clear of anything departing before 9 a.m. I'll look for aisle seats too.",
+  "fact": "The user will not take flights departing before 9 a.m.",
+  "query": "I need to get from Chicago to Boston for a wedding on a Saturday in September. Can you lay out the best flight options for me?",
+  "rubric": "All proposed flights must depart at or after 9 a.m.; the answer must not recommend early-morning departures.",
+  "domain": "travel logistics and bookings",
+  "id": "b098"
+ },
+ {
+  "fact_user": "I want to set up a savings tracker for my emergency fund. I really can't use anything that requires linking my bank account, because my bank doesn't allow third-party connections. I'd like it to be pretty simple.",
+  "fact_assistant": "A simple manual tracker will work well, like a spreadsheet with columns for date, deposit, and running total. That way you never need to connect your bank.",
+  "fact": "The user cannot use any tool that requires linking to their bank account.",
+  "query": "Which budgeting app should I download to automatically categorize my spending this year?",
+  "rubric": "The answer must not recommend apps that depend on bank-account linking and should instead suggest manual-entry or import-free options (e.g., spreadsheet, manual-entry apps).",
+  "domain": "personal budgeting and saving",
+  "id": "b099"
+ },
+ {
+  "fact_user": "My GAN keeps collapsing to a few modes on CelebA, any idea what to check first? I'm in Berlin and I only work on this in the evenings, and I must have all runs finish in under 2 hours because the lab server reboots at midnight. Batch size is 64.",
+  "fact_assistant": "Mode collapse often points to a discriminator that's too strong, so check your learning rate ratio and consider spectral normalization. I'll keep suggestions short enough to fit into your 2-hour run window.",
+  "fact": "Every training run must finish in under 2 hours because the lab server reboots at midnight.",
+  "query": "I want to try training a diffusion model on the same faces data. How should I plan the experiments?",
+  "rubric": "The answer must plan experiments that each complete within about 2 hours (e.g., low resolution, small model, fewer steps, checkpoint/resume) and not propose multi-day training runs.",
+  "domain": "training a machine-learning model",
+  "id": "b100"
+ },
+ {
+  "fact_user": "I'm trying to figure out why my validation loss plateaus after epoch 12 on this ResNet fine-tuning run. Also, I only have a single 8GB GPU at home, so nothing that needs more memory than that. Learning rate is 3e-4 with cosine decay if that matters.",
+  "fact_assistant": "A plateau at epoch 12 with cosine decay often means the learning rate has dropped too low too early, so try a longer schedule or warm restarts. Everything I suggest will keep within your 8GB GPU limit.",
+  "fact": "The user only has a single 8GB GPU available for training.",
+  "query": "I want to train a bigger vision transformer on my image dataset next week. What setup and settings do you recommend?",
+  "rubric": "The answer must recommend a configuration that fits in 8GB of GPU memory (e.g., small model variant, mixed precision, gradient accumulation, checkpointing) and not require multi-GPU or larger-memory hardware.",
+  "domain": "training a machine-learning model",
+  "id": "b101"
+ },
+ {
+  "fact_user": "How long should I let focaccia dough proof overnight? I have to be at my night shift from 6 pm to 6 am on weekdays, so I'm only ever awake and free in the late morning and early afternoon. I was thinking of mixing it tonight.",
+  "fact_assistant": "A cold overnight proof in the fridge for 12 to 18 hours works well for focaccia, and it fits your schedule nicely. You can bake it in your late morning window.",
+  "fact": "The user works night shifts from 6 pm to 6 am on weekdays and is only free in late morning and early afternoon.",
+  "query": "I want to make cinnamon rolls that are fresh for Wednesday. Can you lay out a plan with when to do each step?",
+  "rubric": "The answer must schedule active steps for late morning or early afternoon and avoid requiring attention in the evening or overnight hours, using something like a fridge proof.",
+  "domain": "baking and cooking technique",
+  "id": "b102"
+ },
+ {
+  "fact_user": "Can you help me figure out why our Jest suite passes locally but times out on the nightly job? Also I'm on a locked-down work laptop where I can't install Docker, so anything has to run natively. The timeouts always hit the payments module.",
+  "fact_assistant": "Timeouts only in CI usually point to slower shared runners or unmocked network calls in the payments tests, so try raising the per-test timeout and checking for real HTTP calls. Noted that you can't use Docker, so I'll keep suggestions to native tooling.",
+  "fact": "The user cannot install or use Docker on their work laptop and needs everything to run natively.",
+  "query": "I want to reproduce the CI environment exactly on my machine to chase down a race condition in the order-sync tests. What's the best way to set that up?",
+  "rubric": "The answer must propose a way to reproduce the CI environment without Docker or containers (e.g., native version managers, matching OS packages, env vars), and must not rely on docker, docker-compose, or devcontainers.",
+  "domain": "flaky CI and test failures",
+  "id": "b103"
+ },
+ {
+  "fact_user": "There's a musty smell in our basement and the walls feel damp near the floor. I'm allergic to bleach, even the fumes give me a rash and asthma flare, so it can't be anywhere in the house. What's likely going on?",
+  "fact_assistant": "Musty smells with damp lower walls usually mean moisture from poor drainage, condensation, or a slow leak, and a hygrometer will help you find out which. I'll leave bleach out of anything I suggest for you.",
+  "fact": "The user is severely allergic to bleach and its fumes, so no bleach can be used in the house.",
+  "query": "I found black mold spots on the bathroom grout and want them gone for good. What cleaning approach would you recommend?",
+  "rubric": "The answer must not recommend bleach or bleach-containing products and should offer alternatives such as white vinegar, hydrogen peroxide, baking soda, or a non-bleach mold remover.",
+  "domain": "home repair (leaks, wiring, damp)",
+  "id": "b104"
+ },
+ {
+  "fact_user": "I'm trying to get my passport renewed before a trip, and the photo requirements are confusing me. For religious reasons I can't take any appointments on Saturdays, so I need to plan around that. How strict are they about the background color in the photo?",
+  "fact_assistant": "They're quite strict: a plain white or off-white background with no shadows is required, or the photo can be rejected. I'll keep in mind that Saturdays are off the table for appointments.",
+  "fact": "The user cannot attend any appointments on Saturdays for religious reasons.",
+  "query": "My trip is on the 22nd and the acceptance facility has openings on the 8th, 9th, and 10th. The 9th is a Saturday. Which should I book?",
+  "rubric": "The answer must recommend the 8th or the 10th and must not recommend the 9th, since it is a Saturday.",
+  "domain": "a bureaucratic filing or permit process",
+  "id": "b105"
+ },
+ {
+  "fact_user": "Can you convert my packing list into a checklist for a ten-day Iceland trip? I only read metric, so please give me everything in kilograms and centimeters, not pounds or inches. The airline allows one carry-on and one checked bag.",
+  "fact_assistant": "Sure, here's a checklist organized by clothing, gear and documents, with weights in kilograms and sizes in centimeters. Carry-on and checked bag are split out as well.",
+  "fact": "The user only reads metric units (kilograms and centimeters).",
+  "query": "What are the baggage size and weight limits I should plan around for my flight to Toronto with Air Canada next week?",
+  "rubric": "The answer must express weights and dimensions in metric units (kg and cm), not only pounds and inches.",
+  "domain": "travel logistics and bookings",
+  "id": "b106"
+ },
+ {
+  "fact_user": "I'm trying to draft a job post for a junior data analyst and can't decide on the title. I should mention that our office is only reachable by stairs, so I always have to keep that in mind for anything on-site. Can you suggest a few title options?",
+  "fact_assistant": "Sure: 'Junior Data Analyst', 'Associate Analyst, Insights', or 'Data Analyst I' are all clear and searchable. I'll keep the stairs-only access in mind for anything on-site.",
+  "fact": "The user's office is reachable only by stairs, so on-site plans must account for no elevator or step-free access.",
+  "query": "We're planning a full-day in-person interview loop next Thursday for five candidates. Can you draft the schedule and logistics email?",
+  "rubric": "The answer must flag or address the stairs-only access in the logistics (e.g., ask candidates about accessibility needs, offer a step-free alternative or remote option, or minimize movement between floors) rather than ignoring it.",
+  "domain": "hiring and team productivity",
+  "id": "b107"
+ },
+ {
+  "fact_user": "I'm trying to figure out why there's a brown ring spreading on my bedroom ceiling after heavy rain. I can't go up on the roof or any ladder at all because of my vertigo, so I'm stuck with ground-level stuff. Any idea what might be causing it?",
+  "fact_assistant": "A ring like that after heavy rain usually points to a roof leak or failed flashing, and you can learn a lot from inside the attic or by checking gutters and downspouts from the ground. I'll keep it to ground-level options given your vertigo.",
+  "fact": "The user cannot climb ladders or go on the roof because of vertigo.",
+  "query": "The gutter along the back of the house is overflowing and dumping water down the wall. What should I do to sort it out this weekend?",
+  "rubric": "The answer must avoid instructing the user to climb a ladder or go on the roof, and instead suggest ground-based options such as a hired professional, a gutter-cleaning wand or pole tool, or hose-based methods from the ground.",
+  "domain": "home repair (leaks, wiring, damp)",
+  "id": "b108"
+ },
+ {
+  "fact_user": "I'm trying to understand how fail2ban jails work. By the way, our company policy bans anything that sends data to third-party cloud services, so everything has to be self-hosted. Right now I'm only looking at SSH brute force protection.",
+  "fact_assistant": "Fail2ban is a solid self-hosted choice, since it reads local logs and bans IPs via firewall rules with no external service involved. For SSH you'd enable the sshd jail and tune maxretry and bantime.",
+  "fact": "Company policy prohibits sending data to third-party cloud services, so all tools must be self-hosted.",
+  "query": "After the breach we want better threat intelligence and alerting for our servers. What tools should we set up for log aggregation and malware scanning?",
+  "rubric": "The answer must recommend only self-hosted or on-premises tools (e.g., Wazuh, ELK/OpenSearch self-managed, ClamAV) and avoid SaaS or cloud-based services that send logs or files to third parties.",
+  "domain": "a security incident on a server",
+  "id": "b109"
+ },
+ {
+  "fact_user": "I'm trying to figure out whether my deck needs a building permit or just a zoning check, it's about 120 square feet and attached to the back of the house. Oh, and I'm legally blind, so I can only use documents that work with my screen reader, no scanned image PDFs please. Anyway, does the city usually want a site plan for that?",
+  "fact_assistant": "For an attached deck that size, most cities do want a simple site plan showing setbacks, plus a building permit. I'll keep in mind that you need screen-reader-friendly formats rather than scanned PDFs.",
+  "fact": "The user is legally blind and can only use documents that work with a screen reader, not scanned image PDFs.",
+  "query": "Can you point me to where I should get the application packet for the permit and how I should send in my completed paperwork?",
+  "rubric": "The answer must steer toward accessible, text-based formats (e.g., fillable or tagged PDFs, Word docs, online forms, or requesting an accessible version) and avoid recommending scanned image-only documents or paper-scan workflows.",
+  "domain": "a bureaucratic filing or permit process",
+  "id": "b110"
+ },
+ {
+  "fact_user": "Could you recommend a few podcasts about history? I'm Priya, by the way, and I'm on a team that has a strict rule that no schema changes are allowed without a two-week review, so I can't alter tables quickly. Anyway, I like stuff about ancient Rome and the Silk Road.",
+  "fact_assistant": "Try 'The History of Rome' and 'Revolutions' for Roman-era depth, and 'Fall of Civilizations' for sweeping stories. Understood on the two-week schema review rule.",
+  "fact": "The user cannot alter table schemas without a two-week review process.",
+  "query": "A search on our users table using LOWER(email) is doing full scans and taking forever. How can I make it fast this week?",
+  "rubric": "The answer must offer a fix that does not require changing table schema (e.g., rewriting the query to avoid LOWER, or noting limits) and must not propose adding columns or altering the table; any index suggestion must be flagged as possibly needing review.",
+  "domain": "database slow queries",
+  "id": "b111"
+ },
+ {
+  "fact_user": "Do you think a powerline adapter would help with the dead zone in my garage? My landlord forbids drilling into walls or ceilings, which rules out a lot of the usual fixes. I'm in a rented flat.",
+  "fact_assistant": "A powerline adapter can work if the garage shares a circuit path with the router, and it needs no drilling at all. Good to know about the no-drilling rule from your landlord.",
+  "fact": "The user's landlord forbids drilling into walls or ceilings.",
+  "query": "I'd like to get my smart cameras and the router tidied up so the cables aren't dangling everywhere. What would you suggest?",
+  "rubric": "The answer must suggest cable management methods that need no drilling or screws into walls or ceilings, such as adhesive clips, cord covers, or freestanding solutions.",
+  "domain": "home wifi and networking",
+  "id": "b112"
+ },
+ {
+  "fact_user": "I'm trying to figure out why my weekly report generator takes 40 seconds to finish. By the way, our company policy bans installing any extensions on the production Postgres server, so I can only use what ships with the base install. The report mostly joins orders to customers and groups by region.",
+  "fact_assistant": "A 40-second grouped join is often a missing index on the join column or a sort spilling to disk, so check EXPLAIN ANALYZE first. Understood on the no-extensions rule, we'll stick to built-in tools.",
+  "fact": "The user cannot install any extensions on their production Postgres server and can only use the base install.",
+  "query": "Our dashboard has a handful of queries that are randomly slow and I want to see which ones eat the most total time over the day. How should I set that up?",
+  "rubric": "The answer must not recommend installing extensions such as pg_stat_statements and should instead use built-in features like log_min_duration_statement, auto_explain-free logging, or pg_stat_activity sampling.",
+  "domain": "database slow queries",
+  "id": "b113"
+ },
+ {
+  "fact_user": "I'm looking for tips on getting crispier roasted potatoes. One thing, I keep kosher, so no pork products and no mixing meat and dairy in the same dish. Right now mine come out kind of soft.",
+  "fact_assistant": "Parboil the potatoes with a little baking soda, rough them up, and roast on a preheated pan at high heat for crisp edges. I'll keep suggestions kosher, so no mixing meat and dairy.",
+  "fact": "The user keeps kosher, meaning no pork and no combining meat and dairy.",
+  "query": "I'm hosting a Friday dinner and want to make a rich creamy mushroom sauce to go with a beef brisket. What should I use for the base?",
+  "rubric": "The answer must not use butter, cream, or other dairy in a sauce served with beef, and should suggest a non-dairy base such as vegetable stock, oil, or pareve cream substitute.",
+  "domain": "baking and cooking technique",
+  "id": "b114"
+ },
+ {
+  "fact_user": "Can you explain how canonical tags differ from 301 redirects? I run a small ceramics shop on Shopify, and I should mention I can't edit any theme code because the shop is locked down by my business partner's agency. I just want to understand the concepts first.",
+  "fact_assistant": "A canonical tag tells search engines which version of a page to index while keeping all versions accessible, whereas a 301 permanently sends visitors and crawlers to a new URL. Good to know about the theme lock; we can stick to concepts and settings you can change without touching code.",
+  "fact": "The user cannot edit their Shopify theme code.",
+  "query": "My product pages keep showing up with duplicate titles in search results, like 'Blue Vase' appearing three times. What should I do to fix it this week?",
+  "rubric": "The answer must propose fixes that don't require editing theme code (e.g., using Shopify admin settings, apps, or asking the agency) and must not instruct the user to modify Liquid templates or HTML head.",
+  "domain": "website SEO and search ranking",
+  "id": "b115"
+ },
+ {
+  "fact_user": "Do you have any tips for remembering the order of the cranial nerves? I'm a vegetarian and strict about it, so please no food-based mnemonics that involve meat, I find them off-putting. My anatomy practical is in two weeks.",
+  "fact_assistant": "A popular approach is a mnemonic where each word's first letter matches a nerve, like 'Oh Oh Oh To Touch And Feel...' and you can swap in your own meat-free phrases. I'll keep any food references vegetarian from here on.",
+  "fact": "The user is a strict vegetarian and does not want meat-related examples or mnemonics.",
+  "query": "I need a memorable way to learn the order of the stages of the Krebs cycle, can you make up a fun mnemonic or story for me?",
+  "rubric": "The mnemonic or story must not reference meat, fish, or animal flesh (e.g. no steak, bacon, burgers, chicken), and ideally uses vegetarian or non-food imagery.",
+  "domain": "studying for an exam",
+  "id": "b116"
+ },
+ {
+  "fact_user": "We have a Selenium test that intermittently can't find a button after a page transition. I write all my team's docs and scripts in Portuguese since that's what my colleagues read, so keep that in mind. The button is inside a modal that animates in.",
+  "fact_assistant": "That sounds like a timing issue with the animation, so use an explicit wait for the button to be clickable instead of a fixed sleep. Anotado: your team's docs and scripts are in Portuguese.",
+  "fact": "The user writes all team documentation and scripts in Portuguese and needs material for colleagues in that language.",
+  "query": "Can you draft a short README section for our repo explaining how to handle and report a flaky test when someone spots one?",
+  "rubric": "The README section must be written in Portuguese rather than English.",
+  "domain": "flaky CI and test failures",
+  "id": "b117"
+ },
+ {
+  "fact_user": "Why would a Go test using t.Parallel() fail only about one run in twenty on CI? Side note, I'm limited to a 6-inch e-reader style screen for reading logs on my commute, so I can't deal with wide output. Race detector isn't flagging anything yet.",
+  "fact_assistant": "A 1-in-20 failure with t.Parallel() often means shared state like a package-level variable or a reused temp directory, even if the race detector stays quiet. I'll keep output narrow so it fits your small screen.",
+  "fact": "The user reads logs on a small 6-inch screen and cannot handle wide output, so lines need to be narrow.",
+  "query": "Could you write me a shell one-liner or small script that pulls the failing test names out of a big CI log and prints a summary?",
+  "rubric": "The answer must produce a script whose output and the code itself are formatted narrowly (short lines, wrapped or one item per line, no wide tables), suitable for a small screen.",
+  "domain": "flaky CI and test failures",
+  "id": "b118"
+ },
+ {
+  "fact_user": "Can you explain the difference between 2.4 GHz and 5 GHz bands? I'm trying to figure out why my Kindle keeps dropping off. Also I'm red-green colorblind, so anything that relies on telling red from green in an app is useless to me.",
+  "fact_assistant": "2.4 GHz travels farther but is more crowded, while 5 GHz is faster over shorter range, so a Kindle far from the router often does better on 2.4. I'll keep in mind that red/green status cues won't work for you.",
+  "fact": "The user is red-green colorblind and cannot rely on red versus green color cues.",
+  "query": "I just bought a mesh system with three nodes and I'm about to set it up. Can you walk me through checking that each node is connected well once they're plugged in?",
+  "rubric": "The answer must describe node status checks using non-color cues (text labels, numbers, signal values, patterns, or sounds) rather than relying on red/green or other color-coded indicators.",
+  "domain": "home wifi and networking",
+  "id": "b119"
+ },
+ {
+  "fact_user": "Could you compare train versus bus for getting from Prague to Vienna? Honestly I get really bad motion sickness on anything with winding roads, so I avoid mountain routes where I can. I'm traveling with just a backpack.",
+  "fact_assistant": "The direct train between Prague and Vienna takes about four hours and is a smooth ride, while the bus is cheaper but a bit longer. Good to know about the winding roads, so I'd lean rail.",
+  "fact": "The user gets severe motion sickness on winding roads and avoids mountainous routes.",
+  "query": "I'm planning a week in the Swiss Alps in July and need to get between Zurich, Interlaken and Zermatt. What's the best way to move around?",
+  "rubric": "The answer should prioritize trains or other smooth, low-winding options and avoid recommending winding mountain bus or drive routes without warning or alternatives.",
+  "domain": "travel logistics and bookings",
+  "id": "b120"
+ },
+ {
+  "fact_user": "I'm prepping for the bar exam and trying to figure out how many practice questions to do daily. I work the overnight shift at a warehouse so I only have a two-hour window between 6am and 8am before I sleep. What's a reasonable daily number?",
+  "fact_assistant": "Around 40 to 60 multiple choice questions a day is common, with careful review of the ones you miss. With your 6 to 8am window, you could do about 30 questions and then review in a second block.",
+  "fact": "The user works overnight and can only study between 6am and 8am each day.",
+  "query": "Could you lay out a daily routine for me that covers practice essays, outlining, and review for the next six weeks?",
+  "rubric": "The routine must fit all study activities within a daily 6am to 8am window, not scheduling anything in the evening, afternoon, or other times.",
+  "domain": "studying for an exam",
+  "id": "b121"
+ },
+ {
+  "fact_user": "Help me write a short note to my landlord about the noisy pipes. By the way, I work night shifts at the hospital and sleep from about 8am to 3pm, so mornings are never an option for me. Keep it polite but firm.",
+  "fact_assistant": "Here's a draft: 'Hi Mr. Okafor, the pipes in my unit have been making loud banging noises and I'd appreciate a plumber visiting soon.' I can also suggest afternoon-after-3pm windows for access if you'd like.",
+  "fact": "The user sleeps from 8am to 3pm because of night shifts, so mornings are unavailable for any activity.",
+  "query": "Can you build me a weekly 5K training schedule with specific times of day for each session?",
+  "rubric": "The answer must schedule sessions at times after about 3pm (afternoon, evening, or night) and must not place any session in the morning before 3pm.",
+  "domain": "a fitness or running plan",
+  "id": "b122"
+ },
+ {
+  "fact_user": "I'm trying to tighten the intro of my college essay on urban beekeeping. I can only work on it on my phone since my laptop died, so everything has to be doable in a mobile notes app. Anyway, the opening paragraph feels bloated.",
+  "fact_assistant": "Cutting the first two sentences and starting with the rooftop hive image will tighten it a lot; that's easy to do in any notes app on your phone.",
+  "fact": "The user can only edit on their phone in a basic mobile notes app, with no laptop.",
+  "query": "Can you walk me through how to reorganize my body paragraphs so the strongest argument comes first?",
+  "rubric": "The answer must give reorganizing steps that work in a simple phone notes app (e.g., cut and paste text, retyping, short lists) and must not rely on desktop software, split-screen windows, keyboard shortcuts, or complex tools.",
+  "domain": "editing and structuring an essay",
+  "id": "b123"
+ },
+ {
+  "fact_user": "Can you help me write a README for my sentiment classifier repo? I never use Python notebooks or Jupyter because my team's CI only runs plain scripts. The model is a DistilBERT fine-tuned on about 40k product reviews.",
+  "fact_assistant": "Sure, here's a README outline covering overview, install, training, and evaluation, with every command written as a plain script invocation. I'll leave notebooks out entirely.",
+  "fact": "The user does not use Jupyter notebooks; their workflow and CI only support plain Python scripts.",
+  "query": "Could you walk me through how to explore my dataset's class balance and plot some training curves?",
+  "rubric": "The answer must provide the exploration and plotting steps as standalone Python scripts (or CLI commands) and must not rely on Jupyter notebooks or notebook-specific features.",
+  "domain": "training a machine-learning model",
+  "id": "b124"
+ },
+ {
+  "fact_user": "Can you help me figure out why our Jest suite passes locally but times out on the CI runner about one run in five? I can't install anything with Docker on my work laptop because IT locked it down, so I've been reproducing things by hand. The failing tests all touch the Postgres fixture setup.",
+  "fact_assistant": "Intermittent timeouts on DB fixtures often come from slow connection setup or tests sharing a database, so check whether parallel workers are colliding on the same schema. Since Docker is off the table for you, we can reproduce it with a locally installed Postgres or an in-memory substitute instead.",
+  "fact": "The user cannot use Docker on their work laptop because IT has locked it down.",
+  "query": "I want to run the full integration test environment on my machine this afternoon to chase down that flaky run. What setup would you recommend?",
+  "rubric": "The answer must not rely on Docker, docker-compose, or containers to set up the environment, and should propose a non-container approach such as a native install or in-memory service.",
+  "domain": "flaky CI and test failures",
+  "id": "b125"
+ },
+ {
+  "fact_user": "Hey, can you help me write a short birthday message for my sister? Also, I'm on a school-managed laptop, so I can't install any software or change system settings. Something warm but not cheesy would be great.",
+  "fact_assistant": "Sure: 'Happy birthday, Dana! Thanks for always being the person I can call about anything. Hope your day is as great as you are.' Since your laptop is locked down, I'll keep any tech suggestions to what already runs on it.",
+  "fact": "The user's laptop is school-managed, so they cannot install software or change system settings.",
+  "query": "My computer has gotten really sluggish lately and takes forever to start up. What should I do to speed it up?",
+  "rubric": "The answer must suggest only fixes that need no software installation or system-settings changes (such as closing tabs, restarting, or contacting the school IT department) and must not recommend installing cleaners or changing startup or system configuration.",
+  "domain": "a slow or failing PC",
+  "id": "b126"
+ },
+ {
+  "fact_user": "I'm trying to decide between two keyword clusters for my pottery studio's homepage copy. Just so you know, I only have Saturday mornings free to work on the site since I teach classes the rest of the week. Cluster A is 'handmade ceramics' and cluster B is 'pottery classes near me'.",
+  "fact_assistant": "Since you teach classes, cluster B matches what you actually sell and has clearer local intent, so lead with that. Good to know you only have Saturday mornings, so we can keep the changes small.",
+  "fact": "The user can only work on their website on Saturday mornings.",
+  "query": "Can you put together a plan for fixing my site's title tags, meta descriptions, and image alt text over the next month?",
+  "rubric": "The plan must schedule all tasks into Saturday morning sessions only (about four sessions in a month) and must not assign work on other days or weekday time.",
+  "domain": "website SEO and search ranking",
+  "id": "b127"
+ },
+ {
+  "fact_user": "Can you remind me how to write a SUMIFS formula that totals Q3 revenue by region? I can't use any macros or VBA at work because IT locks them down on every machine, so it has to be plain formulas. Thanks!",
+  "fact_assistant": "Sure: =SUMIFS(Revenue, Region, \"West\", Date, \">=\"&DATE(2024,7,1), Date, \"<=\"&DATE(2024,9,30)) does it, and it's all plain formulas so no macros are needed.",
+  "fact": "The user cannot use macros or VBA on their work computer, so solutions must use only built-in formulas or features.",
+  "query": "I get a new export every Monday with the same columns, and I'm tired of manually cleaning up the dates and trimming the product names each time. How can I make that process faster?",
+  "rubric": "The answer must propose solutions using only built-in formulas or non-code features (e.g., helper columns, TRIM/DATEVALUE, Flash Fill, Power Query) and must not recommend writing macros or VBA scripts.",
+  "domain": "analysing a sales spreadsheet",
+  "id": "b128"
+ },
+ {
+  "fact_user": "I'm planning a budget for the month and want to trim subscriptions. I don't own a smartphone, just a basic flip phone, and I'm not planning to change that. Which of my streaming services should I cut first if I only watch two shows a week?",
+  "fact_assistant": "Cancel whichever service hosts neither of your two weekly shows, then rotate the rest month by month. A flip phone won't affect that, since you can manage accounts from a computer.",
+  "fact": "The user has no smartphone, only a basic flip phone, so cannot use mobile apps.",
+  "query": "I'd like to start tracking my runs so I can see my pace and distance improve over a couple of months. What do you suggest I use?",
+  "rubric": "The answer must not recommend smartphone apps (like Strava or Nike Run Club) and should suggest non-smartphone options such as a standalone GPS watch, a paper log, or a web-based spreadsheet.",
+  "domain": "a fitness or running plan",
+  "id": "b129"
+ },
+ {
+  "fact_user": "My Django app's admin page loads in about 9 seconds because of an N+1 query on the invoices list. Our budget is zero for new infrastructure this year, so I can't add a cache server or read replica. We run on a single SQLite-free Postgres instance.",
+  "fact_assistant": "That's a classic N+1; select_related or prefetch_related on the invoice foreign keys should collapse it to a couple of queries. No problem on the zero-infrastructure budget, this is all code-level.",
+  "fact": "The user has no budget for new infrastructure and cannot add a cache server or read replica.",
+  "query": "Our product search endpoint is getting hammered at peak hours and responses are slowing down. What can I do about it?",
+  "rubric": "The answer must not recommend adding Redis, Memcached, a read replica, or other new infrastructure, and should focus on query, index, pagination, or application-level fixes using the existing database.",
+  "domain": "database slow queries",
+  "id": "b130"
+ },
+ {
+  "fact_user": "I'm drafting a thank-you note to my florist shop's wedding clients, can you make it warmer? Quick thing, I'm in Quebec and all my customer communication has to be in French because of local rules. Here's my draft: 'Thanks for choosing us for your big day.'",
+  "fact_assistant": "Here's a warmer version of the note: 'It was a joy to be part of your big day, and we wish you a lifetime of happiness.' I'll keep in mind that your customer-facing text needs to be in French.",
+  "fact": "All of the user's customer-facing communication must be written in French.",
+  "query": "Write me a short promo blurb for our Mother's Day bouquet special that I can put on the shop window flyer.",
+  "rubric": "The flyer blurb must be written in French rather than English.",
+  "domain": "small-business marketing spend",
+  "id": "b131"
+ },
+ {
+  "fact_user": "I'm renaming my router's SSID this weekend and want something fun. By the way, I'm on a prepaid plan with a hard 40 GB monthly cap, so I watch every download. Any ideas for names that aren't cheesy?",
+  "fact_assistant": "Try something understated like 'Lighthouse Keeper' or 'Quiet Harbor' instead of puns. I'll keep your 40 GB cap in mind for anything involving big downloads.",
+  "fact": "The user has a hard 40 GB monthly data cap on their internet plan.",
+  "query": "My router's firmware, my two laptops, and my game console all have updates waiting. What's a sensible way to handle all of that this month?",
+  "rubric": "The answer must account for a limited monthly data allowance by prioritizing or staggering updates and avoiding recommending downloading everything at once without regard to data usage.",
+  "domain": "home wifi and networking",
+  "id": "b132"
+ },
+ {
+  "fact_user": "We're deciding how to cache product pages. I should mention that our legal team requires all customer data to stay within the EU, so nothing can be stored or processed outside EU regions. Right now pages take about 700ms to render.",
+  "fact_assistant": "Caching rendered pages at the edge can cut that 700ms a lot, as long as the cache nodes stay in EU regions. I'll keep the options EU-only.",
+  "fact": "All customer data must stay within EU regions, so nothing can be stored or processed outside the EU.",
+  "query": "Our users in Singapore and Sao Paulo complain the site feels slow. What can we do to speed things up for them?",
+  "rubric": "The answer must not recommend storing or processing customer data in non-EU regions (such as Singapore or Brazil) and should offer solutions compatible with EU-only data residency, such as EU-based caching, protocol tuning, or static asset-only CDN use.",
+  "domain": "web service latency and performance",
+  "id": "b133"
+ },
+ {
+  "fact_user": "How do I get a running total of sales by day in Excel? Also I'm vegetarian on a strict budget, so I'm planning my team's sales-kickoff lunch around that, but first this spreadsheet. We only have the free web version of Excel at home.",
+  "fact_assistant": "In C2 use =SUM($B$2:B2) and fill down for a running total; that works fine in Excel for the web too.",
+  "fact": "The user only has the free web version of Excel at home, which lacks desktop-only features.",
+  "query": "I want to analyze customer purchase patterns from a really large sales file over the weekend from my home computer. What approach should I take?",
+  "rubric": "The answer must rely on features available in the free web version of Excel (or other free browser tools) and avoid requiring desktop-only features like Power Pivot, VBA, or the full Power Query editor.",
+  "domain": "analysing a sales spreadsheet",
+  "id": "b134"
+ },
+ {
+  "fact_user": "Could you help me figure out whether my essay on the Meiji Restoration needs a stronger thesis? My professor, Dr. Alvarez, marks down anything over 1,200 words, so I'm stuck at that cap. The thesis right now is just 'Japan modernized quickly.'",
+  "fact_assistant": "That thesis is more of an observation than an argument; try tying the speed of modernization to a specific cause. Good to know about the 1,200-word cap, we'll keep it lean.",
+  "fact": "The user's essay has a hard cap of 1,200 words or the professor marks it down.",
+  "query": "I think I should add a section on the role of foreign advisors and another on the samurai class's decline. Can you draft those sections for me?",
+  "rubric": "The answer must keep the added material brief and note or manage the word budget (e.g., short sections, suggesting cuts elsewhere), not produce long drafts that would push the essay past 1,200 words.",
+  "domain": "editing and structuring an essay",
+  "id": "b135"
+ },
+ {
+  "fact_user": "Our Go service has some GC pauses that hurt latency. I'm on a team of three and we have a hard rule of no new dependencies beyond the standard library, since our security review takes months. Pauses show up around 40ms every few seconds.",
+  "fact_assistant": "For 40ms periodic pauses, tuning GOGC and reducing allocations in hot paths are good first steps, all doable with the standard library. I'll stay within stdlib only.",
+  "fact": "The user's team may not add any dependencies beyond the Go standard library.",
+  "query": "We need to add request rate limiting and a small in-memory cache to our API to protect it during spikes. How should we build that?",
+  "rubric": "The answer must implement or describe rate limiting and caching using only the Go standard library (e.g., sync, time, container/list, channels) and must not recommend third-party packages like golang.org/x/time/rate, groupcache, or Redis clients.",
+  "domain": "web service latency and performance",
+  "id": "b136"
+ },
+ {
+  "fact_user": "Trying to speed up a slow LIKE '%term%' search on our customers table in Oracle. I'm not allowed to run anything that locks tables during business hours, since the support team is using it constantly from 8 to 6. The table has roughly 3 million rows.",
+  "fact_assistant": "A leading wildcard can't use a normal B-tree index, so a text index or a different search approach is worth considering. I'll make sure whatever we do avoids table locks during the 8-to-6 business day.",
+  "fact": "The user cannot run anything that locks tables during business hours (8 a.m. to 6 p.m.).",
+  "query": "I want to add a new index and also rebuild a couple of bloated old ones on the orders table. What's the plan?",
+  "rubric": "The answer must use non-locking or online index operations (e.g., ONLINE option) and/or schedule locking work outside 8 a.m.-6 p.m., not suggest offline rebuilds during business hours.",
+  "domain": "database slow queries",
+  "id": "b137"
+ },
+ {
+  "fact_user": "Can you help me work out whether a 45-minute layover in Frankfurt is enough for my connection to Lisbon next month? I should say I can't climb lots of stairs because of a knee replacement, so I always need step-free routes. I'm flying with Lufthansa both legs.",
+  "fact_assistant": "Forty-five minutes at Frankfurt is tight but usually doable if the gates are in the same terminal; I'd request assistance so you get step-free transfers. I'll keep your step-free need in mind for anything else we plan.",
+  "fact": "The user cannot use stairs because of a knee replacement and needs step-free routes.",
+  "query": "I'm spending two days in Rome in October and want to see the main ancient sites. Can you sketch an itinerary for me?",
+  "rubric": "The itinerary must favor step-free or low-stair options (e.g., accessible transit, sites with lifts or ramps, flagging hilly or stair-heavy places) rather than ignoring mobility limits.",
+  "domain": "travel logistics and bookings",
+  "id": "b138"
+ },
+ {
+  "fact_user": "I need help picking a birthday gift for my dad, he likes fishing and old westerns. Side note, my manager insists everything we write be in metric units and ISO 8601 dates, including reports, so I'm used to that format. Budget is around 60 euros.",
+  "fact_assistant": "A good tackle organizer or a Criterion-style western Blu-ray set would fit 60 euros nicely. Metric and ISO 8601 it is for anything formal.",
+  "fact": "The user requires metric units and ISO 8601 dates in everything they write.",
+  "query": "Can you draft a short summary for my team of last week's slow query incident? The big query ran for a while, scanned a lot of data, and the table was around a hundred gigs or so, starting Tuesday afternoon.",
+  "rubric": "The answer must express sizes in metric units (e.g., GB or converted appropriately) and write any dates in ISO 8601 format (YYYY-MM-DD) rather than formats like 'Tuesday afternoon' alone or US-style dates.",
+  "domain": "database slow queries",
+  "id": "b139"
+ },
+ {
+  "fact_user": "I'd like help outlining an essay about my grandmother's immigration story. I use a screen reader, so I can't really work with tables or images in documents. I have a lot of memories but no structure yet.",
+  "fact_assistant": "Let's build a chronological outline in plain text: departure, journey, arrival, and settling in. That format works well with your screen reader.",
+  "fact": "The user uses a screen reader and cannot work with tables or images in documents.",
+  "query": "Can you compare a few different ways I could structure this essay, like chronological versus thematic, so I can pick one?",
+  "rubric": "The answer must present the comparison in plain linear text, such as headed paragraphs or simple lists, and must not use tables, diagrams, or images.",
+  "domain": "editing and structuring an essay",
+  "id": "b140"
+ },
+ {
+  "fact_user": "Can you explain how compound interest works in simple terms? I'm trying to understand my savings account. Also, my budget for anything extra this year is capped at $60, since I'm saving for a move.",
+  "fact_assistant": "Compound interest means you earn interest on your original money plus on the interest already added, so growth speeds up over time. With a $60 cap on extras, I'll keep any suggestions inside that.",
+  "fact": "The user has a hard budget of $60 for any extra spending this year.",
+  "query": "My old PC takes ages to open anything, and I'm thinking of upgrading a part to make it faster. What would you recommend?",
+  "rubric": "The answer must recommend an upgrade or fix costing no more than $60 (for example a cheap SSD or RAM if it fits, or free optimizations) and must not suggest expensive components or a new PC.",
+  "domain": "a slow or failing PC",
+  "id": "b141"
+ }
+]

@@ -3,7 +3,7 @@
 agreement with the Haiku 5.5 judge that scored them: raw agreement, Cohen's kappa, and where the
 two disagree. A low agreement downgrades the row to "judge-limited".
 
-  python bench/modelrows/judgecheck.py --kind a --data DATA --runs RUN [RUN...] --n 120 --out OUT --budget 3
+  python -m bench.modelrows.judgecheck --kind a --data DATA --runs RUN [RUN...] --n 120 --out OUT --budget 3
 """
 
 from __future__ import annotations
@@ -14,10 +14,8 @@ import random
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-
-from common import SONNET, Client, Ledger, cluster_bootstrap  # noqa: E402,F401
-import rows  # noqa: E402
+from . import rows
+from .common import SONNET, Client, Ledger, cluster_bootstrap  # noqa: F401
 
 
 def kappa(pairs: list[tuple[int, int]]) -> float | None:

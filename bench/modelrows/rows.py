@@ -18,7 +18,7 @@ from pathlib import Path
 from anneal_memory import Store
 from anneal_memory.retrieval import retrieve_relevant
 
-from common import (PROJECT_NAME, Client, answer, cluster_bootstrap, judge_json, mean, new_wrap_stats,
+from .common import (PROJECT_NAME, Client, answer, cluster_bootstrap, judge_json, mean, new_wrap_stats,
                     paired_diff, probe_update, record_session, transcript, wrap_session)
 
 # ---------------------------------------------------------------------------------------------

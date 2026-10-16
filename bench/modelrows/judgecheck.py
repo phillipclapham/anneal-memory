@@ -63,7 +63,8 @@ def main() -> None:
     # balanced by the Haiku judge's own call (most A answers are 0, so a plain sample has no positives)
     pos = [x for x in pool if hscore(x) == 1]
     neg = [x for x in pool if hscore(x) == 0]
-    pick = rng.sample(pos, min(args.n // 2, len(pos))) + rng.sample(neg, min(args.n - args.n // 2, len(neg)))
+    ps, ns = rng.sample(pos, min(args.n // 2, len(pos))), rng.sample(neg, min(args.n - args.n // 2, len(neg)))
+    pick = [x for pair in zip(ps, ns) for x in pair] + ps[len(ns):] + ns[len(ps):]   # alternate, so an early stop stays balanced
 
     if args.judge.startswith("or:"):
         if args.or_budget <= 0:
@@ -86,8 +87,8 @@ def main() -> None:
             else:
                 old = u["arms"][arm]
                 new = rows._judge_b(judge, sc, old["answer"])
-        except BudgetExceeded as e:   # keep what was judged; a stop must not discard paid calls
-            stopped = str(e)
+        except (BudgetExceeded, RuntimeError) as e:   # keep what was judged; a stop must not discard paid calls
+            stopped = str(e)[:300]
             break
         out_rows.append({"uid": u["uid"], "arm": arm, "i": i, "haiku": old["score"], "check": new["score"],
                          "haiku_why": old.get("why"), "check_why": new.get("why")})
@@ -107,6 +108,8 @@ def main() -> None:
                "ledger": ledger.summary()["total"]}
     Path(args.out).write_text(json.dumps({"summary": summary, "rows": out_rows}, indent=1))
     print(json.dumps(summary))
+    if stopped:
+        raise SystemExit(f"INCOMPLETE: judged {len(out_rows)} of {len(pick)} before: {stopped}")
 
 
 if __name__ == "__main__":

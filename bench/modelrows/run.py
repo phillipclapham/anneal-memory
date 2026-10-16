@@ -272,7 +272,8 @@ def main() -> None:
         r.add_argument("--est-unit-usd", type=float, required=True, help="projected $ per unit; the run is refused if units x this passes --budget")
         r.add_argument("--variants", default="light,heavy")
         r.add_argument("--seed", type=int, default=0)
-        r.add_argument("--reader", default="haiku", help=readers)
+        r.add_argument("--reader", default="haiku", help=readers,
+                       **({} if name.startswith("reread") else {"choices": ("haiku", "sonnet")}))
         r.add_argument("--or-budget", type=float, default=0.0, help="OpenRouter budget, USD (an or: reader needs it)")
         r.add_argument("--from-run")
     rp = sub.add_parser("report")

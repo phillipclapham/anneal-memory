@@ -27,7 +27,7 @@ _INFLIGHT = threading.BoundedSemaphore(max(1, int(os.environ.get("OR_MAX_INFLIGH
 
 
 class _Transient(Exception):
-    """A 200 response that carries no usable completion; retried like a 5xx."""
+    """A 200 response that reports an error and carries no completion; retried like a 5xx."""
 
 
 class ORLedger(Ledger):
@@ -81,11 +81,17 @@ class Client:
             try:
                 with _INFLIGHT, urllib.request.urlopen(req, timeout=300) as resp:
                     data = json.loads(resp.read())
+                # a response is billed whether or not it is usable: record it before judging it
+                self.ledger.add(role, self.model, data.get("usage") or {})
                 choice = (data.get("choices") or [{}])[0]
-                if "error" in data and not data.get("choices"):
-                    raise _Transient(f"in-body error: {str(data['error'])[:200]}")
-                if choice.get("finish_reason") == "error" or not (choice.get("message") or {}).get("content"):
-                    raise _Transient(f"empty or errored completion (finish_reason {choice.get('finish_reason')!r})")
+                err = data.get("error")
+                if err and not data.get("choices"):
+                    code = err.get("code") if isinstance(err, dict) else None
+                    if code in (401, 402, 403):
+                        raise BudgetExceeded(f"OpenRouter refused (in-body {code}): {str(err)[:200]}")
+                    raise _Transient(f"in-body error: {str(err)[:200]}")
+                if choice.get("finish_reason") == "error":
+                    raise _Transient("errored completion")
                 break
             except _Transient as e:
                 if attempt < retries - 1:
@@ -114,7 +120,6 @@ class Client:
                     delay = min(delay * 2, 30)
                     continue
                 raise RuntimeError(f"OpenRouter network error: {e}") from None
-        self.ledger.add(role, self.model, data.get("usage") or {})
-        text = choice["message"]["content"]
+        text = (choice.get("message") or {}).get("content") or ""
         fr = choice.get("finish_reason") or ""
         return text, ("stop" if fr in ("stop", "end_turn") else fr)

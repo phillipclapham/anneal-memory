@@ -20,6 +20,8 @@ Construction notes: a fresh pattern is refused at 2x, so rows climb with a 1x wr
 
 ## Result on the 1.0.0rc1 candidate
 
+Captured before the `paired_gain` row was added to the runner; a run with no key now also prints `SKIP | paired_gain`.
+
 ```
 PASS      | rotated_pairs
     counts   : {'absurd_graduated': 5, 'demoted': 0, 'on_worklist': 5, 'gaming_suspects': 0, 'citation_reuse_max': 1}
@@ -47,10 +49,10 @@ NOT BUILT | sycophancy_drift
 
 `paired_gain` is the only row that calls a model. It replays a synthetic 80-session history (scenarios and filler ship in `bench/modelrows/data`; no outside dataset) into scratch stores, composes anneal's state with the real wrap loop, and asks a reader a question that depends on a fact stated once, early. Composer, reader and judge are `claude-haiku-5-5`.
 
-Run it: `ANTHROPIC_API_KEY=... ANNEAL_BENCH_PAID=1 PYTHONPATH=. python -W ignore -m bench.gauntlet.run`. It runs 4 scenarios by default and refuses to start if the projected cost passes `ANNEAL_BENCH_BUDGET_USD` (default $2). `ANNEAL_BENCH_UNITS` sizes the slice. Its expectation is unset on purpose: the output is model behaviour, and a slice this small supports neither pass nor fail. The full run behind the figures below is `python -m bench.modelrows.run row-b`.
+Run it: `ANTHROPIC_API_KEY=... ANNEAL_BENCH_PAID=1 PYTHONPATH=. python -W ignore -m bench.gauntlet.run`. It runs 4 scenarios by default and refuses to start if the projected cost passes `ANNEAL_BENCH_BUDGET_USD` (default $2). `ANNEAL_BENCH_UNITS` sizes the slice. Its expectation is unset on purpose: the output is model behaviour, and a slice this small supports neither pass nor fail. The figures below come from the full run: 136 scenarios in two chunks (`python -m bench.modelrows.run row-b --data bench/modelrows/data --out RUN --offset 6 --limit 68 --budget 7 --est-unit-usd 0.08`, then the same with `--offset 74`), about $8.90 of API credit on 2026-10-15. `python -m bench.modelrows.run report --kind b RUN1 RUN2` prints the arms and the paired intervals.
 
-**What it shows.** On 136 synthetic scenarios (95% intervals are cluster bootstraps by scenario), a reader with no memory applies the planted fact 15% of the time [10%, 21%]. With anneal's composed state it applies it 82% of the time [76%, 88%], at about 3,100 characters of context. With the full transcript of all 80 sessions it applies it 81% [74%, 87%], at about 34,000 characters. With the fact exchange alone (the ceiling) it applies it 84%. The paper's rolling memory scores 78% at about 600 characters. So the composed state reaches roughly the full dump's accuracy at about one eleventh of its context.
+**What it shows.** On 136 synthetic scenarios (95% intervals are cluster bootstraps by scenario), a reader with no memory applies the planted fact 15% of the time [10%, 21%]. With anneal's composed state it applies it 82% of the time [76%, 88%], at about 3,100 characters of context. With the full transcript of all 80 sessions it applies it 81% [74%, 87%], at about 34,000 characters. With the fact exchange alone (the ceiling) it applies it 84%. A rolling memory (a model rewrites one memory file, capped at 200 lines, after every session) scores 78% at about 600 characters. So the composed state reaches roughly the full dump's accuracy at about one eleventh of its context.
 
-**What it does not show.** It does not show anneal beating the full dump or the rolling memory: the paired differences (+1.5 points against the full dump, +4.4 against the rolling memory) have intervals that include zero. Reader and judge are one model family on synthetic data written by one model, with the fact at one position (session 16) and one horizon (80 sessions).
+**What it does not show.** It does not show anneal beating the full dump or the rolling memory: the paired differences (+1.5 points against the full dump, +4.4 against the rolling memory) have intervals that include zero. Reader and judge are one model family on synthetic data written by one model, with the fact at one position (the 17th of 80 sessions) and one horizon (80 sessions).
 
 **A named limitation.** anneal's retrieval path (`retrieve_relevant`, lexical) sits at the no-memory level on these queries (21% against 15%, difference +5 points, interval [-1, +12]) because each query is written to share no vocabulary with the fact. It found the planted fact in 9% of scenarios. Requests that name their subject are the other regime, and were not run.

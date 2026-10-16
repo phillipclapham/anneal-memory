@@ -17,7 +17,7 @@ import sys
 from pathlib import Path
 
 from . import orouter, rows
-from .common import SONNET, Client, Ledger, cluster_bootstrap  # noqa: F401
+from .common import SONNET, BudgetExceeded, Client, Ledger, cluster_bootstrap  # noqa: F401
 
 
 def kappa(pairs: list[tuple[int, int]]) -> float | None:
@@ -66,22 +66,29 @@ def main() -> None:
     pick = rng.sample(pos, min(args.n // 2, len(pos))) + rng.sample(neg, min(args.n - args.n // 2, len(neg)))
 
     if args.judge.startswith("or:"):
+        if args.or_budget <= 0:
+            raise SystemExit("an or: judge needs --or-budget > 0")
         ledger = orouter.ORLedger()
         judge = orouter.Client(args.judge[3:], ledger, args.or_budget)
     else:
         ledger = Ledger()
         judge = Client(SONNET, ledger, args.budget)
     out_rows = []
+    stopped = None
     for u, arm, i in pick:
         sc = scs[u["scenario"]]
-        if args.kind == "a":
-            p = u["arms"][arm]["probes"][i]
-            _, ev = rows.sessions_a(sc, u["variant"])
-            new = rows._judge_a(judge, sc, ev, p["answer"])
-            old = p
-        else:
-            old = u["arms"][arm]
-            new = rows._judge_b(judge, sc, old["answer"])
+        try:
+            if args.kind == "a":
+                p = u["arms"][arm]["probes"][i]
+                _, ev = rows.sessions_a(sc, u["variant"])
+                new = rows._judge_a(judge, sc, ev, p["answer"])
+                old = p
+            else:
+                old = u["arms"][arm]
+                new = rows._judge_b(judge, sc, old["answer"])
+        except BudgetExceeded as e:   # keep what was judged; a stop must not discard paid calls
+            stopped = str(e)
+            break
         out_rows.append({"uid": u["uid"], "arm": arm, "i": i, "haiku": old["score"], "check": new["score"],
                          "haiku_why": old.get("why"), "check_why": new.get("why")})
     ok = [r for r in out_rows if r["haiku"] in (0, 1) and r["check"] in (0, 1)]
@@ -95,7 +102,7 @@ def main() -> None:
                    [r for r in ok if r["haiku"] == 1]),
                "agree_when_haiku_0": (lambda x: sum(1 for r in x if r["check"] == 0) / len(x) if x else None)(
                    [r for r in ok if r["haiku"] == 0]),
-               "judge": args.judge,
+               "judge": args.judge, "stopped": stopped,
                "note": "sample balanced on the Haiku call, so kappa is for a 50/50 mix, not for the run's prevalence",
                "ledger": ledger.summary()["total"]}
     Path(args.out).write_text(json.dumps({"summary": summary, "rows": out_rows}, indent=1))

@@ -7,6 +7,7 @@ line, never in a shell profile, settings file or .env). It is never printed or w
 
 from __future__ import annotations
 
+import http.client
 import json
 import os
 import random
@@ -147,7 +148,8 @@ class Client:
                     delay = min(delay * 2, 60)
                     continue
                 raise RuntimeError(f"Anthropic HTTP {e.code}: {detail}") from None
-            except (urllib.error.URLError, TimeoutError) as e:
+            except (OSError, http.client.HTTPException, json.JSONDecodeError) as e:
+                # a reset or truncated body mid-read is not a URLError, and a lost 80-session unit is ~40 paid calls
                 if attempt < retries - 1:
                     time.sleep(delay)
                     delay = min(delay * 2, 60)

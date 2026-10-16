@@ -164,9 +164,10 @@ def summarize_a(units: list[dict]) -> dict:
             arm: cluster_bootstrap(us, lambda u: _um(u, arm), lambda u: u["scenario"]) for arm in A_ARMS}
     for arm in ("paper-probe", "anneal-continuity"):
         sj = [u["arms"][arm]["state_judge"] for u in units]
-        n = len(sj)
-        out.setdefault("state", {})[arm] = {
-            k: (sum(1 for x in sj if x.get(k) == 1) / n if n else None) for k in STATE_KEYS}
+        out.setdefault("state", {})[arm] = {}
+        for k in STATE_KEYS:
+            scored = [x[k] for x in sj if x.get(k) in (0, 1)]   # an unscored judgement is not a zero
+            out["state"][arm][k] = sum(scored) / len(scored) if scored else None
     out["unscored_answers"] = sum(1 for u in units for a in A_ARMS for p in u["arms"][a]["probes"] if p["score"] is None)
     out["wrap"] = {
         "anneal_saved": sum(u["wrap"]["anneal"]["saved"] for u in units),
@@ -196,6 +197,8 @@ JUDGE_B_SYS = (
 
 def sessions_b(sc: dict, filler: list[dict], seed: int) -> tuple[list[dict], int]:
     rng = random.Random(f"{seed}:{sc['id']}")
+    if not filler:
+        raise ValueError("the filler pool is empty")
     pool = filler[:]
     rng.shuffle(pool)
     need = N_SESSIONS_B * 2
@@ -278,7 +281,8 @@ def run_unit_b(sc: dict, filler: list[dict], seed: int, work: Path, client: Clie
 def summarize_b(units: list[dict]) -> dict:
     out: dict = {"units": len(units), "arms": {}, "diffs": {}}
     for arm in B_ARMS:
-        out["arms"][arm] = cluster_bootstrap(units, lambda u: u["arms"][arm]["score"], lambda u: u["scenario"])
+        out["arms"][arm] = (cluster_bootstrap(units, lambda u: u["arms"][arm]["score"], lambda u: u["scenario"])
+                            or {"mean": None, "lo": None, "hi": None, "n": 0, "clusters": 0})
         out["arms"][arm]["mean_context_chars"] = mean([u["arms"][arm]["context_chars"] for u in units])
     for a, b in (("anneal-continuity", "none"), ("anneal-recall", "none"), ("paper-probe", "none"),
                  ("full-dump", "none"), ("anneal-continuity", "full-dump"), ("anneal-recall", "full-dump"),

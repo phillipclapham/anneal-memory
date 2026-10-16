@@ -8,8 +8,11 @@ only (the launcher script sets it on the exec line); never printed, never writte
   python -m bench.modelrows.run reread-a --data DATA --from-run RUN --out RUN2 --budget 8 --reader sonnet
   python -m bench.modelrows.run report --kind a RUN [RUN ...]
 
-A run is refused up front when its projected cost would pass --budget; the ledger stops it if the
-projection was wrong. Each finished unit is one file under RUN/units, so a rerun skips what is done.
+A run is refused up front when its projected cost for the units still to do would pass --budget; the
+ledger stops it if the projection was wrong. The budget is checked before each call, so a stop can
+overshoot by the calls already in flight. Each finished unit is one file under RUN/units, so a rerun
+skips what is done: use ONE --out directory per configuration (reader, seed, variants), because a unit
+is skipped by its name alone. The command exits 1 when a unit failed or a unit is still missing.
 """
 
 from __future__ import annotations
@@ -17,6 +20,7 @@ from __future__ import annotations
 import argparse
 import concurrent.futures as cf
 import json
+import os
 import sys
 import threading
 import time
@@ -50,6 +54,18 @@ def write_ledger(out: Path, ledger: Ledger, extra: dict | None = None, or_ledger
     (out / "ledger.json").write_text(json.dumps(body, indent=1))
 
 
+def write_atomic(path: Path, text: str) -> None:
+    """A unit file either exists whole or not at all: a killed run must not leave a truncated file
+    that every later run skips."""
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(text)
+    os.replace(tmp, path)
+
+
+def unit_id(sc: dict, variant: str | None) -> str:
+    return f"{sc['id']}_{variant}" if variant else sc["id"]
+
+
 def run_units(args, kind: str) -> None:
     out = Path(args.out)
     (out / "units").mkdir(parents=True, exist_ok=True)
@@ -61,14 +77,15 @@ def run_units(args, kind: str) -> None:
     ledger = Ledger()
     main, judge, reader = clients(args, ledger)
     per_unit = args.est_unit_usd
-    if per_unit * len(jobs) > args.budget:
-        sys.exit(f"projected ${per_unit * len(jobs):.2f} for {len(jobs)} units passes budget ${args.budget:.2f}; not started")
+    pending = [j for j in jobs if not (out / "units" / f"{unit_id(*j)}.json").exists()]
+    if per_unit * len(pending) > args.budget:
+        sys.exit(f"projected ${per_unit * len(pending):.2f} for {len(pending)} pending units passes budget ${args.budget:.2f}; not started")
     errors, lock = [], threading.Lock()
     t0 = time.time()
 
     def one(job):
         sc, v = job
-        uid = f"{sc['id']}_{v}" if v else sc["id"]
+        uid = unit_id(sc, v)
         f = out / "units" / f"{uid}.json"
         if f.exists():
             return
@@ -77,7 +94,7 @@ def run_units(args, kind: str) -> None:
                 res = rows.run_unit_a(sc, v, out, main, judge, reader)
             else:
                 res = rows.run_unit_b(sc, filler, args.seed, out, main, judge, reader)
-            f.write_text(json.dumps(res))
+            write_atomic(f, json.dumps(res))
         except BudgetExceeded:
             raise
         except Exception:
@@ -94,6 +111,8 @@ def run_units(args, kind: str) -> None:
                                "seconds": round(time.time() - t0), "args": vars(args)})
     tot = ledger.summary()["total"]
     print(f"units on disk {done}/{len(jobs)} · errors {len(errors)} · calls {tot['calls']} · ${tot['usd']:.4f}")
+    if errors or done < len(jobs):
+        sys.exit(1)
 
 
 def cmd_gen(args) -> None:
@@ -116,8 +135,9 @@ def cmd_reread(args, kind: str) -> None:
     ledger, or_ledger = Ledger(), orouter.ORLedger()
     main, judge, reader = clients(args, ledger, or_ledger)
     assert reader is not None, "--reader sonnet or --reader or:<model> required"
-    if args.est_unit_usd * len(src) > args.budget:
-        sys.exit(f"projected ${args.est_unit_usd * len(src):.2f} passes budget ${args.budget:.2f}; not started")
+    pending = [p for p in src if not (out / "units" / p.name).exists()]
+    if args.est_unit_usd * len(pending) > args.budget:
+        sys.exit(f"projected ${args.est_unit_usd * len(pending):.2f} for {len(pending)} pending units passes budget ${args.budget:.2f}; not started")
     errors = []
 
     def one(path):
@@ -127,7 +147,7 @@ def cmd_reread(args, kind: str) -> None:
         u = json.loads(path.read_text())
         try:
             r = (rows.reread_a if kind == "a" else rows.reread_b)(u, scs[u["scenario"]], reader, judge)
-            f.write_text(json.dumps(r))
+            write_atomic(f, json.dumps(r))
         except BudgetExceeded:
             raise
         except Exception:
@@ -140,6 +160,8 @@ def cmd_reread(args, kind: str) -> None:
     write_ledger(out, ledger, {"errors": errors, "args": vars(args)}, or_ledger)
     print(f"reread {len(list((out / 'units').glob('*.json')))}/{len(src)} · errors {len(errors)} · "
           f"anthropic ${ledger.summary()['total']['usd']:.4f} · openrouter ${or_ledger.summary()['total']['usd']:.4f}")
+    if errors or len(list((out / "units").glob("*.json"))) < len(src):
+        sys.exit(1)
 
 
 def cmd_pilot_a(args) -> None:
@@ -240,6 +262,7 @@ def main() -> None:
     pa.add_argument("--or-budget", type=float, required=True, help="OpenRouter budget per model, USD")
     for name in ("row-a", "row-b", "reread-a", "reread-b"):
         r = sub.add_parser(name)
+        readers = "haiku | sonnet | or:<OpenRouter model id>" if name.startswith("reread") else "haiku | sonnet"
         r.add_argument("--data", required=True)
         r.add_argument("--out", required=True)
         r.add_argument("--budget", type=float, required=True)
@@ -249,7 +272,7 @@ def main() -> None:
         r.add_argument("--est-unit-usd", type=float, required=True, help="projected $ per unit; the run is refused if units x this passes --budget")
         r.add_argument("--variants", default="light,heavy")
         r.add_argument("--seed", type=int, default=0)
-        r.add_argument("--reader", default="haiku", help="haiku | sonnet | or:<OpenRouter model id>")
+        r.add_argument("--reader", default="haiku", help=readers)
         r.add_argument("--or-budget", type=float, default=0.0, help="OpenRouter budget, USD (an or: reader needs it)")
         r.add_argument("--from-run")
     rp = sub.add_parser("report")

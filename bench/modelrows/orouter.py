@@ -9,6 +9,7 @@ response reports its own cost, which the ledger records.
 
 from __future__ import annotations
 
+import http.client
 import json
 import os
 import random
@@ -23,6 +24,10 @@ API_URL = "https://openrouter.ai/api/v1/chat/completions"
 MODELS_URL = "https://openrouter.ai/api/v1/models"
 RATE_LIMIT_PATIENCE_S = 600.0
 _INFLIGHT = threading.BoundedSemaphore(max(1, int(os.environ.get("OR_MAX_INFLIGHT", "12"))))
+
+
+class _Transient(Exception):
+    """A 200 response that carries no usable completion; retried like a 5xx."""
 
 
 class ORLedger(Ledger):
@@ -76,12 +81,20 @@ class Client:
             try:
                 with _INFLIGHT, urllib.request.urlopen(req, timeout=300) as resp:
                     data = json.loads(resp.read())
+                choice = (data.get("choices") or [{}])[0]
                 if "error" in data and not data.get("choices"):
-                    raise urllib.error.HTTPError(API_URL, int(data["error"].get("code") or 502), "",
-                                                 None, None)  # type: ignore[arg-type]
+                    raise _Transient(f"in-body error: {str(data['error'])[:200]}")
+                if choice.get("finish_reason") == "error" or not (choice.get("message") or {}).get("content"):
+                    raise _Transient(f"empty or errored completion (finish_reason {choice.get('finish_reason')!r})")
                 break
+            except _Transient as e:
+                if attempt < retries - 1:
+                    time.sleep(delay)
+                    delay = min(delay * 2, 30)
+                    continue
+                raise RuntimeError(f"OpenRouter returned no usable completion: {e}") from None
             except urllib.error.HTTPError as e:
-                detail = (e.read().decode(errors="replace")[:300] if e.fp else "")
+                detail = e.read().decode(errors="replace")[:300]
                 if e.code in (401, 402, 403):
                     raise BudgetExceeded(f"OpenRouter refused (HTTP {e.code}): {detail}") from None
                 if e.code == 429 and waited < RATE_LIMIT_PATIENCE_S:
@@ -95,14 +108,13 @@ class Client:
                     delay = min(delay * 2, 30)
                     continue
                 raise RuntimeError(f"OpenRouter HTTP {e.code}: {detail}") from None
-            except (urllib.error.URLError, TimeoutError) as e:
+            except (OSError, http.client.HTTPException, json.JSONDecodeError) as e:
                 if attempt < retries - 1:
                     time.sleep(delay)
                     delay = min(delay * 2, 30)
                     continue
                 raise RuntimeError(f"OpenRouter network error: {e}") from None
         self.ledger.add(role, self.model, data.get("usage") or {})
-        choice = (data.get("choices") or [{}])[0]
-        text = (choice.get("message") or {}).get("content") or ""
+        text = choice["message"]["content"]
         fr = choice.get("finish_reason") or ""
         return text, ("stop" if fr in ("stop", "end_turn") else fr)

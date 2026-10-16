@@ -131,7 +131,9 @@ def probe_update(memory: str, session: dict, client: Client, stats: dict) -> str
         role="probe-update", max_completion_tokens=PROBE_UPDATE_MAX)
     stats["compose_calls"] += 1
     if finish != "stop":
+        # a cut-off or refused update must not replace the accumulated memory
         stats["finish_not_stop"].append(finish)
+        return memory
     lines = text.strip("\n").split("\n")[:200]
     out = "\n".join(lines)
     raw = out.encode()

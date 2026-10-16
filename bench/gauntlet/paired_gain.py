@@ -70,6 +70,8 @@ def run(tmpdir: str) -> dict:
         raise RuntimeError(f"{n} units project to ${n * EST_UNIT_USD:.2f}, over the ${budget:.2f} cap; "
                            "raise ANNEAL_BENCH_BUDGET_USD or lower ANNEAL_BENCH_UNITS")
     scenarios = json.loads((DATA / "scenarios_b.json").read_text())[FIRST_SCENARIO:FIRST_SCENARIO + n]
+    if n < 1 or not scenarios:
+        raise RuntimeError(f"ANNEAL_BENCH_UNITS={n} selects no scenarios")
     filler = json.loads((DATA / "filler.json").read_text())
     ledger = Ledger()
     client, judge = Client(HAIKU, ledger, budget), Client(HAIKU, ledger, budget)

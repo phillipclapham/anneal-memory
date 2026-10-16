@@ -163,18 +163,21 @@ def summarize_a(units: list[dict]) -> dict:
         out.setdefault("by_variant", {})[variant] = {
             arm: cluster_bootstrap(us, lambda u: _um(u, arm), lambda u: u["scenario"]) for arm in A_ARMS}
     for arm in ("paper-probe", "anneal-continuity"):
+        if not all("state_judge" in u["arms"][arm] for u in units):
+            break    # a reread of saved states carries no state judgement
         sj = [u["arms"][arm]["state_judge"] for u in units]
         out.setdefault("state", {})[arm] = {}
         for k in STATE_KEYS:
             scored = [x[k] for x in sj if x.get(k) in (0, 1)]   # an unscored judgement is not a zero
             out["state"][arm][k] = sum(scored) / len(scored) if scored else None
     out["unscored_answers"] = sum(1 for u in units for a in A_ARMS for p in u["arms"][a]["probes"] if p["score"] is None)
-    out["wrap"] = {
-        "anneal_saved": sum(u["wrap"]["anneal"]["saved"] for u in units),
-        "anneal_cancelled": sum(u["wrap"]["anneal"]["cancelled"] for u in units),
-        "anneal_refusals": sum(len(u["wrap"]["anneal"]["refusals"]) for u in units),
-        "anneal_finish_not_stop": sum(len(u["wrap"]["anneal"]["finish_not_stop"]) for u in units),
-    }
+    if all("wrap" in u for u in units):
+        out["wrap"] = {
+            "anneal_saved": sum(u["wrap"]["anneal"]["saved"] for u in units),
+            "anneal_cancelled": sum(u["wrap"]["anneal"]["cancelled"] for u in units),
+            "anneal_refusals": sum(len(u["wrap"]["anneal"]["refusals"]) for u in units),
+            "anneal_finish_not_stop": sum(len(u["wrap"]["anneal"]["finish_not_stop"]) for u in units),
+        }
     return out
 
 

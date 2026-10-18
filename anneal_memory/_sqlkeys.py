@@ -29,7 +29,11 @@ def json_each_available(conn: sqlite3.Connection) -> bool:
         try:
             conn.execute("SELECT value FROM json_each('[]')").fetchall()
             _json_each = True
-        except sqlite3.OperationalError:
+        except sqlite3.OperationalError as e:
+            # Only a missing json_each is an answer; a lock or I/O error is
+            # not, and caching it would hold for the life of the process.
+            if "no such" not in str(e):
+                raise
             _json_each = False
     return _json_each
 

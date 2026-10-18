@@ -8166,16 +8166,17 @@ class Store:
                         (last_wrap["id"],),
                     ).fetchone()
                     prev_id = prev_row["id"] if prev_row["id"] is not None else 0
-                    placeholders = ",".join("?" for _ in episode_ids)
-                    not_in_snapshot = (
-                        f"AND id NOT IN ({placeholders})" if episode_ids else ""
-                    )
+                    # The snapshot binds as one JSON-array parameter, not one
+                    # per id: a first wrap over an imported store can carry
+                    # more ids than SQLite's bound-variable limit.
                     self._conn.execute(
-                        f"UPDATE episodes SET session_id = ? "
-                        f"WHERE session_id IS NOT NULL "
-                        f"AND CAST(session_id AS INTEGER) > ? "
-                        f"AND CAST(session_id AS INTEGER) <= ? {not_in_snapshot}",
-                        (str(last_wrap["id"] + 1), prev_id, last_wrap["id"], *episode_ids),
+                        "UPDATE episodes SET session_id = ? "
+                        "WHERE session_id IS NOT NULL "
+                        "AND CAST(session_id AS INTEGER) > ? "
+                        "AND CAST(session_id AS INTEGER) <= ? "
+                        "AND id NOT IN (SELECT value FROM json_each(?))",
+                        (str(last_wrap["id"] + 1), prev_id, last_wrap["id"],
+                         json.dumps(list(episode_ids))),
                     )
                 if episode_ids is None:
                     # Direct wrap_completed call (episode_ids=None).
@@ -8184,19 +8185,13 @@ class Store:
                         (session_id,),
                     )
                 elif episode_ids:
-                    # Frozen snapshot path. Build a dynamic IN clause —
-                    # SQLite supports up to 999 parameters by default, which
-                    # covers the realistic per-session episode count by a
-                    # comfortable margin. If a wrap ever exceeds that, the
-                    # caller should chunk the ID list and call us per chunk
-                    # (we don't do it here because the batching concerns
-                    # belong upstream where chunking the compression is also
-                    # a relevant choice).
-                    placeholders = ",".join("?" for _ in episode_ids)
+                    # Frozen snapshot path, bound as one JSON-array parameter
+                    # (see the carry-over UPDATE above).
                     self._conn.execute(
-                        f"UPDATE episodes SET session_id = ? "
-                        f"WHERE session_id IS NULL AND id IN ({placeholders})",
-                        (session_id, *episode_ids),
+                        "UPDATE episodes SET session_id = ? "
+                        "WHERE session_id IS NULL "
+                        "AND id IN (SELECT value FROM json_each(?))",
+                        (session_id, json.dumps(list(episode_ids))),
                     )
                 # If episode_ids is an empty list, skip the NULL stamp (the
                 # carry-over above has already moved the closing session's

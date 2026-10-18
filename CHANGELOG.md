@@ -4,6 +4,19 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
 
 ## [Unreleased]
 
+## [1.0.1] — 2026-10-18
+
+### Fixed
+- **A big consolidation no longer fails at save.** `decay_associations` excluded the pairs a wrap had just
+  strengthened with one SQL clause per pair; past about 1,000 pairs SQLite refused the statement ("Expression tree
+  is too large (maximum depth 1000)") and `validated_save_continuity` failed, leaving the wrap open. The pairs now
+  go into a per-connection TEMP table and are excluded with an anti-join, so the statement no longer grows with
+  the wrap.
+- **Lists of ids no longer bind one SQL variable per id.** `get_associations`, the frozen-snapshot updates in
+  `Store.wrap_completed`, and the pattern-association drain and reads pass their id or name list as one JSON
+  parameter (`json_each`) when SQLite has JSON1; a build without JSON1 keeps the 1.0.0 statements. With JSON1,
+  `wrap_completed` accepts a snapshot of more than 996 episodes, which it used to refuse.
+
 ## [1.0.0] — 2026-10-15
 
 The 1.0 release: the API freeze, schema generation 2, the erasure fix and the dreaming primitives of [1.0.0rc1](#100rc1--2026-10-14), the three review fixes of [1.0.0rc2](#100rc2--2026-10-14), and the changes below. Final releases are installed by default (`pip install anneal-memory`).

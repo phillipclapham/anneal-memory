@@ -285,6 +285,72 @@ class TestDecayAssociations:
         row = conn.execute("SELECT episode_a FROM associations").fetchone()
         assert row[0] == "aaa"  # The strong link survived
 
+    def test_big_wrap_binds_a_bounded_statement(self, tmp_path):
+        """A wrap that strengthens more pairs than SQLite's expression-depth
+        limit, or reads more ids than its bound-variable limit, still runs.
+        Reproduced 2026-10-17: two dream saves died in decay_associations with
+        "Expression tree is too large (maximum depth 1000)"."""
+        if not hasattr(sqlite3.Connection, "setlimit"):
+            pytest.skip("Connection.setlimit needs Python 3.11+")
+        conn = _make_db(tmp_path)
+        ids = [f"e{i:03d}" for i in range(65)]
+        for eid in ids:
+            _insert_episode(conn, eid)
+        pairs = {canonical_pair(a, b) for i, a in enumerate(ids) for b in ids[i + 1:]}
+        assert len(pairs) > 2000
+        record_associations(conn, pairs, set(), "2026-10-17T12:00:00Z")
+
+        assert decay_associations(conn, strengthened_pairs=pairs) == 0
+        # The stock SQLite build's variable limit is 32766; a distro build is
+        # often far higher. Pin the lowest a supported build ships so the read
+        # below means the same thing everywhere.
+        conn.setlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER, 999)
+        assert decay_associations(conn, strengthened_pairs=pairs) == 0
+        many_ids = ids + [f"x{i:04d}" for i in range(1000)]
+        assert len(get_associations(conn, many_ids, limit=100000)) == len(pairs)
+
+    def test_decay_excludes_exactly_the_strengthened_pairs(self, tmp_path):
+        """Strengthened pairs keep their strength; every other link decays by
+        exactly the factor or, below the threshold, is deleted; the return value
+        counts both."""
+        conn = _make_db(tmp_path)
+        for eid in ["aaa", "bbb", "ccc", "ddd", "eee"]:
+            _insert_episode(conn, eid)
+        record_associations(
+            conn, {("aaa", "bbb"), ("bbb", "ccc"), ("aaa", "ddd")},
+            {("ddd", "eee")}, "2026-10-17T12:00:00Z",
+        )
+        conn.execute(
+            "UPDATE associations SET strength = 0.105 "
+            "WHERE episode_a = 'ddd' AND episode_b = 'eee'"
+        )
+        conn.commit()
+
+        decayed = decay_associations(
+            conn,
+            # (ccc, eee) has no link: an excluded pair with no row changes nothing.
+            strengthened_pairs={("aaa", "bbb"), ("ccc", "eee")},
+        )
+
+        rows = dict(
+            ((a, b), s) for a, b, s in
+            conn.execute("SELECT episode_a, episode_b, strength FROM associations")
+        )
+        assert decayed == 3
+        assert rows == {
+            ("aaa", "bbb"): DIRECT_CO_CITATION_STRENGTH,
+            ("bbb", "ccc"): pytest.approx(DIRECT_CO_CITATION_STRENGTH * DEFAULT_DECAY_FACTOR),
+            ("aaa", "ddd"): pytest.approx(DIRECT_CO_CITATION_STRENGTH * DEFAULT_DECAY_FACTOR),
+        }
+        # A caller that rolls back keeps one scratch table, not one per attempt.
+        decay_associations(conn, {("aaa", "bbb")}, commit=False)
+        conn.rollback()
+        decay_associations(conn, {("aaa", "bbb")}, commit=False)
+        conn.rollback()
+        assert conn.execute(
+            "SELECT COUNT(*) FROM sqlite_temp_master WHERE type = 'table'"
+        ).fetchone()[0] <= 1
+
 
 class TestGetAssociations:
     """Association retrieval."""

@@ -21,6 +21,7 @@ from __future__ import annotations
 import sqlite3
 from typing import Any
 
+from ._sqlkeys import key_list
 from .types import AffectiveState, AssociationPair, AssociationStats
 
 # Import GraduationResult lazily to avoid circular imports
@@ -197,6 +198,9 @@ def record_associations(
     return formed, strengthened
 
 
+# Per-connection scratch table for decay_associations' exclusion set.
+_STRENGTHENED_TABLE = "temp.anneal_strengthened_pairs"
+
 def decay_associations(
     conn: sqlite3.Connection,
     strengthened_pairs: set[tuple[str, str]],
@@ -224,39 +228,48 @@ def decay_associations(
     """
     # Batch decay: update all unreinforced links in two SQL statements
     # instead of individual UPDATE/DELETE per row (N+1 → 2 queries).
-
-    # Build exclusion list for strengthened pairs
-    if strengthened_pairs:
-        # Filter out strengthened pairs from decay using NOT IN on the pair
-        exclude_clauses = " OR ".join(
-            "(episode_a = ? AND episode_b = ?)" for _ in strengthened_pairs
-        )
-        exclude_params: list[str] = []
-        for a, b in strengthened_pairs:
-            exclude_params.extend([a, b])
-        where_unreinforced = f"NOT ({exclude_clauses})"
-    else:
-        where_unreinforced = "1=1"
-        exclude_params = []
+    #
+    # The strengthened pairs go into a TEMP table and are excluded with an
+    # anti-join, never inlined: one inline clause per pair grows the
+    # expression tree past SQLite's depth limit on a big wrap (two dream saves
+    # failed that way on 2026-10-17), and two bound values per pair grow
+    # toward its variable limit. The table has one fixed name per connection
+    # and is emptied at entry and exit, so a caller's rollback can leave at
+    # most one (empty-or-stale) table behind, never one per attempt.
+    conn.execute(
+        f"CREATE TEMP TABLE IF NOT EXISTS {_STRENGTHENED_TABLE} "
+        "(episode_a, episode_b, PRIMARY KEY (episode_a, episode_b)) WITHOUT ROWID"
+    )
+    conn.execute(f"DELETE FROM {_STRENGTHENED_TABLE}")
+    conn.executemany(
+        f"INSERT OR IGNORE INTO {_STRENGTHENED_TABLE} VALUES (?, ?)",
+        strengthened_pairs,
+    )
+    where_unreinforced = (
+        f"NOT EXISTS (SELECT 1 FROM {_STRENGTHENED_TABLE} k WHERE "
+        "k.episode_a = associations.episode_a "
+        "AND k.episode_b = associations.episode_b)"
+    )
 
     # Count how many will be affected (for return value)
-    count_row = conn.execute(
-        f"SELECT COUNT(*) FROM associations WHERE {where_unreinforced}",
-        exclude_params,
-    ).fetchone()
-    decayed = count_row[0]
+    decayed = conn.execute(
+        f"SELECT COUNT(*) FROM associations WHERE {where_unreinforced}"
+    ).fetchone()[0]
 
     # Delete links that will fall below threshold after decay
     conn.execute(
-        f"DELETE FROM associations WHERE {where_unreinforced} AND strength * ? < ?",
-        [*exclude_params, decay_factor, cleanup_threshold],
+        f"DELETE FROM associations WHERE {where_unreinforced} "
+        "AND strength * ? < ?",
+        (decay_factor, cleanup_threshold),
     )
 
     # Decay remaining unreinforced links
     conn.execute(
-        f"UPDATE associations SET strength = strength * ? WHERE {where_unreinforced}",
-        [decay_factor, *exclude_params],
+        f"UPDATE associations SET strength = strength * ? "
+        f"WHERE {where_unreinforced}",
+        (decay_factor,),
     )
+    conn.execute(f"DELETE FROM {_STRENGTHENED_TABLE}")
 
     if commit:
         conn.commit()
@@ -286,17 +299,19 @@ def get_associations(
     if not episode_ids:
         return []
 
-    placeholders = ",".join("?" for _ in episode_ids)
+    # A caller may pass every episode in the store, more ids than SQLite
+    # binds per statement: the list goes through key_list.
+    ids_in, ids_params = key_list(conn, episode_ids)
     rows = conn.execute(
         f"""SELECT episode_a, episode_b, strength, co_citations,
                    first_linked, last_strengthened,
                    affective_tag, affective_intensity
             FROM associations
-            WHERE (episode_a IN ({placeholders}) OR episode_b IN ({placeholders}))
+            WHERE (episode_a IN {ids_in} OR episode_b IN {ids_in})
               AND strength >= ?
             ORDER BY strength DESC, episode_a ASC, episode_b ASC
             LIMIT ?""",
-        [*episode_ids, *episode_ids, min_strength, limit],
+        [*ids_params, *ids_params, min_strength, limit],
     ).fetchall()
 
     return [

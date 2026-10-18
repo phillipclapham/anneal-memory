@@ -17,33 +17,30 @@ from collections.abc import Iterable
 _json_each: bool | None = None
 
 
-def json_each_available() -> bool:
+def json_each_available(conn: sqlite3.Connection) -> bool:
     """Whether this process's SQLite library has ``json_each`` (JSON1).
 
-    Probed once: JSON1 is a property of the library, shared by every
+    Probed once, on the caller's connection with a read that opens no
+    transaction: JSON1 is a property of the library, shared by every
     connection in the process.
     """
     global _json_each
     if _json_each is None:
         try:
-            probe = sqlite3.connect(":memory:")
-            try:
-                probe.execute("SELECT value FROM json_each('[]')").fetchall()
-            finally:
-                probe.close()
+            conn.execute("SELECT value FROM json_each('[]')").fetchall()
             _json_each = True
-        except sqlite3.Error:
+        except sqlite3.OperationalError:
             _json_each = False
     return _json_each
 
 
-def key_list(keys: Iterable[str]) -> tuple[str, list[str]]:
+def key_list(conn: sqlite3.Connection, keys: Iterable[str]) -> tuple[str, list[str]]:
     """``(fragment, params)`` for ``<expr> IN <fragment>`` over ``keys``.
 
     Keys are bound as values, never formatted into the SQL. Use the
     fragment once per bound copy of ``params``.
     """
     keys = list(keys)
-    if json_each_available():
+    if json_each_available(conn):
         return "(SELECT value FROM json_each(?))", [json.dumps(keys)]
     return "(" + ",".join("?" * len(keys)) + ")", keys

@@ -116,9 +116,10 @@ def test_snapshot_at_the_variable_guard_fits_every_statement(tmp_path):
     from anneal_memory import _sqlkeys
 
     for json1, size in ((True, 2000), (False, Store._MAX_SQL_VARS_IN_CLAUSE)):
-        if json1 and not _sqlkeys.json_each_available():
-            continue
         store = Store(tmp_path / f"m{json1}.db", project_name="t")
+        if json1 and not _sqlkeys.json_each_available(store._conn):
+            store.close()
+            continue
         saved = _sqlkeys._json_each
         _sqlkeys._json_each = json1
         try:

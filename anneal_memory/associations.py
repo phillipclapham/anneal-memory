@@ -301,7 +301,7 @@ def get_associations(
 
     # A caller may pass every episode in the store, more ids than SQLite
     # binds per statement: the list goes through key_list.
-    ids_in, ids_params = key_list(episode_ids)
+    ids_in, ids_params = key_list(conn, episode_ids)
     rows = conn.execute(
         f"""SELECT episode_a, episode_b, strength, co_citations,
                    first_linked, last_strengthened,

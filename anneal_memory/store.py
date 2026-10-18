@@ -8020,7 +8020,7 @@ class Store:
         """
         if (
             episode_ids is not None
-            and not json_each_available()
+            and not json_each_available(self._conn)
             and len(episode_ids) > self._MAX_SQL_VARS_IN_CLAUSE
         ):
             raise StoreError(
@@ -8171,7 +8171,7 @@ class Store:
                     prev_id = prev_row["id"] if prev_row["id"] is not None else 0
                     # A big day's snapshot can carry more ids than SQLite
                     # binds per statement: the list goes through key_list.
-                    snap_in, snap_params = key_list(episode_ids)
+                    snap_in, snap_params = key_list(self._conn, episode_ids)
                     self._conn.execute(
                         f"UPDATE episodes SET session_id = ? "
                         f"WHERE session_id IS NOT NULL "
@@ -8188,7 +8188,7 @@ class Store:
                     )
                 elif episode_ids:
                     # Frozen snapshot path, bound through key_list too.
-                    snap_in, snap_params = key_list(episode_ids)
+                    snap_in, snap_params = key_list(self._conn, episode_ids)
                     self._conn.execute(
                         f"UPDATE episodes SET session_id = ? "
                         f"WHERE session_id IS NULL AND id IN {snap_in}",

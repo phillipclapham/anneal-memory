@@ -545,7 +545,7 @@ def drain_co_surface_events(
     # 1. Idempotency: which event_ids were already drained?
     already: set[str] = set()
     if seen_event_ids:
-        ids_in, ids_params = key_list(seen_event_ids)  # a drain's batch is caller-sized
+        ids_in, ids_params = key_list(conn, seen_event_ids)  # a drain's batch is caller-sized
         rows = conn.execute(
             f"SELECT event_id FROM processed_co_surface_events WHERE event_id IN {ids_in}",
             ids_params,
@@ -654,7 +654,7 @@ def _normalize_nodes(
     only edges that actually scale are written (decay stays lazy otherwise)."""
     if not nodes:
         return
-    nodes_in, nodes_params = key_list(nodes)
+    nodes_in, nodes_params = key_list(conn, nodes)
     rows = conn.execute(
         f"""SELECT name_a, name_b, strength, last_decay_at FROM pattern_associations
             WHERE name_a IN {nodes_in} OR name_b IN {nodes_in}""",
@@ -694,7 +694,7 @@ def _gc_touched(
     if not nodes:
         return 0
     gced = 0
-    nodes_in, nodes_params = key_list(nodes)
+    nodes_in, nodes_params = key_list(conn, nodes)
     rows = conn.execute(
         f"""SELECT name_a, name_b, strength, last_decay_at FROM pattern_associations
             WHERE name_a IN {nodes_in} OR name_b IN {nodes_in}""",
@@ -914,7 +914,7 @@ def get_pattern_associations(
     is telemetry only."""
     if not names:
         return []
-    names_in, names_params = key_list(names)
+    names_in, names_params = key_list(conn, names)
     rows = conn.execute(
         f"""SELECT name_a, name_b, strength, direction, first_linked_at,
                    last_strengthened_at, last_co_surfaced_at, last_decay_at,

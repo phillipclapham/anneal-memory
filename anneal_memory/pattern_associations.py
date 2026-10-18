@@ -47,12 +47,12 @@ Zero dependencies beyond Python stdlib.
 
 from __future__ import annotations
 
-import json
 import math
 import sqlite3
 from itertools import combinations
 from typing import Any
 
+from ._sqlkeys import key_list
 from .types import (
     PatternAssociationPair,
     PatternAssociationStats,
@@ -545,11 +545,10 @@ def drain_co_surface_events(
     # 1. Idempotency: which event_ids were already drained?
     already: set[str] = set()
     if seen_event_ids:
-        # One JSON-array parameter, not one per id: a drain's batch is caller-sized.
+        ids_in, ids_params = key_list(seen_event_ids)  # a drain's batch is caller-sized
         rows = conn.execute(
-            "SELECT event_id FROM processed_co_surface_events "
-            "WHERE event_id IN (SELECT value FROM json_each(?))",
-            (json.dumps(list(seen_event_ids)),),
+            f"SELECT event_id FROM processed_co_surface_events WHERE event_id IN {ids_in}",
+            ids_params,
         ).fetchall()
         already = {r[0] for r in rows}
 
@@ -655,12 +654,11 @@ def _normalize_nodes(
     only edges that actually scale are written (decay stays lazy otherwise)."""
     if not nodes:
         return
-    nodes_json = json.dumps(list(nodes))
+    nodes_in, nodes_params = key_list(nodes)
     rows = conn.execute(
-        """SELECT name_a, name_b, strength, last_decay_at FROM pattern_associations
-           WHERE name_a IN (SELECT value FROM json_each(?))
-              OR name_b IN (SELECT value FROM json_each(?))""",
-        (nodes_json, nodes_json),
+        f"""SELECT name_a, name_b, strength, last_decay_at FROM pattern_associations
+            WHERE name_a IN {nodes_in} OR name_b IN {nodes_in}""",
+        [*nodes_params, *nodes_params],
     ).fetchall()
     if not rows:
         return
@@ -696,12 +694,11 @@ def _gc_touched(
     if not nodes:
         return 0
     gced = 0
-    nodes_json = json.dumps(list(nodes))
+    nodes_in, nodes_params = key_list(nodes)
     rows = conn.execute(
-        """SELECT name_a, name_b, strength, last_decay_at FROM pattern_associations
-           WHERE name_a IN (SELECT value FROM json_each(?))
-              OR name_b IN (SELECT value FROM json_each(?))""",
-        (nodes_json, nodes_json),
+        f"""SELECT name_a, name_b, strength, last_decay_at FROM pattern_associations
+            WHERE name_a IN {nodes_in} OR name_b IN {nodes_in}""",
+        [*nodes_params, *nodes_params],
     ).fetchall()
     for name_a, name_b, strength, last_decay_at in rows:
         if effective_strength(strength, last_decay_at, today, decay_per_day) < GC_THRESHOLD:
@@ -917,15 +914,14 @@ def get_pattern_associations(
     is telemetry only."""
     if not names:
         return []
-    names_json = json.dumps(list(names))
+    names_in, names_params = key_list(names)
     rows = conn.execute(
-        """SELECT name_a, name_b, strength, direction, first_linked_at,
-                  last_strengthened_at, last_co_surfaced_at, last_decay_at,
-                  co_surface_count, co_surface_session_count, formation_source
-           FROM pattern_associations
-           WHERE name_a IN (SELECT value FROM json_each(?))
-              OR name_b IN (SELECT value FROM json_each(?))""",
-        (names_json, names_json),
+        f"""SELECT name_a, name_b, strength, direction, first_linked_at,
+                   last_strengthened_at, last_co_surfaced_at, last_decay_at,
+                   co_surface_count, co_surface_session_count, formation_source
+            FROM pattern_associations
+            WHERE name_a IN {names_in} OR name_b IN {names_in}""",
+        [*names_params, *names_params],
     ).fetchall()
     out = []
     for r in rows:

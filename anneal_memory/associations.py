@@ -18,10 +18,10 @@ Zero dependencies beyond Python stdlib.
 
 from __future__ import annotations
 
-import json
 import sqlite3
 from typing import Any
 
+from ._sqlkeys import key_list
 from .types import AffectiveState, AssociationPair, AssociationStats
 
 # Import GraduationResult lazily to avoid circular imports
@@ -299,20 +299,19 @@ def get_associations(
     if not episode_ids:
         return []
 
-    # One JSON-array parameter, not one per id: a caller may pass every
-    # episode in the store, which outgrows SQLite's bound-variable limit.
-    ids_json = json.dumps(list(episode_ids))
+    # A caller may pass every episode in the store, more ids than SQLite
+    # binds per statement: the list goes through key_list.
+    ids_in, ids_params = key_list(episode_ids)
     rows = conn.execute(
-        """SELECT episode_a, episode_b, strength, co_citations,
-                  first_linked, last_strengthened,
-                  affective_tag, affective_intensity
-           FROM associations
-           WHERE (episode_a IN (SELECT value FROM json_each(?))
-                  OR episode_b IN (SELECT value FROM json_each(?)))
-             AND strength >= ?
-           ORDER BY strength DESC, episode_a ASC, episode_b ASC
-           LIMIT ?""",
-        (ids_json, ids_json, min_strength, limit),
+        f"""SELECT episode_a, episode_b, strength, co_citations,
+                   first_linked, last_strengthened,
+                   affective_tag, affective_intensity
+            FROM associations
+            WHERE (episode_a IN {ids_in} OR episode_b IN {ids_in})
+              AND strength >= ?
+            ORDER BY strength DESC, episode_a ASC, episode_b ASC
+            LIMIT ?""",
+        [*ids_params, *ids_params, min_strength, limit],
     ).fetchall()
 
     return [

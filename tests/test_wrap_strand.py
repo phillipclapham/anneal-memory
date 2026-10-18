@@ -14,6 +14,7 @@ import threading
 import pytest
 
 from anneal_memory import Store
+from anneal_memory.store import StoreError
 from anneal_memory.continuity import prepare_wrap, validated_save_continuity
 
 TODAY = datetime.date.today().isoformat()
@@ -107,19 +108,35 @@ def test_record_cannot_stamp_a_session_a_concurrent_wrap_just_closed(tmp_path):
 def test_snapshot_at_the_variable_guard_fits_every_statement(tmp_path):
     """L1 (spore-1233 review), reproduced: the carry-over UPDATE binds three
     parameters beside the snapshot ids, so a snapshot the guard admitted could
-    still overflow SQLite's 999-variable build limit inside the transaction."""
+    still overflow SQLite's 999-variable build limit inside the transaction.
+    With JSON1 a snapshot past that limit completes (a big dream day, codex
+    L3 1018); without it the guard still holds at its boundary."""
     import sqlite3
 
-    store = Store(tmp_path / "m.db", project_name="t")
-    try:
-        store._conn.setlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER, 999)
-        for cycle in (1, 2):  # the second wrap has a previous wrap, so the carry-over runs
-            store.record(f"in-window {cycle}", "observation")
-            ids = [f"{i:08x}" for i in range(Store._MAX_SQL_VARS_IN_CLAUSE)]
-            store.wrap_completed(episodes_compressed=1, continuity_chars=10, episode_ids=ids)
-        assert store.status().total_wraps == 2
-    finally:
-        store.close()
+    from anneal_memory import _sqlkeys
+
+    for json1, size in ((True, 2000), (False, Store._MAX_SQL_VARS_IN_CLAUSE)):
+        if json1 and not _sqlkeys.json_each_available():
+            continue
+        store = Store(tmp_path / f"m{json1}.db", project_name="t")
+        saved = _sqlkeys._json_each
+        _sqlkeys._json_each = json1
+        try:
+            store._conn.setlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER, 999)
+            for cycle in (1, 2):  # the second wrap has a previous wrap, so the carry-over runs
+                store.record(f"in-window {cycle}", "observation")
+                ids = [f"{i:08x}" for i in range(size)]
+                store.wrap_completed(episodes_compressed=1, continuity_chars=10, episode_ids=ids)
+            assert store.status().total_wraps == 2
+            if not json1:
+                with pytest.raises(StoreError):
+                    store.wrap_completed(
+                        episodes_compressed=1, continuity_chars=10,
+                        episode_ids=ids + ["one-more"],
+                    )
+        finally:
+            _sqlkeys._json_each = saved
+            store.close()
 
 
 def test_a_wrap_completed_during_prepare_is_not_overwritten(tmp_path):

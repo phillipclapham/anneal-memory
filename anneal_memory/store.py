@@ -66,6 +66,7 @@ _LOCK_UNAVAILABLE_ERRNOS = frozenset(
 # import from here.
 _WRAP_TOKEN_RE = re.compile(r"^[0-9a-f]{32}$")
 
+from ._sqlkeys import json_each_available, key_list
 from .associations import (
     ASSOCIATIONS_SCHEMA,
     association_stats as _association_stats,
@@ -515,8 +516,8 @@ class StoreError(AnnealMemoryError):
     - :meth:`Store.save_meta` — atomic metadata sidecar write
     - :meth:`Store.load_wrap_snapshot` — partial-state integrity failures
     - :meth:`Store.wrap_completed` — ``episode_ids`` exceeds the SQLite
-      IN-clause variable guard ``Store._MAX_SQL_VARS_IN_CLAUSE``
-      (chunking is 10.5c.5+ work)
+      IN-clause variable guard ``Store._MAX_SQL_VARS_IN_CLAUSE`` (only on a
+      SQLite library without JSON1)
     - :meth:`Store.close` — called inside an active :meth:`Store._batch`
       context (explicit guard; closing mid-batch would lose deferred
       writes)
@@ -7918,7 +7919,8 @@ class Store:
     # the IDs: the spore-1233 carry-over UPDATE binds three (the new session
     # id and two range bounds), so 999 - 3. Pinned by
     # tests/test_wrap_strand.py::test_snapshot_at_the_variable_guard_fits_every_statement.
-    # Chunking is 10.5c.5+ work if anyone ever actually hits this.
+    # It binds only on a SQLite library without JSON1: with JSON1 the
+    # snapshot travels as one parameter (``_sqlkeys.key_list``).
     _MAX_SQL_VARS_IN_CLAUSE = 996
 
     def wrap_completed(
@@ -8002,9 +8004,9 @@ class Store:
 
         Raises:
             StoreError: If ``episode_ids`` exceeds the SQLite variable
-                guard ``_MAX_SQL_VARS_IN_CLAUSE``. This is a
-                hard guard, not a silent truncation — chunking is
-                10.5c.5+ work.
+                guard ``_MAX_SQL_VARS_IN_CLAUSE`` on a SQLite library
+                without JSON1. This is a hard guard, not a silent
+                truncation.
 
         Warns:
             UserWarning: if the audit event could not be written. The
@@ -8018,6 +8020,7 @@ class Store:
         """
         if (
             episode_ids is not None
+            and not json_each_available()
             and len(episode_ids) > self._MAX_SQL_VARS_IN_CLAUSE
         ):
             raise StoreError(
@@ -8166,17 +8169,16 @@ class Store:
                         (last_wrap["id"],),
                     ).fetchone()
                     prev_id = prev_row["id"] if prev_row["id"] is not None else 0
-                    # The snapshot binds as one JSON-array parameter, not one
-                    # per id: a first wrap over an imported store can carry
-                    # more ids than SQLite's bound-variable limit.
+                    # A big day's snapshot can carry more ids than SQLite
+                    # binds per statement: the list goes through key_list.
+                    snap_in, snap_params = key_list(episode_ids)
                     self._conn.execute(
-                        "UPDATE episodes SET session_id = ? "
-                        "WHERE session_id IS NOT NULL "
-                        "AND CAST(session_id AS INTEGER) > ? "
-                        "AND CAST(session_id AS INTEGER) <= ? "
-                        "AND id NOT IN (SELECT value FROM json_each(?))",
-                        (str(last_wrap["id"] + 1), prev_id, last_wrap["id"],
-                         json.dumps(list(episode_ids))),
+                        f"UPDATE episodes SET session_id = ? "
+                        f"WHERE session_id IS NOT NULL "
+                        f"AND CAST(session_id AS INTEGER) > ? "
+                        f"AND CAST(session_id AS INTEGER) <= ? "
+                        f"AND id NOT IN {snap_in}",
+                        (str(last_wrap["id"] + 1), prev_id, last_wrap["id"], *snap_params),
                     )
                 if episode_ids is None:
                     # Direct wrap_completed call (episode_ids=None).
@@ -8185,13 +8187,12 @@ class Store:
                         (session_id,),
                     )
                 elif episode_ids:
-                    # Frozen snapshot path, bound as one JSON-array parameter
-                    # (see the carry-over UPDATE above).
+                    # Frozen snapshot path, bound through key_list too.
+                    snap_in, snap_params = key_list(episode_ids)
                     self._conn.execute(
-                        "UPDATE episodes SET session_id = ? "
-                        "WHERE session_id IS NULL "
-                        "AND id IN (SELECT value FROM json_each(?))",
-                        (session_id, json.dumps(list(episode_ids))),
+                        f"UPDATE episodes SET session_id = ? "
+                        f"WHERE session_id IS NULL AND id IN {snap_in}",
+                        (session_id, *snap_params),
                     )
                 # If episode_ids is an empty list, skip the NULL stamp (the
                 # carry-over above has already moved the closing session's

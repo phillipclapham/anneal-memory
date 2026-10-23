@@ -42,7 +42,7 @@ links connected and the episodes crystals cite were disjoint sets. On 2026-10-03
 a copy of the store was given the cheapest fix (link each crystal's own evidence
 episodes to each other); replaying 1,000 real prompts, the hop added no pattern
 that recall without it had not already surfaced, at the shipped constants and at
-double strength. The Hebbian links still form at consolidation; recall does not read them.
+double strength. Recall does not read the links, and since 1.0.2 a save forms none.
 
 Superseded episodes (a newer episode recorded as replacing them) are left out of
 the candidate fetch, because it goes through ``Store.recall``'s default. So they

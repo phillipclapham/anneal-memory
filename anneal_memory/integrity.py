@@ -204,9 +204,8 @@ TOOLS: list[dict[str, Any]] = [
             "Prepare a compression package for session wrap. Call this at session "
             "boundaries — when work is ending, the user says to wrap up, or the "
             "session is getting long. Returns all episodes since the last wrap, "
-            "the current continuity file, stale pattern warnings, Hebbian "
-            "association context (which episodes have been thought about together "
-            "before), and compression instructions. Marks a wrap as in-progress "
+            "the current continuity file, stale pattern warnings and compression "
+            "instructions. Marks a wrap as in-progress "
             "and mints a session-handshake token (shown as 'Wrap token: <hex>' "
             "at the end of the response) — round-trip that token to "
             "save_continuity's wrap_token argument so the save call can verify "
@@ -250,12 +249,8 @@ TOOLS: list[dict[str, Any]] = [
             "episodes), and may demote ungrounded graduations. Each pattern's "
             "level is also capped against the level the store last saved for it: "
             "a new pattern enters at 1x and a validated Nx becomes at most "
-            "(N+1)x, whatever the line's date says. Also records "
-            "Hebbian associations between co-cited episodes (episodes cited "
-            "together on the same pattern line form strong links; episodes cited "
-            "in the same wrap form weaker links) and decays unreinforced "
-            "associations. Returns validation results, association metrics, and "
-            "section sizes."
+            "(N+1)x, whatever the line's date says. Returns validation results, "
+            "the wrap id, and section sizes."
         ),
         "inputSchema": {
             "type": "object",
@@ -270,13 +265,9 @@ TOOLS: list[dict[str, Any]] = [
                 "affective_state": {
                     "type": "object",
                     "description": (
-                        "Optional: your functional state during this compression. "
-                        "Reflect on how you felt while consolidating — engaged, "
-                        "curious, uncertain, frustrated, calm, etc. This creates "
-                        "persistent emotional associations between co-cited "
-                        "episodes and modulates link strength (high engagement = "
-                        "stronger associations). Provide tag (free text label) "
-                        "and intensity (0.0-1.0)."
+                        "DEPRECATED and ignored: omit it. It weighted association "
+                        "links, which a save no longer forms; it is accepted so "
+                        "older clients keep working, and removed in 2.0."
                     ),
                     "properties": {
                         "tag": {
@@ -430,7 +421,7 @@ TOOLS: list[dict[str, Any]] = [
             "exist: accidentally recorded PII, sensitive data, or fundamentally "
             "wrong recordings. Do NOT use for factual corrections — record a new "
             "episode with the correction instead and let compression resolve it. "
-            "Deletion cascades: all Hebbian associations involving the episode are "
+            "Deletion cascades: all association links involving the episode are "
             "removed, and the deletion is logged in the audit trail. The text is "
             "removed from the episodes table and overwritten in the database file "
             "(secure_delete); the WAL is emptied after the delete, or at the "
@@ -473,8 +464,8 @@ TOOLS: list[dict[str, Any]] = [
             "memory state, or when diagnosing issues. Returns episode counts "
             "(total and since last wrap), wrap history, continuity file size, "
             "episodes by type, whether a wrap is currently in progress, "
-            "Hebbian association network metrics (total links, average/max "
-            "strength, network density), and audit trail health (enabled/"
+            "association network metrics (links formed before the store stopped "
+            "forming them; no new links since 1.0.2), and audit trail health (enabled/"
             "disabled, entry count, log path, retention window). Use "
             "`anneal-memory verify` from the CLI to validate the audit "
             "hash chain itself — status() only surfaces cheap health "

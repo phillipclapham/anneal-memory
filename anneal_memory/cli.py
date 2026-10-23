@@ -160,7 +160,6 @@ from .store import (
 from .types import (
     DEFAULT_TRUST,
     TRUST_LEVELS,
-    AffectiveState,
     AssociationStats,
     EpisodeType,
     RelevantPattern,
@@ -636,6 +635,7 @@ def cmd_status(args: argparse.Namespace) -> None:
                 "schema": schema_name,
                 "sections": section_headings,
                 "association_stats": _assoc_stats_dict(status.association_stats),
+                "association_formation": store.association_formation(),
                 "audit": {
                     "enabled": status.audit_enabled,
                     "log_path": status.audit_log_path,
@@ -691,6 +691,10 @@ def cmd_status(args: argparse.Namespace) -> None:
             a = status.association_stats
             print()
             print(f"Associations: {a.total_links} links")
+            formation = store.association_formation()
+            if formation["off_at_wrap"] is not None:
+                print(f"  No new links since wrap {formation['off_at_wrap']} "
+                      f"(formation off since anneal-memory 1.0.2)")
             print(f"  Avg strength:    {a.avg_strength:.3f}")
             print(f"  Max strength:    {a.max_strength:.3f}")
             print(f"  Global density:  {a.density:.4f}")
@@ -1671,8 +1675,7 @@ def cmd_save_continuity(args: argparse.Namespace) -> None:
     Thin CLI adapter over the library ``validated_save_continuity``
     pipeline. Reads the agent's compressed text from a file or stdin,
     delegates structure validation, graduation citation validation,
-    Hebbian association formation, decay, metadata update, and wrap
-    recording to the library, then formats the result dict as text or
+    metadata update, and wrap recording to the library, then formats the result dict as text or
     JSON output.
     """
     # Read continuity text from file or stdin. NOTE: do NOT .strip() —
@@ -1718,12 +1721,14 @@ def cmd_save_continuity(args: argparse.Namespace) -> None:
         sys.exit(1)
 
     with _open_store(args) as store:
-        # Parse optional affective state
-        affective_state: AffectiveState | None = None
+        # --affect-tag / --affect-intensity are deprecated and ignored since 1.0.2
+        # (they weighted association links, which a save no longer forms). Still
+        # parsed, so a scheduled caller passing them keeps working.
         if args.affect_tag:
-            affective_state = AffectiveState(
-                tag=args.affect_tag,
-                intensity=args.affect_intensity,
+            print(
+                "Note: --affect-tag is deprecated and ignored since anneal-memory "
+                "1.0.2 (a save forms no association links); it is removed in 2.0.",
+                file=sys.stderr,
             )
 
         # Optional session-handshake token from ``prepare-wrap``. The
@@ -1741,7 +1746,6 @@ def cmd_save_continuity(args: argparse.Namespace) -> None:
             result = _lib_validated_save_continuity(
                 store,
                 text,
-                affective_state=affective_state,
                 wrap_token=wrap_token,
                 session_id=_wrap_session(store, args, saving=True),
                 allow_shrink=getattr(args, "allow_shrink", False),
@@ -1797,6 +1801,7 @@ def cmd_save_continuity(args: argparse.Namespace) -> None:
                 "associations_decayed": result["associations_decayed"],
                 "linkgate_overridden": result["linkgate_overridden"],
                 "association_warning": result["association_warning"],
+                "wrap_id": result["wrap_id"],
                 "citation_spread": result["citation_spread"],
                 "supersessions_recorded": result["supersessions_recorded"],
                 "supersessions_rejected": result["supersessions_rejected"],
@@ -1807,6 +1812,8 @@ def cmd_save_continuity(args: argparse.Namespace) -> None:
             return
 
         print(f"Continuity saved ({chars:,} chars) to {result['path']}")
+        if result["wrap_id"] is not None:
+            print(f"Wrap id: {result['wrap_id']}")
         print(f"Episodes compressed: {result['episodes_compressed']}")
         for entry in result.get("stale_state", []):
             print(f"State line does not hold (fix it next wrap): {entry}")
@@ -3317,6 +3324,9 @@ def cmd_diff(args: argparse.Namespace) -> None:
         print(f"  {'Wrap':>4}  {'When':<20}  {'Episodes':>8}  {'Chars':>7}  {'Grad':>4}  {'Demoted':>7}  {'Formed':>6}  {'Decayed':>7}")
         print(f"  {'----':>4}  {'----':<20}  {'--------':>8}  {'-------':>7}  {'----':>4}  {'-------':>7}  {'------':>6}  {'-------':>7}")
 
+        # A wrap at or after the store's formation-off wrap formed nothing by
+        # design: shown as "off", never as a 0 that reads like a dead write path.
+        off_at = store.association_formation()["off_at_wrap"]
         for i, w in enumerate(wraps):
             wrap_id = w.id
             when = _format_timestamp(w.wrapped_at)
@@ -3324,8 +3334,9 @@ def cmd_diff(args: argparse.Namespace) -> None:
             chars = w.continuity_chars
             grad = w.graduations_validated
             demoted = w.graduations_demoted
-            formed = w.associations_formed
-            decayed = w.associations_decayed
+            off = off_at is not None and wrap_id >= off_at
+            formed: int | str = "off" if off else w.associations_formed
+            decayed: int | str = "off" if off else w.associations_decayed
 
             # Show delta for continuity chars
             chars_delta = ""
@@ -3562,6 +3573,9 @@ def cmd_stats(args: argparse.Namespace) -> None:
             print(f"  Avg episodes:   {wrap_stats['avg_episodes_per_wrap']:.1f} per wrap")
             print(f"  Graduations:    {wrap_stats['total_graduations']} validated, {wrap_stats['total_demotions']} demoted")
             print(f"  Associations:   {wrap_stats['total_associations_formed']} formed, {wrap_stats['total_associations_decayed']} decayed")
+            off_at = store.association_formation()["off_at_wrap"]
+            if off_at is not None:
+                print(f"                  none formed since wrap {off_at} (formation off since 1.0.2)")
             print(f"  First wrap:     {_format_timestamp(wrap_stats['first_wrap'])}")
             print(f"  Last wrap:      {_format_timestamp(wrap_stats['last_wrap'])}")
         else:
@@ -5304,8 +5318,8 @@ def build_parser() -> argparse.ArgumentParser:
         parents=[json_parent],
     )
     sub.add_argument("file", help="Path to continuity markdown file (use '-' for stdin)")
-    sub.add_argument("--affect-tag", help="Affective state tag (e.g. 'engaged', 'uncertain')")
-    sub.add_argument("--affect-intensity", type=float, default=0.5, help="Affective intensity 0.0-1.0 (default: 0.5)")
+    sub.add_argument("--affect-tag", help="Deprecated and ignored since 1.0.2; removed in 2.0")
+    sub.add_argument("--affect-intensity", type=float, default=0.5, help="Deprecated and ignored since 1.0.2; removed in 2.0")
     sub.add_argument(
         "--wrap-token",
         help=(

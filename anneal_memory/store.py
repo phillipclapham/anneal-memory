@@ -34,7 +34,7 @@ from collections.abc import Iterable, Iterator
 from contextlib import AbstractContextManager, contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Callable, Literal, NamedTuple
+from typing import Any, Callable, Literal, NamedTuple, NoReturn
 
 try:  # POSIX advisory locking; absent on Windows (see continuity_lock).
     import fcntl
@@ -245,6 +245,7 @@ def _reject_reserved_audit_kwargs(kwargs: dict[str, Any]) -> dict[str, Any]:
 _LOG = logging.getLogger("anneal-memory")
 from .pattern_associations import (
     PATTERN_ASSOCIATIONS_SCHEMA,
+    _aggregate_events as _aggregate_co_surface_events,
     drain_co_surface_events as _drain_co_surface_events,
     gc_pattern_associations as _gc_pattern_associations,
     get_pattern_associations as _get_pattern_associations,
@@ -416,6 +417,7 @@ StoreOperation = Literal[
     "get_associations",
     "get_association_context",
     "association_stats",
+    "association_formation",
     # Pattern-level cortical association graph (AM-LINKGATE-DECAY, Slice B)
     "seed_pattern_co_graduation",
     "drain_co_surface_events",
@@ -948,6 +950,28 @@ class WrapWindowMovedError(AnnealMemoryError):
         # Two-argument __init__, so the default reduce (which passes self.args, the
         # one message) cannot rebuild it.
         return (type(self), (self.expected, self.actual))
+
+
+class AssociationFormationOffError(AnnealMemoryError):
+    """Raised by a legacy association-forming method on a store whose formation
+    is off (:meth:`Store.association_formation`).
+
+    The first save by a 1.0.2-or-later library records that the store forms no
+    new association links (episode or pattern graph). From then on the methods
+    that would form or decay links refuse instead of writing, so a caller that
+    still builds the graph learns it at once rather than reading a count that
+    no longer means anything. Existing links stay readable. These methods are
+    removed in 2.0.
+    """
+
+
+# The store capability that turns association formation off. Written once, by the
+# first save of a library that forms no links, and read on every call that would
+# form one (never cached per process: another process may have just written it).
+FORMATION_MODE_KEY = "association_formation_mode"
+FORMATION_OFF_AT_WRAP_KEY = "association_formation_off_at_wrap"
+FORMATION_OFF_BY_VERSION_KEY = "association_formation_off_by_version"
+FORMATION_DISABLED = "disabled"
 
 
 class WrapSchemaMovedError(AnnealMemoryError):
@@ -8088,9 +8112,8 @@ class Store:
                     # Roll back the implicit transaction the CAS opened
                     # (legacy path) OR let the outer ``_batch.__exit__``
                     # handle rollback (batched path). In batched mode the
-                    # enclosing transaction may contain uncommitted DML
-                    # from ``record_associations`` + ``decay_associations``
-                    # that must be discarded together with the failed CAS
+                    # enclosing transaction may contain the save's other
+                    # uncommitted DML (graduation records) that must be discarded together with the failed CAS
                     # — that's exactly what ``_batch.__exit__`` does on
                     # exception. Double-rolling back would be harmless but
                     # semantically muddled; 10.5c.5 L2 review flagged the
@@ -8114,7 +8137,7 @@ class Store:
                         f"prepare_wrap to start a fresh wrap."
                     )
 
-            self._conn.execute(
+            wrap_row_id = self._conn.execute(
                 """INSERT INTO wraps
                    (wrapped_at, episodes_compressed, continuity_chars, graduations_validated,
                     graduations_demoted, citation_reuse_max, patterns_extracted,
@@ -8137,7 +8160,7 @@ class Store:
                     1 if unattended else 0,
                     model,
                 ),
-            )
+            ).lastrowid
             # Update session_id for episodes in this wrap cycle.
             #
             # Pre-10.5c.4 behavior: stamp every NULL-session_id episode
@@ -8340,6 +8363,7 @@ class Store:
             associations_formed=associations_formed,
             associations_strengthened=associations_strengthened,
             associations_decayed=associations_decayed,
+            wrap_id=wrap_row_id,
         )
 
     def get_wrap_history(self) -> list[WrapRecord]:
@@ -8832,7 +8856,8 @@ class Store:
     ) -> tuple[int, int]:
         """Record or strengthen Hebbian association links from co-citation.
 
-        Called during wrap validation after graduation citations are checked.
+        LEGACY, removed in 2.0. No save calls it since 1.0.2, and on a store
+        whose formation is off it raises :class:`AssociationFormationOffError`.
         Direct pairs get stronger links than session pairs.
 
         Args:
@@ -8853,15 +8878,21 @@ class Store:
         ts = _now_utc()
         # 10.5c.5: inside a ``_batch()`` the free-function helper must
         # NOT commit — the outer pipeline owns the single commit.
+        # The refusal is decided inside the boundary and raised after it: raised
+        # inside, the boundary would roll back a caller's enclosing batch.
         with self._db_boundary("record_associations"):
-            formed, strengthened = _record_associations(
-                self._conn,
-                direct_pairs,
-                session_pairs or set(),
-                ts,
-                affective_state=affective_state,
-                commit=not self._defer_commit,
-            )
+            refused = self._formation_off()
+            if not refused:
+                formed, strengthened = _record_associations(
+                    self._conn,
+                    direct_pairs,
+                    session_pairs or set(),
+                    ts,
+                    affective_state=affective_state,
+                    commit=not self._defer_commit,
+                )
+        if refused:
+            self._raise_formation_off("record_associations")
 
         if formed or strengthened:
             audit_data: dict = {
@@ -8886,6 +8917,9 @@ class Store:
         cleanup_threshold: float = 0.1,
     ) -> int:
         """Decay associations not reinforced this wrap.
+
+        LEGACY, removed in 2.0. No save calls it since 1.0.2, and on a store
+        whose formation is off it raises :class:`AssociationFormationOffError`.
 
         Args:
             strengthened_pairs: Canonical pairs strengthened this wrap (skipped).
@@ -8912,13 +8946,17 @@ class Store:
         # 10.5c.5: inside a ``_batch()`` the free-function helper must
         # NOT commit — the outer pipeline owns the single commit.
         with self._db_boundary("decay_associations"):
-            decayed = _decay_associations(
-                self._conn,
-                canonical,
-                decay_factor,
-                cleanup_threshold,
-                commit=not self._defer_commit,
-            )
+            refused = self._formation_off()
+            if not refused:
+                decayed = _decay_associations(
+                    self._conn,
+                    canonical,
+                    decay_factor,
+                    cleanup_threshold,
+                    commit=not self._defer_commit,
+                )
+        if refused:
+            self._raise_formation_off("decay_associations")
 
         if decayed:
             self._audit_log_after_commit("associations_decayed", {
@@ -8964,6 +9002,68 @@ class Store:
                 self._conn, episode_ids, min_strength, limit
             )
 
+    def association_formation(self) -> dict[str, Any]:
+        """Whether this store still forms association links, and since when not.
+
+        Returns ``{"mode", "off_at_wrap", "off_by_version"}``. ``mode`` is
+        ``"disabled"`` once a save by a library that forms no links has run
+        (1.0.2 and later), else ``"enabled"`` with the other two ``None``.
+        ``off_at_wrap`` is the wraps-table id of that first save: links newer
+        than it are not formed. The existing graph stays readable and still
+        changes (an episode delete cascades its links; compost severs pattern
+        links; pattern strength decays as it is read), so read it as "no new
+        links since wrap N", never as a frozen graph.
+        """
+        with self._db_boundary("association_formation"), self._read_snapshot():
+            rows = dict(self._conn.execute(
+                "SELECT key, value FROM metadata WHERE key IN (?, ?, ?)",
+                (FORMATION_MODE_KEY, FORMATION_OFF_AT_WRAP_KEY,
+                 FORMATION_OFF_BY_VERSION_KEY),
+            ).fetchall())
+        if rows.get(FORMATION_MODE_KEY) != FORMATION_DISABLED:
+            return {"mode": "enabled", "off_at_wrap": None, "off_by_version": None}
+        at = rows.get(FORMATION_OFF_AT_WRAP_KEY)
+        return {
+            "mode": FORMATION_DISABLED,
+            "off_at_wrap": int(at) if at is not None and str(at).isdigit() else None,
+            "off_by_version": rows.get(FORMATION_OFF_BY_VERSION_KEY),
+        }
+
+    def _formation_off(self) -> bool:
+        """Read the formation capability on this connection, inside the caller's
+        boundary (and its transaction, when a batch is open)."""
+        row = self._conn.execute(
+            "SELECT value FROM metadata WHERE key = ?", (FORMATION_MODE_KEY,)
+        ).fetchone()
+        return row is not None and row[0] == FORMATION_DISABLED
+
+    def _raise_formation_off(self, method: str) -> NoReturn:
+        raise AssociationFormationOffError(
+            f"{method}: this store forms no association links (turned off by "
+            f"the first save of anneal-memory 1.0.2 or later; see "
+            f"Store.association_formation()). Existing links stay readable; "
+            f"{method} is removed in 2.0. Stop calling it."
+        )
+
+    def _record_formation_off(self, wrap_id: int | None) -> None:
+        """Record, once, that this store forms no new links from ``wrap_id`` on.
+
+        INSERT OR IGNORE: the first save that runs it wins, so ``off_at_wrap``
+        names the first wrap without links and later saves change nothing. Runs
+        inside the save's batch, so it commits or rolls back with that wrap.
+        """
+        from . import __version__
+        for key, value in (
+            (FORMATION_MODE_KEY, FORMATION_DISABLED),
+            (FORMATION_OFF_AT_WRAP_KEY, None if wrap_id is None else str(wrap_id)),
+            (FORMATION_OFF_BY_VERSION_KEY, __version__),
+        ):
+            if value is not None:
+                self._conn.execute(
+                    "INSERT OR IGNORE INTO metadata (key, value) VALUES (?, ?)",
+                    (key, value),
+                )
+
     def association_stats(self) -> AssociationStats:
         """Get Hebbian association network health metrics."""
         with self._db_boundary("association_stats"), self._read_snapshot():
@@ -8984,9 +9084,9 @@ class Store:
     ) -> int:
         """Seed weak pattern links from co-graduation (same wrap).
 
-        The recall-INDEPENDENT exploration channel — fires inside the wrap
-        pipeline whenever 2+ patterns graduate together, seeding the pairs the
-        keyword recall hook is blind to. Returns links newly seeded.
+        LEGACY, removed in 2.0. No save calls it since 1.0.2, and on a store
+        whose formation is off it raises :class:`AssociationFormationOffError`.
+        Returns links newly seeded.
 
         Warns:
             UserWarning: if the audit event could not be written. The
@@ -8996,9 +9096,13 @@ class Store:
         """
         day = today or _today_local()
         with self._db_boundary("seed_pattern_co_graduation"):
-            formed = _seed_co_graduation(
-                self._conn, graduated_names, day, commit=not self._defer_commit
-            )
+            refused = self._formation_off()
+            if not refused:
+                formed = _seed_co_graduation(
+                    self._conn, graduated_names, day, commit=not self._defer_commit
+                )
+        if refused:
+            self._raise_formation_off("seed_pattern_co_graduation")
         if formed:
             self._audit_log_after_commit(
                 "pattern_associations_seeded", {"formed": formed},
@@ -9009,6 +9113,10 @@ class Store:
         self, events: list[dict[str, Any]], today: str | None = None
     ) -> dict[str, int]:
         """Drain a batch of co-surface events into the pattern graph (idempotent).
+
+        LEGACY, removed in 2.0. On a store whose formation is off it parses the
+        events and discards them, returning zero counts (``events_seen`` counts
+        its distinct event ids), so a harness that still drains its spool keeps working.
 
         The consumer-of-log half: the harness feeds the recall-hook spool here at
         wrap time. event_id dedup makes a re-fed spool safe; per-session
@@ -9023,6 +9131,17 @@ class Store:
         """
         day = today or _today_local()
         with self._db_boundary("drain_co_surface_events"):
+            if self._formation_off():
+                # A compatibility drain through 1.x, so a harness that still
+                # drains a spool at wrap time keeps working: it discards. The
+                # events are still parsed, so a malformed batch fails here as
+                # it always did.
+                _, _, seen_ids = _aggregate_co_surface_events(events)
+                # ``discarded`` (only on this path) tells a reader of the
+                # metrics that the events were dropped on purpose, not unseen.
+                return {"events_seen": len(seen_ids), "events_applied": 0,
+                        "pairs_formed": 0, "pairs_strengthened": 0, "pairs_gc": 0,
+                        "discarded": len(seen_ids)}
             metrics = _drain_co_surface_events(
                 self._conn, events, day, commit=not self._defer_commit
             )
@@ -9362,15 +9481,13 @@ class Store:
         This method writes the continuity text to its sidecar file with
         an atomic fsync-and-rename and logs a ``continuity_saved`` audit
         event. It does **not** validate structure, does **not** run
-        graduation citation checking, does **not** form or decay
-        Hebbian associations, does **not** update wrap metadata, and
+        graduation citation checking, does **not** update wrap metadata, and
         does **not** record a wrap in the wraps table.
 
         For agent-driven session wraps — the normal case — call
         :func:`anneal_memory.validated_save_continuity(store, text)`
         instead. That runs the full canonical pipeline (structure
-        validation → graduation → associations → decay → metadata →
-        wrap completion) which IS anneal-memory's immune system. Using
+        validation → graduation → metadata → wrap completion) which IS anneal-memory's immune system. Using
         this raw method for session wraps silently degrades the memory
         system to a flat file write.
 

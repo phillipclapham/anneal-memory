@@ -20,6 +20,7 @@ from .store import (
     WrapOwnershipError,
     WrapSchemaMovedError,
     WrapWindowMovedError,
+    AssociationFormationOffError,
     continuity_lock,
     register_writer_schema,
 )
@@ -202,6 +203,7 @@ __all__ = [
     "WrapOwnershipError",
     "WrapSchemaMovedError",
     "WrapWindowMovedError",
+    "AssociationFormationOffError",
     "continuity_lock",
     "register_writer_schema",
     "Server",

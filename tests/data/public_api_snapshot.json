@@ -7,6 +7,7 @@
   "AnnealMemoryError",
   "Annotation",
   "ApplyRefused",
+  "AssociationFormationOffError",
   "AssociationPair",
   "AssociationStats",
   "AuditRepairResult",
@@ -4652,6 +4653,15 @@
    "members": {},
    "module": "anneal_memory.spores"
   },
+  "AssociationFormationOffError": {
+   "bases": [
+    "anneal_memory.store.AnnealMemoryError"
+   ],
+   "init": null,
+   "kind": "class",
+   "members": {},
+   "module": "anneal_memory.store"
+  },
   "AssociationPair": {
    "bases": [],
    "init": "(episode_a: 'str', episode_b: 'str', strength: 'float', co_citations: 'int', first_linked: 'str', last_strengthened: 'str', affective_tag: 'str | None' = None, affective_intensity: 'float' = 0.0) -> None",
@@ -5831,6 +5841,7 @@
      "supersessions_recorded": "ForwardRef('int', module='anneal_memory.types')",
      "supersessions_rejected": "ForwardRef('list[dict[str, str]]', module='anneal_memory.types')",
      "uncorroborated": "ForwardRef('list[dict[str, Any]]', module='anneal_memory.types')",
+     "wrap_id": "ForwardRef('int | None', module='anneal_memory.types')",
      "wrap_result": "ForwardRef('dict[str, Any]', module='anneal_memory.types')"
     },
     "optional": [
@@ -5867,6 +5878,7 @@
      "supersessions_recorded",
      "supersessions_rejected",
      "uncorroborated",
+     "wrap_id",
      "wrap_result"
     ]
    }
@@ -6137,6 +6149,10 @@
     "add_drift_probe": {
      "kind": "method",
      "signature": "(self, *, pattern: 'str | None' = None, min_level: 'int | None' = None, fact: 'str | None' = None, section: 'str | None' = None, note: 'str | None' = None) -> 'int'"
+    },
+    "association_formation": {
+     "kind": "method",
+     "signature": "(self) -> 'dict[str, Any]'"
     },
     "association_stats": {
      "kind": "method",
@@ -6522,7 +6538,7 @@
   "StoreOperation": {
    "kind": "value",
    "type": "_LiteralGenericAlias",
-   "value": "typing.Literal['get_by_origin_key', 'read_episode_versioned', 'origin_key_status', 'delete_by_origin_key', 'replace_section', 'save_continuity', 'save_meta', 'load_meta', 'load_wrap_snapshot', 'wrap_completed', 'prepare_continuity_write', 'prepare_meta_write', 'record', 'get', 'delete', 'recall', 'keyword_candidates', 'redirectable_ids', 'wrap_status_snapshot', 'supersede', 'unsupersede', 'import_team_entries', 'import_team_snapshot', 'drift_probes', 'supersession_exists', 'superseded_by_map', 'trust_map', 'trust_counts', 'set_trust', 'derived_edges', 'supersession_problem', 'supersession_links', 'set_state_key', 'clear_state_key', 'state_key_report', 'episodes_since_wrap', 'store_id', 'row_to_episode', 'status', 'wrap_started', 'wrap_cancelled', 'get_wrap_started_at', 'last_wrap_id', 'count_episodes_since_wrap', 'consolidate_requires_baton', 'wrap_gated_session', 'wrap_derive_roots', 'wrap_bound_token', 'wrap_today', 'set_consolidate_requires_baton', 'get_wrap_history', 'record_associations', 'decay_associations', 'get_associations', 'get_association_context', 'association_stats', 'seed_pattern_co_graduation', 'drain_co_surface_events', 'get_pattern_associations', 'pattern_association_stats', 'gc_pattern_associations', 'rename_pattern_association', 'sever_pattern_concept', 'pattern_graph_projection_meta', 'section_schema', 'set_section_schema', 'get_pattern_history', 'upsert_pattern_history', 'seed_pattern_max_level', 'saved_pattern_levels', 'pattern_grounding', 'prune', 'schema_init', 'batch_begin', 'batch_commit', 'supersession_repair', 'close']"
+   "value": "typing.Literal['get_by_origin_key', 'read_episode_versioned', 'origin_key_status', 'delete_by_origin_key', 'replace_section', 'save_continuity', 'save_meta', 'load_meta', 'load_wrap_snapshot', 'wrap_completed', 'prepare_continuity_write', 'prepare_meta_write', 'record', 'get', 'delete', 'recall', 'keyword_candidates', 'redirectable_ids', 'wrap_status_snapshot', 'supersede', 'unsupersede', 'import_team_entries', 'import_team_snapshot', 'drift_probes', 'supersession_exists', 'superseded_by_map', 'trust_map', 'trust_counts', 'set_trust', 'derived_edges', 'supersession_problem', 'supersession_links', 'set_state_key', 'clear_state_key', 'state_key_report', 'episodes_since_wrap', 'store_id', 'row_to_episode', 'status', 'wrap_started', 'wrap_cancelled', 'get_wrap_started_at', 'last_wrap_id', 'count_episodes_since_wrap', 'consolidate_requires_baton', 'wrap_gated_session', 'wrap_derive_roots', 'wrap_bound_token', 'wrap_today', 'set_consolidate_requires_baton', 'get_wrap_history', 'record_associations', 'decay_associations', 'get_associations', 'get_association_context', 'association_stats', 'association_formation', 'seed_pattern_co_graduation', 'drain_co_surface_events', 'get_pattern_associations', 'pattern_association_stats', 'gc_pattern_associations', 'rename_pattern_association', 'sever_pattern_concept', 'pattern_graph_projection_meta', 'section_schema', 'set_section_schema', 'get_pattern_history', 'upsert_pattern_history', 'seed_pattern_max_level', 'saved_pattern_levels', 'pattern_grounding', 'prune', 'schema_init', 'batch_begin', 'batch_commit', 'supersession_repair', 'close']"
   },
   "StoreStatus": {
    "bases": [],
@@ -6709,7 +6725,7 @@
      "name": "recall"
     },
     {
-     "description": "Prepare a compression package for session wrap. Call this at session boundaries — when work is ending, the user says to wrap up, or the session is getting long. Returns all episodes since the last wrap, the current continuity file, stale pattern warnings, Hebbian association context (which episodes have been thought about together before), and compression instructions. Marks a wrap as in-progress and mints a session-handshake token (shown as 'Wrap token: <hex>' at the end of the response) — round-trip that token to save_continuity's wrap_token argument so the save call can verify it matches the in-progress wrap and catch stale tokens. After calling, follow the returned instructions to compress episodes into an updated continuity file, then save with save_continuity. The compression step is where the real thinking happens — patterns emerge that weren't visible in the raw episodes.",
+     "description": "Prepare a compression package for session wrap. Call this at session boundaries — when work is ending, the user says to wrap up, or the session is getting long. Returns all episodes since the last wrap, the current continuity file, stale pattern warnings and compression instructions. Marks a wrap as in-progress and mints a session-handshake token (shown as 'Wrap token: <hex>' at the end of the response) — round-trip that token to save_continuity's wrap_token argument so the save call can verify it matches the in-progress wrap and catch stale tokens. After calling, follow the returned instructions to compress episodes into an updated continuity file, then save with save_continuity. The compression step is where the real thinking happens — patterns emerge that weren't visible in the raw episodes.",
      "inputSchema": {
       "properties": {
        "max_chars": {
@@ -6727,11 +6743,11 @@
      "name": "prepare_wrap"
     },
     {
-     "description": "Validate and save the compressed continuity file. Call this after compressing your episodes using the instructions from prepare_wrap. The text must contain exactly 4 sections: ## State, ## Patterns, ## Decisions, ## Context. The server validates structure, checks graduation citations against real episodes (cited IDs must exist), checks explanation overlap (evidence must reference actual episode content), detects citation gaming (suspicious reuse of single episodes), and may demote ungrounded graduations. Each pattern's level is also capped against the level the store last saved for it: a new pattern enters at 1x and a validated Nx becomes at most (N+1)x, whatever the line's date says. Also records Hebbian associations between co-cited episodes (episodes cited together on the same pattern line form strong links; episodes cited in the same wrap form weaker links) and decays unreinforced associations. Returns validation results, association metrics, and section sizes.",
+     "description": "Validate and save the compressed continuity file. Call this after compressing your episodes using the instructions from prepare_wrap. The text must contain exactly 4 sections: ## State, ## Patterns, ## Decisions, ## Context. The server validates structure, checks graduation citations against real episodes (cited IDs must exist), checks explanation overlap (evidence must reference actual episode content), detects citation gaming (suspicious reuse of single episodes), and may demote ungrounded graduations. Each pattern's level is also capped against the level the store last saved for it: a new pattern enters at 1x and a validated Nx becomes at most (N+1)x, whatever the line's date says. Returns validation results, the wrap id, and section sizes.",
      "inputSchema": {
       "properties": {
        "affective_state": {
-        "description": "Optional: your functional state during this compression. Reflect on how you felt while consolidating — engaged, curious, uncertain, frustrated, calm, etc. This creates persistent emotional associations between co-cited episodes and modulates link strength (high engagement = stronger associations). Provide tag (free text label) and intensity (0.0-1.0).",
+        "description": "DEPRECATED and ignored: omit it. It weighted association links, which a save no longer forms; it is accepted so older clients keep working, and removed in 2.0.",
         "properties": {
          "intensity": {
           "description": "How strongly you felt this state (0.0-1.0).",
@@ -6804,7 +6820,7 @@
      "name": "wrap_cancel"
     },
     {
-     "description": "Delete a single episode by ID. Use this for content that should not exist: accidentally recorded PII, sensitive data, or fundamentally wrong recordings. Do NOT use for factual corrections — record a new episode with the correction instead and let compression resolve it. Deletion cascades: all Hebbian associations involving the episode are removed, and the deletion is logged in the audit trail. The text is removed from the episodes table and overwritten in the database file (secure_delete); the WAL is emptied after the delete, or at the store's next delete or close if another connection is reading at that moment. By default, a tombstone is preserved as an existence proof for audit integrity: episode ID, original timestamp, episode type, and a content hash keyed by a per-store salt; a new episode's id is keyed by it too. The salt is kept in the database, never in the audit trail, so a guess at deleted content cannot be checked against the audit trail alone; whoever holds the database file can still guess short content from the tombstone. Disable tombstones at Store construction (keep_tombstones=False) if no hash should stay in the database. Episodes recorded before the store was upgraded, and team-imported episodes, carry an unsalted hash and id, which can be guessed for short content. The audit trail keeps each event's source, time and type in clear. Not reached: backups, the migration's .bak copy, other copies of the file, and text already consolidated into continuity or a pattern's stored explanations. The hash chain remains verifiable either way. This action is irreversible.",
+     "description": "Delete a single episode by ID. Use this for content that should not exist: accidentally recorded PII, sensitive data, or fundamentally wrong recordings. Do NOT use for factual corrections — record a new episode with the correction instead and let compression resolve it. Deletion cascades: all association links involving the episode are removed, and the deletion is logged in the audit trail. The text is removed from the episodes table and overwritten in the database file (secure_delete); the WAL is emptied after the delete, or at the store's next delete or close if another connection is reading at that moment. By default, a tombstone is preserved as an existence proof for audit integrity: episode ID, original timestamp, episode type, and a content hash keyed by a per-store salt; a new episode's id is keyed by it too. The salt is kept in the database, never in the audit trail, so a guess at deleted content cannot be checked against the audit trail alone; whoever holds the database file can still guess short content from the tombstone. Disable tombstones at Store construction (keep_tombstones=False) if no hash should stay in the database. Episodes recorded before the store was upgraded, and team-imported episodes, carry an unsalted hash and id, which can be guessed for short content. The audit trail keeps each event's source, time and type in clear. Not reached: backups, the migration's .bak copy, other copies of the file, and text already consolidated into continuity or a pattern's stored explanations. The hash chain remains verifiable either way. This action is irreversible.",
      "inputSchema": {
       "properties": {
        "episode_id": {
@@ -6820,7 +6836,7 @@
      "name": "delete_episode"
     },
     {
-     "description": "Get memory health metrics. Call this at session start to understand memory state, or when diagnosing issues. Returns episode counts (total and since last wrap), wrap history, continuity file size, episodes by type, whether a wrap is currently in progress, Hebbian association network metrics (total links, average/max strength, network density), and audit trail health (enabled/disabled, entry count, log path, retention window). Use `anneal-memory verify` from the CLI to validate the audit hash chain itself — status() only surfaces cheap health signals, not integrity proof.",
+     "description": "Get memory health metrics. Call this at session start to understand memory state, or when diagnosing issues. Returns episode counts (total and since last wrap), wrap history, continuity file size, episodes by type, whether a wrap is currently in progress, association network metrics (links formed before the store stopped forming them; no new links since 1.0.2), and audit trail health (enabled/disabled, entry count, log path, retention window). Use `anneal-memory verify` from the CLI to validate the audit hash chain itself — status() only surfaces cheap health signals, not integrity proof.",
      "inputSchema": {
       "properties": {},
       "type": "object"
@@ -7306,7 +7322,7 @@
   },
   "WrapResult": {
    "bases": [],
-   "init": "(saved: 'bool', chars: 'int', section_sizes: 'dict[str, int]', graduations_validated: 'int' = 0, graduations_demoted: 'int' = 0, citation_reuse_max: 'int' = 0, patterns_extracted: 'int' = 0, episodes_compressed: 'int' = 0, pruned_count: 'int' = 0, associations_formed: 'int' = 0, associations_strengthened: 'int' = 0, associations_decayed: 'int' = 0) -> None",
+   "init": "(saved: 'bool', chars: 'int', section_sizes: 'dict[str, int]', graduations_validated: 'int' = 0, graduations_demoted: 'int' = 0, citation_reuse_max: 'int' = 0, patterns_extracted: 'int' = 0, episodes_compressed: 'int' = 0, pruned_count: 'int' = 0, associations_formed: 'int' = 0, associations_strengthened: 'int' = 0, associations_decayed: 'int' = 0, wrap_id: 'int | None' = None) -> None",
    "kind": "class",
    "members": {
     "associations_decayed": {
@@ -7344,6 +7360,10 @@
     "pruned_count": {
      "kind": "attribute",
      "value": 0
+    },
+    "wrap_id": {
+     "kind": "attribute",
+     "value": null
     }
    },
    "module": "anneal_memory.types"
@@ -7951,7 +7971,7 @@
   "save_continuity": {
    "properties": {
     "affective_state": {
-     "description": "Optional: your functional state during this compression. Reflect on how you felt while consolidating — engaged, curious, uncertain, frustrated, calm, etc. This creates persistent emotional associations between co-cited episodes and modulates link strength (high engagement = stronger associations). Provide tag (free text label) and intensity (0.0-1.0).",
+     "description": "DEPRECATED and ignored: omit it. It weighted association links, which a save no longer forms; it is accepted so older clients keep working, and removed in 2.0.",
      "properties": {
       "intensity": {
        "description": "How strongly you felt this state (0.0-1.0).",

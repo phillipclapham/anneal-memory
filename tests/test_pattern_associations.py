@@ -391,11 +391,13 @@ class TestStoreIntegration:
 # -- End-to-end: co-graduation seeding through the real wrap pipeline --
 
 class TestWrapPipelineSeeding:
-    def test_two_graduations_seed_a_pattern_link(self, tmp_path):
+    """Until 1.0.2 a save seeded a weak pattern link between the patterns that
+    graduated together. Since 1.0.2 it seeds nothing (Phill's cut, 2026-10-23)."""
+
+    def test_two_graduations_seed_no_pattern_link(self, tmp_path):
         from anneal_memory.continuity import validated_save_continuity, prepare_wrap
 
         s = Store(str(tmp_path / "m.db"), project_name="test")
-        # two episodes that two patterns will cite as fresh evidence today
         e1 = s.record("first grounding episode about the alpha mechanism", "observation").id
         e2 = s.record("second grounding episode about the beta mechanism", "observation").id
         today = "2026-06-12"
@@ -408,47 +410,16 @@ class TestWrapPipelineSeeding:
             "\n## Context\n\nwrap.\n"
         )
         seed_prior_levels(s, {'alpha_mechanism_pattern': 1, 'beta_mechanism_pattern': 1})
-        prep = prepare_wrap(s)
-        validated_save_continuity(s, text, today=today, wrap_token=prep["wrap_token"])
-        # both graduated this wrap → a co-graduation seed links them
-        p = _pair(s, "alpha_mechanism_pattern", "beta_mechanism_pattern", today=today)
-        assert p is not None
-        assert p.formation_source == "co_graduation"
-        assert p.strength == pytest.approx(SEED_STRENGTH)
-        s.close()
-
-    def test_seeding_fault_does_not_roll_back_wrap_hebbian_dml(self, tmp_path):
-        """Regression for codex L3 HIGH-1: co-graduation seeding now runs as a
-        POST-COMMIT separate transaction, so a seeding fault must NOT roll back
-        the wrap's episode-Hebbian DML (which inside the batch a swallowed fault
-        would have discarded via _db_boundary rollback) and the wrap must still
-        succeed."""
-        from anneal_memory.continuity import validated_save_continuity, prepare_wrap
-
-        s = Store(str(tmp_path / "m.db"), project_name="test")
-        e1 = s.record("episode one about alpha grounding", "observation").id
-        e2 = s.record("episode two about alpha grounding", "observation").id
-        e3 = s.record("episode three about beta grounding", "observation").id
-        e4 = s.record("episode four about beta grounding", "observation").id
-        today = "2026-06-12"
-        # two graduations, each co-citing 2 episodes → forms episode Hebbian links
-        # AND triggers co-graduation seeding (2+ graduated names)
-        text = (
-            "## State\n\nfocus.\n\n## Patterns\n\n"
-            f"- alpha_pattern | 2x ({today}) [evidence: {e1}, {e2} \"episode alpha grounding\"]\n"
-            f"- beta_pattern | 2x ({today}) [evidence: {e3}, {e4} \"episode beta grounding\"]\n"
-            "\n## Decisions\n\nnone.\n\n## Context\n\nwrap.\n"
-        )
 
         def _boom(*a, **k):
-            raise RuntimeError("seeding blew up")
+            raise AssertionError("a 1.0.2 save must not seed pattern links")
 
         s.seed_pattern_co_graduation = _boom  # type: ignore[method-assign]
         prep = prepare_wrap(s)
         result = validated_save_continuity(s, text, today=today, wrap_token=prep["wrap_token"])
-        assert result is not None  # wrap succeeded despite the seeding fault
-        # the episode Hebbian DML survived (was NOT rolled back by the fault)
-        assert s.association_stats().total_links > 0
+        assert result["graduations_validated"] == 2  # both graduated
+        assert _pair(s, "alpha_mechanism_pattern", "beta_mechanism_pattern", today=today) is None
+        assert s._conn.execute("SELECT COUNT(*) FROM pattern_associations").fetchone()[0] == 0
         s.close()
 
 

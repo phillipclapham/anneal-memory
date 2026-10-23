@@ -68,7 +68,6 @@ from .store import (
 )
 from .types import (
     DEFAULT_TRUST,
-    AffectiveState,
     EpisodeType,
     RelevantFact,
     RelevantPattern,
@@ -792,9 +791,10 @@ class Server:
     def _tool_save_continuity(self, args: dict[str, Any]) -> dict[str, Any]:
         """MCP transport adapter for the library validated_save_continuity.
 
-        Parses text and optional affective_state from MCP tool args,
-        delegates the entire save pipeline (structure validation,
-        graduation, associations, decay, metadata, wrap completion) to
+        Parses text from MCP tool args (a deprecated ``affective_state`` is
+        accepted and named as ignored in the reply), delegates the entire
+        save pipeline (structure validation, graduation, metadata, wrap
+        completion) to
         the library, and formats the returned dict as an MCP text
         response. ValueError from the library (empty text or missing
         sections) becomes an is_error=True tool result.
@@ -803,22 +803,11 @@ class Server:
         if not text:
             return _tool_result("Error: text is required", is_error=True)
 
-        # Parse optional affective state (limbic layer).
-        # JSON-to-float coercion is transport-specific (MCP receives
-        # arbitrary JSON types; CLI's argparse already coerces). Once
-        # we have a Python float, clamping is delegated to
-        # AffectiveState.__post_init__ — the single source of truth
-        # that both transports rely on, matching CLI behavior.
-        affective_state: AffectiveState | None = None
-        affect_raw = args.get("affective_state")
-        if affect_raw and isinstance(affect_raw, dict):
-            tag = affect_raw.get("tag", "")
-            try:
-                intensity = float(affect_raw.get("intensity", 0.0))
-            except (ValueError, TypeError):
-                intensity = 0.0
-            if tag and isinstance(tag, str) and tag.strip():
-                affective_state = AffectiveState(tag=tag, intensity=intensity)
+        # affective_state is deprecated and ignored since 1.0.2 (it weighted
+        # association links, which a save no longer forms). Still accepted, so a
+        # client that sends it keeps working; the reply says it was ignored,
+        # because a library UserWarning never reaches an MCP client.
+        affect_sent = args.get("affective_state") is not None
 
         # Optional session-handshake token. When the agent round-trips
         # the token from the prior prepare_wrap response, the library
@@ -869,7 +858,6 @@ class Server:
             result = _lib_validated_save_continuity(
                 self._store,
                 text,
-                affective_state=affective_state,
                 wrap_token=wrap_token,
                 session_id=self._wrap_session(saving=True),
                 allow_shrink=allow_shrink,
@@ -895,6 +883,14 @@ class Server:
         lines = [
             f"Continuity saved ({result['chars']} chars) to {result['path']}"
         ]
+        if result.get("wrap_id") is not None:
+            lines.append(f"Wrap id: {result['wrap_id']}")
+        if affect_sent:
+            lines.append(
+                "affective_state is deprecated and was ignored: since anneal-memory "
+                "1.0.2 a save forms no association links for it to weight. Stop "
+                "sending it; it is removed in 2.0."
+            )
         lines.append(f"Episodes compressed: {result['episodes_compressed']}")
         if result.get("stale_state"):
             lines.append(
@@ -956,9 +952,8 @@ class Server:
 
         if result["association_warning"]:
             # A post-commit UserWarning never reaches an MCP client, so the
-            # AM-WARN signal travels in the result text (codex L3 MED, 0.9.26:
-            # with the AM-LINKGATE refusal removed, a dead association write
-            # path would otherwise be silent over MCP).
+            # AM-WARN signal (citations that resolve to no episode) travels in
+            # the result text.
             lines.append(f"Association warning: {result['association_warning']}")
         if allow_unlinked is True:
             lines.append(
@@ -1353,6 +1348,12 @@ class Server:
                 f"max {a.max_strength:.1f}, "
                 f"{density_str}"
             )
+            formation = self._store.association_formation()
+            if formation["off_at_wrap"] is not None:
+                lines.append(
+                    f"No new links since wrap {formation['off_at_wrap']} "
+                    f"(formation off since anneal-memory 1.0.2)"
+                )
 
         # Audit layer visibility — tamper-evident trail is load-bearing
         # for the "grounded memory" claim. Agents and operators need to

@@ -3,7 +3,7 @@
 Handles:
 - Structural validation (sections required by the store's section schema)
 - Wrap package preparation (episodes + continuity + instructions for the agent)
-- Validated save (full pipeline: structure + graduation + associations + decay)
+- Validated save (full pipeline: structure + graduation + wrap record)
 - Section measurement
 
 The continuity file is a markdown document whose sections are governed by a
@@ -822,8 +822,8 @@ def _build_wrap_package(
     compression package (episodes listing + stale-pattern diagnostic
     + compression instructions + sizing constraints). The caller is
     responsible for wrap lifecycle (``store.wrap_started(token=...,
-    episode_ids=...)``) and Hebbian association context —
-    :func:`prepare_wrap` does that work around this helper.
+    episode_ids=...)`` — :func:`prepare_wrap` does that work around
+    this helper.
 
     Args:
         episodes: Episodes since last wrap (the compression window).
@@ -1206,13 +1206,6 @@ def _build_wrap_instructions(
         ]
     parts += [
         "",
-        "**Affective state:** When saving with save_continuity, optionally include "
-        "your functional state during this compression as "
-        '`affective_state: {"tag": "...", "intensity": 0.0-1.0}`.',
-        "Reflect honestly — were you engaged, curious, uncertain, calm? How "
-        "strongly (0-1)? This creates persistent emotional associations between "
-        "co-cited episodes.",
-        "",
         "**Return ONLY the markdown.** No explanation, no code fences.",
     ]
     return "\n".join(parts)
@@ -1302,7 +1295,7 @@ Required elements:
   is kept by the library (`max_level_reached`), not by this line.
 - For 2x and above: an `[evidence: ... "explanation"]` tag is REQUIRED (the TAG is
   required, not a particular id count). Cite every episode that genuinely supports
-  the pattern (see "Linking episodes" below). A single id is fine when only one
+  the pattern (see "Citing evidence" below). A single id is fine when only one
   episode truly applies; do not pad to reach two.
 
 Optional FlowScript prefix. **The marker KINDS are a closed set — `!` (any run), `?`,
@@ -1342,10 +1335,9 @@ names so the immune system can protect your patterns.
   months and one earned twice last week. (The level you WRITE is current standing,
   not a ratchet — an ungrounded re-stamp is demoted by one; see the LEVEL/RECENCY
   note above. `max_level_reached` is the monotonic high-water mark, not this line.)
-- Evidence citations REQUIRED for graduations (2x and above). Cite 2+ episode 8-char
-  IDs that co-support the pattern — co-citation forms the Hebbian link. A single id
-  is acceptable ONLY when just one episode genuinely supports the pattern (do not
-  pad with unrelated ids to hit two).
+- Evidence citations REQUIRED for graduations (2x and above). Cite the 8-char IDs
+  of every episode that genuinely supports the pattern. A single id is acceptable
+  when just one episode genuinely supports it (do not pad with unrelated ids).
 - **Preserved (still true, but NOT re-exercised this session): KEEP the pattern's
   EXISTING date and evidence — do NOT re-stamp `({today})`.** The date marks when the
   pattern was last genuinely grounded. Re-stamping today's date on a pattern you only
@@ -1360,14 +1352,13 @@ names so the immune system can protect your patterns.
   evidence is too near-identical to cite without tripping the `(cross-session-overlap)`
   gate (the repetitive-domain / daily-telemetry case — e.g. a stable email-triage
   rule), carries `[provenance: <founding_id1>, <founding_id2>]`: the episode ids that
-  ORIGINALLY earned it its level. Provenance is INERT — it forms no Hebbian link,
-  advances no recency, and is NOT re-validated — the durable audit answer to "why is
+  ORIGINALLY earned it its level. Provenance is INERT — it advances no recency, and is NOT re-validated — the durable audit answer to "why is
   this Nx?" that survives after the founding episodes age out of the citation window.
   A top-tier carry with NEITHER fresh evidence NOR provenance is nagged ("graduate OUT
   or retire"); provenance silences that for a genuinely grounded mature pattern.
   - **Provenance REPLACES the evidence tag — NEVER put both on one line.** If you
-    genuinely have fresh citable evidence, use `[evidence:]` (it forms Hebbian links —
-    strictly better) and you do NOT need provenance; provenance is ONLY for when fresh
+    genuinely have fresh citable evidence, use `[evidence:]` (it re-grounds the
+    pattern — strictly better) and you do NOT need provenance; provenance is ONLY for when fresh
     evidence would collide on the overlap gate. A line carrying BOTH is malformed (the
     `[evidence:]` may be silently dropped depending on tag order) — use one or the other.
   - **Why re-stamp `({today})` here when "Preserved" above said don't?** The today-stamp
@@ -1398,16 +1389,13 @@ names so the immune system can protect your patterns.
   shape as an INDENTED line under a pattern — any such line in this section is
   read as a pattern.
 
-### Linking episodes (co-citation)
+### Citing evidence
 Cite every episode that genuinely supports a pattern: one id is fine, and never pad
-with unrelated ids. When 2+ THIS-session episodes co-support a pattern, citing them in
-ONE evidence tag forms a direct Hebbian link between them (separate single-id lines
-form only a weaker session-level pair). Those links feed the association statistics
-and the `graph` export; pattern recall does not read them (it reaches a pattern
-through the episodes its evidence cites), so a wrap that OFFERS no genuine pair
-and forms no link is not a defect; offered pairs that record no link are a write-path
-fault, which the save reports. Re-citing an older episode does not strengthen its links: wrapped episodes
-leave the current-wrap window, so the re-citation dead-ids.
+with unrelated ids. The immune system checks each cited id resolves to a real episode
+in this store and that at least one of them grounds the explanation; extra ids that
+do not support the pattern add nothing. Re-citing an older episode does not ground a
+new level: wrapped episodes leave the current-wrap window, so the re-citation
+dead-ids.
 
 **Example (the first line has two genuinely supporting episodes, so it cites both):**
 ```
@@ -1779,9 +1767,8 @@ def prepare_wrap(
     Handles the full lifecycle: fetches episodes, detects the empty
     case (and clears any stale wrap-in-progress flag), builds the
     agent-facing compression package via the private
-    :func:`_build_wrap_package` helper, marks the wrap as in progress,
-    and attaches Hebbian association context for the episodes being
-    compressed.
+    :func:`_build_wrap_package` helper, and marks the wrap as in
+    progress.
 
     The separate :func:`_build_wrap_package` helper (private) is the
     pure-function core that takes pre-fetched episodes and continuity
@@ -1886,13 +1873,10 @@ def prepare_wrap(
           - ``package`` (:class:`WrapPackageDict` | None): the
             agent-facing compression package built by
             :func:`_build_wrap_package`, or ``None`` if empty
-          - ``assoc_context`` (str | None): Hebbian association context
-            for the episodes being compressed, or ``None`` if empty or
-            no associations exist. Usually ``None``: a wrap forms links
-            among its own episodes at save, and those episodes are outside
-            the next wrap's window, so only links the caller recorded
-            itself (``Store.record_associations``) that touch a window
-            episode, at strength >= 0.5, appear here
+          - ``assoc_context`` (None): always ``None`` since 1.0.2. It
+            carried association-link context to the composer; no recall
+            path read those links, and a save no longer forms them. The
+            key stays for existing readers and is removed in 2.0
           - ``wrap_token`` (str | None): session-handshake token for
             the pending wrap when ``status == "ready"``, ``None`` on
             the empty path. Transports should round-trip this back to
@@ -2179,7 +2163,8 @@ def prepare_wrap(
             )
         package["instructions"] += note
     episode_ids = [ep.id for ep in episodes]
-    assoc_context = store.get_association_context(episode_ids) or None
+    # Always None since 1.0.2 (the composer no longer sees association links).
+    assoc_context = None
 
     # Mint the handshake token + persist the frozen snapshot in a
     # single ``wrap_started`` call. The token is a uuid4 hex (no
@@ -2290,8 +2275,7 @@ def format_wrap_package_text(result: PrepareWrapResult) -> str:
 
     This is the canonical text representation used by both MCP and CLI
     transports. It assembles the compression instructions, episode
-    listing, existing continuity, stale patterns, and Hebbian context
-    into a single markdown-formatted string ready to be handed to the
+    listing, existing continuity and stale patterns into a single markdown-formatted string ready to be handed to the
     agent doing the compression.
 
     Transports that want the canonical presentation call this; library
@@ -2735,12 +2719,13 @@ def validated_save_continuity(
     function get the exact same pipeline as MCP and CLI users.
 
     The pipeline: structure validation → citation-based graduation
-    validation → save → Hebbian association formation → decay → metadata
-    update → wrap completion. Every stage of the immune system runs.
+    validation → save → metadata update → wrap completion. Every stage of
+    the immune system runs. Since 1.0.2 no association link is formed or
+    decayed: the first save records that on the store
+    (:meth:`Store.association_formation`).
 
     Use this instead of bare ``store.save_continuity()`` — the raw store
-    method is a file write that bypasses graduation, associations, and
-    decay. ``validated_save_continuity`` is what you want whenever an
+    method is a file write that bypasses graduation. ``validated_save_continuity`` is what you want whenever an
     agent has finished compressing its session.
 
     .. note::
@@ -2779,8 +2764,8 @@ def validated_save_continuity(
     .. note::
         **Pipeline atomicity (two-phase commit, 10.5c.5).** The
         internal pipeline is now structurally atomic across the
-        continuity file write, meta sidecar write, Hebbian
-        association DML, and wrap-completion DML. Any exception
+        continuity file write, meta sidecar write, graduation records
+        and wrap-completion DML. Any exception
         raised before the final file renames triggers a SQLite
         rollback of the entire batched transaction AND cleanup of
         both tmp sidecars, leaving the store in its exact pre-wrap
@@ -2798,7 +2783,10 @@ def validated_save_continuity(
     Args:
         store: A Store instance.
         text: The agent-compressed continuity text.
-        affective_state: Optional agent functional state during this wrap.
+        affective_state: DEPRECATED, accepted and ignored since 1.0.2: it
+            weighted association links, which a save no longer forms. Passing
+            one emits one ``UserWarning`` after the save commits. Removed in
+            2.0. CLI ``--affect-tag``; MCP ``"affective_state"``.
         today: Optional override for today's date as ``YYYY-MM-DD``.
             Defaults to ``date.today().isoformat()`` (wall clock). Passing
             an explicit value makes the function fully deterministic —
@@ -2839,8 +2827,7 @@ def validated_save_continuity(
         allow_unlinked: DEPRECATED no-op, accepted for compatibility. It
             overrode the AM-LINKGATE save refusal (spore-721), which was
             removed in 0.9.26 because pattern recall stopped reading episode
-            links when the Hebbian hop was retired; a write path that records
-            no links is still warned by AM-WARN Signal B. A literal ``True``
+            links when the Hebbian hop was retired. A literal ``True``
             changes nothing and emits one ``UserWarning`` after the save
             commits. CLI ``--allow-unlinked``; MCP ``"allow_unlinked": true``.
         compost: pattern names whose concept left the working set this
@@ -2898,9 +2885,10 @@ def validated_save_continuity(
             was cited in this wrap
           - ``gaming_suspects`` (list[str]): episode IDs flagged for
             suspicious citation reuse
-          - ``associations_formed`` (int)
-          - ``associations_strengthened`` (int)
-          - ``associations_decayed`` (int)
+          - ``associations_formed`` (int): always 0 since 1.0.2
+          - ``associations_strengthened`` (int): always 0 since 1.0.2
+          - ``associations_decayed`` (int): always 0 since 1.0.2
+          - ``wrap_id`` (int | None): the wraps-table id of this save
           - ``skipped_non_today`` (int): graduation-format lines whose date
             is not today, which validation skipped
           - ``linkgate_overridden`` (bool): always False. Kept for
@@ -2961,8 +2949,6 @@ def validated_save_continuity(
             or :class:`StoreError` specifically to read ``.operation``
             and ``.path`` for clean error messages.
     """
-    from .associations import process_wrap_associations
-
     # --- Wrap-state preconditions, checked BEFORE payload validation ---
     #
     # Ordering is deliberate: a save with no wrap to commit to is
@@ -3414,8 +3400,8 @@ def validated_save_continuity(
     #
     # Phase 1: write continuity.md.tmp (no rename yet) so we know the
     #          content is durable on disk before committing DB state.
-    # Phase 2: inside ``store._batch()``, accumulate DB DML (associations
-    #          + meta + wrap_completed) without intermediate commits and
+    # Phase 2: inside ``store._batch()``, accumulate DB DML (graduation
+    #          records + meta + wrap_completed) without intermediate commits and
     #          write meta.json.tmp (no rename yet). The batch context
     #          manager commits the single outer SQLite transaction on
     #          successful exit and flushes queued audit events.
@@ -3512,8 +3498,6 @@ def validated_save_continuity(
     try:
         # Phase 2: batched DB DML.
         with store._batch():
-            assoc_formed, assoc_strengthened, assoc_decayed = \
-                process_wrap_associations(store, grad_result, affective_state)
 
             if grad_result.validated > 0 or grad_result.citation_counts:
                 meta["citations_seen"] = True
@@ -3628,9 +3612,6 @@ def validated_save_continuity(
                 graduations_demoted=total_demoted,
                 citation_reuse_max=grad_result.citation_reuse_max,
                 patterns_extracted=patterns,
-                associations_formed=assoc_formed,
-                associations_strengthened=assoc_strengthened,
-                associations_decayed=assoc_decayed,
                 section_sizes=sections,
                 episode_ids=frozen_episode_ids,
                 # Pass the token from the snapshot in hand rather than
@@ -3649,6 +3630,10 @@ def validated_save_continuity(
                 content_hash=content_hash,
                 pair_id=tmp_pair_id,
             )
+            # This save formed no association link. Recorded once (the first
+            # such save wins), in this transaction, so the store says from
+            # which wrap on and the legacy forming methods refuse from here.
+            store._record_formation_off(wrap_result.wrap_id)
             # CAP-06: the operator's drift probes, read and checked INSIDE this batch
             # (L3 1007, codex: a probe added between a pre-batch read and the commit
             # had no result) against the exact text being saved; never a gate.
@@ -3682,13 +3667,9 @@ def validated_save_continuity(
             # so they're skipped — the prior session's history
             # remains authoritative, exactly the desired behavior.
             #
-            # wrap_id stays None for now: WrapResult is a dataclass
-            # without the wraps.id field, and adding it would be a
-            # caller-visible return-shape change unrelated to the
-            # cross-session check itself. The audit log captures the
-            # wrap timing and pattern_history's last_seen_at field
-            # gives the per-pattern timestamp — the marginal forensic
-            # value of an explicit wrap_id pointer is low.
+            # pattern_history's wrap_id is left None by choice (the wraps
+            # id is wrap_result.wrap_id since 1.0.2): last_seen_at gives
+            # the per-pattern timestamp and the audit log the wrap timing.
             # v0.3.3 HIGH #1 fix: gate upsert loop to `## Patterns`
             # section only. Codex L3 caught that v0.3.2 fixed the
             # Anti-Patterns parsing leak at the graduation.py side
@@ -3794,26 +3775,6 @@ def validated_save_continuity(
         # point forward, failure must NOT unlink the tmp files.
         db_committed = True
 
-        # AM-LINKGATE-DECAY (Slice B): seed weak cortical links between the
-        # patterns that GRADUATED together this wrap. Recall-INDEPENDENT (the
-        # exploration / selection-bias channel the keyword recall hook is blind
-        # to) and SHADOW-MODE (nothing reads the pattern graph for recall yet).
-        # Runs as a SEPARATE post-commit transaction, NOT inside the batch above
-        # (codex L3 HIGH): a fault here must be best-effort, but inside the batch
-        # the Store's _db_boundary rolls back the WHOLE open transaction on any
-        # error — so a seeding fault swallowed by this try/except would silently
-        # discard the episode-Hebbian DML written by process_wrap_associations,
-        # and the wrap would still "succeed." Post-commit, the wrap's DB state is
-        # already durable, so a seeding failure can only cost the (non-load-bearing,
-        # self-healing) seed itself.
-        # A composted name is left out: seeding it would re-link the concept
-        # this same save just severed.
-        seed_names = [n for n in grad_result.graduated_names if n not in composted]
-        try:
-            if len(seed_names) >= 2:
-                store.seed_pattern_co_graduation(seed_names, today=today_str)
-        except Exception:
-            pass
         # Warned only after Phase 3, through _warn_after_commit.
         still_graduating = sorted(
             set(composted) & set(grad_result.graduated_names)
@@ -3947,9 +3908,8 @@ def validated_save_continuity(
 
     # Phase 4: fire the continuity_saved audit event (after the file
     # has been externalized — matches the pre-10.5c.5 "audit after
-    # rename" invariant). The earlier DB-side audit events
-    # (associations_updated, associations_decayed, wrap_completed)
-    # were already flushed by the batch context manager at its
+    # rename" invariant). The earlier DB-side audit events (e.g.
+    # wrap_completed) were already flushed by the batch context manager at its
     # successful exit.
     #
     # Audit exceptions are swallowed here — same pattern and
@@ -4159,22 +4119,13 @@ def validated_save_continuity(
         for cf in grad_result.carried_forward
     ]
 
-    # AM-WARN (v0.4.2): detect the dead-Hebbian-graph mis-wire. Two STRUCTURAL,
-    # false-positive-free signals; a wrap with NO graduations at all (a pure
-    # state/narrative wrap) stays silent on both.
-    #   (A) graduated patterns carried evidence citations but NONE resolved to an
-    #       episode in this store (e.g. ids minted in another namespace) -> the
-    #       graph cannot form and stays dead. This is the
-    #       invisible_infrastructure_failure that ran silent for ~10 wraps.
-    #   (B) co-citation pairs WERE available but nothing formed or strengthened
-    #       -> the association write path itself is mis-wired.
-    # A third signal, (C) AM-LINKGATE (v0.8.3), warned when graduations validated
-    # but none offered a co-citation pair. It went QUIET in 0.9.26, when the
-    # Hebbian hop was retired and pattern recall stopped reading episode links: a
-    # wrap that forms no link is no longer a recall problem, and single-id
-    # citation is often the honest one. That case now shows only as
-    # ``associations_formed == 0`` and ``associations_strengthened == 0`` in the
-    # save result.
+    # AM-WARN (v0.4.2), Signal A: graduated patterns carried evidence citations
+    # but NONE resolved to an episode in this store (e.g. ids minted in another
+    # namespace). Nothing those lines cite can ground them, so graduation runs on
+    # nothing: the invisible_infrastructure_failure that once ran silent for ~10
+    # wraps. A wrap with no graduations at all stays silent. Signal B (pairs
+    # offered but no link formed) was retired in 1.0.2 with link formation: it
+    # would have fired on every wrap. Signal C (AM-LINKGATE) went quiet in 0.9.26.
     association_warning: str | None = None
     # AM-CARRYFORWARD (v0.4.6) interaction: a CITED carried-forward line is a
     # graduation that carried a citation which failed to resolve this wrap —
@@ -4210,18 +4161,6 @@ def validated_save_continuity(
     # graph. any_citation_resolved is True iff some graduation cited a real
     # store episode this wrap, regardless of grounding or cross-session status.
     resolved_any = grad_result.any_citation_resolved
-    # Signal B must consider the SAME co-citation set the association
-    # pipeline actually attempts to record (direct pairs + cross-line
-    # SESSION pairs) — see process_wrap_associations, which forms both via
-    # extract_session_co_citations(all_validated_ids). The pre-0.4.2 check
-    # `any(len(s) >= 2 ...)` only saw same-line multi-id sets, so a mis-wire
-    # that manifested ONLY in cross-line session pairs (two lines each
-    # citing one different real episode) was invisible to Signal B. Mirror
-    # the pipeline exactly so "available but 0 formed/strengthened" catches
-    # that path too. (codex L3 MEDIUM, 0.4.2.)
-    from .graduation import extract_session_co_citations
-    session_pairs = extract_session_co_citations(grad_result.all_validated_ids)
-    cocitation_available = bool(grad_result.direct_co_citations) or bool(session_pairs)
     cited_superseded = sorted(
         sid for sid in superseded_in_window
         if re.search(r"\[evidence:[^\]]*\b" + re.escape(sid) + r"\b", text, re.IGNORECASE)
@@ -4235,17 +4174,20 @@ def validated_save_continuity(
     elif cited_graduations > 0 and not resolved_any:
         association_warning = (
             f"{cited_graduations} graduated-pattern citation(s) this wrap resolved "
-            f"to ZERO episodes in this store — the Hebbian association graph cannot "
-            f"form and will stay dead. Check the citation id namespace (cite this "
-            f"store's episode ids, not ids minted elsewhere)."
-        )
-    elif cocitation_available and assoc_formed == 0 and assoc_strengthened == 0:
-        association_warning = (
-            "Co-citation pairs were available this wrap but 0 associations formed "
-            "or strengthened — the association write path appears mis-wired."
+            f"to ZERO episodes in this store, so none of them can ground a "
+            f"graduation. Check the citation id namespace (cite this store's "
+            f"episode ids, not ids minted elsewhere)."
         )
     if association_warning is not None:
         _warn_after_commit(association_warning)
+    if affective_state is not None:
+        # After the commit, like allow_unlinked below.
+        _warn_after_commit(
+            "affective_state is deprecated and ignored since anneal-memory 1.0.2: "
+            "it weighted association links, which a save no longer forms. Stop "
+            "passing it (CLI --affect-tag; MCP \"affective_state\"); it is removed "
+            "in 2.0."
+        )
     if allow_unlinked is True:
         # After the commit, like every save warning: emitted before it, an
         # error warnings-filter would turn a no-op flag into a failed save.
@@ -4340,7 +4282,7 @@ def validated_save_continuity(
             f"{len(malformed)} graduation line(s) carry an [evidence:] tag that is "
             f"NOT adjacent to the `| Nx (date)` marker (another tag — e.g. "
             f"[provenance:] — sits between them): {', '.join(malformed)}. That "
-            f"evidence will NOT validate or form a Hebbian link. Move [evidence:] "
+            f"evidence will NOT validate. Move [evidence:] "
             f"immediately after the marker, OR use [provenance:] alone (never both "
             f"on one line). The line(s) were left unchanged unless they claimed "
             f"a level above their prior one (then see the level-capped warning)."
@@ -4393,12 +4335,15 @@ def validated_save_continuity(
         carried_forward=carried_forward_payload,
         uncorroborated=[asdict(u) for u in grad_result.uncorroborated],
         pattern_trust=dict(grad_result.pattern_trust),
-        # Both 0 on a wrap that graduated patterns is the former AM-WARN
-        # Signal C case, which went quiet in 0.9.26: these counts are its record.
-        associations_formed=assoc_formed,
-        associations_strengthened=assoc_strengthened,
-        associations_decayed=assoc_decayed,
+        # Kept for existing readers until 2.0; a save forms no link since 1.0.2,
+        # so all three are 0.
+        associations_formed=0,
+        associations_strengthened=0,
+        associations_decayed=0,
         association_warning=association_warning,
+        # The wraps-table id of this save: what a caller keys this wrap's
+        # wrap_graduations / drift rows on, instead of guessing MAX(id).
+        wrap_id=wrap_result.wrap_id,
         linkgate_overridden=False,
         # AM-LINKGATE gauge (spore-721). ``citation_counts`` is filled from
         # ``cited_ids & valid_ids`` on every today-dated graduation line BEFORE

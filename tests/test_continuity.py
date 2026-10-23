@@ -447,6 +447,8 @@ class TestTypedDictReturnShapes:
                 # AM-WARN (v0.4.2): dead-Hebbian-graph mis-wire warning
                 # (str) or None when the association write path is healthy.
                 "association_warning",
+                # Added 1.0.2: the wraps-table id of this save.
+                "wrap_id",
                 # Always False since 0.9.26 (the AM-LINKGATE refusal it
                 # reported was removed); kept for compatibility.
                 "linkgate_overridden",
@@ -5035,7 +5037,8 @@ class TestAmWarn:
         assert result["association_warning"] is None
 
     def test_silent_on_healthy_co_citation(self, tmp_path):
-        # Two real ids co-cited on one line -> links form -> no warning.
+        # Two real ids co-cited on one line: since 1.0.2 no link forms, and that
+        # is not a warning (Signal B was retired with formation).
         text = (
             "## State\nactive.\n\n"
             "## Patterns\n"
@@ -5046,7 +5049,7 @@ class TestAmWarn:
         )
         result = self._save(tmp_path, text, n_episodes=2)
         assert result["association_warning"] is None
-        assert result["associations_formed"] >= 1
+        assert result["associations_formed"] == 0
 
     def test_silent_on_single_resolved_citation(self, tmp_path):
         # THE false-positive guard: one resolved citation forms no pair (correct,
@@ -5096,9 +5099,9 @@ class TestAmWarn:
         self, tmp_path,
     ):
         # The guidance taught co-citation as a per-wrap duty until 0.9.26, when
-        # pattern recall stopped reading episode links. It must now say one id is
-        # fine, forbid padding, say how a link forms, and say recall does not read
-        # links, without the old every-wrap instruction.
+        # pattern recall stopped reading episode links, and described link
+        # formation until 1.0.2, when a save stopped forming links. It must say one
+        # id is fine and forbid padding, with no linking duty and no link.
         from anneal_memory import prepare_wrap
         store = Store(tmp_path / "instr.db", project_name="Instr")
         store.record(
@@ -5110,8 +5113,8 @@ class TestAmWarn:
         blob = str(pkg).lower()
         assert "one id is fine" in blob
         assert "never pad" in blob
-        assert "forms a direct hebbian link" in blob
-        assert "pattern recall does not read them" in blob
+        assert "hebbian" not in blob
+        assert "affective_state" not in blob
         assert "every wrap:" not in blob
         assert "co-cite 2+" not in blob
 
@@ -5172,15 +5175,15 @@ class TestAmWarn:
         finally:
             store.close()
 
-    def test_signal_b_fires_on_cross_line_session_pair_miswire(self, tmp_path, monkeypatch):
-        """codex L3 MEDIUM (v0.4.2): Signal B must catch a write-path mis-wire
-        that manifests ONLY in cross-line SESSION pairs — two graduation lines
-        each citing one different real episode. Pre-fix, cocitation_available
-        only saw same-line multi-id sets, so a dead write path on the session
-        pair was invisible. Simulate the mis-wire (record_associations forms
-        nothing) and assert Signal B now fires."""
-        monkeypatch.setattr(Store, "record_associations",
-                            lambda self, *a, **k: (0, 0))
+    def test_signal_b_is_retired_with_formation(self, tmp_path, monkeypatch):
+        """Signal B (pairs offered, no link formed) caught a dead association
+        write path from v0.4.2. Since 1.0.2 a save forms no link by design, so
+        Signal B would fire on every wrap: it is retired. A save that offers a
+        cross-line session pair warns nothing, and never calls the legacy
+        forming method."""
+        def _never(self, *a, **k):
+            raise AssertionError("a 1.0.2 save must not call record_associations")
+        monkeypatch.setattr(Store, "record_associations", _never)
         text = (
             "## State\nactive.\n\n## Patterns\n"
             '- pattern_a | 2x (2026-06-02) [evidence: {ep0} '
@@ -5189,16 +5192,18 @@ class TestAmWarn:
             '"second discipline rotation substrate observation"]\n\n'
             "## Decisions\n- d.\n\n## Context\n- c.\n"
         )
-        with pytest.warns(UserWarning, match="Co-citation pairs were available"):
-            result = self._save(tmp_path, text, n_episodes=2)
-        assert result["association_warning"] is not None
-        assert "mis-wired" in result["association_warning"]
+        import warnings as _w
+        with _w.catch_warnings(record=True) as caught:
+            _w.simplefilter("always")
+            result = self._save(tmp_path, text, n_episodes=2,
+                                seed={'pattern_a': 1, 'pattern_b': 1})
+        assert not [w for w in caught if "Co-citation pairs" in str(w.message)]
+        assert result["association_warning"] is None
         assert result["associations_formed"] == 0
 
     def test_silent_on_cross_line_session_pair(self, tmp_path):
-        # Two graduations each cite ONE different real episode: the two
-        # single-id lines form a CROSS-LINE SESSION pair (ep0, ep1), so a real
-        # Hebbian link forms and Signal B stays silent. No warning.
+        # Two graduations each cite ONE different real episode (a cross-line
+        # session pair): no link forms since 1.0.2, and no warning.
         text = (
             "## State\nactive.\n\n## Patterns\n"
             '- pattern_a | 2x (2026-06-02) [evidence: {ep0} '
@@ -5213,7 +5218,7 @@ class TestAmWarn:
             result = self._save(tmp_path, text, n_episodes=2, seed={'pattern_a': 1, 'pattern_b': 1})
         assert not [w for w in caught if issubclass(w.category, UserWarning)]
         assert result["association_warning"] is None
-        assert result["associations_formed"] >= 1
+        assert result["associations_formed"] == 0
 
 
 def test_a_post_commit_warning_under_an_error_filter_does_not_fail_a_committed_save(
@@ -5429,7 +5434,8 @@ class TestAmLinkgateRemoved:
             "## Decisions\n- d.\n\n## Context\n- c.\n"
         )
         same_lone_episode = self.TWO_LINES.replace("{ep1}", "{ep0}")
-        # (shape, does it offer a pair, so Signal B fires on the mis-wire)
+        # (shape, does it offer a pair). Signal B was retired in 1.0.2, so no
+        # shape warns, whatever it offers.
         for name, template, offers_pair in (
             ("two", self.TWO_LINES, True),
             ("one", one_line, True),
@@ -5447,8 +5453,8 @@ class TestAmLinkgateRemoved:
                     w for w in caught
                     if "Co-citation pairs were available" in str(w.message)
                 ]
-                assert bool(b_warned) is offers_pair, name
-                assert (result["association_warning"] is not None) is offers_pair, name
+                assert not b_warned, name
+                assert result["association_warning"] is None, name
                 assert result["associations_formed"] == 0, name
                 assert result["linkgate_overridden"] is False, name
                 assert "- pattern_a |" in (store.load_continuity() or ""), name
@@ -6320,6 +6326,8 @@ class TestCompostSever:
     ):
         # L1+L2 convergent MED, reproduced 2026-09-24: the post-commit
         # co-graduation seed re-linked a name the same save had just severed.
+        # Since 1.0.2 a save seeds nothing at all, which closes it whole; the
+        # sever itself still runs, on a link that existed before the save.
         from anneal_memory import prepare_wrap
 
         store = Store(str(tmp_path / "g.db"), project_name="G")
@@ -6327,8 +6335,10 @@ class TestCompostSever:
             _seed_prior_levels(store, {'alpha': 1, 'beta': 1, 'gamma': 1})
             e1 = store.record("wiring guard fires late in prepare", EpisodeType.OBSERVATION)
             e2 = store.record("wiring guard fires late on save", EpisodeType.OBSERVATION)
-            token = prepare_wrap(store)["wrap_token"]
             today = date.today().isoformat()
+            # A pre-1.0.2 link to sever (the legacy API forms it: no 1.0.2 save yet).
+            store.seed_pattern_co_graduation(["alpha", "beta"], today=today)
+            token = prepare_wrap(store)["wrap_token"]
             ids = f"{e1.id[:8]}, {e2.id[:8]}"
             lines = "".join(
                 f'- {n} | 2x ({today}) [evidence: {ids} "wiring guard fires late"] — {n}\n'
@@ -6347,13 +6357,12 @@ class TestCompostSever:
                 result = validated_save_continuity(
                     store, text, wrap_token=token, compost=["alpha"]
                 )
-            assert result["composted"] == {"alpha": 0}
+            assert result["composted"] == {"alpha": 1}  # the alpha-beta link severed
             assert store.continuity_path.read_text(encoding="utf-8") == text
             assert "also graduated" in caplog.text  # delivered, as a log line
             names = store._conn.execute(
                 "SELECT name_a, name_b FROM pattern_associations"
             ).fetchall()
-            assert names  # beta-gamma still seeded
-            assert not any("alpha" in tuple(r) for r in names)
+            assert names == []  # no co-graduation seed since 1.0.2
         finally:
             store.close()

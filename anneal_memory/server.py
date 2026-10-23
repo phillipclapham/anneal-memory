@@ -1348,12 +1348,15 @@ class Server:
                 f"max {a.max_strength:.1f}, "
                 f"{density_str}"
             )
-            formation = self._store.association_formation()
-            if formation["off_at_wrap"] is not None:
-                lines.append(
-                    f"No new links since wrap {formation['off_at_wrap']} "
-                    f"(formation off since anneal-memory 1.0.2)"
-                )
+
+        # Outside the link block: a store created on 1.0.2 has no links at all,
+        # and its status must still say formation is off (codex L3 r1).
+        formation = self._store.association_formation()
+        if formation["off_at_wrap"] is not None:
+            lines.append(
+                f"No new links since wrap {formation['off_at_wrap']} "
+                f"(formation off since anneal-memory 1.0.2)"
+            )
 
         # Audit layer visibility — tamper-evident trail is load-bearing
         # for the "grounded memory" claim. Agents and operators need to

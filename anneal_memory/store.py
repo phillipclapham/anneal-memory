@@ -9053,16 +9053,19 @@ class Store:
         inside the save's batch, so it commits or rolls back with that wrap.
         """
         from . import __version__
-        for key, value in (
-            (FORMATION_MODE_KEY, FORMATION_DISABLED),
-            (FORMATION_OFF_AT_WRAP_KEY, None if wrap_id is None else str(wrap_id)),
-            (FORMATION_OFF_BY_VERSION_KEY, __version__),
-        ):
-            if value is not None:
-                self._conn.execute(
-                    "INSERT OR IGNORE INTO metadata (key, value) VALUES (?, ?)",
-                    (key, value),
-                )
+        # Through the boundary, so a database failure here (disk full) reaches the
+        # caller as StoreError and rolls the save back, like the save's own writes.
+        with self._db_boundary("association_formation"):
+            for key, value in (
+                (FORMATION_MODE_KEY, FORMATION_DISABLED),
+                (FORMATION_OFF_AT_WRAP_KEY, None if wrap_id is None else str(wrap_id)),
+                (FORMATION_OFF_BY_VERSION_KEY, __version__),
+            ):
+                if value is not None:
+                    self._conn.execute(
+                        "INSERT OR IGNORE INTO metadata (key, value) VALUES (?, ?)",
+                        (key, value),
+                    )
 
     def association_stats(self) -> AssociationStats:
         """Get Hebbian association network health metrics."""

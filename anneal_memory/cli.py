@@ -687,14 +687,17 @@ def cmd_status(args: argparse.Namespace) -> None:
         if status.tombstone_count > 0:
             print(f"Tombstones: {status.tombstone_count}")
 
+        # Outside the link block: a store created on 1.0.2 has no links at all,
+        # and its status must still say formation is off (codex L3 r1).
+        formation = store.association_formation()
+        if formation["off_at_wrap"] is not None:
+            print(f"\nNo new links since wrap {formation['off_at_wrap']} "
+                  f"(formation off since anneal-memory 1.0.2)")
+
         if status.association_stats and status.association_stats.total_links > 0:
             a = status.association_stats
             print()
             print(f"Associations: {a.total_links} links")
-            formation = store.association_formation()
-            if formation["off_at_wrap"] is not None:
-                print(f"  No new links since wrap {formation['off_at_wrap']} "
-                      f"(formation off since anneal-memory 1.0.2)")
             print(f"  Avg strength:    {a.avg_strength:.3f}")
             print(f"  Max strength:    {a.max_strength:.3f}")
             print(f"  Global density:  {a.density:.4f}")

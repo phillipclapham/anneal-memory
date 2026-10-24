@@ -1877,7 +1877,17 @@ def _prepare_fingerprint(
     re-read here (integration L3 r2, codex MED): ``crystal_hash`` is read
     BEFORE the package is composed, so a crystal change landing during the
     composition makes every later replay mismatch (refused, never a second
-    package)."""
+    package).
+
+    Known edge, kept (1024+7 head, integration L3 r3 codex MED, reachability
+    line): the composition reads the crystal document more than once, each in
+    its own snapshot, so a crystal change landing inside a prepare's
+    composition makes a lost-response retry refuse (``sources_moved``) where it
+    could have rebuilt the same package; the wrap stays open and is saved from
+    the first package or cancelled. Under a lease only the holder, who is the
+    one composing, can change crystals. The fix, if it is ever reached, is to
+    compose from one read of the document with its hash (a read at one
+    version, as an MVCC snapshot read), never another check."""
     return hashlib.sha256(json.dumps({
         "episode_ids": sorted(episode_ids),
         "schema": schema,

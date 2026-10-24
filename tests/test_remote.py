@@ -21,6 +21,17 @@ from anneal_memory.store import Store
 
 @pytest.fixture
 def served(tmp_path: Path):
+    yield from _serve(tmp_path)
+
+
+@pytest.fixture
+def served_outbox(tmp_path: Path):
+    yield from _serve(tmp_path, outbox=tmp_path / "outbox" / "outbox.jsonl")
+
+
+def _serve(tmp_path: Path, outbox: Path | None = None):
+    if outbox is not None:
+        outbox.parent.mkdir()
     db = tmp_path / "memory.db"
     with Store(db) as s:
         s.record("the replica answers from argushub over funnel", "observation")
@@ -31,7 +42,7 @@ def served(tmp_path: Path):
     tokens = tmp_path / "tokens"
     a = remote.token_add(tokens, "claude-ai")
     b = remote.token_add(tokens, "other")
-    httpd = remote.make_server(db, tokens, port=0)
+    httpd = remote.make_server(db, tokens, port=0, outbox=outbox)
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
     base = f"http://127.0.0.1:{httpd.server_address[1]}"
 
@@ -162,3 +173,52 @@ def test_head_and_options_answer_behind_auth(served):
         head, _, rest = got.partition(b"\r\n\r\n")
         assert head.split()[1] == status and rest == b""
         assert (b"Content-Length" in head) is (status != b"204")
+
+def test_capture_appends_one_line_and_never_touches_the_store(served_outbox):
+    call, a, _b, _t, path = served_outbox
+    outbox = path / "outbox" / "outbox.jsonl"
+    store_files = {p.name: p.read_bytes() for p in path.iterdir() if p.is_file()}
+    _s, r = call(f"/mcp/{a}", _LIST)
+    tools = {t["name"]: t for t in r["result"]["tools"]}
+    assert set(tools) == {*remote.REMOTE_TOOLS, "capture"}
+    assert tools["capture"]["annotations"]["readOnlyHint"] is False
+    _s, r = call(f"/mcp/{a}", _tool("capture", {"content": "remember\u202e the funnel",
+                                               "episode_type": "decision"}))
+    assert r["result"].get("isError") is not True
+    assert "not recallable before then" in r["result"]["content"][0]["text"]
+    (line,) = outbox.read_text().splitlines()
+    rec = json.loads(line)
+    assert set(rec) == {"v", "id", "connector", "at", "episode_type", "content"}
+    assert rec["connector"] == "claude-ai" and rec["episode_type"] == "decision"
+    assert rec["content"] == "remember the funnel" and len(rec["id"]) == 32
+    assert {p.name: p.read_bytes() for p in path.iterdir() if p.is_file()} == store_files
+    # Without --outbox the tool does not exist at all.
+    plain = remote.RemoteSession(path / "memory.db")
+    r = plain.handle(_LIST, "claude-ai")
+    assert "capture" not in {t["name"] for t in r["result"]["tools"]}
+    r = plain.handle(_tool("capture", {"content": "x", "episode_type": "observation"}), "claude-ai")
+    assert r["result"]["content"][0]["text"] == "Unknown tool: capture"
+
+
+def test_capture_refusals_and_writes_stay_unreachable(served_outbox, monkeypatch):
+    call, a, b, _t, path = served_outbox
+    outbox = path / "outbox" / "outbox.jsonl"
+    for name in ("record", "prepare_wrap", "save_continuity", "delete_episode", "spore_add"):
+        _s, r = call(f"/mcp/{a}", _tool(name, {"content": "x", "episode_type": "observation"}))
+        assert r["result"]["content"][0]["text"] == f"Unknown tool: {name}"
+    for args in ({"content": "x", "episode_type": "wish"}, {"content": " \u200f ", "episode_type": "context"},
+                 {"content": "x" * (remote.MAX_CAPTURE_CHARS + 1), "episode_type": "context"},
+                 {"content": "x", "episode_type": "context", "trust": "operator"},
+                 {"content": 5, "episode_type": "context"}):
+        _s, r = call(f"/mcp/{a}", _tool("capture", args))
+        assert r["result"]["isError"] is True, args
+    assert not outbox.exists()
+    monkeypatch.setattr(remote, "CAPTURES_PER_HOUR", 2)
+    ok = {"content": "x", "episode_type": "context"}
+    assert [call(f"/mcp/{a}", _tool("capture", ok))[1]["result"].get("isError") is True
+            for _ in range(3)] == [False, False, True]
+    assert call(f"/mcp/{b}", _tool("capture", ok))[1]["result"].get("isError") is not True  # per connector
+    monkeypatch.setattr(remote, "MAX_OUTBOX_BYTES", outbox.stat().st_size + 10)
+    _s, r = call(f"/mcp/{b}", _tool("capture", ok))
+    assert "outbox is full" in r["result"]["content"][0]["text"]
+    assert len(outbox.read_text().splitlines()) == 3

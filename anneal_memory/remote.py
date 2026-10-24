@@ -1,5 +1,5 @@
-"""Remote, read-only MCP over Streamable HTTP (experimental; not part of the
-frozen public surface in docs/stability.md).
+"""Remote MCP over Streamable HTTP that never writes the store (experimental;
+not part of the frozen public surface in docs/stability.md).
 
 Serves a store to a remote MCP client (a claude.ai custom connector) over the
 Streamable HTTP transport, JSON responses only, no SSE stream, no session id.
@@ -14,6 +14,13 @@ What makes it read-only is structure, not a check:
   No write or consolidate handler is referenced from this module, so no
   argument, method name or path can route to one.
 - ``resources/*`` is not offered.
+
+One write exists, and only when ``serve --outbox PATH`` is given: the
+``capture`` tool appends one JSON line per episode to that outbox file, a
+separate file the store never reads. It does not open the store at all. The
+operator's own process moves outbox lines into memory later, so the store
+keeps one writer. Without ``--outbox`` the
+tool is not listed and calling it answers "Unknown tool".
 
 Authentication is a per-connector bearer token, accepted in either of two
 places, because claude.ai's "Request headers" field was a beta limited to some
@@ -33,7 +40,7 @@ Usage::
     python -m anneal_memory.remote token-add claude-ai --token-file tokens
     python -m anneal_memory.remote token-revoke claude-ai --token-file tokens
     python -m anneal_memory.remote serve --db memory.db --token-file tokens \\
-        [--host 127.0.0.1] [--port 8765]
+        [--host 127.0.0.1] [--port 8765] [--outbox outbox.jsonl]
 
 Bind to loopback and put a TLS-terminating proxy in front (Tailscale Funnel,
 ``tailscale funnel --bg 8765``); this server speaks plain HTTP.
@@ -60,8 +67,10 @@ from typing import Any, Callable, Iterator
 
 from . import __version__
 from ._fsdir import _fsync_dir
+from .origin import strip_hidden_controls
 from .server import Server, _tool_result
 from .store import Store
+from .types import EpisodeType
 
 logger = logging.getLogger("anneal-memory.remote")
 
@@ -78,6 +87,10 @@ MAX_CONCURRENT = 8
 MAX_CONNECTIONS = 32
 MAX_REPLY_BYTES = 4 * 1024 * 1024
 MAX_RECALL_LIMIT = 200
+
+MAX_CAPTURE_CHARS = 4000
+MAX_OUTBOX_BYTES = 8 * 1024 * 1024
+CAPTURES_PER_HOUR = 60
 
 # Browsers send Origin; claude.ai's backend calls are expected not to. A present
 # Origin outside this set is refused (Streamable HTTP: 403 on an invalid Origin).
@@ -118,6 +131,33 @@ def _remote_tool_defs() -> list[dict[str, Any]]:
     defs = [by_name[name] for name in _SERVER_READ_TOOLS] + [READ_CONTINUITY_TOOL]
     return [{**d, "annotations": {**d.get("annotations", {}), **_READ_ONLY_ANNOTATIONS}}
             for d in defs]
+
+
+CAPTURE_TOOL: dict[str, Any] = {
+    "name": "capture",
+    "description": (
+        "Save one new episode to memory: something the user wants remembered "
+        "(an observation, a decision, an outcome). Append-only: it cannot edit "
+        "or delete anything. It reaches memory at the next sync, not at once, "
+        "so do not expect recall to find it in this conversation."
+    ),
+    "inputSchema": {
+        "type": "object",
+        "properties": {
+            "content": {"type": "string", "minLength": 1, "maxLength": MAX_CAPTURE_CHARS,
+                        "description": "The episode text, self-contained."},
+            "episode_type": {"type": "string", "enum": [t.value for t in EpisodeType]},
+        },
+        "required": ["content", "episode_type"],
+        "additionalProperties": False,
+    },
+    # A write: clients that gate on readOnlyHint (ChatGPT) ask the user first.
+    "annotations": {"readOnlyHint": False, "destructiveHint": False,
+                    "idempotentHint": False, "openWorldHint": False},
+}
+
+CAPTURED_REPLY = ("Captured. It reaches the memory at the next sync; it is not "
+                  "recallable before then.")
 
 
 # The stdio tools exposed remotely. Each name maps to the Server method that
@@ -235,8 +275,72 @@ class RemoteSession:
     a replica swapped underneath is picked up by the next call, and threads
     never share a connection (Store is single-thread)."""
 
-    def __init__(self, db_path: str | Path) -> None:
+    def __init__(self, db_path: str | Path, outbox: str | Path | None = None) -> None:
         self._db_path = Path(db_path)
+        self._outbox = Path(outbox) if outbox is not None else None
+        self._rate_lock = threading.Lock()
+        self._recent: dict[str, list[float]] = {}
+
+    def _tools(self) -> tuple[str, ...]:
+        return (*REMOTE_TOOLS, "capture") if self._outbox is not None else REMOTE_TOOLS
+
+    def _capture(self, connector: str | None, arguments: dict[str, Any]) -> dict[str, Any]:
+        """Append one episode line to the outbox. Never touches the store."""
+        assert self._outbox is not None
+        if connector is None:
+            return _tool_result("Error: capture needs an authenticated connector", is_error=True)
+        if set(arguments) != {"content", "episode_type"}:
+            return _tool_result("Error: arguments are exactly content and episode_type",
+                                is_error=True)
+        content, etype = arguments["content"], arguments["episode_type"]
+        if not isinstance(etype, str) or etype not in {t.value for t in EpisodeType}:
+            return _tool_result("Error: unknown episode_type", is_error=True)
+        if not isinstance(content, str):
+            return _tool_result("Error: content must be a string", is_error=True)
+        content = strip_hidden_controls(content).strip()
+        if not 1 <= len(content) <= MAX_CAPTURE_CHARS:
+            return _tool_result(f"Error: content must be 1..{MAX_CAPTURE_CHARS} characters",
+                                is_error=True)
+        now = time.monotonic()
+        with self._rate_lock:
+            recent = [t for t in self._recent.get(connector, []) if now - t < 3600]
+            if len(recent) >= CAPTURES_PER_HOUR:
+                self._recent[connector] = recent
+                return _tool_result("Error: capture rate limit reached; try later", is_error=True)
+            recent.append(now)
+            self._recent[connector] = recent
+        line = json.dumps({
+            "v": 1, "id": secrets.token_hex(16), "connector": connector,
+            "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "episode_type": etype, "content": content,
+        }, ensure_ascii=True) + "\n"
+        try:
+            import fcntl
+        except ImportError:
+            fcntl = None  # type: ignore[assignment]
+        # Contract for a puller: rename the outbox only while holding this lock. The
+        # append opens by path under the lock, so it lands wholly before or after.
+        lock_fd = os.open(self._outbox.with_name(self._outbox.name + ".lock"),
+                          os.O_RDWR | os.O_CREAT, 0o600)
+        try:
+            if fcntl is not None:
+                fcntl.flock(lock_fd, fcntl.LOCK_EX)
+            try:
+                size = self._outbox.stat().st_size
+            except FileNotFoundError:
+                size = 0
+            if size + len(line) > MAX_OUTBOX_BYTES:
+                return _tool_result("Error: the capture outbox is full until the next sync",
+                                    is_error=True)
+            fd = os.open(self._outbox, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+            try:
+                os.write(fd, line.encode("ascii"))
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+        finally:
+            os.close(lock_fd)
+        return _tool_result(CAPTURED_REPLY)
 
     def _bind(self, server: Server, store: Store) -> dict[str, Callable[[dict[str, Any]], Any]]:
         def read_continuity(_args: dict[str, Any]) -> dict[str, Any]:
@@ -250,8 +354,9 @@ class RemoteSession:
             "read_continuity": read_continuity,
         }
 
-    def handle(self, msg: dict[str, Any]) -> dict[str, Any] | None:
-        """The response for ``msg``, or None for a notification."""
+    def handle(self, msg: dict[str, Any], connector: str | None = None) -> dict[str, Any] | None:
+        """The response for ``msg``, or None for a notification. ``connector`` is
+        the authenticated token name; a capture records it and needs it."""
         method = msg.get("method")
         msg_id = msg.get("id")
         if msg.get("jsonrpc") != "2.0" or not isinstance(method, str):
@@ -270,15 +375,20 @@ class RemoteSession:
                 "capabilities": {"tools": {}},
                 "serverInfo": {"name": "anneal-memory-remote", "version": __version__},
                 "instructions": (
-                    "Read-only access to an anneal-memory store. read_continuity "
+                    "Read access to an anneal-memory store. read_continuity "
                     "returns the compressed long-term memory; recall searches "
                     "episodes; crystal_recall/crystal_index read crystallized patterns."
+                    + (" capture appends a new episode, which reaches memory at the "
+                       "next sync." if self._outbox is not None else "")
                 ),
             })
         if method == "ping":
             return _rpc_result(msg_id, {})
         if method == "tools/list":
-            return _rpc_result(msg_id, {"tools": _remote_tool_defs()})
+            defs = _remote_tool_defs()
+            if self._outbox is not None:
+                defs.append(CAPTURE_TOOL)
+            return _rpc_result(msg_id, {"tools": defs})
         if method == "tools/call":
             name = params.get("name")
             arguments = params.get("arguments")
@@ -286,8 +396,15 @@ class RemoteSession:
                 arguments = {}
             if not isinstance(arguments, dict):
                 return _rpc_error(msg_id, -32602, "arguments must be an object")
-            if name not in REMOTE_TOOLS:
+            if name not in self._tools():
                 return _rpc_result(msg_id, _tool_result(f"Unknown tool: {name}", is_error=True))
+            if name == "capture":
+                try:
+                    return _rpc_result(msg_id, self._capture(connector, arguments))
+                except OSError as e:
+                    logger.error("capture failed: %s", type(e).__name__)
+                    return _rpc_result(msg_id, _tool_result(f"Error: {type(e).__name__}",
+                                                            is_error=True))
             if name == "recall":
                 # The stdio recall has no ceiling on limit; a remote reply does.
                 limit = arguments.get("limit")
@@ -491,7 +608,7 @@ class _Handler(BaseHTTPRequestHandler):
             self._send(503, extra={"Retry-After": "2"})
             return
         try:
-            reply = self.session.handle(msg)
+            reply = self.session.handle(msg, connector)
         finally:
             self.slots.release()
         method = msg.get("method")
@@ -499,7 +616,7 @@ class _Handler(BaseHTTPRequestHandler):
         tool = params.get("name") if method == "tools/call" and isinstance(params, dict) else None
         logger.info("connector=%s method=%s%s", connector,
                     method if isinstance(method, str) and method.isprintable() else "?",
-                    f" tool={tool}" if isinstance(tool, str) and tool in REMOTE_TOOLS else "")
+                    f" tool={tool}" if isinstance(tool, str) and tool in self.session._tools() else "")
         if reply is None:
             self._send(202)
             return
@@ -542,15 +659,18 @@ class _BoundedServer(ThreadingHTTPServer):
 
 
 def make_server(db_path: str | Path, tokens_path: str | Path,
-                host: str = "127.0.0.1", port: int = 8765) -> ThreadingHTTPServer:
-    """A ready (not yet serving) HTTP server. Fails fast on a bad token file or
-    a store that cannot be opened read-only."""
+                host: str = "127.0.0.1", port: int = 8765,
+                outbox: str | Path | None = None) -> ThreadingHTTPServer:
+    """A ready (not yet serving) HTTP server. Fails fast on a bad token file, a
+    store that cannot be opened read-only, or an outbox whose directory is missing."""
     load_tokens(tokens_path)
+    if outbox is not None and not Path(outbox).parent.is_dir():
+        raise ValueError(f"outbox directory does not exist: {Path(outbox).parent}")
     with Store(db_path, read_only=True, audit=False):
         pass
     handler = type("Handler", (_Handler,), {
         "tokens_path": Path(tokens_path),
-        "session": RemoteSession(db_path),
+        "session": RemoteSession(db_path, outbox),
         "slots": threading.BoundedSemaphore(MAX_CONCURRENT),
     })
     return _BoundedServer((host, port), handler)
@@ -565,6 +685,8 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--token-file", required=True)
     s.add_argument("--host", default="127.0.0.1")
     s.add_argument("--port", type=int, default=8765)
+    s.add_argument("--outbox", default=None,
+                   help="enable the append-only capture tool, writing to this file")
     for cmd in ("token-add", "token-revoke"):
         t = sub.add_parser(cmd)
         t.add_argument("name")
@@ -583,8 +705,9 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-    httpd = make_server(args.db, args.token_file, args.host, args.port)
-    logger.info("serving read-only on http://%s:%d/mcp", args.host, args.port)
+    httpd = make_server(args.db, args.token_file, args.host, args.port, args.outbox)
+    logger.info("serving on http://%s:%d/mcp (capture %s)", args.host, args.port,
+                "on" if args.outbox else "off")
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:

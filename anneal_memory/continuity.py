@@ -1862,6 +1862,14 @@ def _save_replay(store: Store, result_json: str | None) -> SaveContinuityReplayR
         **{name: stored.get(name) for name in _SAVE_REPLAY_FIELDS}, "replayed": True})
 
 
+def _crystal_input_hash(store: Store, crystal_store: CrystalStore | None) -> str | None:
+    """The crystal document's hash when crystals are an input to the package
+    (a ``crystal_store`` was passed), else ``None``: a package composed without
+    crystals must not be refused for a crystal change (integration L3 r4,
+    codex MED)."""
+    return None if crystal_store is None else _conn_crystal_hash(store._conn)
+
+
 def _prepare_fingerprint(
     episode_ids: list[str], schema: Any, continuity: str | None,
     today: str | None, crystal_hash: str | None,
@@ -1934,12 +1942,12 @@ def _replay_prepare(
     # crystal hash is read on both sides of the composition, and a move refuses.
     continuity = store.load_continuity()
     wrap_today = store._get_metadata("wrap_today") or None
-    crystal_before = _conn_crystal_hash(store._conn)
+    crystal_before = _crystal_input_hash(store, crystal_store)
     package, _roots, _identities = _compose_wrap_package(
         store, episodes, continuity, schema, max_chars=max_chars,
         staleness_days=staleness_days, crystal_store=crystal_store,
         today=wrap_today)
-    if (_conn_crystal_hash(store._conn) != crystal_before or _prepare_fingerprint(
+    if (_crystal_input_hash(store, crystal_store) != crystal_before or _prepare_fingerprint(
             snapshot["episode_ids"], schema, continuity, wrap_today,
             crystal_before) != stored.get("package_sha256")):
         raise IdempotencyConflictError(
@@ -2361,7 +2369,7 @@ def prepare_wrap(
     schema_warning = schema_role_warning(schema)
     if schema_warning is not None:
         warnings.warn(schema_warning, UserWarning, stacklevel=2)
-    crystal_before = _conn_crystal_hash(store._conn)  # read before composing (_prepare_fingerprint)
+    crystal_before = _crystal_input_hash(store, crystal_store)  # before composing (_prepare_fingerprint)
     package, derive_roots, frozen_identities = _compose_wrap_package(
         store, episodes, existing, schema, max_chars=max_chars,
         staleness_days=staleness_days, crystal_store=crystal_store)

@@ -1332,10 +1332,14 @@ class IdempotencyConflictError(StoreError):
     from the call's. The key named one request; this call is another. Nothing
     was written by this call, and the first request's effect stands.
 
-    ``reason`` is ``"request_mismatch"`` for that case, or ``"wrap_closed"``
+    ``reason`` is ``"request_mismatch"`` for that case; ``"wrap_closed"``
     when a keyed ``prepare_wrap`` is retried after the wrap it opened was
     saved or cancelled: the key's result was that wrap, which no longer
-    exists, so no package is returned."""
+    exists, so no package is returned; ``"sources_moved"`` when a keyed
+    ``prepare_wrap`` retry would rebuild a package other than the one the
+    first call returned; ``"effect_erased"`` when a keyed ``record`` retry
+    finds its episode deleted, or another episode under the same id. Every
+    replay fails closed: never a result other than the first call's."""
 
     def __init__(
         self, message: str, *, operation: StoreOperation, path: str | None = None,
@@ -1360,7 +1364,8 @@ class LeaseFencedError(AnnealMemoryError):
 
     From :meth:`Store.lease_acquire` while an unexpired lease exists; from
     :meth:`Store.lease_renew` when the token is not the live lease's; from
-    ``prepare_wrap(lease_token=...)`` when the token holds no unexpired lease;
+    ``prepare_wrap(lease_token=...)`` when the token holds no unexpired lease,
+    and from ``prepare_wrap`` without one while an unexpired lease exists;
     from ``validated_save_continuity`` when the fence predicate fails; and from
     every identity commit (``save_continuity``, ``save_meta``,
     ``replace_section``, a wrap's save) on a store where an unexpired lease
@@ -1370,7 +1375,7 @@ class LeaseFencedError(AnnealMemoryError):
     ``no_lease`` (no lease row, or none for the presented token),
     ``token_mismatch`` (the token presented is not the one the wrap was
     prepared under or the live lease's, or a leased wrap's save presented
-    none), ``expired`` (the tenure the token names has lapsed or was
+    none, or the wrap's lease record is unreadable), ``expired`` (the tenure the token names has lapsed or was
     released), ``version_moved`` (another identity version was written since
     the prepare), ``lease_held`` (an unexpired lease exists and the commit
     presented no token). ``holder``, ``epoch`` and ``expires_at`` describe the
@@ -2366,8 +2371,9 @@ _DEFAULT_METADATA = {
     # wrap_token, so a value a binary that predates the key left behind can never
     # bind a later wrap. Additive lifecycle key, cleared on every terminal path.
     "wrap_bound_token": "",
-    # Generation 3: the lease fence a wrap was prepared under, JSON
-    # {"token", "token_hash", "holder", "epoch", "identity_version"}, else empty.
+    # Generation 3: what a wrap was prepared under, JSON {"token",
+    # "identity_version"} plus {"token_hash", "holder", "epoch"} when under a
+    # lease; empty on a generation-2 handle or a wrap a binary before it opened.
     # Bound to the wrap's token, so a value left by an earlier wrap never fences a later one.
     # Additive lifecycle key, cleared on every terminal path.
     "wrap_lease": "",
@@ -3764,8 +3770,8 @@ class Store:
             SupersessionError: a ``supersedes`` link failed validation.
             OriginKeyConflict: ``origin_key`` is stored with another payload.
             IdempotencyConflictError: ``idempotency_key`` is stored for another
-                request.
-            ValueError: ``idempotency_key`` recorded an episode since deleted.
+                request (``request_mismatch``), or the episode it recorded was
+                deleted or replaced under the same id (``effect_erased``).
             ValueError: ``origin_key`` is outside the grammar, or belonged to a
                 deleted episode (a key is never reused).
             ValueError: ``state_key`` is not a valid key.
@@ -3792,7 +3798,6 @@ class Store:
         if isinstance(episode_type, str):
             episode_type = EpisodeType(episode_type)
 
-        self._check_trust_ceiling("record", trust)  # before anything is written
         ts = timestamp or _now_utc()
         meta_json = json.dumps(metadata) if metadata is not None else None
         old_ids = _normalize_supersedes(supersedes)
@@ -3823,6 +3828,14 @@ class Store:
                 "state_key": key, "trust": trust, "trust_via": trust_via,
                 "derived_from": source_ids, "origin_key": origin_key,
             })
+            # B3 L3 r1 U5: a committed request is replayed (or refused as another
+            # request) before admission validation, so a store opened under
+            # another policy (a lower trust ceiling) still returns it. Final
+            # outside a transaction; an unused key is re-read under the lock.
+            replayed, stored = self._idempotency_replay(idempotency_key, request_hash, "record")
+            if replayed:
+                return self._record_replay(idempotency_key, stored)
+        self._check_trust_ceiling("record", trust)  # before anything is written
 
         # Retry with incrementing nonce on ID collision (birthday or duplicate content).
         # 10.5c.5 L3 Fix #17: batch-aware commit. If this method is
@@ -3891,7 +3904,7 @@ class Store:
                     # reused for another request (B3 r1 T6).
                     self._idempotency_insert(
                         idempotency_key, "record", request_hash,
-                        json.dumps({"episode_id": keyed_row["id"]}))
+                        self._record_key_result(keyed_row["id"]))
             missing_sources: list[str] = []
             problem: str | None = None
             minted_key: str | None = None
@@ -3987,7 +4000,7 @@ class Store:
                     if idempotency_key is not None:
                         self._idempotency_insert(
                             idempotency_key, "record", request_hash,
-                            json.dumps({"episode_id": ep_id}))
+                            self._record_key_result(ep_id))
                 self._conn.execute("RELEASE record_state_key")
             # On a refusal this commits an empty transaction (releasing the
             # lock); inside a batch it leaves the batch's writes alone.
@@ -3996,16 +4009,7 @@ class Store:
         if idem_status == "conflict":
             self._idempotency_conflict(idempotency_key or "", "record")
         if idem_status == "match":
-            # The episode, not its text, is what the row keeps: a key row holding
-            # content would outlive the episode's deletion (W3 erasure).
-            stored_id = json.loads(idem_result or "{}").get("episode_id")
-            replayed = self.get(stored_id) if isinstance(stored_id, str) else None
-            if replayed is None:
-                raise ValueError(
-                    f"idempotency_key {idempotency_key!r} recorded episode "
-                    f"{stored_id!r}, which has since been deleted. Nothing was recorded."
-                )
-            return replayed
+            return self._record_replay(idempotency_key or "", idem_result)
         if keyed_row is not None:
             if (keyed_row["content"], keyed_row["type"], keyed_row["source"]) != (
                 content, episode_type.value, source
@@ -7273,7 +7277,9 @@ class Store:
                 (:meth:`wrap_lease_fence`), and the save is admitted only when it
                 presents the same token and all three still hold. A token that is
                 not the live lease's raises :class:`LeaseFencedError`; nothing is
-                written.
+                written. Without it, an unexpired lease refuses the start
+                (``lease_held``); either way the latest identity version is
+                recorded, and the wrap's save is refused when it moved.
             idempotency: ``(key, request_hash, result_json)`` from
                 ``prepare_wrap(idempotency_key=...)``: the key row is inserted in
                 this transaction. Looked up first, before either wrap-in-progress
@@ -7489,9 +7495,17 @@ class Store:
                 now_text = self.load_continuity() or ""
                 if hashlib.sha256(now_text.encode("utf-8")).hexdigest() != expect_continuity_sha256:
                     raise WrapContinuityMovedError()
+            # Every wrap records the identity version it was prepared on, the
+            # save's precondition leased or not (B3 L3 r1 U1). Without a token, a
+            # live lease refuses the prepare (``lease_held``): a tokenless caller
+            # never opens the global wrap under another's tenure.
             lease_json = ""
             if lease_token is not None:
                 lease_json = json.dumps({"token": token, **self._lease_prepare(lease_token)})
+            elif self._identity_table_present():
+                self._lease_gate("prepare_wrap", None, None)
+                lease_json = json.dumps({
+                    "token": token, "identity_version": self._latest_identity_version()})
             frozen_schema = live_schema
             frozen_schema_json = json.dumps(frozen_schema)
             self._conn.execute(
@@ -9881,11 +9895,12 @@ class Store:
 
         Every identity commit funnels through here, so the lease gate is here
         (:meth:`_lease_gate`, inside the caller's write transaction): on a store
-        with an unexpired lease the writer must present its token, and a wrap
+        with an unexpired lease the writer must present its token, a wrap
         prepared under a lease (``lease_prepared``) must present the token it
-        was prepared under. ``fenced=False`` only for the store's own bootstrap
-        (the migration seed and the adoption of a file with no version), which
-        no writer makes."""
+        was prepared under, and a wrap's save is refused when the latest version is
+        not the one it was prepared on. ``fenced=False`` only for the generation
+        2 to 3 migration seed, which no writer makes (adoption is gated, and
+        defers under a live lease)."""
         if fenced:
             self._lease_gate(f"identity commit ({source})", lease_token, lease_prepared)
         version = self._conn.execute(
@@ -10212,7 +10227,8 @@ class Store:
     def _adopt_continuity_file(self) -> None:
         """No version row yet: a continuity file beside the store becomes
         version 1 (with its meta sidecar), under the write lock with the
-        emptiness re-checked. Called by :meth:`_reconcile_identity_files`."""
+        emptiness re-checked, and deferred (no version, a warning) while an
+        unexpired lease exists. Called by :meth:`_reconcile_identity_files`."""
         try:
             raw = self.continuity_path.read_bytes()
         except FileNotFoundError:
@@ -10222,12 +10238,17 @@ class Store:
         except UnicodeDecodeError:
             return
         self._conn.execute("BEGIN IMMEDIATE")
+        deferred = False
         try:
-            if self._latest_identity() is None:
+            if self._latest_identity() is None and self._lease_live():
+                # B3 L3 r1 U2: no commit without the lease's token; the file stays
+                # and the next open or reconcile with no live lease adopts it.
+                deferred = True
+            elif self._latest_identity() is None:
                 wrap = self._conn.execute("SELECT MAX(id) FROM wraps").fetchone()[0]
                 self._insert_identity_version(
                     text, meta_json=self._read_meta_file_json(self.meta_path),
-                    source="adopted_file", wrap_id=wrap, fenced=False,
+                    source="adopted_file", wrap_id=wrap,
                 )
             self._conn.commit()
         except BaseException:
@@ -10236,6 +10257,14 @@ class Store:
             except sqlite3.Error:
                 pass
             raise
+        if deferred:
+            _warn_after_commit(
+                f"anneal-memory: {self.continuity_path} was not adopted as the "
+                "identity: an unexpired consolidation lease exists, and adoption "
+                "commits no version under it. The file is left as it is; the next "
+                "open or reconcile with no live lease adopts it.",
+                stacklevel=4,
+            )
 
     def _identity_text(self) -> str | None:
         """The raw identity text (not canonicalised): the latest version, after
@@ -10697,17 +10726,49 @@ class Store:
             (_IDEMPOTENCY_SCOPE, key, operation, request_hash, result_json, _now_utc()),
         )
 
-    def _idempotency_complete(self, key: str, result_json: str) -> None:
-        """Replace a committed key's provisional result with the full one, after
-        the effect's commit. The hash is never touched. Raises on failure: the
-        caller runs it under its post-commit warning guard."""
-        with self._db_boundary("save_continuity"):
-            self._conn.execute(
-                "UPDATE idempotency_keys SET result_json = ? "
-                "WHERE principal_scope = ? AND key = ?",
-                (result_json, _IDEMPOTENCY_SCOPE, key),
-            )
-            self._conn.commit()
+    def _episode_fingerprint(self, episode_id: str) -> str | None:
+        """sha256 over an episode row's identity fields (id, timestamp, type,
+        source, trust, content hash), or ``None`` when no such row exists. A
+        hash, never content, so a record key row holding it keeps erasure."""
+        row = self._conn.execute(
+            "SELECT e.id, e.timestamp, e.type, e.source, e.content, t.trust "
+            "FROM episodes e LEFT JOIN episode_trust t ON t.episode_id = e.id "
+            "WHERE e.id = ?", (episode_id,)).fetchone()
+        if row is None:
+            return None
+        return hashlib.sha256(json.dumps([
+            row["id"], row["timestamp"], row["type"], row["source"],
+            row["trust"] or DEFAULT_TRUST,
+            hashlib.sha256(row["content"].encode("utf-8")).hexdigest(),
+        ]).encode("utf-8")).hexdigest()
+
+    def _record_key_result(self, episode_id: str) -> str:
+        """A record key row's result: the episode id and its fingerprint, read
+        in the caller's transaction (B3 L3 r1 U3)."""
+        return json.dumps({"episode_id": episode_id,
+                           "fingerprint": self._episode_fingerprint(episode_id)})
+
+    def _record_replay(self, key: str, result_json: str | None) -> Episode:
+        """The episode a committed keyed ``record`` made, returned only while the
+        row under its id is that same episode (its fingerprint matches). Ids
+        derive from content and timestamp, so a deleted episode recreated with
+        another type, source or trust reuses the id; that, or a deletion,
+        raises :class:`IdempotencyConflictError` (``effect_erased``)."""
+        stored = json.loads(result_json or "{}")
+        episode_id = stored.get("episode_id") if isinstance(stored, dict) else None
+        episode: Episode | None = None
+        if isinstance(episode_id, str):
+            with self._db_boundary("record"):
+                current = self._episode_fingerprint(episode_id)
+            if current is not None and current == stored.get("fingerprint"):
+                episode = self.get(episode_id)
+        if episode is None:
+            raise IdempotencyConflictError(
+                f"idempotency_key {key!r} recorded episode {episode_id!r}, which has "
+                "since been deleted or replaced by another episode under the same id. "
+                "Nothing was recorded.",
+                operation="record", path=str(self._path), reason="effect_erased")
+        return episode
 
     @staticmethod
     def _lease_args(token: object, ttl_seconds: object | None, *, name: str) -> None:
@@ -10865,21 +10926,24 @@ class Store:
         that lapses by the clock in that window lapses with no one able to take
         it over). The writer presents the token; the store compares it.
 
-        ``prepared`` (the wrap was prepared under a lease, from
-        :meth:`_wrap_lease_prepared`): admitted only when the token presented
-        hashes to the one prepared under, the lease row still holds that hash
-        and epoch, unexpired, and the latest identity version is the prepared
-        one. A leased wrap's save that presents no token is refused, never
-        defaulted. Otherwise: with an unexpired lease the token presented must
-        be its own (none: ``lease_held``); with none, a write that presents no
-        token passes as it always has, and one that presents a token is refused
-        (it asserts a tenure it does not hold). Raises :class:`LeaseFencedError`."""
+        Two mechanisms, never conflated. Ownership (fencing tokens): with
+        ``prepared`` holding a ``token_hash`` (the wrap was prepared under a
+        lease), admitted only when the token presented hashes to it and the
+        lease row still holds that hash and epoch, unexpired; a leased wrap's
+        save that presents no token is refused, never defaulted. Otherwise, with
+        an unexpired lease the token presented must be its own (none:
+        ``lease_held``); with none, a write that presents no token passes as it
+        always has, and one that presents a token is refused (it asserts a tenure
+        it does not hold). Optimistic concurrency (B3 L3 r1 U1): any
+        ``prepared`` record, leased or not, carries the identity version the
+        wrap was prepared on, and the save is refused (``version_moved``) when
+        the latest version is another. Raises :class:`LeaseFencedError`."""
         row = self._lease_row()
         now = _now_utc()
         live = row is not None and row["expires_at"] > now
         presented = None if lease_token is None else self._lease_token_hash(lease_token)
-        reason: LeaseFenceReason
-        if prepared is not None:
+        reason: LeaseFenceReason | None = None
+        if prepared is not None and prepared.get("token_hash") is not None:
             if presented is None or presented != prepared.get("token_hash"):
                 reason = "token_mismatch"
             elif row is None:
@@ -10888,16 +10952,11 @@ class Store:
                 reason = "held_by_other" if live else "expired"
             elif not live:
                 reason = "expired"
-            elif row["latest_version"] != prepared.get("identity_version"):
-                reason = "version_moved"
-            else:
-                return
         elif presented is None:
-            if not live:
-                return
-            reason = "lease_held"
+            if live:
+                reason = "lease_held"
         elif live and row is not None and row["token_hash"] == presented:
-            return
+            pass
         elif row is None:
             reason = "no_lease"
         elif row["token_hash"] == presented:
@@ -10906,7 +10965,28 @@ class Store:
             reason = "token_mismatch"
         else:
             reason = "no_lease"
-        raise self._lease_fenced(row, reason, what)
+        if (reason is None and prepared is not None
+                and self._latest_identity_version() != prepared.get("identity_version")):
+            reason = "version_moved"
+        if reason is not None:
+            raise self._lease_fenced(row, reason, what)
+
+    def _latest_identity_version(self) -> int | None:
+        """The latest ``identity_versions`` version, or ``None`` when there is
+        none or the table is absent (a generation-2 handle)."""
+        if not self._identity_table_present():
+            return None
+        version = self._conn.execute(
+            "SELECT MAX(version) FROM identity_versions").fetchone()[0]
+        return None if version is None else int(version)
+
+    def _lease_live(self) -> bool:
+        """Whether an unexpired consolidation lease exists (``False`` on a
+        generation-2 handle, which has no lease table)."""
+        if not self._identity_table_present():
+            return False
+        row = self._lease_row()
+        return row is not None and row["expires_at"] > _now_utc()
 
     def _lease_prepare(self, lease_token: str) -> dict[str, Any]:
         """What a wrap prepared under ``lease_token`` records (read by
@@ -10920,9 +11000,14 @@ class Store:
                 "holder": row["holder"], "identity_version": row["latest_version"]}
 
     def _wrap_lease_prepared(self) -> dict[str, Any] | None:
-        """The lease record the wrap in progress was prepared under, with its
-        token hash, or ``None``. Bound to the current wrap token, so a record an
-        earlier wrap left is never returned."""
+        """The record the wrap in progress was prepared under (its identity
+        version, and the lease's token hash, epoch and holder when it was
+        prepared under one), or ``None`` when no wrap is in progress or the
+        value is empty (a generation-2 handle's wrap, or one a binary before
+        this record opened). Any other
+        value that is not a record bound to the current wrap token raises
+        :class:`LeaseFencedError` (``token_mismatch``): an unreadable fence fails
+        closed, never as "unleased" (B3 L3 r1 U8)."""
         raw = self._get_metadata("wrap_lease")
         token = self._get_metadata("wrap_token")
         if not raw or not token:
@@ -10930,9 +11015,10 @@ class Store:
         try:
             fence = json.loads(raw)
         except ValueError:
-            return None
+            fence = None
         if not isinstance(fence, dict) or fence.get("token") != token:
-            return None
+            raise self._lease_fenced(
+                self._lease_row(), "token_mismatch", "the wrap's lease record")
         return fence
 
     def wrap_lease_fence(self) -> dict[str, Any] | None:
@@ -10941,7 +11027,7 @@ class Store:
         is in progress or it was prepared without ``lease_token``."""
         with self._db_boundary("load_wrap_snapshot"):
             fence = self._wrap_lease_prepared()
-        if fence is None:
+        if fence is None or fence.get("token_hash") is None:
             return None
         return {k: fence.get(k) for k in ("holder", "epoch", "identity_version")}
 

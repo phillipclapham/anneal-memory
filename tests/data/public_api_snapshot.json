@@ -5863,6 +5863,7 @@
      "path": "ForwardRef('str', module='anneal_memory.types')",
      "pattern_trust": "ForwardRef('dict[str, str]', module='anneal_memory.types')",
      "proven_without_contradicts_declaration": "ForwardRef('list[dict[str, Any]]', module='anneal_memory.types')",
+     "replayed": "ForwardRef('bool', module='anneal_memory.types')",
      "sections": "ForwardRef('dict[str, int]', module='anneal_memory.types')",
      "skipped_non_today": "ForwardRef('int', module='anneal_memory.types')",
      "stale_state": "ForwardRef('list[str]', module='anneal_memory.types')",
@@ -5877,6 +5878,7 @@
      "drift",
      "durable_warnings",
      "level_capped",
+     "replayed",
      "stale_state"
     ],
     "required": [

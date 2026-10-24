@@ -771,6 +771,11 @@ class _SaveContinuityOptional(TypedDict, total=False):
     # ``{"name", "written_level", "capped_to", "prior_level", "validated"}`` per
     # line, also delivered as a UserWarning and recorded in the audit chain.
     level_capped: list[dict[str, Any]]
+    # Present ONLY on a keyed retry's replay (``idempotency_key``, generation 3),
+    # always ``True``: the replay is the key row's non-content subset (``wrap_id``,
+    # ``chars``, ``path``, ``content_hash``, ``episodes_compressed``,
+    # ``graduations_validated``, ``graduations_demoted``), not the full shape.
+    replayed: bool
 
 
 class SaveContinuityResult(_SaveContinuityOptional):

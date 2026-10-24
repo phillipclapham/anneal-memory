@@ -2560,8 +2560,11 @@ class TestValidatedSaveContinuity:
             f"## Context\nOptimizing database layer.\n"
         )
 
-        # L3 r1 R1: a save_meta another writer commits after the wrap read the
-        # meta is kept; the wrap applies its own changes to the fresh copy.
+        # L3 r1 R1, then B3 L3 r1 U1: a save_meta another writer commits after
+        # the prepare is a new identity version, so the save is refused
+        # (version_moved), never a revert of it; the other writer's meta is kept
+        # and a re-prepared wrap applies its own changes to that copy.
+        from anneal_memory import LeaseFencedError
         other = Store(store.path)
         real_load_meta = store.load_meta
         raced = []
@@ -2575,11 +2578,16 @@ class TestValidatedSaveContinuity:
 
         store.load_meta = racing_load_meta
         try:
-            result = validated_save_continuity(store, text)
+            with pytest.raises(LeaseFencedError) as moved:
+                validated_save_continuity(store, text)
         finally:
             del store.load_meta
             other.close()
-        assert raced
+        assert raced and moved.value.reason == "version_moved"
+        assert store.status().wrap_in_progress
+        store.wrap_cancelled()
+        prepare_wrap(store)
+        result = validated_save_continuity(store, text)
         assert {k: store.load_meta().get(k) for k in ("sessions_produced", "custom")} \
             == {"sessions_produced": 100, "custom": "new"}
 

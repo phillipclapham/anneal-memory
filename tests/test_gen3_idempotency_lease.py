@@ -44,6 +44,15 @@ def test_t4_an_idempotency_key_reused_for_another_request_is_refused(tmp_path):
     with pytest.raises(IdempotencyConflictError):  # an argument the old key compared not at all
         s.record("idem one", EpisodeType.OBSERVATION, metadata={"x": 1}, idempotency_key="req-1")
     assert _count(s, "episodes") == 1
+    # B3 L3 r1 U3: ids derive from content and timestamp, so a deleted episode
+    # recreated with another type reuses the id; the keyed retry is refused.
+    ts = "2026-10-23T01:00:00.000000Z"
+    gone = s.record("aba", EpisodeType.OBSERVATION, timestamp=ts, idempotency_key="req-aba")
+    s.delete(gone.id)
+    assert s.record("aba", EpisodeType.DECISION, timestamp=ts).id == gone.id
+    with pytest.raises(IdempotencyConflictError) as erased:
+        s.record("aba", EpisodeType.OBSERVATION, timestamp=ts, idempotency_key="req-aba")
+    assert erased.value.reason == "effect_erased"
 
     # The save: a keyed retry gets its result where an unkeyed one is a phantom
     # re-save, and the same key with other text changes nothing.
@@ -60,19 +69,29 @@ def test_t4_an_idempotency_key_reused_for_another_request_is_refused(tmp_path):
             mock.patch.object(Store, "get_wrap_started_at", return_value=None):
         assert prepare_wrap(s, idempotency_key="prep-1")["wrap_token"] == p["wrap_token"]
     saved = validated_save_continuity(
-        s, _TEXT, wrap_token=p["wrap_token"], today="2026-10-23", idempotency_key="save-1")
+        s, _TEXT, wrap_token=p["wrap_token"], today="2026-10-23",
+        compost=iter(["gone_pattern"]), idempotency_key="save-1")
+    assert saved["composted"] == {"gone_pattern": 0}  # r1 U6: the iterator was hashed, not spent
     again = validated_save_continuity(
-        s, _TEXT, wrap_token=p["wrap_token"], today="2026-10-23", idempotency_key="save-1")
-    assert again["wrap_id"] == saved["wrap_id"] and "provisional" not in again
+        s, _TEXT, wrap_token=p["wrap_token"], today="2026-10-23",
+        compost=["gone_pattern"], idempotency_key="save-1")
+    assert again["wrap_id"] == saved["wrap_id"] and again["replayed"] is True
     with pytest.raises(IdempotencyConflictError):
         validated_save_continuity(
             s, _TEXT.replace("Active.", "Other."), wrap_token=p["wrap_token"],
-            today="2026-10-23", idempotency_key="save-1")
+            today="2026-10-23", compost=["gone_pattern"], idempotency_key="save-1")
     assert (_count(s, "wraps"), _count(s, "identity_versions")) == (1, 1)
     assert s.load_continuity() == _TEXT
     with pytest.raises(IdempotencyConflictError) as closed:  # r1 T4: never a stale package
         prepare_wrap(s, idempotency_key="prep-1")
     assert closed.value.reason == "wrap_closed"
+    # B3 L3 r1 U4: a replay that would rebuild another package is refused.
+    s.record("idem three", EpisodeType.OBSERVATION)
+    prepare_wrap(s, idempotency_key="prep-2")
+    s.save_continuity(_TEXT.replace("Active.", "Moved."))
+    with pytest.raises(IdempotencyConflictError) as moved:
+        prepare_wrap(s, idempotency_key="prep-2")
+    assert moved.value.reason == "sources_moved"
     s.close()
 
 
@@ -83,6 +102,9 @@ def test_t5_a_save_prepared_under_an_expired_lease_is_fenced(tmp_path):
     a.record("obs", EpisodeType.OBSERVATION)
     ga = a.lease_acquire("A", ttl_seconds=0.6)
     assert ga.epoch == 1 and ga.token not in repr(ga)
+    with pytest.raises(LeaseFencedError) as tokenless:  # B3 L3 r1 U1
+        prepare_wrap(b)
+    assert tokenless.value.reason == "lease_held"
     pa = prepare_wrap(a, lease_token=ga.token)
     assert a.wrap_lease_fence() == {"holder": "A", "epoch": 1, "identity_version": None}
 
@@ -127,5 +149,16 @@ def test_t5_a_save_prepared_under_an_expired_lease_is_fenced(tmp_path):
     pb = prepare_wrap(b, lease_token=gb.token)
     assert save(b, gb.token, wrap=pb["wrap_token"])["wrap_id"] == 1
     assert (_count(a, "wraps"), _count(a, "identity_versions")) == (1, 1)
+
+    # B3 L3 r1 U1: every save carries the identity version it was prepared on,
+    # leased or not, so an unleased wrap never overwrites a later version.
+    assert b.lease_release(gb.token)
+    a.record("obs 2", EpisodeType.OBSERVATION)
+    pu = prepare_wrap(a)
+    b.save_continuity(_TEXT.replace("Active.", "C1 by B."))
+    with pytest.raises(LeaseFencedError) as stale:
+        save(a, None, text=_TEXT.replace("Active.", "A's text."), wrap=pu["wrap_token"])
+    assert stale.value.reason == "version_moved"
+    assert "C1 by B." in a.load_continuity() and _count(a, "identity_versions") == 2
     a.close()
     b.close()

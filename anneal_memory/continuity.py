@@ -32,7 +32,7 @@ import logging
 import warnings
 from dataclasses import asdict
 from datetime import date, datetime
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from .graduation import (
     mask_explanations_text,
@@ -1832,6 +1832,18 @@ def _compose_wrap_package(
     return package, derive_roots, frozen_identities
 
 
+def _save_replay(result_json: str | None) -> SaveContinuityResult:
+    """A keyed save's replay: the key row's non-content subset, marked
+    ``replayed`` (the documented replay shape, not the full result)."""
+    return cast(SaveContinuityResult, {**json.loads(result_json or "{}"), "replayed": True})
+
+
+def _package_fingerprint(package: Any) -> str:
+    """sha256 of a wrap package's canonical JSON (keys sorted)."""
+    return hashlib.sha256(json.dumps(
+        package, sort_keys=True, default=str).encode("utf-8")).hexdigest()
+
+
 def _replay_prepare(
     store: Store,
     result_json: str | None,
@@ -1840,16 +1852,19 @@ def _replay_prepare(
     staleness_days: int,
     crystal_store: CrystalStore | None,
 ) -> PrepareWrapResult:
-    """A keyed ``prepare_wrap`` retry: its key row holds only the wrap token
-    (never the package, whose episode text would outlive an episode's deletion).
-    While that wrap is the open one, the package is rebuilt from its frozen
-    snapshot (episode ids, schema, the prepare's day) by the same code a prepare
-    runs; once it is saved or cancelled, ``IdempotencyConflictError`` with
-    ``reason="wrap_closed"``, never a stale package.
+    """A keyed ``prepare_wrap`` retry: its key row holds the wrap token and the
+    sha256 of the package returned (never the package, whose episode text
+    would outlive an episode's deletion). While that wrap is the open one, the
+    package is rebuilt from its frozen snapshot (episode ids, schema, the
+    prepare's day) by the same code a prepare runs, and returned only when its
+    fingerprint is the stored one; otherwise ``IdempotencyConflictError`` with
+    ``reason="sources_moved"`` (B3 L3 r1 U4). Once the wrap is saved or
+    cancelled, ``reason="wrap_closed"``. Never a package other than the first.
 
-    Known edge: what is true only now is recomputed, as on any prepare: the
-    re-derive flags and the superseded marks. The other arguments are the
-    first call's (they are in the request hash)."""
+    Known edge: what is true only now is recomputed, as on any prepare (the
+    re-derive flags and the superseded marks); when it moved, the fingerprint
+    refuses the replay. The other arguments are the first call's (they are in
+    the request hash)."""
     stored = json.loads(result_json or "{}")
     wrap_token = stored.get("wrap_token") if isinstance(stored, dict) else None
     snapshot = store.load_wrap_snapshot()
@@ -1866,6 +1881,14 @@ def _replay_prepare(
         store, episodes, store.load_continuity(), schema, max_chars=max_chars,
         staleness_days=staleness_days, crystal_store=crystal_store,
         today=store._get_metadata("wrap_today") or None)
+    if _package_fingerprint(package) != stored.get("package_sha256"):
+        raise IdempotencyConflictError(
+            f"prepare_wrap: this idempotency key's package can no longer be rebuilt "
+            f"as it was returned (its sources moved since wrap {wrap_token!r} was "
+            "opened), so no package is returned. Nothing was written; the wrap "
+            "stays open. Save it from the first package, or cancel it and prepare "
+            "again with a new key.",
+            operation="wrap_started", path=str(store.path), reason="sources_moved")
     return PrepareWrapResult(
         status="ready",
         message=f"Ready to compress {len(episodes)} episode(s).",
@@ -2103,6 +2126,7 @@ def prepare_wrap(
             "crystal_store": None if crystal_store is None else str(crystal_store.path),
             "session_id": session_id, "allow_sole_live": allow_sole_live,
             "wrap_token": wrap_token, "lease_token": lease_token,
+            "project_name": store.project_name,
         })
         replayed, stored = store._idempotency_replay(
             idempotency_key, idem_hash, "wrap_started")
@@ -2319,7 +2343,8 @@ def prepare_wrap(
         gen3_extras["lease_token"] = lease_token
     if idempotency_key is not None:
         gen3_extras["idempotency"] = (
-            idempotency_key, idem_hash, json.dumps({"wrap_token": wrap_token}))
+            idempotency_key, idem_hash, json.dumps({
+                "wrap_token": wrap_token, "package_sha256": _package_fingerprint(package)}))
     # AM-SCHEMASNAPSHOT: freeze the EXACT schema we read above (line ~884) into
     # the wrap snapshot, so validated_save_continuity reads back this same schema
     # rather than re-reading a possibly-concurrently-changed live schema. Passing
@@ -2998,10 +3023,12 @@ def validated_save_continuity(
             save's transaction. A retry with the same key and request returns
             the stored result and writes nothing (where a retry without a key is
             refused as a phantom re-save); the same key with another request
-            raises :class:`~anneal_memory.IdempotencyConflictError`. A crash
-            between the commit and the full result's write leaves a provisional
-            result (``wrap_id``, ``chars``, ``path``, ``content_hash``,
-            ``provisional: True``), which a retry returns.
+            raises :class:`~anneal_memory.IdempotencyConflictError`. A replay
+            returns the key row's one stable shape, the non-content subset
+            ``wrap_id``, ``chars``, ``path``, ``content_hash``,
+            ``episodes_compressed``, ``graduations_validated``,
+            ``graduations_demoted``, with ``replayed: True``; never the full
+            result, whose episode-derived text would outlive an erasure.
         lease_token: The consolidation lease's fencing token, presented by the
             writer. When the wrap was prepared under a lease
             (``prepare_wrap(lease_token=...)``), the save is admitted only if ONE
@@ -3011,7 +3038,9 @@ def validated_save_continuity(
             the one prepared from. A leased wrap's save that presents no token
             is refused, never defaulted. A wrap prepared without a lease, on a
             store where an unexpired lease exists, must present that lease's
-            token. Otherwise :class:`~anneal_memory.LeaseFencedError` (with its
+            token. Every save, leased or not, is refused (``version_moved``)
+            when an identity version was written after its prepare (B3 L3 r1
+            U1). Otherwise :class:`~anneal_memory.LeaseFencedError` (with its
             ``reason``) and nothing is written. No lease and no token: as
             before.
 
@@ -3106,6 +3135,25 @@ def validated_save_continuity(
     # before the no-wrap refusal below would call it a phantom re-save.
     if lease_token is not None and (not isinstance(lease_token, str) or not lease_token):
         raise ValueError("validated_save_continuity: lease_token must be a non-empty str")
+    # compost is materialized and validated exactly once, here, before the request
+    # hash reads it (B3 L3 r1 U6): hashing a one-shot iterator first exhausted it,
+    # so the save composted nothing. A padded name is refused rather than
+    # stripped, so the ``composted`` result is keyed by exactly the strings passed.
+    compost_names: list[str] | None = None
+    if compost is not None:
+        if isinstance(compost, (str, bytes)):
+            raise TypeError(
+                "compost must be a list of non-empty pattern-name strings"
+            )
+        compost = list(compost)
+        if not all(
+            isinstance(n, str) and n and n == n.strip() for n in compost
+        ):
+            raise TypeError(
+                "compost must be a list of non-empty pattern-name strings "
+                "without leading or trailing whitespace"
+            )
+        compost_names = list(dict.fromkeys(compost))
     idem_hash = ""
     if idempotency_key is not None:
         _validate_idempotency_key(idempotency_key)
@@ -3116,7 +3164,7 @@ def validated_save_continuity(
             "allow_unlinked": allow_unlinked,
             "carryforward_cold_days": carryforward_cold_days,
             "crystal_store": None if crystal_store is None else str(crystal_store.path),
-            "compost": None if compost is None else list(compost),
+            "compost": compost,
             "session_id": session_id, "allow_sole_live": allow_sole_live,
             "require_rederive": require_rederive, "unattended": unattended,
             "model": model, "lease_token": lease_token,
@@ -3124,7 +3172,7 @@ def validated_save_continuity(
         replayed, stored = store._idempotency_replay(
             idempotency_key, idem_hash, "save_continuity")
         if replayed:
-            return json.loads(stored or "null")
+            return _save_replay(stored)
     # --- Wrap-state preconditions, checked BEFORE payload validation ---
     #
     # Ordering is deliberate: a save with no wrap to commit to is
@@ -3234,26 +3282,7 @@ def validated_save_continuity(
                 f"fresh token."
             )
 
-    # --- Payload validation: compost, then the continuity text itself ---
-    # Materialized first: validating a one-shot iterator would exhaust it. A
-    # padded name is refused rather than stripped, so the ``composted`` result
-    # is keyed by exactly the strings the caller passed.
-    compost_names: list[str] | None = None
-    if compost is not None:
-        if isinstance(compost, (str, bytes)):
-            raise TypeError(
-                "compost must be a list of non-empty pattern-name strings"
-            )
-        compost = list(compost)
-        if not all(
-            isinstance(n, str) and n and n == n.strip() for n in compost
-        ):
-            raise TypeError(
-                "compost must be a list of non-empty pattern-name strings "
-                "without leading or trailing whitespace"
-            )
-        compost_names = list(dict.fromkeys(compost))
-
+    # --- Payload validation: the continuity text (compost was validated first) ---
     if not text or not text.strip():
         raise ValueError("Continuity text cannot be empty")
     # NOTHING UN-CANONICAL ENTERS (Phill 12:13, "(A)"; graduation.canonical_continuity_text).
@@ -3645,7 +3674,7 @@ def validated_save_continuity(
             if idem_status == "match":
                 # A concurrent same request committed first. Nothing is written
                 # yet, so leaving the batch commits an empty transaction.
-                return json.loads(idem_stored or "null")
+                return _save_replay(idem_stored)
             if idem_status == "conflict":
                 store._idempotency_conflict(idempotency_key, "save_continuity")
         # The gate runs again at the version insert below; run here first, a
@@ -3653,11 +3682,12 @@ def validated_save_continuity(
         lease_prepared = store._wrap_lease_prepared()
         store._lease_gate("validated_save_continuity", lease_token, lease_prepared)
 
-        # The meta read above may be stale: a save_meta committed since then
-        # would be reverted by the version row below (L3 r1 codex HIGH). Re-read
-        # it under the batch's write lock and apply this wrap's changes to the
-        # fresh copy; refuse if the field the validation read moved. Raising
-        # rolls the batch back: nothing saved, the wrap stays open.
+        # The meta read above may be stale (L3 r1 codex HIGH). Since B3 L3 r1
+        # U1 the gate above refuses a save_meta committed after the prepare (it
+        # is a new identity version), so this re-read under the batch's write
+        # lock and the citations_seen check below are a second guard for the
+        # same race, kept. Raising rolls the batch back: nothing saved, the wrap
+        # stays open.
         meta = store.load_meta()
         if meta.get("citations_seen", False) != citations_seen:
             raise ValueError(
@@ -3793,14 +3823,17 @@ def validated_save_continuity(
             lease_token=lease_token, lease_prepared=lease_prepared,
         )
         if idempotency_key is not None:
-            # Provisional result, in this transaction; replaced by the full one
-            # after the commit (_idempotency_complete). Known edge: a retry inside
-            # that window, or after a crash in it, gets this subset with
-            # ``provisional: True``. It holds no episode text (path, counts, hashes).
+            # The key row's result, in this transaction and never rewritten: the
+            # non-content subset only (B3 L3 r1 U7), which a replay returns marked
+            # ``replayed``. Text derived from episodes (pattern names, State
+            # lines, warnings) would outlive an episode's erasure.
             store._idempotency_insert(
                 idempotency_key, "save_continuity", idem_hash, json.dumps({
                     "wrap_id": wrap_result.wrap_id, "chars": len(grad_result.text),
-                    "path": path, "content_hash": content_hash, "provisional": True,
+                    "path": path, "content_hash": content_hash,
+                    "episodes_compressed": wrap_result.episodes_compressed,
+                    "graduations_validated": wrap_result.graduations_validated,
+                    "graduations_demoted": wrap_result.graduations_demoted,
                 }))
         # This save formed no association link. Recorded once (the first
         # such save wins), in this transaction, so the store says from
@@ -4420,14 +4453,6 @@ def validated_save_continuity(
             "Re-derive is not enabled for this store at save, so no State line was "
             "checked at this save (pass require_rederive to refuse such a save)."
         )
-    if idempotency_key is not None:
-        try:
-            store._idempotency_complete(idempotency_key, json.dumps(result))
-        except Exception as exc:  # post-commit: the save stands
-            _warn_after_commit(
-                f"idempotency_key {idempotency_key!r}: the save committed, but its full "
-                f"result was not stored ({type(exc).__name__}); a retry returns the "
-                "provisional result.")
     return result
 
 

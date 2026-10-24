@@ -182,7 +182,7 @@ def test_capture_appends_one_line_and_never_touches_the_store(served_outbox):
     tools = {t["name"]: t for t in r["result"]["tools"]}
     assert set(tools) == {*remote.REMOTE_TOOLS, "capture"}
     assert tools["capture"]["annotations"]["readOnlyHint"] is False
-    _s, r = call(f"/mcp/{a}", _tool("capture", {"content": "remember\u202e the funnel",
+    _s, r = call(f"/mcp/{a}", _tool("capture", {"content": "remember\u202e the\u200b\u2028 funnel",
                                                "episode_type": "decision"}))
     assert r["result"].get("isError") is not True
     assert "not recallable before then" in r["result"]["content"][0]["text"]
@@ -222,3 +222,6 @@ def test_capture_refusals_and_writes_stay_unreachable(served_outbox, monkeypatch
     _s, r = call(f"/mcp/{b}", _tool("capture", ok))
     assert "outbox is full" in r["result"]["content"][0]["text"]
     assert len(outbox.read_text().splitlines()) == 3
+    # A refused write gives its rate slot back: b used 1 of 2 and can still write.
+    monkeypatch.setattr(remote, "MAX_OUTBOX_BYTES", 10**6)
+    assert call(f"/mcp/{b}", _tool("capture", ok))[1]["result"].get("isError") is not True

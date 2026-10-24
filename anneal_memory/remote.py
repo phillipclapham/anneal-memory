@@ -5,22 +5,22 @@ Serves a store to a remote MCP client (a claude.ai custom connector) over the
 Streamable HTTP transport, JSON responses only, no SSE stream, no session id.
 Stdlib only, like the stdio server.
 
-What makes it read-only is structure, not a check:
+What keeps the store read-only is structure, not a check:
 
 - The store is opened per request with ``Store(read_only=True)``: the
   connection runs ``PRAGMA query_only=ON`` and the open writes nothing.
-- The only tools a request can reach are the names in :data:`REMOTE_TOOLS`,
+- The only store tools a request can reach are the names in :data:`REMOTE_TOOLS`,
   bound one by one below to read methods of :class:`~anneal_memory.server.Server`.
-  No write or consolidate handler is referenced from this module, so no
+  No store write or consolidate handler is referenced from this module, so no
   argument, method name or path can route to one.
 - ``resources/*`` is not offered.
 
-One write exists, and only when ``serve --outbox PATH`` is given: the
-``capture`` tool appends one JSON line per episode to that outbox file, a
-separate file the store never reads. It does not open the store at all. The
-operator's own process moves outbox lines into memory later, so the store
-keeps one writer. Without ``--outbox`` the
-tool is not listed and calling it answers "Unknown tool".
+The one exception to "reads only" is ``capture``, and only when ``serve
+--outbox PATH`` is given: it appends one JSON line per episode to that outbox
+file (and its ``.lock``), separate files the store never reads, and it does not
+open the store at all. The operator's own process moves outbox lines into
+memory later, so the store keeps one writer. Without ``--outbox`` the tool is
+not listed and calling it answers "Unknown tool".
 
 Authentication is a per-connector bearer token, accepted in either of two
 places, because claude.ai's "Request headers" field was a beta limited to some
@@ -61,6 +61,7 @@ import sys
 import tempfile
 import threading
 import time
+import unicodedata
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Callable, Iterator
@@ -113,7 +114,7 @@ READ_CONTINUITY_TOOL: dict[str, Any] = {
 }
 
 
-# MCP tool annotations (spec 2025-03-26+): every remote tool only reads. Clients that
+# MCP tool annotations (spec 2025-03-26+): every tool in REMOTE_TOOLS only reads. Clients that
 # gate writes on them (ChatGPT confirms any tool without readOnlyHint) then call
 # these without a prompt. Hints are advisory to the client; the allowlist above and
 # the query-only open are what enforce read-only here.
@@ -160,8 +161,18 @@ CAPTURED_REPLY = ("Captured. It reaches the memory at the next sync; it is not "
                   "recallable before then.")
 
 
+def line_for(connector: str, episode_type: str, content: str) -> str:
+    """One outbox line: the format a puller re-validates key by key."""
+    return json.dumps({
+        "v": 1, "id": secrets.token_hex(16), "connector": connector,
+        "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "episode_type": episode_type, "content": content,
+    }, ensure_ascii=True) + "\n"
+
+
 # The stdio tools exposed remotely. Each name maps to the Server method that
-# implements it in :meth:`RemoteSession._bind`; nothing else is reachable.
+# implements it in :meth:`RemoteSession._bind`; the only other tool is ``capture``
+# (outbox only, never the store), and only with ``--outbox``.
 _SERVER_READ_TOOLS = ("recall", "crystal_recall", "crystal_index")
 REMOTE_TOOLS = (*_SERVER_READ_TOOLS, "read_continuity")
 
@@ -297,7 +308,11 @@ class RemoteSession:
             return _tool_result("Error: unknown episode_type", is_error=True)
         if not isinstance(content, str):
             return _tool_result("Error: content must be a string", is_error=True)
-        content = strip_hidden_controls(content).strip()
+        # Also the invisible format and separator characters (zero-width, BOM,
+        # U+2028/2029) the shared filter keeps: they dodge keyword filters and
+        # can render as line breaks downstream (L2).
+        content = "".join(ch for ch in strip_hidden_controls(content)
+                          if unicodedata.category(ch) not in ("Cf", "Zl", "Zp")).strip()
         if not 1 <= len(content) <= MAX_CAPTURE_CHARS:
             return _tool_result(f"Error: content must be 1..{MAX_CAPTURE_CHARS} characters",
                                 is_error=True)
@@ -309,11 +324,23 @@ class RemoteSession:
                 return _tool_result("Error: capture rate limit reached; try later", is_error=True)
             recent.append(now)
             self._recent[connector] = recent
-        line = json.dumps({
-            "v": 1, "id": secrets.token_hex(16), "connector": connector,
-            "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-            "episode_type": etype, "content": content,
-        }, ensure_ascii=True) + "\n"
+        written = False
+        try:
+            written = self._append(line_for(connector, etype, content))
+        finally:
+            if not written:  # a refused or failed write gives its slot back
+                with self._rate_lock:
+                    slots = self._recent.get(connector, [])
+                    if now in slots:
+                        slots.remove(now)
+        if not written:
+            return _tool_result("Error: the capture outbox is full until the next sync",
+                                is_error=True)
+        return _tool_result(CAPTURED_REPLY)
+
+    def _append(self, line: str) -> bool:
+        """Append ``line`` under the outbox lock; False when the outbox is full."""
+        assert self._outbox is not None
         try:
             import fcntl
         except ImportError:
@@ -330,17 +357,18 @@ class RemoteSession:
             except FileNotFoundError:
                 size = 0
             if size + len(line) > MAX_OUTBOX_BYTES:
-                return _tool_result("Error: the capture outbox is full until the next sync",
-                                    is_error=True)
+                return False
             fd = os.open(self._outbox, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
             try:
                 os.write(fd, line.encode("ascii"))
                 os.fsync(fd)
             finally:
                 os.close(fd)
+            if size == 0:  # possibly a new file: make its directory entry durable
+                _fsync_dir(self._outbox.parent)
         finally:
             os.close(lock_fd)
-        return _tool_result(CAPTURED_REPLY)
+        return True
 
     def _bind(self, server: Server, store: Store) -> dict[str, Callable[[dict[str, Any]], Any]]:
         def read_continuity(_args: dict[str, Any]) -> dict[str, Any]:
@@ -678,7 +706,7 @@ def make_server(db_path: str | Path, tokens_path: str | Path,
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m anneal_memory.remote",
-                                     description="Read-only remote MCP over Streamable HTTP")
+                                     description="Remote MCP over Streamable HTTP: store read-only, optional append-only capture outbox")
     sub = parser.add_subparsers(dest="cmd", required=True)
     s = sub.add_parser("serve")
     s.add_argument("--db", required=True)

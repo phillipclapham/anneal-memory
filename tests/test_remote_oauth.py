@@ -209,8 +209,8 @@ def test_the_pin_binds_codes_issued_before_it_and_resource_is_bound(oauth_server
     st, _h, body = _exchange(req, reg, code_b, verifier, other)
     assert st == 400 and gem not in body
     # RFC 8707: a resource other than this server is refused at sign-in and at exchange.
-    evil = {**q, "resource": "https://evil.example/mcp"}
-    assert req("GET", "/authorize?" + urllib.parse.urlencode(evil))[0] == 400
+    for wrong in ("https://evil.example/mcp", ISS + "/mcp//"):
+        assert req("GET", "/authorize?" + urllib.parse.urlencode({**q, "resource": wrong}))[0] == 400
     code = _code_from(_sign_in(req, q, gem)[1])["code"]
     basic = base64.b64encode(f"{reg['client_id']}:{reg['client_secret']}".encode()).decode()
     form = {"grant_type": "authorization_code", "code": code, "redirect_uri": REDIRECT,
@@ -221,9 +221,11 @@ def test_the_pin_binds_codes_issued_before_it_and_resource_is_bound(oauth_server
 
 
 @pytest.mark.parametrize("issuer", ["http://h", "https://h/x", "https://u@h", "https://h:bad",
-                                    "https://h\r\nX: y", "https://h?q", "https:// h"])
+                                    "https://h\r\nX: y", "https://h?q", "https:// h",
+                                    "https://h///"])
 def test_the_issuer_must_be_a_bare_https_origin(issuer):
     from anneal_memory.remote_oauth import OAuth
     with pytest.raises(ValueError):
         OAuth(issuer)
     assert OAuth("https://h.example:8443/").issuer == "https://h.example:8443"
+    assert OAuth("https://[2001:db8::1]:8443").issuer == "https://[2001:db8::1]:8443"

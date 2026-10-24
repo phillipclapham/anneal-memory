@@ -51,7 +51,19 @@ import urllib.parse
 from pathlib import Path
 from typing import Any
 
-from ._fsdir import _fsync_dir
+
+def _fsync_dir_strict(path: Path) -> None:
+    """Make a new directory entry durable, or raise. Unlike the shared best-effort
+    helper, a failure here must stop the sign-in: a pin lost in a crash after the
+    token went out would re-open first use. Windows has no directory fsync."""
+    if os.name != "posix":
+        return
+    fd = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
 
 CODE_TTL_S = 120
 MAX_PENDING_CODES = 32
@@ -105,8 +117,12 @@ class OAuth:
             port = parts.port
         except ValueError:
             raise bad from None
-        origin = f"https://{parts.hostname}" + (f":{port}" if port is not None else "")
-        if parts.scheme != "https" or not parts.hostname or issuer.rstrip("/") != origin:
+        host = parts.hostname or ""
+        if ":" in host:  # an IPv6 literal keeps its brackets
+            host = f"[{host}]"
+        origin = f"https://{host}" + (f":{port}" if port is not None else "")
+        if parts.scheme != "https" or not parts.hostname or \
+                issuer.lower() not in (origin, origin + "/"):
             raise bad
         self.issuer = origin
         self.resource = self.issuer + "/mcp"
@@ -157,7 +173,7 @@ class OAuth:
         finally:
             with contextlib.suppress(OSError):
                 os.unlink(tmp)
-        _fsync_dir(self._pin_path.parent)
+        _fsync_dir_strict(self._pin_path.parent)
         return self.pinned() == uri
 
     # -- discovery --
@@ -241,7 +257,7 @@ class OAuth:
         return None
 
     def _resource_ok(self, value: str) -> bool:
-        return value.rstrip("/") == self.resource
+        return value in (self.resource, self.resource + "/")
 
     @staticmethod
     def _fields(raw: dict[str, list[str]]) -> dict[str, str] | None:
@@ -255,7 +271,7 @@ class OAuth:
             q = self._fields(urllib.parse.parse_qs(query, keep_blank_values=True,
                                                    max_num_fields=16))
         except ValueError:
-            q = None
+            return 400, _page("Sign-in refused", "<p>malformed query</p>")
         problem = "a field is repeated" if q is None else self._request_problem(q)
         if problem or q is None:  # never redirect on a bad request (RFC 6749 §4.1.2.1)
             return 400, _page("Sign-in refused", f"<p>{html.escape(problem or '')}</p>")
@@ -358,7 +374,7 @@ class OAuth:
         resource = q.get("resource")
         if resource is not None and not self._resource_ok(resource) or \
                 entry["resource"] is not None and resource is not None \
-                and resource.rstrip("/") != entry["resource"].rstrip("/"):
+                and resource.rstrip("/") != entry["resource"].rstrip("/"):  # both already exact
             return 400, {"error": "invalid_target"}
         still = check_token(entry["token"])
         if still is UNAVAILABLE:

@@ -739,7 +739,9 @@ def make_server(db_path: str | Path, tokens_path: str | Path,
     store that cannot be opened read-only, or an outbox whose directory is missing."""
     load_tokens(tokens_path)
     if outbox is not None:
-        out_dir = Path(outbox).parent
+        # Anchored once, so a later chdir cannot move it off the checked directory.
+        outbox = Path(outbox).parent.resolve() / Path(outbox).name
+        out_dir = outbox.parent
         if not out_dir.is_dir():
             raise ValueError(f"outbox directory does not exist: {out_dir}")
         # The store and its sidecars live beside the db; an outbox there could be

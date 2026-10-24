@@ -1,0 +1,299 @@
+"""A one-user OAuth 2.1 front for :mod:`anneal_memory.remote` (experimental; not
+part of the frozen public surface in docs/stability.md).
+
+Some MCP clients (the Gemini app's custom apps) refuse a server without OAuth.
+This adds exactly what such a client needs to end up holding one of the bearer
+tokens the server already accepts, and nothing that could mint any other:
+
+- Discovery: RFC 9728 protected-resource metadata and RFC 8414 authorization
+  server metadata, and ``WWW-Authenticate: Bearer resource_metadata=...`` on a 401.
+- ``POST /register`` (RFC 7591): stateless. It returns a fresh client id and
+  secret and stores neither; anyone may register, so a client secret proves
+  nothing and is not checked. What binds a client is the authorization code.
+- ``GET /authorize``: a sign-in page. ``POST /authorize``: the operator pastes an
+  existing connector token; it is checked against the server's own token file.
+  Only then is a one-time code (single use, :data:`CODE_TTL_S`, PKCE S256 bound,
+  client id and redirect URI bound) issued, delivered by a 200 page that
+  navigates to the redirect URI (a 302 there was reported blocked by a
+  ``form-action`` policy in Gemini's callback chain).
+- ``POST /token``: exchanges the code, checks PKCE, re-checks the token is still
+  in the token file, and returns that same token as the access token.
+
+So the only credential this flow ever hands out is one the operator typed and
+the token file already holds: a server run with a different token file can
+neither mint nor accept another server's tokens. There is no refresh token and
+no expiry beyond the token's own revocation (``token-revoke``).
+
+Redirect URIs must be https on a host in :data:`REDIRECT_HOSTS`. Codes live in
+memory; a restart between sign-in and exchange fails that sign-in only.
+"""
+
+from __future__ import annotations
+
+import base64
+import hashlib
+import hmac
+import html
+import json
+import re
+import secrets
+import threading
+import time
+import urllib.parse
+from typing import Any
+
+CODE_TTL_S = 120
+MAX_PENDING_CODES = 32
+MAX_STATE_CHARS = 4096
+MAX_FORM_BYTES = 16 * 1024
+MAX_REGISTER_BYTES = 16 * 1024
+# The hosts the Gemini app registers as redirect URIs (oauth-redirect,
+# oauth-redirect-sandbox), read from public reports 2026-10-24
+# (github.com/doobidoo/mcp-memory-service/issues/1553; discuss.ai.google.dev
+# t/186405). A redirect anywhere else is refused at registration and at sign-in.
+REDIRECT_HOSTS = frozenset({"oauth-redirect.googleusercontent.com",
+                            "oauth-redirect-sandbox.googleusercontent.com"})
+_VERIFIER_RE = re.compile(r"^[A-Za-z0-9._~-]{43,128}$")
+_CHALLENGE_RE = re.compile(r"^[A-Za-z0-9_-]{43}$")  # base64url(sha256), unpadded
+_CLIENT_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
+AUTH_METHODS = ("client_secret_basic", "client_secret_post", "none")
+
+
+def redirect_ok(uri: Any) -> bool:
+    if not isinstance(uri, str) or len(uri) > 2048:
+        return False
+    try:
+        parts = urllib.parse.urlsplit(uri)
+        port = parts.port
+    except ValueError:
+        return False
+    return (parts.scheme == "https" and parts.hostname in REDIRECT_HOSTS
+            and port in (None, 443) and not parts.username and not parts.password
+            and not parts.fragment and uri.isascii() and uri.isprintable())
+
+
+def s256(verifier: str) -> str:
+    digest = hashlib.sha256(verifier.encode("ascii")).digest()
+    return base64.urlsafe_b64encode(digest).rstrip(b"=").decode("ascii")
+
+
+class OAuth:
+    """Endpoints for one issuer. Each handler returns ``(status, headers, body)``."""
+
+    def __init__(self, issuer: str) -> None:
+        parts = urllib.parse.urlsplit(issuer)
+        if parts.scheme != "https" or not parts.hostname or parts.path not in ("", "/") \
+                or parts.query or parts.fragment:
+            raise ValueError("the OAuth issuer must be a bare https origin")
+        self.issuer = issuer.rstrip("/")
+        self.resource = self.issuer + "/mcp"
+        self._codes: dict[str, dict[str, Any]] = {}
+        self._lock = threading.Lock()
+
+    # -- discovery --
+
+    def resource_metadata_url(self) -> str:
+        return self.issuer + "/.well-known/oauth-protected-resource/mcp"
+
+    def challenge_header(self) -> str:
+        return f'Bearer resource_metadata="{self.resource_metadata_url()}"'
+
+    def protected_resource(self) -> dict[str, Any]:
+        return {"resource": self.resource, "authorization_servers": [self.issuer],
+                "bearer_methods_supported": ["header"]}
+
+    def server_metadata(self) -> dict[str, Any]:
+        return {
+            "issuer": self.issuer,
+            "authorization_endpoint": self.issuer + "/authorize",
+            "token_endpoint": self.issuer + "/token",
+            "registration_endpoint": self.issuer + "/register",
+            "response_types_supported": ["code"],
+            "grant_types_supported": ["authorization_code"],
+            "code_challenge_methods_supported": ["S256"],
+            "token_endpoint_auth_methods_supported": list(AUTH_METHODS),
+        }
+
+    # -- registration --
+
+    def register(self, body: bytes) -> tuple[int, dict[str, Any]]:
+        try:
+            meta = json.loads(body)
+        except (ValueError, RecursionError):
+            return 400, {"error": "invalid_client_metadata"}
+        if not isinstance(meta, dict):
+            return 400, {"error": "invalid_client_metadata"}
+        uris = meta.get("redirect_uris")
+        if not isinstance(uris, list) or not uris or len(uris) > 16 \
+                or not all(redirect_ok(u) for u in uris):
+            return 400, {"error": "invalid_redirect_uri",
+                         "error_description": "redirect URIs must be https on an allowed host"}
+        method = meta.get("token_endpoint_auth_method", "client_secret_basic")
+        if method not in AUTH_METHODS:
+            method = "client_secret_basic"
+        out: dict[str, Any] = {
+            "client_id": secrets.token_urlsafe(24),
+            "client_id_issued_at": int(time.time()),
+            "redirect_uris": uris,
+            "grant_types": ["authorization_code"],
+            "response_types": ["code"],
+            "token_endpoint_auth_method": method,
+        }
+        if method != "none":
+            out["client_secret"] = secrets.token_urlsafe(32)
+            out["client_secret_expires_at"] = 0
+        name = meta.get("client_name")
+        if isinstance(name, str) and len(name) <= 200:
+            out["client_name"] = name
+        return 201, out
+
+    # -- authorization --
+
+    @staticmethod
+    def _request_problem(q: dict[str, str]) -> str | None:
+        """Why an authorization request is refused, or None. Checked on the page
+        and again on the submit, which carries the same fields."""
+        if q.get("response_type") != "code":
+            return "response_type must be code"
+        if not _CLIENT_ID_RE.match(q.get("client_id", "")):
+            return "missing or malformed client_id"
+        if not redirect_ok(q.get("redirect_uri")):
+            return "redirect_uri is not allowed"
+        if q.get("code_challenge_method") != "S256" or \
+                not _CHALLENGE_RE.match(q.get("code_challenge", "")):
+            return "PKCE with S256 is required"
+        state = q.get("state", "")
+        if len(state) > MAX_STATE_CHARS or not state.isprintable():
+            return "state is too long or not printable"
+        return None
+
+    @staticmethod
+    def _fields(raw: dict[str, list[str]]) -> dict[str, str] | None:
+        """One value per field, or None when any field repeats."""
+        if any(len(v) != 1 for v in raw.values()):
+            return None
+        return {k: v[0] for k, v in raw.items()}
+
+    def authorize_page(self, query: str) -> tuple[int, str]:
+        q = self._fields(urllib.parse.parse_qs(query, keep_blank_values=True))
+        problem = "a field is repeated" if q is None else self._request_problem(q)
+        if problem or q is None:  # never redirect on a bad request (RFC 6749 §4.1.2.1)
+            return 400, _page("Sign-in refused", f"<p>{html.escape(problem or '')}</p>")
+        return 200, self._form(q, "")
+
+    def _form(self, q: dict[str, str], error: str) -> str:
+        keep = ("response_type", "client_id", "redirect_uri", "code_challenge",
+                "code_challenge_method", "state", "resource", "scope")
+        hidden = "".join(
+            f'<input type="hidden" name="{k}" value="{html.escape(q[k], quote=True)}">'
+            for k in keep if k in q)
+        err = f'<p class="err">{html.escape(error)}</p>' if error else ""
+        host = html.escape(urllib.parse.urlsplit(q["redirect_uri"]).hostname or "", quote=True)
+        return _page("Connect to anneal memory", (
+            f"<p>An app is asking for read access to this memory. It returns to "
+            f"<b>{host}</b>.</p>{err}"
+            f'<form method="post" action="/authorize">{hidden}'
+            '<label>Connector token<br><input type="password" name="token" '
+            'autocomplete="off" required></label><br>'
+            '<button type="submit">Allow</button></form>'))
+
+    def authorize_submit(self, body: bytes, check_token: Any) -> tuple[int, str]:
+        """``check_token(token) -> connector name | None`` against the token file."""
+        try:
+            raw = urllib.parse.parse_qs(body.decode("ascii"), keep_blank_values=True,
+                                        max_num_fields=16)
+        except (UnicodeDecodeError, ValueError):
+            return 400, _page("Sign-in refused", "<p>malformed form</p>")
+        q = self._fields(raw)
+        problem = "a field is repeated" if q is None else self._request_problem(q)
+        if problem:
+            return 400, _page("Sign-in refused", f"<p>{html.escape(problem)}</p>")
+        assert q is not None
+        token = q.get("token", "").strip()
+        if not token or check_token(token) is None:
+            time.sleep(1)  # tokens are 32 random bytes; this only slows a script
+            return 401, self._form(q, "That token is not valid here.")
+        code = secrets.token_urlsafe(32)
+        now = time.monotonic()
+        with self._lock:
+            for c in [c for c, v in self._codes.items() if v["exp"] <= now]:
+                del self._codes[c]
+            if len(self._codes) >= MAX_PENDING_CODES:
+                return 503, _page("Busy", "<p>Too many sign-ins in progress; try again shortly.</p>")
+            self._codes[code] = {"client_id": q["client_id"], "redirect_uri": q["redirect_uri"],
+                                 "challenge": q["code_challenge"], "token": token,
+                                 "exp": now + CODE_TTL_S}
+        params = {"code": code}
+        if "state" in q:
+            params["state"] = q["state"]
+        target = _with_query(q["redirect_uri"], params)
+        esc = html.escape(target, quote=True)
+        return 200, _page("Connected", (
+            f'<p>Returning to the app. <a href="{esc}">Continue</a> if nothing happens.</p>'),
+            refresh=target)
+
+    # -- token --
+
+    def token(self, body: bytes, basic: str | None, check_token: Any) -> tuple[int, dict[str, Any]]:
+        try:
+            raw = urllib.parse.parse_qs(body.decode("ascii"), keep_blank_values=True,
+                                        max_num_fields=16)
+        except (UnicodeDecodeError, ValueError):
+            return 400, {"error": "invalid_request"}
+        q = self._fields(raw)
+        if q is None:
+            return 400, {"error": "invalid_request"}
+        if q.get("grant_type") != "authorization_code":
+            return 400, {"error": "unsupported_grant_type"}
+        client_id = q.get("client_id")
+        if basic is not None:
+            try:
+                user = base64.b64decode(basic, validate=True).decode("ascii").split(":", 1)[0]
+                basic_id = urllib.parse.unquote(user)
+            except (ValueError, UnicodeDecodeError):
+                return 401, {"error": "invalid_client"}
+            if client_id is not None and client_id != basic_id:
+                return 400, {"error": "invalid_request"}
+            client_id = basic_id
+        with self._lock:
+            entry = self._codes.pop(q.get("code", ""), None)  # single use, even when refused
+        verifier = q.get("code_verifier", "")
+        if (entry is None or entry["exp"] <= time.monotonic()
+                or not hmac.compare_digest(str(client_id), entry["client_id"])
+                or q.get("redirect_uri") != entry["redirect_uri"]
+                or not _VERIFIER_RE.match(verifier)
+                or not hmac.compare_digest(s256(verifier), entry["challenge"])):
+            return 400, {"error": "invalid_grant"}
+        if check_token(entry["token"]) is None:  # revoked since the sign-in
+            return 400, {"error": "invalid_grant"}
+        return 200, {"access_token": entry["token"], "token_type": "Bearer"}
+
+
+def _with_query(uri: str, params: dict[str, str]) -> str:
+    parts = urllib.parse.urlsplit(uri)
+    query = "&".join(p for p in (parts.query, urllib.parse.urlencode(params)) if p)
+    return urllib.parse.urlunsplit(parts._replace(query=query))
+
+
+def _page(title: str, body: str, refresh: str | None = None) -> str:
+    meta = (f'<meta http-equiv="refresh" content="0;url={html.escape(refresh, quote=True)}">'
+            if refresh else "")
+    return ("<!doctype html><html><head><meta charset=\"utf-8\">"
+            "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
+            f"{meta}<title>{html.escape(title)}</title><style>"
+            "body{font:16px system-ui,sans-serif;max-width:28rem;margin:3rem auto;padding:0 1rem}"
+            "input[type=password]{width:100%;padding:.5rem;margin:.5rem 0}"
+            "button{padding:.5rem 1.2rem}.err{color:#b00}</style></head>"
+            f"<body><h1>{html.escape(title)}</h1>{body}</body></html>")
+
+
+# Sent with every page: nothing loads from anywhere, the page cannot be framed,
+# and the form may only post back here. The navigation to the redirect URI is a
+# meta refresh, which form-action does not govern.
+PAGE_HEADERS = {
+    "Content-Security-Policy": ("default-src 'none'; style-src 'unsafe-inline'; "
+                                "form-action 'self'; frame-ancestors 'none'; base-uri 'none'"),
+    "X-Frame-Options": "DENY",
+    "Referrer-Policy": "no-referrer",
+    "X-Content-Type-Options": "nosniff",
+}

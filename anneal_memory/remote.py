@@ -87,6 +87,7 @@ from . import __version__
 from ._fsdir import _fsync_dir
 from .origin import strip_hidden_controls
 from .server import _RELAYED_LABEL, Server, _tool_result
+from .remote_oauth import MAX_FORM_BYTES, MAX_REGISTER_BYTES, PAGE_HEADERS, OAuth
 from .store import Store
 from .types import EpisodeType
 
@@ -695,6 +696,7 @@ class _Handler(BaseHTTPRequestHandler):
     tokens_path: Path
     session: RemoteSession
     slots: threading.BoundedSemaphore
+    oauth: OAuth | None = None
 
     def log_message(self, format: str, *args: Any) -> None:
         # The default line carries the request path, which may be the token.
@@ -751,8 +753,10 @@ class _Handler(BaseHTTPRequestHandler):
             return None
         name = match_token(tokens, presented)
         if name is None:
+            challenge = (self.oauth.challenge_header() if self.oauth is not None
+                         else 'Bearer realm="anneal-memory"')
             self._send(401, b'{"error":"unauthorized"}', "application/json",
-                       {"WWW-Authenticate": 'Bearer realm="anneal-memory"'})
+                       {"WWW-Authenticate": challenge})
             return None
         return name
 
@@ -802,6 +806,8 @@ class _Handler(BaseHTTPRequestHandler):
         self._send(204, extra={"Allow": ALLOWED_METHODS})
 
     def _get(self) -> None:
+        if self.command == "GET" and self._oauth_route():
+            return
         if self._authorize() is None:
             return
         # No server-initiated SSE stream and no sessions to end.
@@ -817,22 +823,77 @@ class _Handler(BaseHTTPRequestHandler):
             except OSError:
                 pass
 
-    def _post(self) -> None:
-        connector = self._authorize()
-        if connector is None:
-            return
+    def _body(self, limit: int) -> bytes | None:
+        """The request body under ``limit`` bytes, or None after a refusal."""
         if self.headers.get("Transfer-Encoding"):
             self._send(411)
-            return
+            return None
         values = self.headers.get_all("Content-Length") or []
         # Digits only, exactly one header: int() also takes "+5", " 5", "1_0".
         if len(values) != 1 or not (values[0].isascii() and values[0].isdigit()):
             self._send(411)
-            return
-        if len(values[0]) > 8 or int(values[0]) > MAX_BODY_BYTES:
+            return None
+        if len(values[0]) > 8 or int(values[0]) > limit:
             self._send(413)
+            return None
+        return self._read_body(int(values[0]))
+
+    def _oauth_route(self) -> bool:
+        """Answer an OAuth endpoint (only with ``--oauth-issuer``); False when the
+        path is not one, so the MCP routes handle it. These routes take no bearer:
+        each is what a client calls to obtain one."""
+        oauth = self.oauth
+        if oauth is None:
+            return False
+        path, _, query = self.path.partition("?")
+        if self.command == "GET":
+            if path in ("/.well-known/oauth-protected-resource",
+                        "/.well-known/oauth-protected-resource/mcp"):
+                self._send_json(200, oauth.protected_resource())
+            elif path == "/.well-known/oauth-authorization-server":
+                self._send_json(200, oauth.server_metadata())
+            elif path == "/authorize":
+                status, page = oauth.authorize_page(query)
+                self._send(status, page.encode("utf-8"), "text/html; charset=utf-8",
+                           PAGE_HEADERS)
+            else:
+                return False
+            return True
+        if self.command != "POST" or path not in ("/register", "/authorize", "/token"):
+            return False
+        body = self._body(MAX_REGISTER_BYTES if path == "/register" else MAX_FORM_BYTES)
+        if body is None:
+            return True
+        if path == "/register":
+            status, obj = oauth.register(body)
+            self._send_json(status, obj)
+        elif path == "/authorize":
+            status, page = oauth.authorize_submit(body, self._check_token)
+            self._send(status, page.encode("utf-8"), "text/html; charset=utf-8", PAGE_HEADERS)
+        else:
+            auth = self.headers.get("Authorization", "")
+            scheme, _, value = auth.partition(" ")
+            basic = value.strip() if scheme.lower() == "basic" else None
+            status, obj = oauth.token(body, basic, self._check_token)
+            self._send(status, json.dumps(obj).encode("utf-8"), "application/json",
+                       {"Pragma": "no-cache"})
+        return True
+
+    def _check_token(self, token: str) -> str | None:
+        """The connector name ``token`` belongs to in this server's token file."""
+        try:
+            return match_token(load_tokens(self.tokens_path), token)
+        except (OSError, ValueError):
+            logger.exception("token file unreadable; refusing")
+            return None
+
+    def _post(self) -> None:
+        if self._oauth_route():
             return
-        raw = self._read_body(int(values[0]))
+        connector = self._authorize()
+        if connector is None:
+            return
+        raw = self._body(MAX_BODY_BYTES)
         if raw is None:
             return
         try:
@@ -913,10 +974,15 @@ class _BoundedServer(ThreadingHTTPServer):
 
 def make_server(db_path: str | Path, tokens_path: str | Path,
                 host: str = "127.0.0.1", port: int = 8765,
-                outbox: str | Path | None = None) -> ThreadingHTTPServer:
+                outbox: str | Path | None = None,
+                oauth_issuer: str | None = None) -> ThreadingHTTPServer:
     """A ready (not yet serving) HTTP server. Fails fast on a bad token file, a
-    store that cannot be opened read-only, or an outbox whose directory is missing."""
+    store that cannot be opened read-only, an outbox whose directory is missing,
+    or an OAuth issuer that is not a bare https origin. With ``oauth_issuer`` the
+    OAuth endpoints of :mod:`anneal_memory.remote_oauth` are served; they can only
+    hand out tokens this ``tokens_path`` already holds."""
     load_tokens(tokens_path)
+    oauth = OAuth(oauth_issuer) if oauth_issuer is not None else None
     if outbox is not None:
         # Anchored once, so a later chdir cannot move it off the checked directory.
         outbox = Path(outbox).parent.resolve() / Path(outbox).name
@@ -933,6 +999,7 @@ def make_server(db_path: str | Path, tokens_path: str | Path,
         "tokens_path": Path(tokens_path),
         "session": RemoteSession(db_path, outbox),
         "slots": threading.BoundedSemaphore(MAX_CONCURRENT),
+        "oauth": oauth,
     })
     return _BoundedServer((host, port), handler)
 
@@ -948,6 +1015,9 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--port", type=int, default=8765)
     s.add_argument("--outbox", default=None,
                    help="enable the append-only capture tool, writing to this file")
+    s.add_argument("--oauth-issuer", default=None,
+                   help="serve a one-user OAuth sign-in at this public https origin "
+                        "(for clients that require OAuth); it issues only tokens in --token-file")
     for cmd in ("token-add", "token-revoke"):
         t = sub.add_parser(cmd)
         t.add_argument("name")
@@ -966,9 +1036,14 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-    httpd = make_server(args.db, args.token_file, args.host, args.port, args.outbox)
-    logger.info("serving on http://%s:%d/mcp (capture %s)", args.host, args.port,
-                "on" if args.outbox else "off")
+    try:
+        httpd = make_server(args.db, args.token_file, args.host, args.port, args.outbox,
+                            args.oauth_issuer)
+    except ValueError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
+    logger.info("serving on http://%s:%d/mcp (capture %s, oauth %s)", args.host, args.port,
+                "on" if args.outbox else "off", "on" if args.oauth_issuer else "off")
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:

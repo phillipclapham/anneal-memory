@@ -752,9 +752,10 @@ class CrystalStore:
         file answers when it exists; an absent file raises a retryable
         :class:`CrystalError`, never an empty answer.
 
-        Known edge (review r1 C4, routed): the file is not validated here, since
-        every read of a busy store, its hashes included, is busy too; a foreign
-        file answers until the store frees."""
+        Known edge (review r1 C4, head ruling (b)): on a busy read a foreign file is
+        returned unvalidated (test_worth's locked-db contract; every read of a busy
+        store, its hashes included, is busy too), and the writer's next reconcile
+        repairs it."""
         text = self._read_file_text()
         if text is None:
             raise CrystalError(

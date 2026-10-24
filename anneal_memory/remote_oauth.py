@@ -37,6 +37,7 @@ Codes live in memory; a restart between sign-in and exchange fails that sign-in 
 from __future__ import annotations
 
 import base64
+import contextlib
 import hashlib
 import hmac
 import html
@@ -49,6 +50,8 @@ import time
 import urllib.parse
 from pathlib import Path
 from typing import Any
+
+from ._fsdir import _fsync_dir
 
 CODE_TTL_S = 120
 MAX_PENDING_CODES = 32
@@ -68,6 +71,7 @@ AUTH_METHODS = ("client_secret_basic", "client_secret_post", "none")
 # What a ``check_token`` callback returns when the token file cannot be read,
 # so a broken server is never reported to the operator as a wrong token.
 UNAVAILABLE = object()
+_INVALID_PIN = "\x00invalid pin"  # matches no redirect URI
 
 
 def redirect_ok(uri: Any) -> bool:
@@ -92,11 +96,19 @@ class OAuth:
     """Endpoints for one issuer. Each handler returns ``(status, headers, body)``."""
 
     def __init__(self, issuer: str, pin_path: str | os.PathLike[str] | None = None) -> None:
+        # It reaches metadata and a response header: only an exact https://host[:port].
+        bad = ValueError("the OAuth issuer must be a bare https origin, https://host[:port]")
+        if not issuer.isascii() or not issuer.isprintable() or any(c in issuer for c in ' "\\'):
+            raise bad
         parts = urllib.parse.urlsplit(issuer)
-        if parts.scheme != "https" or not parts.hostname or parts.path not in ("", "/") \
-                or parts.query or parts.fragment:
-            raise ValueError("the OAuth issuer must be a bare https origin")
-        self.issuer = issuer.rstrip("/")
+        try:
+            port = parts.port
+        except ValueError:
+            raise bad from None
+        origin = f"https://{parts.hostname}" + (f":{port}" if port is not None else "")
+        if parts.scheme != "https" or not parts.hostname or issuer.rstrip("/") != origin:
+            raise bad
+        self.issuer = origin
         self.resource = self.issuer + "/mcp"
         self._codes: dict[str, dict[str, Any]] = {}
         self._lock = threading.Lock()
@@ -112,26 +124,41 @@ class OAuth:
             text = self._pin_path.read_text(encoding="ascii").strip()
         except FileNotFoundError:
             return None
-        if not redirect_ok(text):  # an unreadable pin refuses every redirect
-            return "\x00invalid pin"
-        return text
+        except (OSError, ValueError):  # unreadable or not ASCII: refuse every redirect
+            return _INVALID_PIN
+        return text if redirect_ok(text) else _INVALID_PIN
 
     def _redirect_allowed(self, uri: Any) -> bool:
         pin = self.pinned()
         return redirect_ok(uri) and (pin is None or uri == pin)
 
-    def _pin(self, uri: str) -> None:
-        """Pin ``uri`` if nothing is pinned yet (created exclusively: first one wins)."""
+    def _ensure_pinned(self, uri: str) -> bool:
+        """True when ``uri`` is the pinned redirect, pinning it if nothing is yet.
+        The pin is written whole to a temporary file and linked into place, so it
+        appears complete or not at all and the first link wins across processes;
+        the directory is synced before a token is released. Raises OSError when it
+        cannot be written. Call under ``self._lock``."""
         if self._pin_path is None:
-            return
+            return True
+        current = self.pinned()
+        if current is not None:
+            return current == uri
+        tmp = self._pin_path.with_name(f"{self._pin_path.name}.{secrets.token_hex(8)}.tmp")
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         try:
-            fd = os.open(self._pin_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        except FileExistsError:
-            return
-        with os.fdopen(fd, "w", encoding="ascii") as f:
-            f.write(uri + "\n")
-            f.flush()
-            os.fsync(f.fileno())
+            with os.fdopen(fd, "w", encoding="ascii") as f:
+                f.write(uri + "\n")
+                f.flush()
+                os.fsync(f.fileno())
+            try:
+                os.link(tmp, self._pin_path)
+            except FileExistsError:
+                pass  # another process pinned first; compare below
+        finally:
+            with contextlib.suppress(OSError):
+                os.unlink(tmp)
+        _fsync_dir(self._pin_path.parent)
+        return self.pinned() == uri
 
     # -- discovery --
 
@@ -209,7 +236,12 @@ class OAuth:
         state = q.get("state", "")
         if len(state) > MAX_STATE_CHARS or not state.isprintable():
             return "state is too long or not printable"
+        if "resource" in q and not self._resource_ok(q["resource"]):
+            return "resource is not this server"  # RFC 8707: never a token for another
         return None
+
+    def _resource_ok(self, value: str) -> bool:
+        return value.rstrip("/") == self.resource
 
     @staticmethod
     def _fields(raw: dict[str, list[str]]) -> dict[str, str] | None:
@@ -219,7 +251,11 @@ class OAuth:
         return {k: v[0] for k, v in raw.items()}
 
     def authorize_page(self, query: str) -> tuple[int, str]:
-        q = self._fields(urllib.parse.parse_qs(query, keep_blank_values=True))
+        try:
+            q = self._fields(urllib.parse.parse_qs(query, keep_blank_values=True,
+                                                   max_num_fields=16))
+        except ValueError:
+            q = None
         problem = "a field is repeated" if q is None else self._request_problem(q)
         if problem or q is None:  # never redirect on a bad request (RFC 6749 §4.1.2.1)
             return 400, _page("Sign-in refused", f"<p>{html.escape(problem or '')}</p>")
@@ -272,6 +308,7 @@ class OAuth:
                 return 503, _page("Busy", "<p>Too many sign-ins in progress; try again shortly.</p>")
             self._codes[code] = {"client_id": q["client_id"], "redirect_uri": q["redirect_uri"],
                                  "challenge": q["code_challenge"], "token": token,
+                                 "resource": q.get("resource"),
                                  "exp": now + CODE_TTL_S}
         params = {"code": code}
         if "state" in q:
@@ -318,12 +355,25 @@ class OAuth:
                 or not _VERIFIER_RE.fullmatch(verifier)
                 or not hmac.compare_digest(s256(verifier), entry["challenge"])):
             return 400, {"error": "invalid_grant"}
+        resource = q.get("resource")
+        if resource is not None and not self._resource_ok(resource) or \
+                entry["resource"] is not None and resource is not None \
+                and resource.rstrip("/") != entry["resource"].rstrip("/"):
+            return 400, {"error": "invalid_target"}
         still = check_token(entry["token"])
         if still is UNAVAILABLE:
             return 503, {"error": "server_error"}
         if still is None:  # revoked since the sign-in
             return 400, {"error": "invalid_grant"}
-        self._pin(entry["redirect_uri"])
+        # The pin binds codes issued before it existed too: a second app's code,
+        # signed in while nothing was pinned, is refused once the first one pinned.
+        try:
+            with self._lock:
+                pinned_here = self._ensure_pinned(entry["redirect_uri"])
+        except OSError:
+            return 503, {"error": "server_error"}
+        if not pinned_here:
+            return 400, {"error": "invalid_grant"}
         return 200, {"access_token": entry["token"], "token_type": "Bearer"}
 
 

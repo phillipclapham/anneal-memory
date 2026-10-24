@@ -165,7 +165,7 @@ def test_crafted_malicious_lines_are_refused(project, tmp_path):
 
     # At load: a memory file edited behind the save gate still runs nothing.
     validated_save_continuity(store, _continuity(TRUE_STATE))
-    Path(store.continuity_path).write_text(evil_text)
+    store.save_continuity(evil_text)  # gen 3: the un-gated writer (a file edit never reaches a reader)
     report = rederive_continuity(store)
     by_line = {r.line: r.status for r in report.results}
     assert [by_line[l] for l in evil_lines] == ["refused"] * len(EVIL)
@@ -179,7 +179,7 @@ def test_crafted_malicious_lines_are_refused(project, tmp_path):
     outside = tmp_path / "outside.mailmap"
     outside.write_text("OUTSIDE-SECRET <out@x> <t@t>\n")
     subprocess.run(["git", "config", "mailmap.file", str(outside)], cwd=repo, check=True)
-    Path(store.continuity_path).write_text(
+    store.save_continuity(  # gen 3: the un-gated writer
         _continuity(TRUE_STATE + ["- author [derive: git log -1 => nope]"])
     )
     assert "OUTSIDE-SECRET" not in rederive_continuity(store).text
@@ -187,7 +187,7 @@ def test_crafted_malicious_lines_are_refused(project, tmp_path):
     # A repository whose object store points outside the root runs no git.
     alt = repo / ".git" / "objects" / "info" / "alternates"
     alt.write_text(str(tmp_path / "elsewhere.git" / "objects") + "\n")
-    Path(store.continuity_path).write_text(_continuity(TRUE_STATE))
+    store.save_continuity(_continuity(TRUE_STATE))  # gen 3: the un-gated writer
     git_lines = [r for r in rederive_continuity(store).results if "git " in r.line]
     assert git_lines and all(r.status == "error" and "alternates" in r.detail for r in git_lines)
     alt.unlink()
@@ -198,7 +198,7 @@ def test_crafted_malicious_lines_are_refused(project, tmp_path):
     (repo / ".git" / "refs" / "heads" / "evil").unlink()
 
     # An untracked secret is never read: the claim is judged stale, unread.
-    Path(store.continuity_path).write_text(
+    store.save_continuity(  # gen 3: the un-gated writer
         _continuity(TRUE_STATE + ["- key [derive: grep -c API .env => 1]"])
     )
     untracked = rederive_continuity(store).results[-1]

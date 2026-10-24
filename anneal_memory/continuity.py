@@ -26,18 +26,14 @@ import dataclasses
 import re
 import shlex
 import glob
-import os
 import sqlite3
-import tempfile
 import uuid
 import logging
 import warnings
 from dataclasses import asdict
 from datetime import date, datetime
-from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from ._fsdir import _fsync_dir
 from .graduation import (
     mask_explanations_text,
     CrossSessionCollision,
@@ -109,7 +105,6 @@ from .store import (
     WrapWindowMovedError,
     WrapContinuityMovedError,
     SectionError,
-    _safe_unlink,
 )
 from .types import (
     DEFAULT_TRUST,
@@ -2303,8 +2298,7 @@ def format_wrap_package_text(result: PrepareWrapResult) -> str:
     # TypedDict, so this documents + enforces the invariant at the narrowing
     # boundary. Explicit raise, not ``assert``: assertions are stripped by
     # ``python -O``, and under ``-O`` the next line would raise ``TypeError``
-    # on a None subscript instead of a typed library error. Same convention as
-    # the ``meta_tmp`` / ``cont_tmp`` guards in validated_save_continuity.
+    # on a None subscript instead of a typed library error.
     if package is None:
         # AnnealMemoryError, not StoreError: this is a pure formatter with no
         # store and no I/O, so there is no operation or path to attribute — and
@@ -3396,40 +3390,28 @@ def validated_save_continuity(
         graduating_headings=grad_headings,
     )
 
-    # 10.5c.5 TWO-PHASE COMMIT PIPELINE
+    # 10.5c.5 TWO-PHASE COMMIT PIPELINE, generation 3
     #
-    # Phase 1: write continuity.md.tmp (no rename yet) so we know the
-    #          content is durable on disk before committing DB state.
     # Phase 2: inside ``store._batch()``, accumulate DB DML (graduation
-    #          records + meta + wrap_completed) without intermediate commits and
-    #          write meta.json.tmp (no rename yet). The batch context
-    #          manager commits the single outer SQLite transaction on
-    #          successful exit and flushes queued audit events.
-    # Phase 3: after the DB commit succeeds, atomically rename both
-    #          tmp sidecars to their final paths.
+    #          records + wrap_completed + the ``identity_versions`` row that
+    #          holds the text and meta) without intermediate commits; the
+    #          batch's audit events become ``audit_outbox`` rows in the same
+    #          transaction. The batch commits once and flushes the outbox.
+    # Phase 3: after the commit, project the continuity file and meta
+    #          sidecar from the committed row (Store._project_identity).
     # Phase 4: fire the continuity_saved audit event.
     #
     # Crash windows:
-    #   - Before the batch commit: DB rolls back + tmp files cleaned up.
-    #     Store is in exact pre-wrap state.
-    #   - Between batch commit and final renames: DB reflects the new
-    #     wrap, both .tmp files PERSIST on disk (deliberately NOT
-    #     cleaned up — they hold the new content and are required
-    #     for operator recovery). continuity.md and meta.json are
-    #     still the pre-wrap versions. Operator recovery path: the
-    #     .md.tmp and .json.tmp files can be manually ``mv``'d to
-    #     their final paths; the wrap-status subcommand still reports
-    #     the pre-wrap state since wrap_completed cleared the
-    #     in-progress metadata during Phase 2.
-    #   - Between the two renames: continuity is the new version;
-    #     meta.json.tmp still holds the new meta. Same operator
-    #     recovery applies — ``mv x.json.tmp x.json`` finishes the
-    #     externalization.
-    #
-    # The load-bearing invariant: once the batch has committed the
-    # DB, the outer ``except`` MUST NOT unlink the tmp files. They
-    # are the committed state awaiting externalization. Pre-commit
-    # cleanup is unchanged (pre-wrap state is restored cleanly).
+    #   - Before the batch commit: the DB rolls back; nothing was written
+    #     to the files. Store is in exact pre-wrap state.
+    #   - After the commit, before or during the projection: the DB holds
+    #     the new identity, the files the old one (or a projection tmp).
+    #     The next open, or load_continuity, re-projects and removes the
+    #     tmp; nothing needs an operator. A projection failure here warns
+    #     and the save still returns success (it committed).
+    # (Phase 1, the pre-commit tmp write and the operator ``mv`` recovery,
+    # was the generation-2 pipeline; its orphan scan stays for stores not
+    # yet migrated and goes in 2.0.)
     sections = measure_sections(grad_result.text)
     patterns = len(re.findall(r"\|\s*\d+x", mask_explanations_text(grad_result.text)))
     total_demoted = grad_result.demoted + grad_result.bare_demoted
@@ -3440,32 +3422,15 @@ def validated_save_continuity(
     # ``self._path`` — it's stable across the pipeline.
     path = str(store.continuity_path)
 
-    # Phase 1: continuity tmp write.
-    # The tmp filename suffix is a PAIR ID: ``<token12>-<uuid8>``.
-    #   * the ``<token12>`` prefix gives continuity.tmp + meta.tmp (written in
-    #     Phase 2) a shared recoverability identity, and lets the startup
-    #     orphan-detector match an in-flight wrap by its active wrap_token
-    #     prefix (10.5c.5 L3 Fix #19 + #21).
-    #   * the ``<uuid8>`` makes the path UNIQUE PER SAVE ATTEMPT. AM-CONTLOCK
-    #     L3 (codex HIGH): the Phase-1 tmp write happens BEFORE the wrap-token
-    #     CAS and OUTSIDE the Phase-3 flock, so two concurrent saves sharing one
-    #     snapshot token would otherwise write the SAME deterministic tmp path —
-    #     the loser's bytes could be renamed under the winner's committed DB row
-    #     (silent file/DB divergence). A per-attempt uuid makes a collision
-    #     negligibly unlikely — a 32-bit suffix is ~2^-32 birthday odds for two
-    #     same-snapshot saves, and the realistic concurrency is a single
-    #     consolidate plus at most one external editor — so each save renames ITS
-    #     OWN tmp. (Not a hard impossibility: an airtight version would be
-    #     O_CREAT|O_EXCL-with-retry; unwarranted at this concurrency.) This
-    #     reconciles Fix #19's pairing (kept via the token prefix) with the
-    #     uniqueness the earlier 10.5c.5 fix required (which #19 had traded away).
+    # The wraps row's ``pair_id`` (``<token12>-<uuid8>``) named the gen-2
+    # pipeline's tmp pair; it is still recorded, per attempt, so the gen-2
+    # orphan classifier keeps reading a well-formed row. No tmp carries it.
     tmp_pair_id: str = f"{snapshot['token'][:12]}-{uuid.uuid4().hex[:8]}"
     # AM-SNAPSHOT ①: compute the continuity content hash ONCE here, from the
-    # exact text written to the tmp sidecar (and renamed to continuity.md in
-    # Phase 3). It is passed into wrap_completed (durable in the wraps row at
-    # the Phase-2 commit, the recovery oracle) AND reused in the Phase-4
-    # continuity_saved audit payload below — single source, so the durable
-    # oracle and the audit event can never disagree about what this wrap saved.
+    # exact text the identity row holds and the projection writes. It is
+    # passed into wrap_completed (durable in the wraps row) AND reused in the
+    # Phase-4 continuity_saved audit payload below — single source, so the
+    # wraps row, the version row and the audit event agree on what was saved.
     content_hash: str = hashlib.sha256(
         grad_result.text.encode("utf-8")
     ).hexdigest()
@@ -3478,16 +3443,7 @@ def validated_save_continuity(
         inert_value, cue_warnings = _durable_cue_state(
             store, section_schema, grad_result.text
         )
-    cont_tmp: Path | None = store._prepare_continuity_write(
-        grad_result.text, token_hex=tmp_pair_id
-    )
-    meta_tmp: Path | None = None
     wrap_result = None
-    # Once ``db_committed`` flips True, the outer ``except`` preserves
-    # tmp files instead of cleaning them up — they represent committed
-    # state awaiting externalization. Cleaning them up would destroy
-    # the new content permanently (L1 HIGH + L2 M2 data-loss path).
-    db_committed = False
     composted: dict[str, int] = {}
     still_graduating: list[str] = []
     drift_results: list[dict[str, Any]] = []
@@ -3495,426 +3451,294 @@ def validated_save_continuity(
     # Raised inside the batch, delivered only after it commits.
     drift_warnings: list[str] = []
 
-    try:
-        # Phase 2: batched DB DML.
-        with store._batch():
+    # Phase 2: batched DB DML.
+    with store._batch():
 
-            if grad_result.validated > 0 or grad_result.citation_counts:
-                meta["citations_seen"] = True
-            meta["sessions_produced"] = meta.get("sessions_produced", 0) + 1
+        if grad_result.validated > 0 or grad_result.citation_counts:
+            meta["citations_seen"] = True
+        meta["sessions_produced"] = meta.get("sessions_produced", 0) + 1
 
-            # Write meta tmp inside the batch window — not a DB op,
-            # but scoped here so a failure rolls back the DB alongside
-            # cleaning up both tmp files. Order matters only for the
-            # cleanup path: if this raises, the outer ``try`` below
-            # cleans up cont_tmp (and meta_tmp stays None) and the
-            # batch's ``except`` rolls back the DB. The shared
-            # ``tmp_pair_id`` pairs this tmp with cont_tmp (same
-            # ``<token12>-<uuid8>``) so operator recovery matches them.
-            meta_tmp = store._prepare_meta_write(
-                meta, token_hex=tmp_pair_id
+        # The bound ran on levels read before this batch took the write lock.
+        # A sever or rename committed in between would be undone by the record
+        # below (codex L3 r2 HIGH): re-read under the lock, before this wrap's own
+        # compost below, and refuse on any change. Raising rolls the batch back:
+        # nothing saved, the wrap stays open.
+        if store.saved_pattern_levels() != saved_levels:
+            # A ValueError, which every transport surfaces as a refused save.
+            raise ValueError(
+                "validated_save_continuity: the store's saved pattern levels "
+                "changed while this save ran (a sever, rename or another save "
+                "committed). Nothing was saved and the wrap is still open; save "
+                "again so the graduation bound reads the current levels."
             )
 
-            # The bound ran on levels read before this batch took the write lock.
-            # A sever or rename committed in between would be undone by the record
-            # below (codex L3 r2 HIGH): re-read under the lock, before this wrap's own
-            # compost below, and refuse on any change. Raising rolls the batch back:
-            # nothing saved, the wrap stays open.
-            if store.saved_pattern_levels() != saved_levels:
-                # A ValueError, which every transport surfaces as a refused save.
-                raise ValueError(
-                    "validated_save_continuity: the store's saved pattern levels "
-                    "changed while this save ran (a sever, rename or another save "
-                    "committed). Nothing was saved and the wrap is still open; save "
-                    "again so the graduation bound reads the current levels."
-                )
-
-            # Compost severance, in THIS transaction so it commits or rolls
-            # back with the wrap row below. Inside the batch the Store method
-            # defers its commit and queues its audit event until the commit.
-            for name in compost_names or ():
-                composted[name] = store.sever_pattern_concept(
-                    name, today=today_str
-                )
-
-            # The [supersedes:] links accepted above decided what was citable:
-            # recompute that decision under the lock, before this save records any
-            # link, and refuse below (after the narrower checks) if it moved.
-            _supersedes_moved = _accepted_supersedes() != accepted_supersedes
-            supersessions_recorded, supersessions_rejected = \
-                _record_wrap_supersessions(store, grad_result.text, valid_ids)
-            # Re-read under the batch's write lock (codex L3, reproduced: a link
-            # another connection committed between validation and this batch
-            # let a pattern graduate on the episode it superseded). Raising
-            # here rolls the batch back: nothing saved, the wrap stays open.
-            _now_superseded = set(store.superseded_by_map(sorted(valid_ids)))
-            _late = sorted(
-                (_now_superseded - superseded_in_window) & set(grad_result.citation_counts)
-            )
-            if _late:
-                raise SupersessionError(
-                    f"validated_save_continuity: cited episode(s) {', '.join(_late)} were "
-                    f"superseded by another writer while this save ran. Nothing was "
-                    f"saved and the wrap is still open; save again (cite the replacing "
-                    f"episode instead)."
-                )
-            # The same re-read for the grounds (codex r1 #4; CAP-08 D3 R4): per
-            # cited id, whether it exists, its removal marks and its effective
-            # trust. Another writer moving any of them after validation read them
-            # would let the save commit a graduation judged on the old state (a
-            # deleted external ground read the same class before and after, so
-            # comparing trust alone missed it). Raising rolls the batch back.
-            _cited = set(grad_result.citation_counts) | _marker_ids | _grounding_ids
-            _, _state_now = _grounded_trust(
-                store, set(grad_result.citation_counts) | _grounding_ids, _marker_ids)
-            _gone_now = _gone_marks(store.pattern_grounding())
-            _absent = (False, DEFAULT_TRUST)
-            _trust_moved = sorted(
-                cid for cid in _cited
-                if (_state_now.get(cid, _absent), _gone_now.get(cid, ()))
-                != (window_state.get(cid, _absent), window_gone.get(cid, ()))
-            )
-            if _trust_moved:
-                raise StoreError(
-                    f"validated_save_continuity: cited episode(s) "
-                    f"{', '.join(_trust_moved)} were removed or changed trust class "
-                    f"while this save ran. Nothing was saved and the wrap is still "
-                    f"open; save again.",
-                    operation="save_continuity",
-                )
-            if _supersedes_moved:
-                raise ValueError(
-                    "validated_save_continuity: the [supersedes:] links this text "
-                    "proposes changed while this save ran (a trust change or another "
-                    "writer's link). Nothing was saved and the wrap is still open; "
-                    "save again so citability reads the current links."
-                )
-
-            # The bound's next prior, recorded in this transaction so it commits
-            # with the wrap or not at all, with the episodes that grounded each
-            # rung validated today (CAP-08 D2).
-            store._record_pattern_grounding(
-                grad_result.pattern_grounding, today_str, wrap_id=snapshot["token"])
-            # A composted name's level row was deleted with its edges above; the
-            # first save's tombstone seed must not bring it back (codex L3 r1 HIGH 2).
-            _prior_line_levels = pattern_line_levels(prior_continuity or "", grad_headings)
-            store._record_pattern_levels(
-                pattern_line_levels(grad_result.text, grad_headings), today_str,
-                lower_to=_prior_line_levels,
-                first_tombstones={k: v for k, v in _prior_line_levels.items()
-                                  if not (k[0] == "name" and k[1] in composted)},
+        # Compost severance, in THIS transaction so it commits or rolls
+        # back with the wrap row below. Inside the batch the Store method
+        # defers its commit and queues its audit event until the commit.
+        for name in compost_names or ():
+            composted[name] = store.sever_pattern_concept(
+                name, today=today_str
             )
 
-            wrap_result = store.wrap_completed(
-                episodes_compressed=len(episodes),
-                continuity_chars=len(grad_result.text),
-                graduations_validated=grad_result.validated,
-                graduations_demoted=total_demoted,
-                citation_reuse_max=grad_result.citation_reuse_max,
-                patterns_extracted=patterns,
-                section_sizes=sections,
-                episode_ids=frozen_episode_ids,
-                # Pass the token from the snapshot in hand rather than
-                # having wrap_completed re-read metadata. Removes a
-                # within-method SELECT-before-clear sequence that
-                # Layer 1 L3 flagged as a TOCTOU-within-TOCTOU-fix
-                # pattern.
-                wrap_token=snapshot["token"],
-                unattended=unattended,
-                model=model,
-                # AM-SNAPSHOT ① durable recovery oracle: persist the content
-                # hash + tmp pair id in the wraps row, atomic with this wrap's
-                # commit (inside wrap_completed's _db_boundary). Durable before
-                # the Phase-3 rename, so orphan recovery can self-classify even
-                # if the crash beat Phase 4's audit event.
-                content_hash=content_hash,
-                pair_id=tmp_pair_id,
+        # The [supersedes:] links accepted above decided what was citable:
+        # recompute that decision under the lock, before this save records any
+        # link, and refuse below (after the narrower checks) if it moved.
+        _supersedes_moved = _accepted_supersedes() != accepted_supersedes
+        supersessions_recorded, supersessions_rejected = \
+            _record_wrap_supersessions(store, grad_result.text, valid_ids)
+        # Re-read under the batch's write lock (codex L3, reproduced: a link
+        # another connection committed between validation and this batch
+        # let a pattern graduate on the episode it superseded). Raising
+        # here rolls the batch back: nothing saved, the wrap stays open.
+        _now_superseded = set(store.superseded_by_map(sorted(valid_ids)))
+        _late = sorted(
+            (_now_superseded - superseded_in_window) & set(grad_result.citation_counts)
+        )
+        if _late:
+            raise SupersessionError(
+                f"validated_save_continuity: cited episode(s) {', '.join(_late)} were "
+                f"superseded by another writer while this save ran. Nothing was "
+                f"saved and the wrap is still open; save again (cite the replacing "
+                f"episode instead)."
             )
-            # This save formed no association link. Recorded once (the first
-            # such save wins), in this transaction, so the store says from
-            # which wrap on and the legacy forming methods refuse from here.
-            store._record_formation_off(wrap_result.wrap_id)
-            # CAP-06: the operator's drift probes, read and checked INSIDE this batch
-            # (L3 1007, codex: a probe added between a pre-batch read and the commit
-            # had no result) against the exact text being saved; never a gate.
-            drift_results = _evaluate_drift_probes(
-                store, section_schema, grad_result.text, crystal_levels, drift_warnings
+        # The same re-read for the grounds (codex r1 #4; CAP-08 D3 R4): per
+        # cited id, whether it exists, its removal marks and its effective
+        # trust. Another writer moving any of them after validation read them
+        # would let the save commit a graduation judged on the old state (a
+        # deleted external ground read the same class before and after, so
+        # comparing trust alone missed it). Raising rolls the batch back.
+        _cited = set(grad_result.citation_counts) | _marker_ids | _grounding_ids
+        _, _state_now = _grounded_trust(
+            store, set(grad_result.citation_counts) | _grounding_ids, _marker_ids)
+        _gone_now = _gone_marks(store.pattern_grounding())
+        _absent = (False, DEFAULT_TRUST)
+        _trust_moved = sorted(
+            cid for cid in _cited
+            if (_state_now.get(cid, _absent), _gone_now.get(cid, ()))
+            != (window_state.get(cid, _absent), window_gone.get(cid, ()))
+        )
+        if _trust_moved:
+            raise StoreError(
+                f"validated_save_continuity: cited episode(s) "
+                f"{', '.join(_trust_moved)} were removed or changed trust class "
+                f"while this save ran. Nothing was saved and the wrap is still "
+                f"open; save again.",
+                operation="save_continuity",
             )
-            store._record_drift_results(drift_results)
+        if _supersedes_moved:
+            raise ValueError(
+                "validated_save_continuity: the [supersedes:] links this text "
+                "proposes changed while this save ran (a trust change or another "
+                "writer's link). Nothing was saved and the wrap is still open; "
+                "save again so citability reads the current links."
+            )
 
-
-            # Update cross-session pattern history. Scan the
-            # post-validation continuity text for every named pattern
-            # line with an [evidence: ...] explanation that was AUTHORED
-            # TODAY. That includes today's 1x mentions (preserves their
-            # explanation for the next session's cross-session check)
-            # and today's surviving Proven-tier graduations (the demoted
-            # ones already lost their evidence tag via _demote_line so
-            # they won't match here, which is correct).
-            #
-            # Today-only gate (v0.3.2 fix for Codex MEDIUM from the
-            # 4-layer review): without this, carried-forward pattern
-            # lines whose explanation prose differs from the prior
-            # session's stored version would silently overwrite the
-            # canonical prior explanation in pattern_history — letting
-            # unvalidated carry-forward edits pollute the corpus the
-            # cross-session check relies on. validate_graduations
-            # intentionally skips non-today graduation lines for the
-            # same family of reasons; the upsert path must match.
-            #
-            # Patterns demoted to 1x with `(cross-session-overlap)`
-            # marker specifically don't have an evidence tag anymore
-            # so they're skipped — the prior session's history
-            # remains authoritative, exactly the desired behavior.
-            #
-            # pattern_history's wrap_id is left None by choice (the wraps
-            # id is wrap_result.wrap_id since 1.0.2): last_seen_at gives
-            # the per-pattern timestamp and the audit log the wrap timing.
-            # v0.3.3 HIGH #1 fix: gate upsert loop to `## Patterns`
-            # section only. Codex L3 caught that v0.3.2 fixed the
-            # Anti-Patterns parsing leak at the graduation.py side
-            # (validate_graduations / extract_pattern_names /
-            # detect_stale_patterns all use _is_patterns_heading) but
-            # did NOT propagate the fix to the upsert path here.
-            # Result: `## Anti-Patterns` bullets matching the widened
-            # _NAMED_PATTERN_RE still polluted the pattern_history DB
-            # via the upsert loop. The section guard closes that gap.
-            in_patterns_section = False
-            # The review worklist is the validator's own records (name, level and
-            # explanation from the marker it validated and bound to the name), never a
-            # re-parse of the line by name (L3 r3, codex: a second line with the same
-            # name overwrote the validated row).
-            wrap_graduations: list[tuple[str, int, str]] = list(
-                grad_result.graduated_records)
-            for line in grad_result.text.split("\n"):
-                if line.startswith("## "):
-                    in_patterns_section = _is_graduating_heading(line, grad_headings)
-                    continue
-                if not in_patterns_section:
-                    continue
-                # AM-PERNAME-LINEBIND (v0.4.6): capture the name AND its
-                # evidence tag in ONE anchored match, so the level/date/
-                # explanation are guaranteed to belong to the SAME marker as
-                # the name. The pre-0.4.6 path matched the name with
-                # _NAMED_PATTERN_RE.match (anchored, first marker) and the
-                # evidence separately with _PATTERN_LINE_WITH_EVIDENCE_RE.search
-                # (UNANCHORED) — on a malformed line carrying two
-                # ``name | Nx [evidence:]`` markers whose first marker had been
-                # demoted (evidence tag stripped), the unanchored search bound
-                # the SECOND marker's evidence to the FIRST marker's name,
-                # polluting pattern_history. The combined regex matches the
-                # any-level evidence form (GRADUATION_RE excludes 1x but has NO
-                # ceiling; this said "2x/3x-only" until 2026-09-04) so
-                # 1x mentions with explanations still anchor cross-session
-                # history (the 1x → 2x first-graduation step Phase 1b probe #1
-                # exploits). A line with no ``[evidence:]`` simply doesn't match
-                # (1x without explanation, or a demoted line) — nothing to
-                # anchor against — preserving the prior skip.
-                ev_match = _NAMED_PATTERN_WITH_EVIDENCE_RE.match(line)
-                if ev_match is None:
-                    continue
-                # Today-only gate (Codex MEDIUM v0.3.2): only upsert
-                # for lines authored this wrap. Carried-forward lines
-                # with non-today dates are skipped to keep the
-                # cross-session corpus authoritative.
-                line_date = ev_match.group(3)
-                if line_date != today_str:
-                    continue
-                explanation = ev_match.group(5)
-                # A level of 10 or more digits is a malformed marker (bounded before
-                # int(), so a huge run can neither raise nor overflow the history).
-                if len(ev_match.group(2)) > 9:
-                    continue
-                pattern_level = int(ev_match.group(2))
-                if not explanation:
-                    continue
-                store.upsert_pattern_history(
-                    pattern_name=ev_match.group(1),
-                    level=pattern_level,
-                    explanation=explanation,
-                    wrap_id=None,
-                    # AM-PRESERVE determinism (spore-081): anchor the recency
-                    # baseline to the pipeline's `today`, not wall-clock, so the
-                    # warm-preservation gate's (today − last_seen_at) stays
-                    # coherent on deterministic/backdated runs.
-                    seen_at=today_str,
-                )
-            store._record_wrap_graduations(wrap_graduations)
-
-            # flow spore-1169: the authoritative consolidate-gate check, deliberately the LAST
-            # statement in the batch. wrap_completed's DML above means this connection holds
-            # SQLite's write lock, so a policy change from any other connection has either
-            # committed already (and this re-read sees it) or waits for this transaction to
-            # end. Raising rolls the whole batch back, like the linkgate block. The baton is a
-            # sidecar file outside the transaction, so a take landing between this read and the
-            # commit below (the commit itself) is not seen: a documented residual. Holding the
-            # baton flock across the commit instead was tried and withdrawn in L3: a failed
-            # unlock after the commit discarded the committed tmp files, and an on_audit_event
-            # callback that touches the baton would block on the lock this process holds.
-            # Durable cue state: one metadata row, in this transaction, so it commits or
-            # rolls back with the wrap row and always names the continuity it was computed
-            # for (the recall path also checks that hash, so a continuity written any other
-            # way simply turns the filter off).
-            # If the computation failed there is no current set, and an old one must not
-            # outlive the continuity it described: remove it in the same transaction (the
-            # recall path withholds the durable tier until a wrap writes a current key).
-            if durable_report is not None:
-                if inert_value is not None:
-                    store._conn.execute(
-                        "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
-                        (INERT_TOKENS_KEY, inert_value),
-                    )
-                else:
-                    store._conn.execute(
-                        "DELETE FROM metadata WHERE key = ?", (INERT_TOKENS_KEY,)
-                    )
-            _check_save_authority(store, session_id, wrap_token, allow_sole_live)
-            # Batch context manager commits here on successful exit.
-
-        # Batch exited without raising → DB is committed. From this
-        # point forward, failure must NOT unlink the tmp files.
-        db_committed = True
-
-        # Warned only after Phase 3, through _warn_after_commit.
-        still_graduating = sorted(
-            set(composted) & set(grad_result.graduated_names)
+        # The bound's next prior, recorded in this transaction so it commits
+        # with the wrap or not at all, with the episodes that grounded each
+        # rung validated today (CAP-08 D2).
+        store._record_pattern_grounding(
+            grad_result.pattern_grounding, today_str, wrap_id=snapshot["token"])
+        # A composted name's level row was deleted with its edges above; the
+        # first save's tombstone seed must not bring it back (codex L3 r1 HIGH 2).
+        _prior_line_levels = pattern_line_levels(prior_continuity or "", grad_headings)
+        store._record_pattern_levels(
+            pattern_line_levels(grad_result.text, grad_headings), today_str,
+            lower_to=_prior_line_levels,
+            first_tombstones={k: v for k, v in _prior_line_levels.items()
+                              if not (k[0] == "name" and k[1] in composted)},
         )
 
-        # Phase 3: DB commit succeeded — externalize files.
-        # At this point cont_tmp is still the Path returned from
-        # _prepare_continuity_write (we only clear it to None after the
-        # successful rename below). The type is Path | None only because
-        # of the consumed-handle pattern further down.
-        # AM-CONTLOCK: take the SHARED cross-process continuity lock around the
-        # externalization (both renames). This is the physical race point — an
-        # external editor (e.g. Levain's governed State write) reads the
-        # continuity file, and a rename interleaving its read→os.replace would
-        # silently clobber (or be clobbered). The lock spans Phase 3 ONLY, not
-        # the whole pipeline: anneal writes the WHOLE recomposed file (no
-        # read-merge — verified, the save reads no continuity text), so the
-        # only shared resource is the rename. The wrap-vs-edit PRECEDENCE during
-        # Phases 1–2 (an operator State edit landing while the agent composes)
-        # is the arrow-of-time case the design intends (a wrap supersedes a
-        # concurrent edit; the editor's undo refuses across the wrap), NOT a
-        # bug for the lock to prevent — see continuity_lock's docstring. The
-        # lock is held INSIDE the post-commit region. A LOCK-UNAVAILABLE flock
-        # failure (ENOLCK/EOPNOTSUPP on a lock-less FS) does NOT reach here:
-        # continuity_lock degrades it to an unlocked no-op so the write still
-        # completes. Any OTHER flock OSError (a real fault) DOES propagate, and
-        # being post-commit it lands in the existing tmp-preservation path below,
-        # exactly like a rename OSError (committed DB + recoverable tmps).
+        wrap_result = store.wrap_completed(
+            episodes_compressed=len(episodes),
+            continuity_chars=len(grad_result.text),
+            graduations_validated=grad_result.validated,
+            graduations_demoted=total_demoted,
+            citation_reuse_max=grad_result.citation_reuse_max,
+            patterns_extracted=patterns,
+            section_sizes=sections,
+            episode_ids=frozen_episode_ids,
+            # Pass the token from the snapshot in hand rather than
+            # having wrap_completed re-read metadata. Removes a
+            # within-method SELECT-before-clear sequence that
+            # Layer 1 L3 flagged as a TOCTOU-within-TOCTOU-fix
+            # pattern.
+            wrap_token=snapshot["token"],
+            unattended=unattended,
+            model=model,
+            # AM-SNAPSHOT ① durable recovery oracle: persist the content
+            # hash + tmp pair id in the wraps row, atomic with this wrap's
+            # commit (inside wrap_completed's _db_boundary). Durable before
+            # the Phase-3 rename, so orphan recovery can self-classify even
+            # if the crash beat Phase 4's audit event.
+            content_hash=content_hash,
+            pair_id=tmp_pair_id,
+        )
+        # Generation 3: the identity itself, text and meta in one row, in
+        # this transaction with the wraps row above.
+        store._insert_identity_version(
+            grad_result.text, meta_json=store._meta_json(meta),
+            source="wrap", wrap_id=wrap_result.wrap_id,
+        )
+        # This save formed no association link. Recorded once (the first
+        # such save wins), in this transaction, so the store says from
+        # which wrap on and the legacy forming methods refuse from here.
+        store._record_formation_off(wrap_result.wrap_id)
+        # CAP-06: the operator's drift probes, read and checked INSIDE this batch
+        # (L3 1007, codex: a probe added between a pre-batch read and the commit
+        # had no result) against the exact text being saved; never a gate.
+        drift_results = _evaluate_drift_probes(
+            store, section_schema, grad_result.text, crystal_levels, drift_warnings
+        )
+        store._record_drift_results(drift_results)
+
+
+        # Update cross-session pattern history. Scan the
+        # post-validation continuity text for every named pattern
+        # line with an [evidence: ...] explanation that was AUTHORED
+        # TODAY. That includes today's 1x mentions (preserves their
+        # explanation for the next session's cross-session check)
+        # and today's surviving Proven-tier graduations (the demoted
+        # ones already lost their evidence tag via _demote_line so
+        # they won't match here, which is correct).
         #
-        # LOCK ORDERING (do NOT move the acquire): the flock is taken HERE, AFTER
-        # store._batch() has fully committed the SQLite transaction (db_committed is
-        # already True). The flock and the DB lock are DISJOINT/sequential, never
-        # nested — so there is no flock↔SQLite lock-order cycle to deadlock on.
-        # Acquiring the flock earlier (around the batch) would nest them and create
-        # one; keep it scoped to the renames.
-        with store.continuity_lock():
-            # Explicit None check instead of ``assert`` so the guard survives
-            # ``python -O``, which strips assertions — the SAME correction made
-            # for ``meta_tmp`` twenty lines below (L3 complement F3 +
-            # contrarian F6). That fix landed on the sibling and not here, so
-            # under ``-O`` this assert vanished and ``cont_tmp.replace(...)``
-            # raised ``AttributeError`` on None: the wrong exception type for
-            # the transport layer, at the moment the DB has already committed.
-            if cont_tmp is None:
-                raise StoreError(
-                    "internal pipeline invariant violated: cont_tmp is None "
-                    "after the batch committed — this indicates a bug in "
-                    "validated_save_continuity's control flow. The DB has "
-                    "committed but the continuity sidecar was never staged; "
-                    "the store is in a partial-commit state. Manual recovery "
-                    "required.",
-                    operation="save_continuity",
-                    path=str(store.continuity_path),
+        # Today-only gate (v0.3.2 fix for Codex MEDIUM from the
+        # 4-layer review): without this, carried-forward pattern
+        # lines whose explanation prose differs from the prior
+        # session's stored version would silently overwrite the
+        # canonical prior explanation in pattern_history — letting
+        # unvalidated carry-forward edits pollute the corpus the
+        # cross-session check relies on. validate_graduations
+        # intentionally skips non-today graduation lines for the
+        # same family of reasons; the upsert path must match.
+        #
+        # Patterns demoted to 1x with `(cross-session-overlap)`
+        # marker specifically don't have an evidence tag anymore
+        # so they're skipped — the prior session's history
+        # remains authoritative, exactly the desired behavior.
+        #
+        # pattern_history's wrap_id is left None by choice (the wraps
+        # id is wrap_result.wrap_id since 1.0.2): last_seen_at gives
+        # the per-pattern timestamp and the audit log the wrap timing.
+        # v0.3.3 HIGH #1 fix: gate upsert loop to `## Patterns`
+        # section only. Codex L3 caught that v0.3.2 fixed the
+        # Anti-Patterns parsing leak at the graduation.py side
+        # (validate_graduations / extract_pattern_names /
+        # detect_stale_patterns all use _is_patterns_heading) but
+        # did NOT propagate the fix to the upsert path here.
+        # Result: `## Anti-Patterns` bullets matching the widened
+        # _NAMED_PATTERN_RE still polluted the pattern_history DB
+        # via the upsert loop. The section guard closes that gap.
+        in_patterns_section = False
+        # The review worklist is the validator's own records (name, level and
+        # explanation from the marker it validated and bound to the name), never a
+        # re-parse of the line by name (L3 r3, codex: a second line with the same
+        # name overwrote the validated row).
+        wrap_graduations: list[tuple[str, int, str]] = list(
+            grad_result.graduated_records)
+        for line in grad_result.text.split("\n"):
+            if line.startswith("## "):
+                in_patterns_section = _is_graduating_heading(line, grad_headings)
+                continue
+            if not in_patterns_section:
+                continue
+            # AM-PERNAME-LINEBIND (v0.4.6): capture the name AND its
+            # evidence tag in ONE anchored match, so the level/date/
+            # explanation are guaranteed to belong to the SAME marker as
+            # the name. The pre-0.4.6 path matched the name with
+            # _NAMED_PATTERN_RE.match (anchored, first marker) and the
+            # evidence separately with _PATTERN_LINE_WITH_EVIDENCE_RE.search
+            # (UNANCHORED) — on a malformed line carrying two
+            # ``name | Nx [evidence:]`` markers whose first marker had been
+            # demoted (evidence tag stripped), the unanchored search bound
+            # the SECOND marker's evidence to the FIRST marker's name,
+            # polluting pattern_history. The combined regex matches the
+            # any-level evidence form (GRADUATION_RE excludes 1x but has NO
+            # ceiling; this said "2x/3x-only" until 2026-09-04) so
+            # 1x mentions with explanations still anchor cross-session
+            # history (the 1x → 2x first-graduation step Phase 1b probe #1
+            # exploits). A line with no ``[evidence:]`` simply doesn't match
+            # (1x without explanation, or a demoted line) — nothing to
+            # anchor against — preserving the prior skip.
+            ev_match = _NAMED_PATTERN_WITH_EVIDENCE_RE.match(line)
+            if ev_match is None:
+                continue
+            # Today-only gate (Codex MEDIUM v0.3.2): only upsert
+            # for lines authored this wrap. Carried-forward lines
+            # with non-today dates are skipped to keep the
+            # cross-session corpus authoritative.
+            line_date = ev_match.group(3)
+            if line_date != today_str:
+                continue
+            explanation = ev_match.group(5)
+            # A level of 10 or more digits is a malformed marker (bounded before
+            # int(), so a huge run can neither raise nor overflow the history).
+            if len(ev_match.group(2)) > 9:
+                continue
+            pattern_level = int(ev_match.group(2))
+            if not explanation:
+                continue
+            store.upsert_pattern_history(
+                pattern_name=ev_match.group(1),
+                level=pattern_level,
+                explanation=explanation,
+                wrap_id=None,
+                # AM-PRESERVE determinism (spore-081): anchor the recency
+                # baseline to the pipeline's `today`, not wall-clock, so the
+                # warm-preservation gate's (today − last_seen_at) stays
+                # coherent on deterministic/backdated runs.
+                seen_at=today_str,
+            )
+        store._record_wrap_graduations(wrap_graduations)
+
+        # flow spore-1169: the authoritative consolidate-gate check, deliberately the LAST
+        # statement in the batch. wrap_completed's DML above means this connection holds
+        # SQLite's write lock, so a policy change from any other connection has either
+        # committed already (and this re-read sees it) or waits for this transaction to
+        # end. Raising rolls the whole batch back, like the linkgate block. The baton is a
+        # sidecar file outside the transaction, so a take landing between this read and the
+        # commit below (the commit itself) is not seen: a documented residual. Holding the
+        # baton flock across the commit instead was tried and withdrawn in L3: a failed
+        # unlock after the commit discarded the committed tmp files, and an on_audit_event
+        # callback that touches the baton would block on the lock this process holds.
+        # Durable cue state: one metadata row, in this transaction, so it commits or
+        # rolls back with the wrap row and always names the continuity it was computed
+        # for (the recall path also checks that hash, so a continuity written any other
+        # way simply turns the filter off).
+        # If the computation failed there is no current set, and an old one must not
+        # outlive the continuity it described: remove it in the same transaction (the
+        # recall path withholds the durable tier until a wrap writes a current key).
+        if durable_report is not None:
+            if inert_value is not None:
+                store._conn.execute(
+                    "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
+                    (INERT_TOKENS_KEY, inert_value),
                 )
-            try:
-                cont_tmp.replace(store.continuity_path)
-            except OSError as exc:
-                raise StoreError(
-                    f"Failed to rename continuity tmp to "
-                    f"{store.continuity_path}: {exc}. "
-                    f"The DB has committed the wrap but externalization "
-                    f"is incomplete; the new continuity content is "
-                    f"preserved at {cont_tmp}. Manually move it to "
-                    f"{store.continuity_path} to finish recovery.",
-                    operation="save_continuity",
-                    path=str(store.continuity_path),
-                ) from exc
-            # cont_tmp is now the final file, not a tmp file. Clear the
-            # handle so the except clause below doesn't try to preserve
-            # a path that no longer refers to a tmp sidecar.
-            cont_tmp = None
-
-            # Explicit None check instead of ``assert`` so the guard
-            # survives ``python -O`` (which strips assertions). Under
-            # ``-O`` the old assert vanished and ``meta_tmp.replace(...)``
-            # would raise ``AttributeError`` on None — wrong exception
-            # type for the transport layer. L3 complement F3 + contrarian F6.
-            if meta_tmp is None:
-                raise StoreError(
-                    "internal pipeline invariant violated: meta_tmp is "
-                    "None after the batch committed — this indicates a "
-                    "bug in validated_save_continuity's control flow. "
-                    "The DB has committed but the meta sidecar was "
-                    "never staged; the store is in a partial-commit "
-                    "state. Manual recovery required.",
-                    operation="save_meta",
-                    path=str(store.meta_path),
+            else:
+                store._conn.execute(
+                    "DELETE FROM metadata WHERE key = ?", (INERT_TOKENS_KEY,)
                 )
-            try:
-                meta_tmp.replace(store.meta_path)
-            except OSError as exc:
-                raise StoreError(
-                    f"Failed to rename meta tmp to {store.meta_path}: "
-                    f"{exc}. The DB has committed the wrap and the "
-                    f"continuity file was externalized; only the meta "
-                    f"sidecar rename failed. The new meta content is "
-                    f"preserved at {meta_tmp}. Manually move it to "
-                    f"{store.meta_path} to finish recovery.",
-                    operation="save_meta",
-                    path=str(store.meta_path),
-                ) from exc
-            meta_tmp = None
-            # Directory fsync after both renames so the rename syscalls
-            # themselves are durable. Without this, a crash immediately
-            # after a successful rename can revert to the pre-rename
-            # directory entry on some POSIX filesystems. Best-effort.
-            _fsync_dir(store.continuity_path.parent)
+        _check_save_authority(store, session_id, wrap_token, allow_sole_live)
+        # Batch context manager commits here on successful exit.
 
-    except BaseException:
-        # Cleanup policy depends on whether the DB has committed.
-        #
-        # ``BaseException`` scope chosen deliberately: we want
-        # cleanup to run on ^C (KeyboardInterrupt) and sys.exit()
-        # too, since a half-completed wrap with orphan tmp files is
-        # worse than a clean pre-wrap state. SystemExit and
-        # GeneratorExit are rare enough at this layer that the
-        # consistent "always clean up pre-commit" policy is fine.
-        #
-        # Post-commit failures (rename OSError, Phase 4 audit error,
-        # anything raised after the ``with store._batch()`` block
-        # exits successfully): PRESERVE the tmp files. They hold
-        # the new content and the operator needs them for recovery
-        # via ``mv``. Cleaning them up here would destroy committed
-        # state permanently (L1 HIGH + L2 M2).
-        if not db_committed:
-            if cont_tmp is not None:
-                _safe_unlink(cont_tmp)
-            if meta_tmp is not None:
-                _safe_unlink(meta_tmp)
-        raise
+    # Warned only after Phase 3, through _warn_after_commit.
+    still_graduating = sorted(
+        set(composted) & set(grad_result.graduated_names)
+    )
 
-    # Phase 4: fire the continuity_saved audit event (after the file
-    # has been externalized — matches the pre-10.5c.5 "audit after
-    # rename" invariant). The earlier DB-side audit events (e.g.
-    # wrap_completed) were already flushed by the batch context manager at its
-    # successful exit.
+    # Phase 3: the batch committed; project the continuity file and meta
+    # sidecar from the committed row. A failure warns and the save still
+    # succeeds: the DB holds the identity and the next open or
+    # load_continuity re-projects.
+    store._project_after_commit("the wrap")
+
+    # Phase 4: fire the continuity_saved audit event (after the projection
+    # was attempted; the identity committed in Phase 2). The earlier DB-side
+    # audit events (e.g. wrap_completed) were already flushed from the outbox
+    # by the batch context manager at its successful exit.
     #
     # Audit exceptions are swallowed here — same pattern and
     # rationale as the batch's deferred-audit flush. At this point
-    # the wrap is fully committed and externalized; an audit log
+    # the wrap is fully committed; an audit log
     # failure must not cause the pipeline to report failure to the
     # caller. L3 complement F4.
     if store._audit is not None:
@@ -4466,11 +4290,9 @@ def _locate_section(
 
 
 def _read_raw_continuity(store: "Store") -> str | None:
-    try:
-        with open(store.continuity_path, encoding="utf-8", newline="") as f:
-            return f.read()
-    except FileNotFoundError:
-        return None
+    """The identity's raw text: the latest version row (generation 3), or the
+    file when the store has no row yet."""
+    return store._identity_text()
 
 
 def _section_version(text: str) -> str:
@@ -4609,6 +4431,8 @@ def replace_section(
             except sqlite3.Error:
                 pass
             raise
+        if result.outcome == "written":
+            store._project_after_commit("the section edit", locked=True)
     if result.outcome == "written" and spec is not None:
         store._audit_log_after_commit("section_replaced", {
             "heading": spec["heading"],
@@ -4619,36 +4443,13 @@ def replace_section(
 
 
 def _write_continuity_in_place(store: "Store", text: str) -> None:
-    """Atomically replace the continuity file with ``text``: a tmp in the same
-    directory (named so the wrap-orphan scan never matches it), the original's
-    mode, fsync, ``os.replace``, then the directory fsync."""
-    path = store.continuity_path
-    tmp_name: str | None = None
-    try:
-        try:
-            mode = os.stat(path).st_mode & 0o7777
-        except FileNotFoundError:
-            mode = 0o644
-        fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix="." + path.name + ".", suffix=".section-edit")
-        try:
-            f = os.fdopen(fd, "w", encoding="utf-8", newline="")
-        except BaseException:
-            os.close(fd)
-            raise
-        with f:
-            if hasattr(os, "fchmod"):
-                os.fchmod(f.fileno(), mode)
-            f.write(text)
-            f.flush()
-            os.fsync(f.fileno())
-        os.replace(tmp_name, path)
-        tmp_name = None
-    except OSError as exc:
-        # A full disk or a permission error reaches the caller as the store's
-        # own error type (L3 r1, codex); the file is unchanged.
-        raise StoreError(f"replace_section could not write {path}: {exc}",
-                         operation="replace_section", path=str(path)) from exc
-    finally:
-        if tmp_name is not None:
-            _safe_unlink(Path(tmp_name))
-    _fsync_dir(path.parent)
+    """Record ``text`` as the next identity version (``source='section_edit'``,
+    the latest meta carried forward) in the caller's transaction. Generation 3:
+    the file is written by :meth:`Store._project_identity` after the caller's
+    commit, so a rolled-back edit never reaches it."""
+    latest = store._latest_identity()
+    store._insert_identity_version(
+        text, meta_json=(latest["meta_json"] if latest is not None
+                         else store._read_meta_file_json(store.meta_path)),
+        source="section_edit",
+    )

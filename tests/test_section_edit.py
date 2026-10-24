@@ -41,8 +41,9 @@ class _Case(unittest.TestCase):
         self._tmp.cleanup()
 
     def write(self, text: str) -> None:
-        with open(self.store.continuity_path, "w", encoding="utf-8", newline="") as f:
-            f.write(text)
+        # Generation 3: the identity is the DB's; a raw save seeds it (and the
+        # file it projects). A direct file write would be a foreign edit.
+        self.store.save_continuity(text)
 
     def raw(self) -> str:
         with open(self.store.continuity_path, encoding="utf-8", newline="") as f:
@@ -91,14 +92,26 @@ class TestRead(_Case):
         self.assertIn("## State of Mind\n\nfresh\n\n## Durable Facts", self.raw())
 
     def test_a_file_that_is_not_utf8_is_unreadable(self) -> None:
-        self.store.continuity_path.write_bytes(DOC.encode() + b"\xff")
-        with self.assertRaises(SectionError) as cm:
-            self.store.read_section("State")
-        self.assertEqual(cm.exception.reason, "unreadable")
+        # Generation 3: only a store with no identity version still reads the file.
+        store = Store(Path(self._tmp.name) / "fresh.db")
+        try:
+            store.continuity_path.write_bytes(DOC.encode() + b"\xff")
+            with self.assertRaises(SectionError) as cm:
+                store.read_section("State")
+            self.assertEqual(cm.exception.reason, "unreadable")
+        finally:
+            store.close()
 
     def test_missing_file(self) -> None:
+        # Generation 3: a deleted projection loses nothing; no identity reads None.
         self.store.continuity_path.unlink()
-        self.assertIsNone(self.store.read_section("State"))
+        self.assertEqual(self.store.read_section("State")[0], "old state line")
+        self.assertTrue(self.store.continuity_path.exists())
+        store = Store(Path(self._tmp.name) / "fresh.db")
+        try:
+            self.assertIsNone(store.read_section("State"))
+        finally:
+            store.close()
 
 
 @_NEEDS_LOCK
@@ -218,21 +231,25 @@ class TestReplace(_Case):
         got = {r[0] for r in self.store._conn.execute("SELECT content FROM episodes")}
         self.assertTrue({"staged before the refusal", "staged after the refusal"} <= got)
 
-    def test_a_write_error_is_a_store_error_and_the_file_is_unchanged(self) -> None:
+    def test_a_projection_error_warns_and_the_next_load_reprojects(self) -> None:
+        # Generation 3: the edit commits as a version; a write error on the
+        # projection after it warns (the edit landed), leaves the file and no
+        # tmp, and the next load re-projects.
         import errno
         from unittest import mock
-        from anneal_memory.store import StoreError
         _, v = self.store.read_section("State")
         before = self.raw()
 
         def full(*a, **k):
             raise OSError(errno.ENOSPC, "No space left on device")
 
-        with mock.patch("anneal_memory.continuity.os.replace", full), self.assertRaises(StoreError):
-            self.store.replace_section("State", "x", expected_version=v)
+        with mock.patch.object(Path, "replace", full), self.assertWarns(UserWarning):
+            r = self.store.replace_section("State", "x", expected_version=v)
+        self.assertEqual(r.outcome, "written")
         self.assertEqual(self.raw(), before)
-        left = [p.name for p in self.store.continuity_path.parent.iterdir() if "section-edit" in p.name]
-        self.assertEqual(left, [])
+        self.assertEqual(list(self.store.continuity_path.parent.glob("*.tmp")), [])
+        self.assertIn("## State\n\nx\n", self.store.load_continuity())
+        self.assertIn("## State\n\nx\n", self.raw())
 
     def test_a_glob_character_in_the_store_name_still_sees_the_tmp(self) -> None:
         store = Store(Path(self._tmp.name) / "my[ab].db")  # L2 #4, run
@@ -248,10 +265,14 @@ class TestReplace(_Case):
             store.close()
 
     def test_a_file_that_is_not_utf8_is_refused(self) -> None:
-        _, v = self.store.read_section("State")
-        self.store.continuity_path.write_bytes(DOC.encode() + b"\xff\xfe")
-        r = self.store.replace_section("State", "x", expected_version=v)
-        self.assertEqual((r.outcome, r.reason), ("refused", "unreadable"))
+        # Generation 3: only a store with no identity version still reads the file.
+        store = Store(Path(self._tmp.name) / "fresh.db")
+        try:
+            store.continuity_path.write_bytes(DOC.encode() + b"\xff\xfe")
+            r = store.replace_section("State", "x", expected_version="0" * 64)
+            self.assertEqual((r.outcome, r.reason), ("refused", "unreadable"))
+        finally:
+            store.close()
 
     def test_an_open_wrap_refuses(self) -> None:
         self.store.record("an episode for the wrap window", "observation")

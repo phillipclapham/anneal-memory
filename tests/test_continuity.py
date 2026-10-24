@@ -2136,58 +2136,48 @@ class TestTwoPhaseCommit:
         ).fetchone()
         return row[0]
 
-    # -- Failure: continuity tmp write fails --
+    # -- Failure inside the batch (generation 3: before anything reaches a file) --
 
     def test_continuity_tmp_write_failure_leaves_clean_state(
         self, tmp_path, monkeypatch
     ):
-        """StoreError from _prepare_continuity_write: no DB mutation,
-        no continuity / meta changes, no orphan tmp files."""
+        """Generation 3: the save writes no file before its commit, so the
+        pre-commit failure is one inside the batch (here the identity row):
+        no DB mutation, no continuity / meta change, no tmp files."""
         from anneal_memory import validated_save_continuity
 
         db_path = str(tmp_path / "cont_fail.db")
         store, text, token = self._prime_store(db_path, "ContFail")
         try:
             wraps_before = self._count_wraps(store)
-            snapshot_before = store.load_wrap_snapshot()
-            assert snapshot_before is not None  # wrap IS in progress
+            assert store.load_wrap_snapshot() is not None  # wrap IS in progress
 
-            original = Store._prepare_continuity_write
+            def exploding(self, *args, **kwargs):
+                raise StoreError("injected identity row failure",
+                                 operation="save_continuity")
 
-            def exploding(self, text_arg, token_hex=None):
-                raise StoreError(
-                    "injected continuity tmp write failure",
-                    operation="prepare_continuity_write",
-                    path=str(self.continuity_path),
-                )
-
-            monkeypatch.setattr(Store, "_prepare_continuity_write", exploding)
-            with pytest.raises(StoreError, match="injected continuity"):
+            monkeypatch.setattr(Store, "_insert_identity_version", exploding)
+            with pytest.raises(StoreError, match="injected identity"):
                 validated_save_continuity(store, text, wrap_token=token)
+            monkeypatch.undo()
 
-            # Post-conditions: pre-wrap state intact.
-            monkeypatch.setattr(Store, "_prepare_continuity_write", original)
             assert self._count_wraps(store) == wraps_before
-            # Snapshot still present — wrap was not completed.
             assert store.load_wrap_snapshot() is not None
-            # No orphan tmp files.
-            assert not list(
-                store.continuity_path.parent.glob("*.md.tmp")
-            )
-            assert not list(
-                store.continuity_path.parent.glob("*.json.tmp")
-            )
+            assert store._latest_identity() is None
+            assert not store.continuity_path.exists()
+            assert not list(store.continuity_path.parent.glob("*.tmp"))
         finally:
             store.close()
 
-    # -- Failure: meta tmp write fails (mid-batch) --
+    # -- Failure: a projection write fails after the commit --
 
     def test_meta_tmp_write_failure_rolls_back_batch(
         self, tmp_path, monkeypatch
     ):
-        """StoreError from _prepare_meta_write inside the batch:
-        associations DML rolled back, continuity tmp cleaned up,
-        no wraps row inserted, snapshot still in progress."""
+        """Generation 3: the meta tmp is written by the projection, after the
+        commit. Its failure warns and the save succeeds: the wrap row and the
+        identity row (meta included) are durable, and the next open projects
+        the sidecar."""
         from anneal_memory import validated_save_continuity
 
         db_path = str(tmp_path / "meta_fail.db")
@@ -2195,132 +2185,72 @@ class TestTwoPhaseCommit:
         try:
             wraps_before = self._count_wraps(store)
 
-            original = Store._prepare_meta_write
-
             def exploding(self, meta_arg, token_hex=None):
-                raise StoreError(
-                    "injected meta tmp write failure",
-                    operation="prepare_meta_write",
-                    path=str(self.meta_path),
-                )
+                raise StoreError("injected meta tmp write failure",
+                                 operation="prepare_meta_write",
+                                 path=str(self.meta_path))
 
             monkeypatch.setattr(Store, "_prepare_meta_write", exploding)
-            with pytest.raises(StoreError, match="injected meta"):
+            with pytest.warns(UserWarning, match="injected meta"):
                 validated_save_continuity(store, text, wrap_token=token)
+            monkeypatch.undo()
 
-            monkeypatch.setattr(Store, "_prepare_meta_write", original)
-
-            # DB rolled back: no new wrap, no associations persisted.
-            assert self._count_wraps(store) == wraps_before
-            assert store.load_wrap_snapshot() is not None
-            assert not list(
-                store.continuity_path.parent.glob("*.md.tmp")
-            )
-            assert not list(
-                store.continuity_path.parent.glob("*.json.tmp")
-            )
+            assert self._count_wraps(store) == wraps_before + 1
+            assert store.load_wrap_snapshot() is None
+            assert store.load_meta()["sessions_produced"] == 1
+            assert not store.meta_path.exists()
+            assert not list(store.continuity_path.parent.glob("*.tmp"))
         finally:
             store.close()
+        reopened = Store(db_path, project_name="MetaFail")
+        try:
+            import json
+            assert json.loads(reopened.meta_path.read_text())["sessions_produced"] == 1
+        finally:
+            reopened.close()
 
     # -- Failure: continuity rename fails (after DB commit) --
 
     def test_continuity_rename_failure_preserves_tmp_for_recovery(
         self, tmp_path, monkeypatch
     ):
-        """OSError from continuity tmp -> real rename (post-DB-commit):
-        the residual risk window. DB reflects the new wrap (including
-        cleared snapshot), continuity and meta files remain the
-        pre-wrap versions, but BOTH .tmp files PERSIST on disk with
-        the new content. This is the load-bearing invariant: once the
-        batch has committed, the outer except clause MUST NOT unlink
-        the tmp files, because they hold the committed state that
-        still needs to be externalized. Operator recovery: manually
-        ``mv *.md.tmp *.md`` and ``mv *.json.tmp *.json``.
-
-        10.5c.5 L1 HIGH + L2 M2 — prior implementation unlinked the
-        tmp files on post-commit failure, destroying the new content
-        permanently and making the "residual window recoverable via
-        wrap-status/wrap-cancel" story a lie.
-        """
+        """Generation 3 replaces the operator ``mv`` recovery of 10.5c.5 (L1
+        HIGH + L2 M2): a rename failure after the commit warns, the save
+        succeeds, the committed text is in the DB (``load_continuity`` returns
+        it), the projection leaves no tmp behind, and the next open writes the
+        file."""
         from anneal_memory import validated_save_continuity
+        from pathlib import Path as _Path
 
         db_path = str(tmp_path / "rename_fail.db")
         store, text, token = self._prime_store(db_path, "RenameFail")
         try:
             wraps_before = self._count_wraps(store)
-            # Establish a known-pre-wrap continuity baseline so we
-            # can assert the rename failure did NOT clobber it.
-            pre_wrap_contents = None
-            if store.continuity_path.exists():
-                pre_wrap_contents = store.continuity_path.read_text(
-                    encoding="utf-8"
-                )
-
-            from pathlib import Path as _Path
             original_replace = _Path.replace
 
             def flaky_replace(self, target):
-                if self.suffix == ".tmp" and self.name.endswith(".md.tmp"):
-                    raise OSError(
-                        "injected continuity rename failure"
-                    )
+                if self.name.endswith(".md.tmp"):
+                    raise OSError("injected continuity rename failure")
                 return original_replace(self, target)
 
             monkeypatch.setattr(_Path, "replace", flaky_replace)
-
-            with pytest.raises(StoreError, match="continuity tmp"):
+            with pytest.warns(UserWarning, match="injected continuity rename"):
                 validated_save_continuity(store, text, wrap_token=token)
-
             monkeypatch.setattr(_Path, "replace", original_replace)
 
-            # DB WAS committed before the rename failed.
             assert self._count_wraps(store) == wraps_before + 1
-            # Snapshot is cleared because wrap_completed ran inside
-            # the batch and the batch did commit.
             assert store.load_wrap_snapshot() is None
-            # Continuity file on disk is STILL the pre-wrap version.
-            if pre_wrap_contents is not None:
-                assert store.continuity_path.read_text(encoding="utf-8") == \
-                    pre_wrap_contents
-
-            # THE LOAD-BEARING ASSERTION: tmp files must PERSIST.
-            # They hold the committed state awaiting externalization.
-            cont_tmp_files = list(
-                store.continuity_path.parent.glob("*.md.tmp")
-            )
-            meta_tmp_files = list(
-                store.continuity_path.parent.glob("*.json.tmp")
-            )
-            assert len(cont_tmp_files) == 1, (
-                f"continuity tmp should persist for operator recovery; "
-                f"found: {cont_tmp_files}"
-            )
-            assert len(meta_tmp_files) == 1, (
-                f"meta tmp should persist for operator recovery; "
-                f"found: {meta_tmp_files}"
-            )
-
-            # And they must hold the NEW content, not old.
-            cont_tmp_text = cont_tmp_files[0].read_text(encoding="utf-8")
-            assert cont_tmp_text == text.replace(
-                "| 1x (2026-04-10)",
-                # graduation may rewrite the date or status — just
-                # verify the marker content we know is unique to
-                # the new wrap is present.
-                "| 1x (2026-04-10)",
-            ) or "two-phase commit holds" in cont_tmp_text
-
-            # Simulate operator recovery: finish the rename manually.
-            cont_tmp_files[0].replace(store.continuity_path)
-            meta_tmp_files[0].replace(store.meta_path)
-
-            # After manual recovery the store is in the committed
-            # state the pipeline would have produced on a clean run.
-            assert "two-phase commit holds" in store.continuity_path.read_text(
-                encoding="utf-8"
-            )
+            assert not store.continuity_path.exists()
+            assert not list(store.continuity_path.parent.glob("*.md.tmp"))
+            assert "two-phase commit holds" in store.load_continuity()
         finally:
             store.close()
+        reopened = Store(db_path, project_name="RenameFail")
+        try:
+            assert "two-phase commit holds" in reopened.continuity_path.read_text(
+                encoding="utf-8")
+        finally:
+            reopened.close()
 
     # -- Behavioral: batched DML is atomic (visible to separate conn only after commit) --
 
@@ -2947,14 +2877,13 @@ class TestPostReviewFixes:
         db_path = str(tmp_path / "reset_fail.db")
         store, text, token = _prime_simple(db_path, "ResetFail")
         try:
-            def exploding(self, meta_arg, token_hex=None):
-                raise StoreError(
-                    "injected meta failure",
-                    operation="prepare_meta_write",
-                    path=str(self.meta_path),
-                )
+            # Generation 3: the identity row is the in-batch write (the meta
+            # file is written after the commit).
+            def exploding(self, *args, **kwargs):
+                raise StoreError("injected identity row failure",
+                                 operation="save_continuity")
 
-            monkeypatch.setattr(Store, "_prepare_meta_write", exploding)
+            monkeypatch.setattr(Store, "_insert_identity_version", exploding)
             with pytest.raises(StoreError):
                 validated_save_continuity(store, text, wrap_token=token)
 
@@ -3444,8 +3373,12 @@ class TestL3Fixes:
 
             monkeypatch.setattr(Store, "_prepare_meta_write", returns_none)
 
-            with pytest.raises(StoreError, match="meta_tmp is None"):
+            # Generation 3: the meta tmp belongs to the post-commit projection,
+            # where a broken step (here an AttributeError on None) warns and
+            # the committed save still returns, never a bare AttributeError.
+            with pytest.warns(UserWarning, match="committed to the database"):
                 validated_save_continuity(store, text, wrap_token=token)
+            assert store.load_wrap_snapshot() is None
         finally:
             store.close()
 
@@ -3565,6 +3498,71 @@ class TestL3Fixes:
         finally:
             store.close()
 
+    def test_gen3_a_save_killed_after_its_commit_opens_to_one_state(self, tmp_path):
+        """B1 T1, from the 1023+28 repro: a real save killed (``os._exit``) at the
+        rename onto continuity.md, after the batch committed. Generation 2 left
+        wraps saying TWO, the file and ``load_continuity`` saying ONE, and TWO
+        only in an orphan tmp; generation 3 opens to TWO everywhere."""
+        import hashlib
+        import sqlite3
+        import subprocess
+        import sys
+
+        def text(tag):
+            return (f"# Kill — Memory (v1)\n\n## State\nversion {tag}.\n\n"
+                    f"## Patterns\nnone yet ({tag}).\n\n## Decisions\nsmall ({tag}).\n\n"
+                    f"## Context\nthe kill window, wrap {tag}.\n")
+
+        child = (
+            "import os, sys\n"
+            "from pathlib import Path\n"
+            "from anneal_memory import Store, prepare_wrap, validated_save_continuity\n"
+            "store = Store(sys.argv[1], project_name='Kill')\n"
+            "target, real = store.continuity_path, Path.replace\n"
+            "def replace(self, dst):\n"
+            "    if Path(dst) == target:\n"
+            "        os._exit(17)\n"
+            "    return real(self, dst)\n"
+            "Path.replace = replace\n"
+            "for i in range(3):\n"
+            "    store.record(f'episode TWO #{i}: topic {i}.', 'observation')\n"
+            "token = prepare_wrap(store, max_chars=40000)['wrap_token']\n"
+            "validated_save_continuity(store, sys.argv[2], today='2026-10-23', wrap_token=token)\n"
+        )
+        db = tmp_path / "kill.db"
+        store = Store(str(db), project_name="Kill")
+        self._wrap(store, text("ONE"))
+        store.close()
+        rc = subprocess.run([sys.executable, "-c", child, str(db), text("TWO")]).returncode
+        assert rc == 17  # killed at the projection, after the commit
+
+        store = Store(str(db), project_name="Kill")
+        try:
+            assert store.load_continuity() == text("TWO")
+            assert store.continuity_path.read_text(encoding="utf-8") == text("TWO")
+        finally:
+            store.close()
+        assert sorted(tmp_path.glob("*.tmp")) == []
+        two = hashlib.sha256(text("TWO").encode("utf-8")).hexdigest()
+        conn = sqlite3.connect(str(db))
+        try:
+            wrap_id, wrap_hash = conn.execute(
+                "SELECT id, content_hash FROM wraps ORDER BY id DESC LIMIT 1").fetchone()
+            assert conn.execute(
+                "SELECT content_hash, wrap_id FROM identity_versions "
+                "ORDER BY version DESC LIMIT 1").fetchone() == (two, wrap_id)
+        finally:
+            conn.close()
+        assert wrap_hash == two
+
+    @staticmethod
+    def _wrap(store, text):
+        from anneal_memory import prepare_wrap, validated_save_continuity
+        for i in range(3):
+            store.record(f"episode ONE #{i}: topic {i}.", "observation")
+        token = prepare_wrap(store, max_chars=40000)["wrap_token"]
+        return validated_save_continuity(store, text, today="2026-10-23", wrap_token=token)
+
 
 class TestL3CodexFixes:
     """10.5c.5 Layer 3 codex retry-pass fix regression gates.
@@ -3596,61 +3594,23 @@ class TestL3CodexFixes:
     def test_pipeline_tmp_files_share_token_prefix(
         self, tmp_path, monkeypatch
     ):
-        """Continuity + meta tmp files written by the canonical pipeline must
-        share a <token12>-<uuid8> PAIR ID so operator recovery can pair them,
-        AND the per-attempt <uuid8> makes the path unique so two concurrent
-        saves are negligibly unlikely to collide on one tmp (the pair-id's
-        <token12> prefix is the first 12 hex chars of the wrap_token). L3 codex
-        HIGH (pairing) + AM-CONTLOCK L3 codex HIGH (uniqueness).
-        """
+        """Generation 3: the save writes no tmp pair, but the wraps row still
+        records a <token12>-<uuid8> PAIR ID (the gen-2 orphan classifier reads
+        it): its prefix is the first 12 hex chars of the wrap_token and the
+        <uuid8> is per attempt. L3 codex HIGH (pairing) + AM-CONTLOCK L3 codex
+        HIGH (uniqueness)."""
         from anneal_memory import validated_save_continuity
 
         db_path = str(tmp_path / "paired.db")
         store, text, token = _prime_simple(db_path, "Paired")
         try:
-            # Monkeypatch Path.replace to fail on the continuity
-            # rename — this freezes the pipeline at the post-commit
-            # / pre-rename state, leaving BOTH tmp files on disk
-            # for us to inspect.
-            from pathlib import Path as _Path
-            original_replace = _Path.replace
-
-            def flaky(self, target):
-                if self.suffix == ".tmp" and self.name.endswith(".md.tmp"):
-                    raise OSError("inject rename failure for paired check")
-                return original_replace(self, target)
-
-            monkeypatch.setattr(_Path, "replace", flaky)
-
-            with pytest.raises(StoreError):
-                validated_save_continuity(store, text, wrap_token=token)
-
-            monkeypatch.setattr(_Path, "replace", original_replace)
-
-            # Find the persisted tmp files.
-            cont_parent = store.continuity_path.parent
-            cont_tmps = list(cont_parent.glob("*.md.tmp"))
-            meta_tmps = list(cont_parent.glob("*.json.tmp"))
-            assert len(cont_tmps) == 1
-            assert len(meta_tmps) == 1
-
-            # Extract tokens from filenames.
-            cont_token = store._token_from_orphan(cont_tmps[0])
-            meta_token = store._token_from_orphan(meta_tmps[0])
-            assert cont_token == meta_token, (
-                f"tmp filenames not paired: {cont_token} != {meta_token}"
-            )
-            # The shared suffix is a <token12>-<uuid8> pair id: its prefix is the
-            # 12-char wrap_token prefix (recovery pairing), and the <uuid8>
-            # component makes it unique per save attempt (no concurrent collision).
-            prefix, sep, uniq = cont_token.partition("-")
+            validated_save_continuity(store, text, wrap_token=token)
+            pair_id = store._conn.execute(
+                "SELECT pair_id FROM wraps ORDER BY id DESC LIMIT 1").fetchone()[0]
+            prefix, sep, uniq = pair_id.partition("-")
             assert prefix == token[:12]
             assert sep == "-" and len(uniq) == 8 and uniq
-
-            # Clean up so the fixture's tmp_path doesn't leave
-            # orphans between tests.
-            cont_tmps[0].unlink()
-            meta_tmps[0].unlink()
+            assert not list(store.continuity_path.parent.glob("*.tmp"))
         finally:
             store.close()
 

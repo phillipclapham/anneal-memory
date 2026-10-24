@@ -2263,46 +2263,48 @@ class TestStoreError:
 
     # -- save_continuity failure paths --
 
+    # Generation 3: save_continuity commits a ``raw_save`` version and then
+    # projects the file. A file-I/O failure in the projection warns (the save
+    # has landed) and never leaves a tmp; the DB answer stands and a later
+    # open re-projects.
+    _RAW = ("# T — Memory (v1)\n\n## State\nx\n"
+            "\n## Patterns\np\n\n## Decisions\nd\n\n## Context\nc\n")
+
     def test_save_continuity_raises_store_error_on_replace_failure(
         self, store, monkeypatch
     ):
         """Patch ``Path.replace`` so the tmp file IS created, the
         atomic rename then fails, and the cleanup path runs on a
         real tmp file. This is the right fault-injection surface."""
-        real_replace = Path.replace
-
         def exploding_replace(self, target):
             raise OSError("injected rename failure")
 
         monkeypatch.setattr(Path, "replace", exploding_replace)
+        with pytest.warns(UserWarning, match="injected rename failure"):
+            store.save_continuity(self._RAW)
 
-        with pytest.raises(StoreError) as exc_info:
-            store.save_continuity(
-                "# T — Memory (v1)\n\n## State\nx\n"
-                "\n## Patterns\np\n\n## Decisions\nd\n\n## Context\nc\n"
-            )
-
-        err = exc_info.value
-        assert err.operation == "save_continuity"
-        assert err.path == str(store.continuity_path)
-        assert isinstance(err.__cause__, OSError)
-        assert "injected rename failure" in str(err.__cause__)
         # Tmp cleanup ran — no stale sidecar on disk.
         assert not list(store.continuity_path.parent.glob("*.md.tmp"))
-        # Main continuity file UNTOUCHED — the atomic-write
-        # invariant is that the old file survives a failed new write.
-        # First-write case: file never existed, still doesn't exist.
+        # First-write case: the file never existed and still does not;
+        # the committed text is the DB's.
         assert not store.continuity_path.exists()
+        monkeypatch.undo()
+        assert store.load_continuity() == self._RAW
 
     def test_save_continuity_preserves_previous_file_on_failure(
         self, store, monkeypatch
     ):
-        """Stronger atomic-write invariant: when a previous continuity
-        file exists and a new write fails, the OLD file survives
-        intact (not truncated, not partially overwritten)."""
+        """When a previous continuity file exists and the projection of a
+        new save fails, the OLD file survives intact (not truncated, not
+        partially overwritten) while the DB holds the new text, and a
+        reopen re-projects it."""
         good_text = (
             "# T — Memory (v1)\n\n## State\nold state\n"
             "\n## Patterns\nold\n\n## Decisions\nold\n\n## Context\nold\n"
+        )
+        new_text = (
+            "# T — Memory (v1)\n\n## State\nnew state\n"
+            "\n## Patterns\nnew\n\n## Decisions\nnew\n\n## Context\nnew\n"
         )
         store.save_continuity(good_text)
         assert store.load_continuity() == good_text
@@ -2311,28 +2313,26 @@ class TestStoreError:
             raise OSError("injected rename failure")
 
         monkeypatch.setattr(Path, "replace", exploding_replace)
+        with pytest.warns(UserWarning, match="injected rename failure"):
+            store.save_continuity(new_text)
+        monkeypatch.undo()
 
-        with pytest.raises(StoreError):
-            store.save_continuity(
-                "# T — Memory (v1)\n\n## State\nnew state\n"
-                "\n## Patterns\nnew\n\n## Decisions\nnew\n\n## Context\nnew\n"
-            )
-
-        # Previous content survived verbatim.
-        assert store.load_continuity() == good_text
+        assert store.continuity_path.read_text(encoding="utf-8") == good_text
         assert not list(store.continuity_path.parent.glob("*.md.tmp"))
+        reopened = Store(store.path)
+        try:
+            assert store.continuity_path.read_text(encoding="utf-8") == new_text
+            assert reopened.load_continuity() == new_text
+        finally:
+            reopened.close()
 
     def test_save_continuity_cleans_tmp_on_non_oserror(
         self, store, monkeypatch
     ):
         """The atomic-write invariant MUST hold regardless of exception
-        class. Inject a non-OSError failure and verify (a) the
-        exception propagates bare (not wrapped as StoreError — we
-        only wrap OSError), (b) the tmp file is still cleaned up."""
+        class: a non-OSError in the projection's tmp write still cleans
+        the tmp, and (post-commit) warns rather than raising."""
 
-        # Real file gets created; write() then raises a non-OSError.
-        # Use a sentinel subclass so we can catch it specifically
-        # without accidentally masking real exceptions.
         class InjectedError(Exception):
             pass
 
@@ -2350,19 +2350,14 @@ class TestStoreError:
             return f
 
         monkeypatch.setattr("builtins.open", exploding_open)
-
-        with pytest.raises(InjectedError):
-            store.save_continuity(
-                "# T — Memory (v1)\n\n## State\nx\n"
-                "\n## Patterns\np\n\n## Decisions\nd\n\n## Context\nc\n"
-            )
+        with pytest.warns(UserWarning, match="not an OSError"):
+            store.save_continuity(self._RAW)
+        monkeypatch.undo()
 
         # Critical: tmp cleanup ran even though exception was not an
         # OSError. Regression guard for I1 fix.
         assert not list(store.continuity_path.parent.glob("*.md.tmp"))
-        # Stronger atomic-write invariant: on a first-write failure,
-        # the main continuity file was never created. The replace
-        # stage never ran because write raised before reaching it.
+        # The replace stage never ran because write raised before it.
         assert not store.continuity_path.exists()
 
     def test_save_continuity_cleans_tmp_on_fsync_failure(
@@ -2374,37 +2369,27 @@ class TestStoreError:
         Intermediate assertion: the tmp file MUST be created before
         fsync fires (otherwise the 'no stale tmp' assertion at the
         bottom is vacuously true because there was never a tmp file
-        to clean up). We capture the tmp file's existence at the
-        moment fsync is called, then let the fault raise.
+        to clean up).
         """
         tmp_existed_at_fsync: list[bool] = []
+        real_fsync = os.fsync
 
         def exploding_fsync(fd):
-            # At this point ``with open(...) as f`` has already
-            # created the tmp file on disk. Snapshot existence
-            # before raising so the assertion downstream is real.
-            # 10.5c.5 L3 Fix #12 uses uuid-suffixed tmp filenames
-            # (e.g. ``mystore.continuity.abc12345.md.tmp``), so we
-            # glob for any matching tmp file rather than checking a
-            # fixed path.
-            tmps = list(
-                store.continuity_path.parent.glob("*.md.tmp")
-            )
+            monkeypatch.setattr(os, "fsync", real_fsync)  # only the first one fails
+            tmps = list(store.continuity_path.parent.glob("*.md.tmp"))
             tmp_existed_at_fsync.append(len(tmps) > 0)
             raise OSError("injected fsync failure")
 
-        monkeypatch.setattr(os, "fsync", exploding_fsync)
+        # After the version commits: the projection's fsync is the one hit.
+        real_project = store._project_identity
 
-        with pytest.raises(StoreError) as exc_info:
-            store.save_continuity(
-                "# T — Memory (v1)\n\n## State\nx\n"
-                "\n## Patterns\np\n\n## Decisions\nd\n\n## Context\nc\n"
-            )
-        assert exc_info.value.operation == "save_continuity"
-        assert "injected fsync failure" in str(exc_info.value.__cause__)
-        # Non-vacuous: the tmp file DID exist when fsync fired, and
-        # it was cleaned up afterwards. If fsync had not been reached
-        # for some reason, tmp_existed_at_fsync would be empty.
+        def project_with_bad_fsync(**kwargs):
+            monkeypatch.setattr(os, "fsync", exploding_fsync)
+            return real_project(**kwargs)
+
+        monkeypatch.setattr(store, "_project_identity", project_with_bad_fsync)
+        with pytest.warns(UserWarning, match="injected fsync failure"):
+            store.save_continuity(self._RAW)
         assert tmp_existed_at_fsync == [True], (
             "fsync fault did not fire after tmp file was created — "
             "the cleanup assertion below would be vacuously true"
@@ -2415,18 +2400,8 @@ class TestStoreError:
         self, store, monkeypatch
     ):
         """The cleanup helper MUST swallow its own OSError so the
-        primary exception is never masked. If unlink fails (e.g.
-        permission denied), the primary StoreError still propagates
-        and is what the user sees — not a confusing
-        'secondary exception from cleanup' chain.
-
-        Also verifies the secondary unlink failure does NOT leak into
-        the raised exception's ``__context__`` chain. Python chains
-        context exceptions by default; ``_safe_unlink``'s bare
-        ``except OSError: pass`` should suppress context propagation.
-        Catches a future refactor where someone adds logging in
-        ``_safe_unlink`` that itself raises.
-        """
+        primary failure is never masked: the warning names the primary
+        rename failure, never the secondary unlink failure."""
         def exploding_replace(self, target):
             raise OSError("injected primary failure")
 
@@ -2435,26 +2410,11 @@ class TestStoreError:
 
         monkeypatch.setattr(Path, "replace", exploding_replace)
         monkeypatch.setattr(Path, "unlink", exploding_unlink)
-
-        with pytest.raises(StoreError) as exc_info:
-            store.save_continuity(
-                "# T — Memory (v1)\n\n## State\nx\n"
-                "\n## Patterns\np\n\n## Decisions\nd\n\n## Context\nc\n"
-            )
-        # Primary error preserved — secondary unlink failure swallowed.
-        assert "injected primary failure" in str(exc_info.value.__cause__)
-        # Secondary unlink failure must NOT leak into the raised
-        # exception's context chain. The __context__ should be the
-        # original OSError (via 'raise ... from exc'), not the
-        # secondary unlink OSError from the cleanup path.
-        ctx = exc_info.value.__context__
-        if ctx is not None:
-            assert "injected secondary unlink failure" not in str(ctx), (
-                "secondary unlink failure leaked into __context__ "
-                "chain — _safe_unlink's suppression broke"
-            )
-
-    # -- save_meta failure paths --
+        with pytest.warns(UserWarning) as caught:
+            store.save_continuity(self._RAW)
+        texts = [str(w.message) for w in caught]
+        assert any("injected primary failure" in t for t in texts), texts
+        assert not any("injected secondary unlink failure" in t for t in texts), texts
 
     def test_save_meta_raises_store_error_on_replace_failure(
         self, store, monkeypatch
@@ -4373,6 +4333,56 @@ class TestGenerationGuards:
         conn.commit()
         conn.close()
 
+    @classmethod
+    def _as_generation_2(cls, db):
+        # a store as the 1.0 releases left it: gen-2 guards, marker 2, and no
+        # generation-3 tables (gen 3 adds identity_versions and audit_outbox)
+        from anneal_memory.store import _install_generation_guards
+
+        cls._as_generation_1(db)
+        conn = cls._old_writer(db, 2)
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute("DROP TABLE identity_versions")
+        conn.execute("DROP TABLE audit_outbox")
+        _install_generation_guards(conn, 2)
+        conn.execute("UPDATE metadata SET value = '2' WHERE key = 'format_version'")
+        conn.commit()
+        conn.close()
+
+    def test_a_gen2_store_migrates_with_its_continuity_as_version_1(self, tmp_path):
+        # B1 T2: gen 2 -> 3 seeds the identity from the files, byte-identical,
+        # guards the new tables, and refuses a still-open gen-2 writer
+        import hashlib
+        import json
+
+        db = tmp_path / "m.db"
+        Store(db).close()
+        self._as_generation_2(db)
+        text = "# M — Memory (v1)\r\n\r\n## State\r\nkept byte for byte.\r\n"
+        cont = tmp_path / "m.continuity.md"
+        cont.write_bytes(text.encode("utf-8"))
+        (tmp_path / "m.continuity.meta.json").write_text(
+            json.dumps({"sessions_produced": 4, "citations_seen": True}), encoding="utf-8")
+        gen2 = self._old_writer(db, 2)  # an older release still holding the store
+        Store(db).close()
+        assert len(sorted(tmp_path.glob("m.db.gen2-*.bak"))) == 1
+        conn = sqlite3.connect(str(db))
+        try:
+            rows = conn.execute(
+                "SELECT version, text, content_hash, meta_json, source FROM identity_versions"
+            ).fetchall()
+        finally:
+            conn.close()
+        assert rows == [(1, text, hashlib.sha256(text.encode("utf-8")).hexdigest(),
+                         '{"citations_seen": true, "sessions_produced": 4}', "migration")]
+        assert cont.read_bytes() == text.encode("utf-8")
+        guards, _ = self._guards(db)
+        for table in ("identity_versions", "audit_outbox"):
+            assert {f"anneal_gen3_guard_{table}_{op}" for op in ("insert", "update", "delete")} <= guards
+        with pytest.raises(sqlite3.IntegrityError, match="schema generation 3"):
+            gen2.execute("INSERT INTO metadata (key, value) VALUES ('x', 'y')")
+        gen2.close()
+
     def test_every_table_carries_this_generations_three_guards(self, tmp_path):
         from anneal_memory.store import _SCHEMA_VERSION
 
@@ -4386,7 +4396,9 @@ class TestGenerationGuards:
         assert tables and guards == want
 
     def test_an_open_older_writer_is_refused_and_nothing_lands(self, tmp_path):
-        # case A: 0.9.43 (function returns 1) already open when the store is gen 2
+        # case A: 0.9.43 (function returns 1) already open when the store is this generation
+        from anneal_memory.store import _SCHEMA_VERSION
+
         db = tmp_path / "m.db"
         store = Store(db)
         store.record("kept", episode_type="observation")
@@ -4397,7 +4409,7 @@ class TestGenerationGuards:
             "UPDATE metadata SET value = value WHERE key = 'format_version'",
             "DELETE FROM episodes",
         ):
-            with pytest.raises(sqlite3.IntegrityError, match="schema generation 2"):
+            with pytest.raises(sqlite3.IntegrityError, match=f"schema generation {_SCHEMA_VERSION}"):
                 old.execute(sql)
         old.rollback()
         old.close()
@@ -4654,10 +4666,12 @@ class TestGenerationGuards:
 
     def test_a_garbled_marker_still_gets_the_guards(self, tmp_path):
         # the guard reads a literal, never the marker, so a garbled marker does not disarm it
+        from anneal_memory.store import _SCHEMA_VERSION
+
         db = tmp_path / "m.db"
         Store(db).close()
         conn = sqlite3.connect(str(db))
-        conn.create_function("anneal_writer_schema", 0, lambda: 2, deterministic=True)
+        conn.create_function("anneal_writer_schema", 0, lambda: _SCHEMA_VERSION, deterministic=True)
         conn.execute("UPDATE metadata SET value = 'garbled' WHERE key = 'format_version'")
         conn.commit()
         conn.close()
@@ -4665,7 +4679,7 @@ class TestGenerationGuards:
         old = self._old_writer(db, 1)
         # an INSERT, not a DELETE: the guards are row triggers, and a statement
         # that touches no row (DELETE on an empty table) fires none
-        with pytest.raises(sqlite3.IntegrityError, match="schema generation 2"):
+        with pytest.raises(sqlite3.IntegrityError, match=f"schema generation {_SCHEMA_VERSION}"):
             old.execute("INSERT INTO metadata (key, value) VALUES ('x', 'y')")
         old.close()
 

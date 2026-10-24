@@ -71,6 +71,24 @@ def _unreadable(path: Path):
         path.chmod(0o600)
 
 
+def _newer_meta(store: Store) -> None:
+    """Generation 3: the meta is the latest identity row's ``meta_json`` and the
+    sidecar its projection, so a newer writer's meta is a row plus the file it
+    projects (writing the file alone is a foreign edit, kept aside at open)."""
+    import sqlite3
+    from anneal_memory.store import register_writer_schema
+
+    conn = sqlite3.connect(str(store.path))
+    register_writer_schema(conn)
+    conn.execute(
+        "UPDATE identity_versions SET meta_json = ? WHERE version = "
+        "(SELECT MAX(version) FROM identity_versions)",
+        (json.dumps(_NEWER_META, sort_keys=True),))
+    conn.commit()
+    conn.close()
+    store.meta_path.write_text(json.dumps(_NEWER_META, indent=2, sort_keys=True) + "\n")
+
+
 _NO_CHMOD = pytest.mark.skipif(
     sys.platform == "win32" or (hasattr(os, "geteuid") and os.geteuid() == 0),
     reason="mode 000 does not block reads on Windows or as root",
@@ -124,7 +142,7 @@ class TestContinuityMeta:
         self._wrapped(store)
         store.record("second episode", EpisodeType.OBSERVATION)
         prepare_wrap(store)
-        store.meta_path.write_text(json.dumps(_NEWER_META))
+        _newer_meta(store)
         meta_before = store.meta_path.read_bytes()
         cont_before = store.continuity_path.read_bytes()
         with pytest.raises(_NewerSidecarError):
@@ -139,7 +157,7 @@ class TestContinuityMeta:
         server = Server(store)
         server._tool_record({"content": "second", "episode_type": "observation"})
         server._tool_prepare_wrap({})
-        store.meta_path.write_text(json.dumps(_NEWER_META))
+        _newer_meta(store)
         result = server._tool_save_continuity({"text": _CONT + "Second.\n"})
         assert result.get("isError")
         text = result["content"][0]["text"]
@@ -148,7 +166,7 @@ class TestContinuityMeta:
 
     def test_prepare_wrap_refuses_before_any_wrap_opens(self, store):
         self._wrapped(store)
-        store.meta_path.write_text(json.dumps(_NEWER_META))
+        _newer_meta(store)
         before = store.meta_path.read_bytes()
         store.record("second episode", EpisodeType.OBSERVATION)
         with pytest.raises(_NewerSidecarError):
@@ -165,7 +183,7 @@ class TestContinuityMeta:
     def test_cli_prepare_wrap_refuses_and_opens_no_wrap(self, store):
         self._wrapped(store)
         store.record("second episode", EpisodeType.OBSERVATION)
-        store.meta_path.write_text(json.dumps(_NEWER_META))
+        _newer_meta(store)
         db = store.path
         store.close()
         _cli(db, "baton", "claim", "S2")
@@ -184,7 +202,7 @@ class TestContinuityMeta:
         assert _cli(db, "record", "second episode", "--type", "observation").returncode == 0
         out = _cli(db, "prepare-wrap", "--session-id", "S2").stdout
         token = out.split("Wrap token:")[1].split()[0]
-        store.meta_path.write_text(json.dumps(_NEWER_META))
+        _newer_meta(store)
         before = store.meta_path.read_bytes()
         r = _cli(db, "--json", "continuity")
         assert r.returncode == 1 and "written by a newer anneal-memory" in r.stderr
@@ -225,28 +243,22 @@ class TestContinuityMeta:
         assert json.loads(store.meta_path.read_text())["sessions_produced"] == 5
 
     @_NO_CHMOD
-    def test_a_save_over_an_unreadable_meta_writes_nothing(self, store):
+    def test_a_save_over_an_unreadable_meta_projection_keeps_the_db_meta(self, store):
+        # Generation 3: once a version row exists the meta is read from the DB,
+        # so an unreadable projection cannot reset the counters (the gen-2
+        # hazard); the save commits and re-projects a readable sidecar.
         self._wrapped(store)
         store.record("second episode", EpisodeType.OBSERVATION)
         prepare_wrap(store)
-        before = store.meta_path.read_bytes()
-        cont_before = store.continuity_path.read_bytes()
         with _unreadable(store.meta_path):
-            with pytest.raises(StoreError) as ei:
-                validated_save_continuity(store, _CONT + "Second.\n")
-            assert ei.value.operation == "load_meta"
-            # MCP: one error result, naming the file, not a raised exception.
-            server = Server(store)
-            result = server._tool_save_continuity({"text": _CONT + "Second.\n"})
-            assert result.get("isError")
-            assert "load_meta" in result["content"][0]["text"]
-            result = server._tool_prepare_wrap({})
-            assert result.get("isError") and "Cannot read" in result["content"][0]["text"]
-        assert store.meta_path.read_bytes() == before
-        assert store.continuity_path.read_bytes() == cont_before
+            validated_save_continuity(store, _CONT + "Second.\n")
+        assert store.load_meta()["sessions_produced"] == 2
+        assert json.loads(store.meta_path.read_text())["sessions_produced"] == 2
 
     @_NO_CHMOD
-    def test_cli_paths_print_one_line_for_an_unreadable_meta(self, store, tmp_path):
+    def test_cli_paths_work_over_an_unreadable_meta_projection(self, store, tmp_path):
+        # Generation 3: the CLI reads the meta from the DB; the unreadable file
+        # is kept aside at the first open and re-projected.
         self._wrapped(store)
         db = store.path
         store.close()
@@ -254,22 +266,20 @@ class TestContinuityMeta:
         assert _cli(db, "record", "second episode", "--type", "observation").returncode == 0
         token = _cli(db, "prepare-wrap", "--session-id", "S2").stdout.split(
             "Wrap token:")[1].split()[0]
-        before = store.meta_path.read_bytes()
         (tmp_path / "c.md").write_text(_CONT + "Again.\n", encoding="utf-8")
         with _unreadable(store.meta_path):
             runs = [
                 _cli(db, "--json", "continuity"),
                 _cli(db, "export", "--output", str(tmp_path / "out.json")),
-                _cli(db, "prepare-wrap", "--session-id", "S2"),
                 _cli(db, "save-continuity", str(tmp_path / "c.md"), "--session-id", "S2",
                      "--wrap-token", token),
             ]
         for r in runs:
-            assert r.returncode == 1, r.stderr
-            assert "Cannot read" in r.stderr or "load_meta" in r.stderr
+            assert r.returncode == 0, r.stderr
             assert "Traceback" not in r.stderr
-        assert not (tmp_path / "out.json").exists()
-        assert store.meta_path.read_bytes() == before
+        assert (tmp_path / "out.json").exists()
+        assert json.loads(store.meta_path.read_text())["sessions_produced"] == 2
+        assert len(list(tmp_path.glob("mem.continuity.meta.json.diverged-*"))) == 1
 
     @pytest.mark.parametrize("content", [b"[]", b"null", b"42", b'"text"', b"\xff\xfe\x00{"])
     def test_a_meta_that_is_not_a_json_object_reads_as_defaults(self, store, content):
@@ -526,7 +536,7 @@ def test_a_sidecar_format_constant_moves_only_with_a_generation_decision():
     from anneal_memory.rederive import _TRUST_VERSION
 
     assert (store_module._SCHEMA_VERSION, store_module._META_FORMAT_VERSION,
-            audit_module._MANIFEST_VERSION, _TRUST_VERSION) == (2, 1, 1, 2), (
+            audit_module._MANIFEST_VERSION, _TRUST_VERSION) == (3, 1, 1, 2), (
         "changing a store-attached sidecar constant (meta, manifest) requires "
         "raising _SCHEMA_VERSION; _TRUST_VERSION is per-user, not covered by "
         "the generation, and needs its own newer-refusal kept."

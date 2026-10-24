@@ -2621,21 +2621,24 @@ class TestSwallowedWriteIsStillVisible:
         d.mkdir()
         store = Store(d / "memory.db")
 
-        with pytest.raises(RuntimeError):
+        # Generation 3 closes the inversion for save_continuity structurally:
+        # inside a batch it refuses before writing, so nothing lands and no
+        # event is owed.
+        from anneal_memory.store import StoreError
+
+        with pytest.raises(StoreError, match="inside a batch"):
             with store._batch():
                 store.save_continuity("# externalized\n")
-                raise RuntimeError("batch body fails AFTER the file landed")
 
-        assert store.continuity_path.exists(), "the file did not externalize"
+        assert not store.continuity_path.exists(), "the refused save externalized"
+        assert store.load_continuity() is None
+        active = store._audit._active_path
         events = [
             json.loads(line)["event"]
-            for line in store._audit._active_path.read_text().splitlines()
+            for line in (active.read_text().splitlines() if active.exists() else [])
             if line.strip()
         ]
-        assert "continuity_saved" in events, (
-            "the file was externalized but its audit event was queued behind a "
-            f"batch that rolled back, and lost. events={events}"
-        )
+        assert "continuity_saved" not in events, f"an event for nothing: {events}"
 
 
 class TestDegradedAuditHealthReachesEveryTransport:
@@ -2868,7 +2871,7 @@ class TestCodexL3TwentySixOhNineOhFour:
                     with store._batch():
                         store.record("inside the batch", episode_type="observation")
                         store._audit.log = self._boom
-                        store.save_continuity("# not batch aware\n")
+                        store._audit_log_after_commit("continuity_saved", {"chars": 18}, method="save_continuity", committed="the continuity file", batch_aware=False)  # gen 3: save_continuity refuses in a batch; its non-batch-aware emit, directly
                         raise RuntimeError("force rollback")
         finally:
             store.close()
@@ -2908,7 +2911,7 @@ class TestCodexL3TwentySixOhNineOhFour:
                 with store._batch():
                     store.record("must survive", episode_type="observation")
                     store._audit.log = self._boom
-                    store.save_continuity("# not batch aware\n")
+                    store._audit_log_after_commit("continuity_saved", {"chars": 18}, method="save_continuity", committed="the continuity file", batch_aware=False)  # gen 3: save_continuity refuses in a batch; its non-batch-aware emit, directly
                 # batch exits normally — its DML must be committed
             assert store.status().total_episodes == 1, (
                 "a batch that completed successfully lost its DML — the "
@@ -2966,7 +2969,7 @@ class TestCodexL3TwentySixOhNineOhFour:
                     store.record("must survive", episode_type="observation")
                     healthy = store._audit.log
                     store._audit.log = self._boom
-                    store.save_continuity("# not batch aware\n")
+                    store._audit_log_after_commit("continuity_saved", {"chars": 18}, method="save_continuity", committed="the continuity file", batch_aware=False)  # gen 3: save_continuity refuses in a batch; its non-batch-aware emit, directly
                     store._audit.log = healthy  # the sink heals mid-batch
             assert store._audit_failures_unpersisted == 0, (
                 "the batch exited with a degraded-audit delta still pending — "
@@ -3024,7 +3027,7 @@ class TestCodexL3TwentySixOhNineOhFour:
                         store.record("inside", episode_type="observation")
                         healthy = store._audit.log
                         store._audit.log = self._boom
-                        store.save_continuity("# not batch aware\n")
+                        store._audit_log_after_commit("continuity_saved", {"chars": 18}, method="save_continuity", committed="the continuity file", batch_aware=False)  # gen 3: save_continuity refuses in a batch; its non-batch-aware emit, directly
                         store._audit.log = healthy
                         raise RuntimeError("force rollback")
                 assert store._audit_failures_unpersisted == 1, (

@@ -136,23 +136,24 @@ def test_store_method_keys_on_continuity_path(tmp_path):
 
 
 def test_validated_save_takes_the_lock(tmp_path, monkeypatch):
-    """The canonical pipeline wraps its Phase-3 externalization in the lock."""
+    """The canonical pipeline wraps its Phase-3 externalization in the lock
+    (generation 3: the projection, which takes the module-level lock)."""
     store = Store(str(tmp_path / "memory.db"), project_name="T")
     store.record("An observation worth at least a few words here.", "observation")
+    prepare_wrap(store)
 
     entered = []
-    real = store.continuity_lock
+    real = store_module.continuity_lock
 
     @contextlib.contextmanager
-    def spy():
-        entered.append(True)
-        with real():
+    def spy(path, **kwargs):
+        entered.append(str(path))
+        with real(path, **kwargs):
             yield
 
-    monkeypatch.setattr(store, "continuity_lock", spy)
-    prepare_wrap(store)
+    monkeypatch.setattr(store_module, "continuity_lock", spy)
     validated_save_continuity(store, _WRAP_TEXT)
-    assert entered == [True], "validated_save_continuity entered the continuity lock exactly once"
+    assert entered == [str(store.continuity_path)], "validated_save_continuity entered the continuity lock exactly once"
     assert os.path.exists(_lock_path(store.continuity_path))
 
 
@@ -183,34 +184,43 @@ def test_bare_save_continuity_takes_the_lock(tmp_path, monkeypatch):
 # CAS and sits outside the Phase-3 flock. The fix: a <token12>-<uuid8> pair id.
 
 def test_canonical_save_uses_unique_pair_id(tmp_path, monkeypatch):
-    """The canonical pipeline passes a <token12>-<uuid8> pair id (NOT the bare
-    deterministic wrap token) to BOTH tmp writes — unique per attempt, still
-    paired for operator recovery."""
+    """The race the pair id closed (two saves' tmps written before the CAS and
+    outside the flock, colliding) cannot occur in generation 3: the canonical
+    save writes its tmps only in the projection, after the commit, holding the
+    continuity lock. The wraps row's pair id is pinned in test_continuity.py."""
     store = Store(str(tmp_path / "memory.db"), project_name="T")
     store.record("an observation with enough characters to be a valid episode.", "observation")
+    prepare_wrap(store)
 
-    captured: dict[str, str] = {}
+    held = []
+    real = store_module.continuity_lock
+
+    @contextlib.contextmanager
+    def spy(path, **kwargs):
+        held.append(True)
+        try:
+            with real(path, **kwargs):
+                yield
+        finally:
+            held.pop()
+
+    tmp_writes: list[bool] = []
     realc = store._prepare_continuity_write
     realm = store._prepare_meta_write
 
     def cspy(text, token_hex=None):
-        captured["cont"] = token_hex
+        tmp_writes.append(bool(held))
         return realc(text, token_hex=token_hex)
 
     def mspy(meta, token_hex=None):
-        captured["meta"] = token_hex
+        tmp_writes.append(bool(held))
         return realm(meta, token_hex=token_hex)
 
+    monkeypatch.setattr(store_module, "continuity_lock", spy)
     monkeypatch.setattr(store, "_prepare_continuity_write", cspy)
     monkeypatch.setattr(store, "_prepare_meta_write", mspy)
-    res = prepare_wrap(store)
     validated_save_continuity(store, _WRAP_TEXT)
-
-    pair = captured["cont"]
-    assert pair == captured["meta"], "continuity + meta tmp share ONE pair id (recovery pairing)"
-    prefix, sep, uniq = pair.partition("-")
-    assert sep == "-" and len(prefix) == 12 and len(uniq) == 8 and uniq
-    assert prefix == res["wrap_token"][:12], "the pair-id prefix IS the wrap-token prefix"
+    assert tmp_writes == [True, True], "every tmp the save writes is written under the lock"
 
 
 def test_orphan_detection_pairs_by_pair_id_and_filters_by_token_prefix(tmp_path):

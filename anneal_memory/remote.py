@@ -98,13 +98,23 @@ READ_CONTINUITY_TOOL: dict[str, Any] = {
 }
 
 
+# MCP tool annotations (spec 2025-03-26+): every remote tool only reads. Clients that
+# gate writes on them (ChatGPT confirms any tool without readOnlyHint) then call
+# these without a prompt. Hints are advisory to the client; the allowlist above and
+# the query-only open are what enforce read-only here.
+_READ_ONLY_ANNOTATIONS = {"readOnlyHint": True, "destructiveHint": False,
+                          "idempotentHint": True, "openWorldHint": False}
+
+
 def _remote_tool_defs() -> list[dict[str, Any]]:
     """The tool definitions served remotely: the stdio definitions of the
-    allowlisted read tools, byte-for-byte, plus ``read_continuity``."""
+    allowlisted read tools plus ``read_continuity``, each a copy carrying
+    the read-only annotations."""
     from .integrity import TOOLS
 
     by_name = {t["name"]: t for t in TOOLS}
-    return [by_name[name] for name in _SERVER_READ_TOOLS] + [READ_CONTINUITY_TOOL]
+    defs = [by_name[name] for name in _SERVER_READ_TOOLS] + [READ_CONTINUITY_TOOL]
+    return [{**d, "annotations": dict(_READ_ONLY_ANNOTATIONS)} for d in defs]
 
 
 # The stdio tools exposed remotely. Each name maps to the Server method that
@@ -283,7 +293,10 @@ class RemoteSession:
                 if integral and limit is not None and limit > MAX_RECALL_LIMIT:
                     arguments = {**arguments, "limit": MAX_RECALL_LIMIT}
             try:
-                with Store(self._db_path, read_only=True, audit=False) as store:
+                # Resolve once per request: a db reached through a swapped symlink
+                # (a published generation) and its sibling files then come from one
+                # generation, even if the link moves mid-request.
+                with Store(self._db_path.resolve(), read_only=True, audit=False) as store:
                     server = Server(store)
                     result = self._bind(server, store)[name](arguments)
             except Exception as e:  # a tool error is a result, not a transport error

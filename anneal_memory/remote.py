@@ -87,7 +87,7 @@ from typing import Any, Callable, Iterator
 from . import __version__
 from ._fsdir import _fsync_dir
 from .origin import strip_hidden_controls
-from .server import Server, _tool_result
+from .server import _RELAYED_LABEL, Server, _tool_result
 from .store import Store
 from .types import EpisodeType
 
@@ -213,10 +213,16 @@ def _valid_pending(raw: bytes) -> dict[str, Any] | None:
         return None
     if not all(isinstance(rec[k], str) for k in _LINE_KEYS - {"v"}):
         return None
-    if (not _LINE_ID_RE.match(rec["id"]) or not _TOKEN_NAME_RE.match(rec["connector"])
-            or not _LINE_AT_RE.match(rec["at"])
+    # fullmatch: "$" alone also matches before a trailing newline.
+    if (not _LINE_ID_RE.fullmatch(rec["id"]) or not _TOKEN_NAME_RE.fullmatch(rec["connector"])
+            or not _LINE_AT_RE.fullmatch(rec["at"])
             or rec["episode_type"] not in {t.value for t in EpisodeType}
             or not 1 <= len(rec["content"]) <= MAX_CAPTURE_CHARS):
+        return None
+    # What capture strips never comes back from the file: control characters other
+    # than newline and tab, invisible format characters, line/paragraph separators.
+    if any((unicodedata.category(ch) == "Cc" and ch not in "\n\t")
+           or unicodedata.category(ch) in ("Cf", "Zl", "Zp", "Cs") for ch in rec["content"]):
         return None
     return rec
 
@@ -230,52 +236,57 @@ def _as_utc(value: str) -> datetime.datetime | None:
 
 
 def _pending_matches(rec: dict[str, Any], args: dict[str, Any]) -> bool:
-    """Whether a pending capture passes recall's filters. A filter it cannot
-    evaluate (an unparseable time, a non-string) excludes it."""
+    """Whether a pending capture passes recall's filters, read as the store reads
+    them: an empty filter is no filter, and since/until include their bound. A
+    filter it cannot evaluate (an unparseable time, a non-string) excludes it."""
     etype = args.get("episode_type")
-    if etype is not None and rec["episode_type"] != etype:
+    if etype and rec["episode_type"] != etype:
         return False
     source = args.get("source")
-    if source is not None and source != f"remote:{rec['connector']}":
+    if source and source != f"remote:{rec['connector']}":
         return False
     at = _as_utc(rec["at"])
     for name, after in (("since", True), ("until", False)):
         bound = args.get(name)
-        if bound is None:
+        if not bound:
             continue
         when = _as_utc(bound) if isinstance(bound, str) else None
-        if when is None or at is None or (at <= when if after else at >= when):
+        if when is None or at is None or (at < when if after else at > when):
             return False
     keyword = args.get("keyword")
-    if keyword is not None:
+    if keyword:
         if not isinstance(keyword, str):
             return False
-        phrase = keyword.casefold().strip()
+        phrase = keyword.casefold()
         text = rec["content"].casefold()
-        if phrase and phrase not in text and not all(w in text for w in phrase.split()):
+        if phrase not in text and not all(w in text for w in phrase.split()):
             return False
     return True
 
 
-def _pending_block(recs: list[dict[str, Any]], args: dict[str, Any]) -> str:
-    """The pending captures recall shows, newest first, or "" for none. Only on
-    a first page that asks for episodes. Every content line is indented, so a
-    capture cannot start a line that reads as part of the block's frame."""
+def _pending_wanted(args: dict[str, Any]) -> bool:
+    """Whether a recall with ``args`` can show pending captures at all: a first
+    page that asks for episodes. Checked before any file is read."""
     offset, limit = args.get("offset", 0), args.get("limit", 1)
-    if (isinstance(offset, (int, float)) and offset > 0) or (
-            isinstance(limit, (int, float)) and limit <= 0):
-        return ""
+    return not ((isinstance(offset, (int, float)) and offset > 0)
+                or (isinstance(limit, (int, float)) and limit <= 0))
+
+
+def _pending_block(recs: list[dict[str, Any]], args: dict[str, Any]) -> str:
+    """The pending captures recall shows, newest first, or "" for none. Framed
+    like a synced external episode (the store's relayed label), and each capture
+    is one JSON string on one line, so its text cannot shape the block."""
     hits = sorted((r for r in recs if _pending_matches(r, args)),
                   key=lambda r: (r["at"], r["id"]), reverse=True)
     if not hits:
         return ""
     shown = hits[:MAX_PENDING_SHOWN]
     rows = [f"Pending sync ({len(hits)}, showing {len(shown)}): captured through a "
-            "remote connector, not yet in memory. Unverified: written by the "
-            "connector named. Once the sync lands, the same text can also appear above."]
+            "remote connector and not yet in memory; once the sync lands, the same "
+            "text can also appear above.", _RELAYED_LABEL]
     for r in shown:
-        body = "\n".join(f"    {ln}" for ln in r["content"].splitlines())
-        rows.append(f"- [pending] {r['at']} via {r['connector']} [{r['episode_type']}]:\n{body}")
+        rows.append(f"- [pending] {r['at']} via {r['connector']} [{r['episode_type']}]: "
+                    f"{json.dumps(r['content'], ensure_ascii=False)}")
     return "\n".join(rows)
 
 
@@ -523,8 +534,10 @@ class RemoteSession:
         seen: dict[str, dict[str, Any]] = {}
         for path in paths:
             try:
+                # O_NONBLOCK: a FIFO at the path would otherwise block the open itself,
+                # before the regular-file check below could refuse it.
                 fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
-                             | getattr(os, "O_BINARY", 0))
+                             | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0))
             except OSError:
                 continue
             try:
@@ -618,10 +631,15 @@ class RemoteSession:
                     arguments = {**arguments, "limit": MAX_RECALL_LIMIT}
             # Read before the store opens: a pulling file removed once its lines are in
             # a newly served store was then read here, so the line shows (twice at worst)
-            # rather than not at all.
+            # rather than not at all. A fault in the pending path never costs the
+            # store's answer: it is logged and the block left out.
+            pending: list[dict[str, Any]] = []
+            if name == "recall" and self._outbox is not None and _pending_wanted(arguments):
+                try:
+                    pending = self._read_pending()
+                except Exception as e:
+                    logger.error("pending read failed: %s", type(e).__name__)
             try:
-                pending = (self._read_pending()
-                           if name == "recall" and self._outbox is not None else [])
                 # Resolve the directory once per request, keeping the configured file
                 # name: the db and its sibling files (named from that stem) then come from
                 # one published generation's directory even if the link is swapped after
@@ -630,15 +648,17 @@ class RemoteSession:
                 with Store(db, read_only=True, audit=False) as store:
                     server = Server(store)
                     result = self._bind(server, store)[name](arguments)
-                if pending and not result.get("isError"):
-                    block = _pending_block(pending, arguments)
-                    if block:
-                        text = result["content"][0]["text"]
-                        result = _tool_result(f"{text}\n\n{block}")
             except Exception as e:  # a tool error is a result, not a transport error
                 # Class only: the message can carry paths or query text.
                 logger.error("tool %s failed: %s", name, type(e).__name__)
                 return _rpc_result(msg_id, _tool_result(f"Error: {type(e).__name__}", is_error=True))
+            if pending and not result.get("isError"):
+                try:
+                    block = _pending_block(pending, arguments)
+                    if block:
+                        result = _tool_result(f"{result['content'][0]['text']}\n\n{block}")
+                except Exception as e:
+                    logger.error("pending block failed: %s", type(e).__name__)
             return _rpc_result(msg_id, result)
         return _rpc_error(msg_id, -32601, f"Method not found: {method}")
 

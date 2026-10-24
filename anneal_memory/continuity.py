@@ -95,7 +95,6 @@ from .retrieval import (
 )
 from .store import (
     AnnealMemoryError,
-    _conn_crystal_hash,
     IdempotencyConflictError,
     _IDEMPOTENCY_SCOPE,
     _IdempotentReplay,
@@ -1862,12 +1861,15 @@ def _save_replay(store: Store, result_json: str | None) -> SaveContinuityReplayR
         **{name: stored.get(name) for name in _SAVE_REPLAY_FIELDS}, "replayed": True})
 
 
-def _crystal_input_hash(store: Store, crystal_store: CrystalStore | None) -> str | None:
-    """The crystal document's hash when crystals are an input to the package
-    (a ``crystal_store`` was passed), else ``None``: a package composed without
-    crystals must not be refused for a crystal change (integration L3 r4,
-    codex MED)."""
-    return None if crystal_store is None else _conn_crystal_hash(store._conn)
+def _pin_crystals(
+    crystal_store: CrystalStore | None,
+) -> tuple[CrystalStore | None, str | None]:
+    """A prepare's crystal input as one snapshot: a pinned read-only view the
+    composition reads from, and the version it was read at, for the fingerprint
+    (:meth:`CrystalStore._pinned`). ``(None, None)`` with no crystal store: a
+    package composed without crystals is never refused for a crystal change
+    (integration L3 r4, codex MED)."""
+    return (None, None) if crystal_store is None else crystal_store._pinned()
 
 
 def _prepare_fingerprint(
@@ -1882,20 +1884,9 @@ def _prepare_fingerprint(
     store a re-derive changed in between.
 
     Every input is the value the composition itself read, passed in, never
-    re-read here (integration L3 r2, codex MED): ``crystal_hash`` is read
-    BEFORE the package is composed, so a crystal change landing during the
-    composition makes every later replay mismatch (refused, never a second
-    package).
-
-    Known edge, kept (1024+7 head, integration L3 r3 codex MED, reachability
-    line): the composition reads the crystal document more than once, each in
-    its own snapshot, so a crystal change landing inside a prepare's
-    composition makes a lost-response retry refuse (``sources_moved``) where it
-    could have rebuilt the same package; the wrap stays open and is saved from
-    the first package or cancelled. Under a lease only the holder, who is the
-    one composing, can change crystals. The fix, if it is ever reached, is to
-    compose from one read of the document with its hash (a read at one
-    version, as an MVCC snapshot read), never another check."""
+    re-read here (integration L3 r2-r5, codex): ``crystal_hash`` is the version
+    of the one crystal document the composition read (:func:`_pin_crystals`),
+    so the package and its fingerprint are one snapshot."""
     return hashlib.sha256(json.dumps({
         "episode_ids": sorted(episode_ids),
         "schema": schema,
@@ -1938,18 +1929,17 @@ def _replay_prepare(
     frozen = set(snapshot["episode_ids"])
     episodes = [ep for ep in store.episodes_since_wrap() if ep.id in frozen]
     schema = store.section_schema_for_wrap()
-    # One read of each input, for the composition and the fingerprint alike; the
-    # crystal hash is read on both sides of the composition, and a move refuses.
+    # One read of each input, for the composition and the fingerprint alike.
     continuity = store.load_continuity()
     wrap_today = store._get_metadata("wrap_today") or None
-    crystal_before = _crystal_input_hash(store, crystal_store)
+    crystal_view, crystal_version = _pin_crystals(crystal_store)
     package, _roots, _identities = _compose_wrap_package(
         store, episodes, continuity, schema, max_chars=max_chars,
-        staleness_days=staleness_days, crystal_store=crystal_store,
+        staleness_days=staleness_days, crystal_store=crystal_view,
         today=wrap_today)
-    if (_crystal_input_hash(store, crystal_store) != crystal_before or _prepare_fingerprint(
+    if _prepare_fingerprint(
             snapshot["episode_ids"], schema, continuity, wrap_today,
-            crystal_before) != stored.get("package_sha256")):
+            crystal_version) != stored.get("package_sha256"):
         raise IdempotencyConflictError(
             f"prepare_wrap: this idempotency key's package can no longer be rebuilt "
             f"as it was returned (its sources moved since wrap {wrap_token!r} was "
@@ -2369,10 +2359,10 @@ def prepare_wrap(
     schema_warning = schema_role_warning(schema)
     if schema_warning is not None:
         warnings.warn(schema_warning, UserWarning, stacklevel=2)
-    crystal_before = _crystal_input_hash(store, crystal_store)  # before composing (_prepare_fingerprint)
+    crystal_view, crystal_version = _pin_crystals(crystal_store)  # one snapshot (_prepare_fingerprint)
     package, derive_roots, frozen_identities = _compose_wrap_package(
         store, episodes, existing, schema, max_chars=max_chars,
-        staleness_days=staleness_days, crystal_store=crystal_store)
+        staleness_days=staleness_days, crystal_store=crystal_view)
     episode_ids = [ep.id for ep in episodes]
     # Always None since 1.0.2 (the composer no longer sees association links).
     assoc_context = None
@@ -2414,7 +2404,7 @@ def prepare_wrap(
         gen3_extras["idempotency"] = (
             idempotency_key, idem_hash, json.dumps({
                 "wrap_token": wrap_token, "package_sha256": _prepare_fingerprint(
-                    episode_ids, schema, existing, package["today"], crystal_before)}))
+                    episode_ids, schema, existing, package["today"], crystal_version)}))
     # AM-SCHEMASNAPSHOT: freeze the EXACT schema we read above (line ~884) into
     # the wrap snapshot, so validated_save_continuity reads back this same schema
     # rather than re-reading a possibly-concurrently-changed live schema. Passing

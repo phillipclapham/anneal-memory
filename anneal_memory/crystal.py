@@ -100,6 +100,7 @@ harness owns the firing. "anneal only fully works inside a complementary harness
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import logging
@@ -826,8 +827,34 @@ class CrystalStore:
         ).fetchone()
         return None if row is None else (row[0], row[1], row[2])
 
+    # Set only on a view made by :meth:`_pinned`: every read serves this one document.
+    _pinned_doc: dict | None = None
+
+    def _pinned(self) -> "tuple[CrystalStore, str | None]":
+        """One read of the document together with its version: a read-only view
+        whose every read (:meth:`active`, :meth:`surface_rewarm_candidates`, ...)
+        serves that one document, and the version it was read at. The version is
+        the row's ``content_hash``; ``None`` with no row or in file mode; on a busy
+        store a value that matches nothing, so a fingerprint of it never matches.
+        A prepare composes from the view and fingerprints the version, so the
+        package and its fingerprint are one snapshot (integration L3 r5, codex:
+        separate reads let a change, and its undo, land between them). The view
+        refuses every write."""
+        data, version = self._load_versioned()
+        view = copy.copy(self)
+        view._pinned_doc = data
+        return view, version
+
     def _load(self) -> dict:
-        """The document, read without writing anything: from the row when a
+        """The document, read without writing anything (see :meth:`_load_versioned`);
+        a :meth:`_pinned` view returns a copy of its one document."""
+        if self._pinned_doc is not None:
+            return copy.deepcopy(self._pinned_doc)
+        return self._load_versioned()[0]
+
+    def _load_versioned(self) -> tuple[dict, str | None]:
+        """The document and its version (:meth:`_pinned`), read without writing
+        anything: from the row when a
         generation-3 store holds it (the file is re-projected by every crystal
         change and by every write-capable Store open, see
         :func:`_reconcile_crystal_projection`), else from the file.
@@ -838,12 +865,13 @@ class CrystalStore:
         Known edge: a ``mode=ro`` open of a WAL store in a non-writable copied
         directory can fail (SQLite version-dependent); the read then raises, never
         ``[]`` (``immutable=1`` is a possible later fallback)."""
+        unread = "unread:" + os.urandom(8).hex()  # a busy read's version matches nothing
         try:
             db = self._db_path()
         except _StoreBusy as e:
-            return self._load_busy(e)
+            return self._load_busy(e), unread
         if db is None:
-            return self._parse(self._read_file_text())
+            return self._parse(self._read_file_text()), None
         try:
             conn = connect(db, read_only=True, timeout=_READ_TIMEOUT)
             try:
@@ -852,12 +880,12 @@ class CrystalStore:
                 conn.close()
         except sqlite3.Error as e:
             if _is_busy(e):
-                return self._load_busy(e)
+                return self._load_busy(e), unread
             raise CrystalError(f"crystal document in {db} could not be read ({e}).") from e
         if row is None:
             # No row yet: the file is the seed, adopted by the first mutation.
-            return self._parse(self._read_file_text())
-        return self._parse(row[0], where=f"the crystal_document row of {db}")
+            return self._parse(self._read_file_text()), None
+        return self._parse(row[0], where=f"the crystal_document row of {db}"), row[1]
 
     def _load_busy(self, cause: Exception) -> dict:
         """A store busy past the read budget (test_worth's locked-db bound): the
@@ -1051,6 +1079,8 @@ class CrystalStore:
         serialization is guaranteed only on a local POSIX filesystem). Known edge:
         without ``fcntl`` (Windows) projections can land out of commit order; the
         next crystal change or write-capable Store open re-projects."""
+        if self._pinned_doc is not None:
+            raise CrystalError(f"{self.path}: a pinned crystal view is read-only; it does not write.")
         with self._lock():
             db = self._db_path(timeout=_DB_TIMEOUT)  # a write waits as long as its write does
             if db is None:

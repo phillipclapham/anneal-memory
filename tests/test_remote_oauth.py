@@ -6,6 +6,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import os
 import re
 import secrets
 import threading
@@ -124,7 +125,9 @@ def test_discovery_to_bearer_ends_with_a_token_the_file_already_holds(oauth_serv
     # The completed sign-in pinned its redirect: another app on the same Google
     # host (someone else's custom app) is refused from now on, the pinned one is not.
     pin = _tokens.with_name(_tokens.name + ".oauth-redirect")
-    assert pin.read_text().strip() == REDIRECT and pin.stat().st_mode & 0o777 == 0o600
+    assert pin.read_text().strip() == REDIRECT
+    if os.name == "posix":  # Windows st_mode does not carry POSIX permissions
+        assert pin.stat().st_mode & 0o777 == 0o600
     other = "https://oauth-redirect.googleusercontent.com/r/user_bound_custom-mcp-attacker"
     st, _h, _ = req("POST", "/register", json.dumps({"redirect_uris": [other]}).encode())
     assert st == 400
@@ -185,3 +188,42 @@ def test_oauth_refusals(oauth_server, tmp_path):
     finally:
         plain.shutdown()
         plain.server_close()
+
+
+def test_the_pin_binds_codes_issued_before_it_and_resource_is_bound(oauth_server):
+    """Two sign-ins while nothing is pinned (two apps): the first exchange pins, the
+    second app's live code is refused. A token is never issued for another resource."""
+    req, gem, _tokens = oauth_server
+    reg = _register(req)
+    verifier, challenge = _pkce()
+    other = "https://oauth-redirect.googleusercontent.com/r/user_bound_custom-mcp-other"
+    q = {"response_type": "code", "client_id": reg["client_id"], "redirect_uri": REDIRECT,
+         "code_challenge": challenge, "code_challenge_method": "S256", "state": "x",
+         "resource": ISS + "/mcp"}
+    code_a = _code_from(_sign_in(req, q, gem)[1])["code"]
+    st, page = _sign_in(req, {**q, "redirect_uri": other}, gem)
+    assert st == 200
+    target = re.search(r'content="0;url=([^"]+)"', page).group(1).replace("&amp;", "&")  # type: ignore[union-attr]
+    code_b = urllib.parse.parse_qs(urllib.parse.urlsplit(target).query)["code"][0]
+    assert _exchange(req, reg, code_a, verifier)[0] == 200
+    st, _h, body = _exchange(req, reg, code_b, verifier, other)
+    assert st == 400 and gem not in body
+    # RFC 8707: a resource other than this server is refused at sign-in and at exchange.
+    evil = {**q, "resource": "https://evil.example/mcp"}
+    assert req("GET", "/authorize?" + urllib.parse.urlencode(evil))[0] == 400
+    code = _code_from(_sign_in(req, q, gem)[1])["code"]
+    basic = base64.b64encode(f"{reg['client_id']}:{reg['client_secret']}".encode()).decode()
+    form = {"grant_type": "authorization_code", "code": code, "redirect_uri": REDIRECT,
+            "code_verifier": verifier, "resource": "https://evil.example/mcp"}
+    st, _h, body = req("POST", "/token", urllib.parse.urlencode(form).encode(),
+                       {"Authorization": f"Basic {basic}"})
+    assert st == 400 and json.loads(body)["error"] == "invalid_target"
+
+
+@pytest.mark.parametrize("issuer", ["http://h", "https://h/x", "https://u@h", "https://h:bad",
+                                    "https://h\r\nX: y", "https://h?q", "https:// h"])
+def test_the_issuer_must_be_a_bare_https_origin(issuer):
+    from anneal_memory.remote_oauth import OAuth
+    with pytest.raises(ValueError):
+        OAuth(issuer)
+    assert OAuth("https://h.example:8443/").issuer == "https://h.example:8443"

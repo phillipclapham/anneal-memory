@@ -5405,6 +5405,17 @@
      "suggested_edit": "Where your files describe the wrap, add one instruction: if `prepare_wrap` downgrades to capture-only, nothing is lost; tell the human what it says, and never claim the baton yourself, because consolidating is the operator's act. Choosing the session id and claiming the baton are the operator's steps, not the agent's.",
      "summary": "Consolidation is now the operator's act by default. A store created by `anneal-memory init`, or created fresh by the MCP server, requires the consolidate baton: agents record freely, and a wrap consolidates only under a session id the operator has claimed the baton for (`anneal-memory baton claim NAME`). The CLI wraps with `--session-id NAME`; the MCP server takes it from its config (`serve --session-id NAME`), never from a tool argument. Otherwise `prepare_wrap` downgrades to capture-only and says how many episodes are waiting and the claim command. An EXISTING store keeps its policy (`anneal-memory status` shows it).",
      "version": "1.0.0"
+    },
+    {
+     "feature": "AM-FORMATION-OFF",
+     "files": [
+      "CLAUDE.md",
+      "AGENTS.md",
+      "GEMINI.md"
+     ],
+     "suggested_edit": "Remove any instruction to pass an affective state or affect tag at the wrap, any step that reads an \"Association Context\" from `prepare_wrap`, and any statement that co-citing episodes forms or strengthens links. Keep instructions to cite every episode that genuinely supports a pattern: the immune system's citation checks are unchanged.",
+     "summary": "anneal-memory 1.0.2 stops forming association links. A save forms and decays no link in either the episode graph or the pattern graph, and the affect input no longer weights anything: recall never read the episode links, and the pattern graph was shadow-only. The first 1.0.2 save records this on the store (`Store.association_formation()`). Links formed earlier stay readable through 1.x. `prepare_wrap` no longer returns association context (`assoc_context` is always `None`), and the `affective_state` argument, the MCP `affective_state` property and the CLI `--affect-tag` / `--affect-intensity` flags are accepted and ignored until 2.0. AM-WARN Signal B is retired. The 0.9.26 entry's line that co-citation still forms Hebbian links no longer holds.",
+     "version": "1.0.2"
     }
    ]
   },

@@ -399,11 +399,19 @@ class OAuth:
             raw = urllib.parse.parse_qs(body.decode("ascii"), keep_blank_values=True,
                                         max_num_fields=16)
         except (UnicodeDecodeError, ValueError):
+            logger.info("oauth token refused: the form is not ASCII form-encoding")
             return 400, {"error": "invalid_request"}
         q = self._fields(raw)
         if q is None:
+            logger.info("oauth token refused: a field is repeated")
             return 400, {"error": "invalid_request"}
+        # What the client sent, by name and shape only: never a value that is a secret.
+        auth = "basic" if basic is not None else (
+            "post" if "client_secret" in q else "none")
+        sent = (f"client auth {auth}; fields {ascii(','.join(sorted(q))[:200])}; "
+                f"grant_type {ascii(q.get('grant_type', '-')[:40])}")
         if q.get("grant_type") != "authorization_code":
+            logger.info("oauth token refused: unsupported grant (%s)", sent)
             return 400, {"error": "unsupported_grant_type"}
         client_id = q.get("client_id")
         if basic is not None:
@@ -412,11 +420,14 @@ class OAuth:
                 user = base64.b64decode(padded, validate=True).decode("ascii").split(":", 1)[0]
                 basic_id = urllib.parse.unquote_plus(user)  # RFC 6749 §2.3.1: form-encoded
             except (ValueError, UnicodeDecodeError):
+                logger.info("oauth token refused: Basic credentials do not decode (%s)", sent)
                 return 401, {"error": "invalid_client"}
             if client_id is not None and client_id != basic_id:
+                logger.info("oauth token refused: client_id differs from Basic (%s)", sent)
                 return 400, {"error": "invalid_request"}
             client_id = basic_id
         if not isinstance(client_id, str) or not _CLIENT_ID_RE.fullmatch(client_id):
+            logger.info("oauth token refused: missing or malformed client_id (%s)", sent)
             return 400, {"error": "invalid_request"}  # also keeps compare_digest on ASCII
         with self._lock:
             entry = self._codes.pop(q.get("code", ""), None)  # single use, even when refused
@@ -434,13 +445,15 @@ class OAuth:
         else:
             why = ""
         if why:
-            logger.info("oauth token refused: %s", why)
+            logger.info("oauth token refused: %s (%s)", why, sent)
             return 400, {"error": "invalid_grant"}
         assert entry is not None  # the first branch above refuses a missing entry
         resource = q.get("resource")
         if resource is not None and not self._resource_ok(resource) or \
                 entry["resource"] is not None and resource is not None \
                 and resource.rstrip("/") != entry["resource"].rstrip("/"):  # both already exact
+            logger.info("oauth token refused: resource %s is not this server's (%s)",
+                        ascii(resource[:120]), sent)
             return 400, {"error": "invalid_target"}
         still = check_token(entry["token"])
         if still is UNAVAILABLE:
@@ -459,6 +472,7 @@ class OAuth:
             logger.info("oauth token refused: redirect %s is not the pinned one",
                         _uri_for_log(entry["redirect_uri"]))
             return 400, {"error": "invalid_grant"}
+        logger.info("oauth token issued (%s)", sent)
         return 200, {"access_token": entry["token"], "token_type": "Bearer"}
 
 

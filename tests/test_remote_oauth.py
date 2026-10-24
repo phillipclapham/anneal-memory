@@ -274,3 +274,28 @@ def test_the_issuer_must_be_a_bare_https_origin(issuer):
         OAuth(issuer)
     assert OAuth("https://h.example:8443/").issuer == "https://h.example:8443"
     assert OAuth("https://[2001:db8::1]:8443").issuer == "https://[2001:db8::1]:8443"
+
+
+def test_every_request_and_the_token_grant_are_logged_without_secrets(oauth_server, caplog):
+    """Each answered request leaves one line (status, method, path, Host, User-Agent),
+    2xx included, and /token names the grant's shape; no code, verifier, secret,
+    state or token reaches the journal (10-24: the Gemini app stopped after its
+    token and the journal could not say where it went)."""
+    req, gem, _tokens = oauth_server
+    caplog.set_level("INFO", logger="anneal-memory.remote")
+    reg = _register(req)
+    verifier, challenge = _pkce()
+    q = {"response_type": "code", "client_id": reg["client_id"], "redirect_uri": REDIRECT,
+         "code_challenge": challenge, "code_challenge_method": "S256", "state": "SECRETSTATE"}
+    code = _code_from(_sign_in(req, q, gem)[1])["code"]
+    assert _exchange(req, reg, code, verifier)[0] == 200
+    assert req("HEAD", "/mcp", headers={"Authorization": f"Bearer {gem}",
+                                        "User-Agent": "Google-Probe/1 \u00e9"})[0] == 200
+    text = caplog.text
+    assert "answered 200 HEAD /mcp host=127.0.0.1:" in text
+    assert "ua=Google-Probe/1 \\xe9" in text  # escaped: the journal stays ASCII
+    assert "answered 200 POST /token" in text and "answered 201 POST /register" in text
+    assert ("oauth token issued (client auth basic; fields "
+            "'code,code_verifier,grant_type,redirect_uri'; grant_type 'authorization_code')") in text
+    for secret in (gem, code, verifier, reg["client_secret"], "SECRETSTATE"):
+        assert secret not in text

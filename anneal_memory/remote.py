@@ -709,8 +709,11 @@ class _Handler(BaseHTTPRequestHandler):
         # as the next request (L1/L2 1024+9: request smuggling through the
         # proxy's connection pool), and no early return can forget this.
         self.close_connection = True
-        if status >= 400:
-            logger.info("refused %d %s", status, self.command)
+        # One line per answered request, so a client that stops (the Gemini app
+        # after its token, 10-24) shows where it went; never a query or a token.
+        logger.info("%s %d %s %s host=%s ua=%s", "refused" if status >= 400 else "answered",
+                    status, self.command, self._path_for_log(),
+                    self._header_for_log("Host", 80), self._header_for_log("User-Agent", 120))
         self.send_response(status)
         self.send_header("Connection", "close")
         if ctype:
@@ -723,6 +726,17 @@ class _Handler(BaseHTTPRequestHandler):
         self.end_headers()
         if body and self.command != "HEAD":  # a HEAD reply never carries a body, refusals included
             self.wfile.write(body)
+
+    def _path_for_log(self) -> str:
+        path = self.path.split("?", 1)[0]  # a query may carry an OAuth code or state
+        if path.startswith("/mcp/"):
+            return "/mcp(token-in-path)"  # that segment IS the token
+        return ascii(path[:80])[1:-1]
+
+    def _header_for_log(self, name: str, limit: int) -> str:
+        headers = getattr(self, "headers", None)
+        value = headers.get(name) if headers is not None else None
+        return "-" if value is None else ascii(value[:limit])[1:-1]
 
     def _send_json(self, status: int, obj: Any) -> None:
         self._send(status, json.dumps(obj).encode("utf-8"), "application/json")

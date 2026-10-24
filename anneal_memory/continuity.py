@@ -3454,6 +3454,19 @@ def validated_save_continuity(
     # Phase 2: batched DB DML.
     with store._batch():
 
+        # The meta read above may be stale: a save_meta committed since then
+        # would be reverted by the version row below (L3 r1 codex HIGH). Re-read
+        # it under the batch's write lock and apply this wrap's changes to the
+        # fresh copy; refuse if the field the validation read moved. Raising
+        # rolls the batch back: nothing saved, the wrap stays open.
+        meta = store.load_meta()
+        if meta.get("citations_seen", False) != citations_seen:
+            raise ValueError(
+                "validated_save_continuity: the store's citations_seen changed "
+                "while this save ran (another writer saved the meta). Nothing was "
+                "saved and the wrap is still open; save again so graduation reads "
+                "the current value."
+            )
         if grad_result.validated > 0 or grad_result.citation_counts:
             meta["citations_seen"] = True
         meta["sessions_produced"] = meta.get("sessions_produced", 0) + 1

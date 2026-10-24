@@ -2197,9 +2197,13 @@ class TestTwoPhaseCommit:
 
             assert self._count_wraps(store) == wraps_before + 1
             assert store.load_wrap_snapshot() is None
-            assert store.load_meta()["sessions_produced"] == 1
             assert not store.meta_path.exists()
             assert not list(store.continuity_path.parent.glob("*.tmp"))
+            # L3 r1 R4: load_meta on a write-capable handle re-projects a
+            # stale meta sidecar, though the continuity file is current.
+            assert store.load_meta()["sessions_produced"] == 1
+            import json
+            assert json.loads(store.meta_path.read_text())["sessions_produced"] == 1
         finally:
             store.close()
         reopened = Store(db_path, project_name="MetaFail")

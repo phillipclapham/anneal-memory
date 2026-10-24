@@ -894,6 +894,22 @@ def _safe_unlink(path: Path) -> None:
         pass
 
 
+def _warn_after_commit(message: str, *, stacklevel: int = 2) -> None:
+    """A ``UserWarning`` for a diagnostic raised after a commit or during an
+    open: logged instead when a warnings filter turns it into an exception,
+    so a landed write is never reported as failed and an open that has
+    already migrated or reconciled does not fail (``continuity.py`` has the
+    same helper for the wrap's warnings). ``stacklevel`` counts from the
+    caller, as ``warnings.warn``'s does."""
+    try:
+        warnings.warn(message, UserWarning, stacklevel=stacklevel + 1)
+    except Exception:
+        try:
+            _LOG.warning("%s", message)
+        except Exception:
+            pass
+
+
 def _reconstruct_wrap_ownership_error(
     expected: str,
     actual: str | None,
@@ -3011,18 +3027,17 @@ class Store:
                 try:
                     self._reconcile_identity_files()
                 except Exception as reconcile_exc:
-                    warnings.warn(
+                    _warn_after_commit(
                         f"anneal-memory: the continuity files could not be "
                         f"re-projected at open ({type(reconcile_exc).__name__}: "
                         f"{reconcile_exc}). The identity in the database is "
                         f"unaffected; load_continuity retries.",
-                        UserWarning,
                         stacklevel=3,
                     )
                 try:
                     self._warn_orphan_tmp_files()
                 except Exception as orphan_exc:
-                    warnings.warn(
+                    _warn_after_commit(
                         f"anneal-memory: orphan tmp-file detection "
                         f"failed during Store initialization "
                         f"({type(orphan_exc).__name__}: {orphan_exc}). "
@@ -3031,7 +3046,6 @@ class Store:
                         f"the operator recovery CLI subcommands "
                         f"(wrap-status / wrap-token-current) manually "
                         f"if you suspect a prior crashed wrap.",
-                        UserWarning,
                         stacklevel=3,
                     )
         except Exception:
@@ -3168,6 +3182,8 @@ class Store:
             "SELECT 1 FROM sqlite_master WHERE type = 'table' "
             "AND name = 'episodes' COLLATE NOCASE"
         ).fetchone() is not None
+        # Under this method's write lock too, so a concurrent migration of the
+        # same store waits here and then finds the table: one seed, not two.
         had_identity_table = self._conn.execute(
             "SELECT 1 FROM sqlite_master WHERE type = 'table' "
             "AND name = 'identity_versions' COLLATE NOCASE"
@@ -3343,11 +3359,10 @@ class Store:
                 "SELECT value FROM metadata WHERE key = 'wrap_started_at'"
             ).fetchone()
             if wrap_row and wrap_row["value"]:
-                warnings.warn(
+                _warn_after_commit(
                     "anneal-memory: section_schema constructor argument ignored "
                     "because a wrap is in progress on this store; the schema is "
                     "frozen for the wrap's duration. Set it before prepare_wrap.",
-                    UserWarning,
                     stacklevel=3,
                 )
             else:
@@ -6844,8 +6859,12 @@ class Store:
         # Generation 3: the latest version's length; the file only with no row.
         continuity_path = self.continuity_path
         continuity_chars = None
-        with self._db_boundary("status"):
-            latest_identity = self._latest_identity()
+        try:
+            with self._db_boundary("status"):
+                latest_identity = self._latest_identity()
+        except StoreError:
+            latest_identity = None  # a locked or corrupt DB: measure the file
+
         if latest_identity is not None:
             continuity_chars = len(latest_identity["text"])
         elif continuity_path.exists():
@@ -9642,11 +9661,11 @@ class Store:
         try:
             self._project_identity(locked=locked)
         except Exception as exc:  # post-commit: nothing may turn a landed write into a failure
-            warnings.warn(
+            _warn_after_commit(
                 f"anneal-memory: {committed} committed to the database but its files "
                 f"were not written ({exc}); they are re-projected at the next open "
                 "or load_continuity.",
-                UserWarning, stacklevel=3,
+                stacklevel=3,
             )
 
     @staticmethod
@@ -9668,8 +9687,12 @@ class Store:
         sidecar, in the migration's transaction; no row when there is no file.
         A crash after a generation-2 save's commit left that save's text in an
         orphan tmp named by the wraps row's ``pair_id``: when its bytes match
-        that row's ``content_hash`` it is the committed identity and seeds the
-        row instead of the stale file."""
+        that row's ``content_hash`` it is the committed identity: the stale
+        file becomes version 1 and the tmp's text version 2.
+
+        Serialised: this runs under ``_init_schema``'s write lock, where
+        ``had_identity_table`` is read, so two processes migrating one store
+        seed once."""
         wrap = self._conn.execute(
             "SELECT id, content_hash, pair_id FROM wraps ORDER BY id DESC LIMIT 1"
         ).fetchone()
@@ -9680,6 +9703,7 @@ class Store:
             raw = None
         meta_source = self.meta_path
         committed = wrap["content_hash"] if wrap is not None else None
+        stale: bytes | None = None
         if committed and wrap["pair_id"] and (
                 raw is None or hashlib.sha256(raw).hexdigest() != committed):
             tmp = self._continuity_tmp_path(wrap["pair_id"])
@@ -9688,7 +9712,7 @@ class Store:
             except OSError:
                 tmp_raw = None
             if tmp_raw is not None and hashlib.sha256(tmp_raw).hexdigest() == committed:
-                raw = tmp_raw
+                stale, raw = raw, tmp_raw
         if (committed and wrap["pair_id"] and raw is not None
                 and hashlib.sha256(raw).hexdigest() == committed
                 and self._meta_tmp_path(wrap["pair_id"]).exists()):
@@ -9698,13 +9722,24 @@ class Store:
         try:
             text = raw.decode("utf-8")
         except UnicodeDecodeError:
-            warnings.warn(
+            _warn_after_commit(
                 f"anneal-memory: {self.continuity_path} is not UTF-8, so the "
                 "generation 3 migration seeded no identity version from it. Fix "
                 "or remove the file; the store reads it until a version exists.",
-                UserWarning, stacklevel=4,
+                stacklevel=4,
             )
             return
+        if stale is not None:
+            # The stale file the tmp replaces is recorded first, as version 1,
+            # so the first projection knows it and replaces it without a
+            # divergence alarm (L3 r1). Its meta is the sidecar's.
+            try:
+                self._insert_identity_version(
+                    stale.decode("utf-8"),
+                    meta_json=self._read_meta_file_json(self.meta_path),
+                    source="migration")
+            except UnicodeDecodeError:
+                pass  # not text: the projection keeps it aside as foreign
         self._insert_identity_version(
             text, meta_json=self._read_meta_file_json(meta_source),
             source="migration", wrap_id=wrap_id,
@@ -9725,7 +9760,12 @@ class Store:
         and is kept as ``<name>.diverged-<UTC stamp>`` (a hard link or copy, so
         the name is never absent) before the name is atomically replaced, with
         a warning naming the copy. A wraps row's hash is NOT known: a text the
-        identity table cannot reproduce is foreign."""
+        identity table cannot reproduce is foreign.
+
+        Known edge: the decision and the replace are atomic only against
+        writers that take the continuity lock (every anneal writer does). A
+        write that ignores it, such as an editor saving between the read and
+        the replace, can be lost; an advisory lock cannot fence it."""
         if not locked:
             with continuity_lock(self.continuity_path):
                 self._project_identity(locked=True)
@@ -9755,6 +9795,7 @@ class Store:
                             "SELECT 1 FROM identity_versions WHERE content_hash = ? "
                             "LIMIT 1", (digest,)).fetchone() is None:
                         kept.append(self._keep_diverged(self.continuity_path))
+                # Known edge: a lock-ignoring write landing since the read is lost.
                 tmp.replace(self.continuity_path)
             except OSError as exc:
                 _safe_unlink(tmp)
@@ -9783,14 +9824,15 @@ class Store:
             _fsync_dir(self.continuity_path.parent)
 
     def _warn_diverged(self, kept: list[Path]) -> None:
+        """Never raises: it runs in a ``finally`` after a commit or at open."""
         for copy in kept:
-            warnings.warn(
+            _warn_after_commit(
                 f"anneal-memory: {copy.name.split('.diverged-')[0]} differed from the "
                 f"store's identity (an edit outside anneal, or an older anneal); it was "
                 f"kept as {copy} and the file is projected from the database. Write "
                 "to the identity through replace_section or save_continuity (a wrap "
                 "through validated_save_continuity); the file is a projection.",
-                UserWarning, stacklevel=4,
+                stacklevel=4,
             )
 
     def _reconcile_identity_files(self) -> None:
@@ -9835,15 +9877,32 @@ class Store:
         """A second name for ``path``'s current content (a hard link, or a
         copy where links are refused); the caller then replaces ``path``, so
         the original name is never absent."""
-        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
-        copy = path.with_name(f"{path.name}.diverged-{stamp}")
-        try:
-            os.link(path, copy)
-        except OSError:
-            shutil.copy2(path, copy)
-            with open(copy, "rb") as f:
-                os.fsync(f.fileno())
-        return copy
+        while True:
+            stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+            copy = path.with_name(f"{path.name}.diverged-{stamp}")
+            try:
+                os.link(path, copy)
+                return copy
+            except FileExistsError:
+                continue  # a stamp collision: never overwrite an earlier copy
+            except OSError:
+                pass
+            # Links refused: an exclusive-create copy, so an earlier copy of
+            # the same stamp is never overwritten either.
+            try:
+                fd = os.open(copy, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            except FileExistsError:
+                continue
+            try:
+                with os.fdopen(fd, "wb") as out, open(path, "rb") as src:
+                    shutil.copyfileobj(src, out)
+                    out.flush()
+                    os.fsync(out.fileno())
+                shutil.copystat(path, copy)
+            except BaseException:
+                _safe_unlink(copy)
+                raise
+            return copy
 
     def _adopt_continuity_file(self) -> None:
         """No version row yet: a continuity file beside the store becomes
@@ -9878,7 +9937,7 @@ class Store:
         a reconcile on a write-capable handle; the file when there is no row."""
         latest = self._latest_identity()
         if latest is not None:
-            if self._continuity_file_stale(latest):
+            if self._identity_files_stale(latest):
                 self._reconcile_quietly()
                 latest = self._latest_identity()
             if latest is not None:
@@ -9899,14 +9958,20 @@ class Store:
         try:
             self._reconcile_identity_files()
         except (OSError, StoreError, sqlite3.Error) as exc:
-            warnings.warn(
+            _warn_after_commit(
                 f"anneal-memory: the continuity files could not be brought in line "
                 f"with the store ({type(exc).__name__}: {exc}); the identity read "
                 "from the database is unaffected, and the next open retries.",
-                UserWarning, stacklevel=4,
+                stacklevel=4,
             )
 
-    def _continuity_file_stale(self, latest: sqlite3.Row) -> bool:
+    def _identity_files_stale(self, latest: sqlite3.Row) -> bool:
+        """Whether either projection (the continuity file or the meta sidecar)
+        differs from ``latest``, so a failed meta projection is retried even
+        when the continuity file is current."""
+        if (latest["meta_json"] is not None
+                and self._read_meta_file_json(self.meta_path) != latest["meta_json"]):
+            return True
         try:
             raw = self.continuity_path.read_bytes()
         except FileNotFoundError:
@@ -10054,6 +10119,13 @@ class Store:
         # sidecar is its projection and is read only when no row exists.
         with self._db_boundary("load_meta"):
             latest = self._latest_identity()
+            # A write-capable handle outside a transaction (a batch holds one
+            # from its start) repairs a stale projection, as load_continuity does.
+            if (latest is not None and not self._read_only
+                    and not self._conn.in_transaction
+                    and self._identity_files_stale(latest)):
+                self._reconcile_quietly()
+                latest = self._latest_identity()
         if latest is not None:
             try:
                 data = json.loads(latest["meta_json"]) if latest["meta_json"] else None
@@ -10107,7 +10179,8 @@ class Store:
         Generation 3: once the store has an identity version, the meta is a
         new ``raw_save`` version row carrying the latest text, and the sidecar
         is projected from it (a projection failure warns; the save has
-        committed). With no version yet the sidecar is written directly.
+        committed). With no version yet the sidecar is written directly, under
+        the same locks, so a first identity commit racing it carries it.
 
         Raises:
             StoreError: On file-I/O failure of the atomic write.
@@ -10122,15 +10195,53 @@ class Store:
         path = self.meta_path
         meta_json = self._meta_json(meta)
         with self._db_boundary("save_meta"):
-            latest = self._latest_identity()
-        if latest is not None:
-            # text=None: the latest text is read inside the write transaction,
-            # so a save that committed after the check above is carried, not
-            # reverted.
-            self._commit_identity_version(
-                None, meta_json=meta_json, source="raw_save", operation="save_meta")
-            self._project_after_commit("the meta save")
+            gen3 = self._identity_table_present()
+        if not gen3:
+            # No identity table: a generation-2 store this handle cannot
+            # migrate (read-only), whose sidecar is still the meta.
+            self._write_meta_sidecar(meta)
             return str(path)
+        self._commit_meta(meta, meta_json)
+        return str(path)
+
+    def _commit_meta(self, meta: dict, meta_json: str) -> None:
+        """:meth:`save_meta` on a generation-3 store. The row check and the
+        write are one critical section (L3 r1 codex HIGH), under the
+        continuity lock and then the write lock (the order replace_section
+        takes them), so a first identity commit from another writer cannot
+        land between them and leave this meta in a sidecar the DB overrides.
+        With a row it adds a version carrying the latest text; with none it
+        writes the sidecar inside the transaction."""
+        path = self.meta_path
+        if not self._closed and self._conn.in_transaction:
+            raise StoreError(
+                "save_meta cannot run inside a batch or an open transaction",
+                operation="save_meta", path=str(path))
+        with continuity_lock(self.continuity_path):
+            with self._db_boundary("save_meta"):
+                self._conn.execute("BEGIN IMMEDIATE")
+                try:
+                    latest = self._latest_identity()
+                    if latest is not None:
+                        self._insert_identity_version(
+                            str(latest["text"]), meta_json=meta_json, source="raw_save")
+                    else:
+                        # No row yet: the sidecar is the meta. Written while
+                        # this transaction holds the write lock, so the first
+                        # identity commit reads it.
+                        self._write_meta_sidecar(meta)
+                    self._conn.commit()
+                except BaseException:
+                    self._rollback_quietly()
+                    raise
+            if latest is not None:
+                self._project_after_commit("the meta save", locked=True)
+
+    def _write_meta_sidecar(self, meta: dict) -> None:
+        """The meta sidecar by tmp + rename (``save_meta`` with no identity
+        row). Raises ``StoreError`` (``operation="save_meta"``) on a file-I/O
+        failure, the tmp removed."""
+        path = self.meta_path
         # 10.5c.5: delegate the tmp-write to the shared primitive.
         # Re-wrap primitive StoreErrors with the public-API operation
         # name so the pre-10.5c.5 contract holds.
@@ -10155,7 +10266,6 @@ class Store:
         finally:
             if not succeeded:
                 _safe_unlink(tmp_path)
-        return str(path)
 
     # -- Properties --
 
@@ -10698,11 +10808,11 @@ class Store:
                 self._conn.rollback()
             except sqlite3.Error:
                 pass
-            warnings.warn(
+            _warn_after_commit(
                 f"anneal-memory: the one-time VACUUM that clears content deleted "
                 f"before this release could not run ({exc}); the store works, and "
                 f"the next write-capable open retries it.",
-                UserWarning, stacklevel=4,
+                stacklevel=4,
             )
             return
         # The rebuilt pages are in the WAL; any checkpoint writes them over the
@@ -12050,9 +12160,12 @@ class Store:
             # Unconditional flag reset — even if SIGINT fires between
             # the commit and the audit flush, the store does NOT
             # stay poisoned in ``_defer_commit=True``. L2 review H2.
-            # The boxed events are logged from ``audit_outbox`` by the replay;
-            # only the unboxed ones are handed over from memory.
-            deferred = [self._deferred_audits[i] for i in self._deferred_unboxed]
+            # After a commit the boxed events are logged from ``audit_outbox``
+            # by the replay, so only the unboxed ones are handed over from
+            # memory; after a rollback the outbox rows rolled back too, and the
+            # replay is handed every discarded event.
+            deferred = ([self._deferred_audits[i] for i in self._deferred_unboxed]
+                        if commit_succeeded else list(self._deferred_audits))
             self._deferred_audits = []
             self._deferred_unboxed = []
             self._defer_commit = False
@@ -12140,16 +12253,18 @@ class Store:
         """Append every ``audit_outbox`` event to the audit log, oldest first,
         deleting each row once its append succeeded, all under one write
         transaction: two processes flushing (an open and a batch's replay)
-        are serialized by it, so an event is logged once. A failed append is
-        counted as today, keeps its row for the next flush, and the rest are
-        still attempted (one bad event never costs the tail). A row that does
+        are serialized by it, so an event is logged once. A row is deleted
+        only when its append returned normally and counted no failure. The
+        first append that fails (counted as today) or raises ends the flush:
+        its row and the rest stay for the next flush, so the write lock is
+        held across at most one audit-lock timeout (L3 r1). A row that does
         not parse is deleted in this transaction and counted as an audit
         write failure, never retried. Never raises an ``Exception``: it runs
         after a commit and at open. A ``SystemExit`` from an append propagates
-        once the rows already appended are committed (the rest stay for the
-        next flush), as on every unbatched post-commit path;
-        ``contain_terminal=True`` is the batched replay's mode, which owns the
-        suppression per event (``_replay_deferred_audits``).
+        once the rows already appended are committed, as on every unbatched
+        post-commit path; ``contain_terminal=True`` is the batched replay's
+        mode, which stops there without raising and owns the suppression
+        (``_replay_deferred_audits``).
 
         Known edges: delivery is at-least-once (a crash after an append and
         before this commit logs that event again; never a loss); boxed events
@@ -12183,19 +12298,29 @@ class Store:
                 failures = self._audit_write_failures
                 # An on_audit_event callback that opens a second writer waits
                 # its busy timeout here, per event: this transaction holds the
-                # write lock.
+                # write lock. Known edge: a callback that writes through THIS
+                # Store commits the flush transaction early (its commit is not
+                # deferred), so the deletes after it run outside one.
+                appended = False
                 try:
                     self._audit_log_after_commit(
                         event, payload, method=method, committed=committed,
                         stacklevel=1, batch_aware=False, **kwargs,
                     )
+                    appended = self._audit_write_failures == failures
                 except Exception:
-                    pass  # recorded by that method's own channels
+                    pass  # recorded by that method's own channels, or not at all
                 except BaseException:
                     if not contain_terminal:
                         raise
-                if self._audit_write_failures != failures:
-                    continue  # kept for the next flush; the rest still go
+                if not appended:
+                    # Only a row whose append returned normally and counted no
+                    # failure is deleted. The first failure (an append error or
+                    # an audit-lock timeout) ends the flush: the rest stay for
+                    # the next one, so this write transaction spends at most one
+                    # audit-lock timeout. Known edge: a sink that always fails keeps
+                    # its rows and counts one failure on every flush.
+                    break
                 self._conn.execute("DELETE FROM audit_outbox WHERE id = ?", (row[0],))
             self._conn.commit()
         except Exception:
@@ -12682,7 +12807,7 @@ class Store:
                     f"yet) — PRESERVE and inspect rather than delete. Files: "
                     f"{pair_desc}.{missing}"
                 )
-            warnings.warn(msg, UserWarning, stacklevel=3)
+            _warn_after_commit(msg, stacklevel=3)
 
     def _token_from_orphan(self, orphan: Path) -> str:
         """Extract the pair id from an orphan tmp filename, STEM-ANCHORED.

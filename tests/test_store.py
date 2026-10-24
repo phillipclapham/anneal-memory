@@ -2288,7 +2288,19 @@ class TestStoreError:
         # First-write case: the file never existed and still does not;
         # the committed text is the DB's.
         assert not store.continuity_path.exists()
+        # L3 r1 R3: under an error filter the post-commit warning is logged,
+        # never raised, so the committed save is not reported as failed.
+        import warnings
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            store.save_continuity(self._RAW.replace("\nc\n", "\nagain\n"))
         monkeypatch.undo()
+        assert store.load_continuity() == self._RAW.replace("\nc\n", "\nagain\n")
+        store.continuity_path.write_text("# a hand edit\n", encoding="utf-8")
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            store.save_continuity(self._RAW)  # the diverged-copy warning too
+        assert len(list(store.continuity_path.parent.glob("*.diverged-*"))) == 1
         assert store.load_continuity() == self._RAW
 
     def test_save_continuity_preserves_previous_file_on_failure(
@@ -2461,25 +2473,49 @@ class TestStoreError:
         assert [k.read_text(encoding="utf-8") for k in kept] == ["# hand edit\n"]
 
     def test_successful_save_meta(self, store):
+        # L3 r1 R2: with no identity row the sidecar is written inside the
+        # write transaction, so a first identity commit cannot land between
+        # the row check and the write (it waits, then carries this meta).
+        real_write = store._prepare_meta_write
+        held = []
+
+        def watching(*args, **kwargs):
+            held.append(store._conn.in_transaction)
+            return real_write(*args, **kwargs)
+
+        store._prepare_meta_write = watching
+        try:
+            store.save_meta({"sessions_produced": 2})
+        finally:
+            del store._prepare_meta_write
+        assert held == [True]
+        assert store._latest_identity() is None
+        assert store.load_meta()["sessions_produced"] == 2
         store.save_continuity("# T — Memory (v1)\n\n## State\nold\n")
+        assert store.load_meta()["sessions_produced"] == 2
         path = store.save_meta({"sessions_produced": 3, "citations_seen": True})
         assert Path(path).exists()
-        # Review r1 F4: a save that commits between save_meta's check and its
-        # transaction is carried forward, not reverted.
+        # Review r1 F4: a save that commits before save_meta's critical
+        # section is carried forward, not reverted.
         other = Store(store.path)
-        real = store._commit_identity_version
+        real = store._identity_table_present
+        fired = []
 
-        def racing(*args, **kwargs):
-            other.save_continuity("# T — Memory (v1)\n\n## State\nnewer\n")
-            return real(*args, **kwargs)
+        def racing():
+            if not fired:
+                fired.append(1)
+                other.save_continuity("# T — Memory (v1)\n\n## State\nnewer\n")
+            return real()
 
-        store._commit_identity_version = racing
+        store._identity_table_present = racing
         try:
             store.save_meta({"sessions_produced": 4})
         finally:
-            del store._commit_identity_version
+            del store._identity_table_present
             other.close()
+        assert fired
         assert store.load_continuity() == "# T — Memory (v1)\n\n## State\nnewer\n"
+        assert store.load_meta()["sessions_produced"] == 4
 
 
 class TestValidatedSaveContinuity:
@@ -2524,7 +2560,28 @@ class TestValidatedSaveContinuity:
             f"## Context\nOptimizing database layer.\n"
         )
 
-        result = validated_save_continuity(store, text)
+        # L3 r1 R1: a save_meta another writer commits after the wrap read the
+        # meta is kept; the wrap applies its own changes to the fresh copy.
+        other = Store(store.path)
+        real_load_meta = store.load_meta
+        raced = []
+
+        def racing_load_meta():
+            out = real_load_meta()
+            if not raced:
+                raced.append(1)
+                other.save_meta({"sessions_produced": 99, "custom": "new"})
+            return out
+
+        store.load_meta = racing_load_meta
+        try:
+            result = validated_save_continuity(store, text)
+        finally:
+            del store.load_meta
+            other.close()
+        assert raced
+        assert {k: store.load_meta().get(k) for k in ("sessions_produced", "custom")} \
+            == {"sessions_produced": 100, "custom": "new"}
 
         # Should have saved
         assert store.load_continuity() is not None
@@ -4419,6 +4476,31 @@ class TestGenerationGuards:
         assert [p.read_text(encoding="utf-8") for p in
                 tmp_path.glob("m.continuity.md.diverged-*")] == [older]
         assert cont.read_bytes() == text.encode("utf-8")
+        # L3 r1 R7: a gen-2 crash left the committed text in an orphan tmp and
+        # the stale file in place. The migration seeds both (stale first), so
+        # the projection replaces the stale file quietly: no divergence alarm.
+        import warnings
+
+        db = tmp_path / "o.db"
+        Store(db).close()
+        self._as_generation_2(db)
+        stale, committed = "# O\n\n## State\nstale.\n", "# O\n\n## State\ncommitted.\n"
+        pair = "abcdef012345-0011aabb"
+        conn = self._old_writer(db, 2)
+        conn.execute("INSERT INTO wraps (episodes_compressed, content_hash, pair_id) "
+                     "VALUES (0, ?, ?)",
+                     (hashlib.sha256(committed.encode("utf-8")).hexdigest(), pair))
+        conn.commit()
+        conn.close()
+        (tmp_path / "o.continuity.md").write_text(stale, encoding="utf-8", newline="")
+        (tmp_path / f"o.continuity.{pair}.md.tmp").write_text(
+            committed, encoding="utf-8", newline="")
+        with warnings.catch_warnings(record=True) as rec:
+            warnings.simplefilter("always")
+            Store(db).close()
+        assert not [w for w in rec if "differed" in str(w.message)]
+        assert not list(tmp_path.glob("o.continuity.md.diverged-*"))
+        assert (tmp_path / "o.continuity.md").read_text(encoding="utf-8") == committed
 
     def test_every_table_carries_this_generations_three_guards(self, tmp_path):
         from anneal_memory.store import _SCHEMA_VERSION

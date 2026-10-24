@@ -3530,7 +3530,7 @@ class TestCodexL3TwentySixOhNineOhFour:
         of them ran, and ``verify()`` would have walked the hole clean.
 
         Two properties, and the second is the one the four channels exist for:
-        the tail is still written (a real Ctrl-C is delivered ONCE, so
+        the tail is still written, by the next flush since L3 r1 (a real Ctrl-C is delivered ONCE, so
         containing it per event costs the one interrupted emit), and the drop
         is RECORDED in the hash chain rather than only as a warning.
 
@@ -3569,15 +3569,24 @@ class TestCodexL3TwentySixOhNineOhFour:
             assert store.status().total_episodes == 4, (
                 "the committed episodes did not survive"
             )
-            assert attempts["n"] > 1, (
-                "the replay stopped at the interrupted event — every audit "
-                f"event after it was dropped (attempted {attempts['n']} of 4)"
-            )
+            # L3 r1 (bound): the flush stops at the first failed append, under
+            # its write lock, and the tail stays in the outbox for the next
+            # flush instead of being attempted under that lock.
+            assert attempts["n"] == 1
+            assert store._conn.execute(
+                "SELECT COUNT(*) FROM audit_outbox").fetchone()[0] == 4, (
+                "the interrupted event and the tail after it were not kept "
+                "for the next flush")
             assert store.status().audit_write_failures == 1, (
                 "the dropped audit event left the failure counter at zero, so "
                 "a caller polling for degraded audit health sees a clean trail "
                 "over a real hole"
             )
+            # The marker rides into the next entry THIS trail appends (it is
+            # pending in memory): the next flush from this handle.
+            store._flush_audit_outbox()
+            assert store._conn.execute(
+                "SELECT COUNT(*) FROM audit_outbox").fetchone()[0] == 0
         finally:
             store._audit.log = real_log
             store.close()
@@ -3590,6 +3599,8 @@ class TestCodexL3TwentySixOhNineOhFour:
             if line.strip()
         ]
         assert entries, "the tail was never written"
+        assert [e["event"] for e in entries].count("record") == 4, (
+            "the kept rows were not appended by the next flush")
         assert any(e.get("dropped_before") for e in entries), (
             "no dropped_before marker rode into the chain — the ONLY channel "
             "that outlives the process is the hash-chained one, and without it "
@@ -3614,6 +3625,21 @@ class TestCodexL3TwentySixOhNineOhFour:
         try:
             assert store._conn.execute("SELECT COUNT(*) FROM audit_outbox").fetchone()[0] == 0
             assert store.status().audit_write_failures == failures + 1
+            # L3 r1 R6: an append that escapes without counting a failure
+            # (an exception, or an interrupt the batched replay contains) never
+            # deletes its row.
+            store._conn.execute("INSERT INTO audit_outbox (event_json, created_at) "
+                                "VALUES (?, 'x')", (good.replace("outbox_good", "outbox_kept"),))
+            store._conn.commit()
+            for escaped in (RuntimeError("uncounted"), KeyboardInterrupt()):
+                def escaping(*args, _exc=escaped, **kwargs):
+                    raise _exc
+                store._audit_log_after_commit = escaping
+                store._flush_audit_outbox(contain_terminal=True)
+                del store._audit_log_after_commit
+                assert store._conn.execute(
+                    "SELECT COUNT(*) FROM audit_outbox").fetchone()[0] == 1, escaped
+            store._flush_audit_outbox()
         finally:
             store.close()
         assert [json.loads(line)["event"] for line in (tmp_path / "tail.audit.jsonl")
@@ -3641,7 +3667,8 @@ class TestCodexL3TwentySixOhNineOhFour:
         B. unbatched + ``KeyboardInterrupt`` → still swallowed. That trade
            dates to 2026-09-05 and reversing it reintroduces the data-loss
            defect that was mutation-tested and refused.
-        C. batched + ``SystemExit`` → suppressed AND the tail still replayed.
+        C. batched + ``SystemExit`` → suppressed, and the tail kept in the
+           outbox for the next flush (L3 r1 bound; it once replayed at once).
            The batched path is the one place a raise makes the caller read a
            committed wrap as failed and unlink its staged sidecars, so
            suppression lives at that call site, visibly, rather than in the
@@ -3684,7 +3711,7 @@ class TestCodexL3TwentySixOhNineOhFour:
             store._audit.log = None
             store.close()
 
-        # C -- batched: suppressed, and the tail is still replayed.
+        # C -- batched: suppressed, and the tail kept for the next flush.
         store = Store(tmp_path / "c.db")
         real_log = store._audit.log
         attempts = {"n": 0}
@@ -3703,12 +3730,16 @@ class TestCodexL3TwentySixOhNineOhFour:
                         store.record(f"episode {i}", episode_type="observation")
                     store._audit.log = exit_on_the_first_emit
             store._audit.log = real_log
-            assert attempts["n"] == 4, (
-                "a SystemExit on the first replayed event abandoned the tail "
-                f"(attempted {attempts['n']} of 4)"
-            )
+            # L3 r1 (bound): the flush stops at the failed append and keeps
+            # it and the tail for the next flush, which appends them.
+            assert attempts["n"] == 1
             assert store.status().total_episodes == 4
             assert store.status().audit_write_failures == 1
+            assert store._conn.execute(
+                "SELECT COUNT(*) FROM audit_outbox").fetchone()[0] == 4
+            store._flush_audit_outbox()
+            assert store._conn.execute(
+                "SELECT COUNT(*) FROM audit_outbox").fetchone()[0] == 0
         finally:
             store._audit.log = real_log
             store.close()

@@ -75,6 +75,7 @@
   "SCHEMA_NAMES",
   "SPORE_VERSION_EXCLUDED",
   "SaveAuthorityError",
+  "SaveContinuityReplayResult",
   "SaveContinuityResult",
   "ScoredEpisode",
   "SectionError",
@@ -5828,6 +5829,38 @@
    "members": {},
    "module": "anneal_memory.store"
   },
+  "SaveContinuityReplayResult": {
+   "bases": [
+    "builtins.dict"
+   ],
+   "init": null,
+   "kind": "class",
+   "members": {},
+   "module": "anneal_memory.types",
+   "typed_dict": {
+    "annotations": {
+     "chars": "ForwardRef('int', module='anneal_memory.types')",
+     "content_hash": "ForwardRef('str', module='anneal_memory.types')",
+     "episodes_compressed": "ForwardRef('int', module='anneal_memory.types')",
+     "graduations_demoted": "ForwardRef('int', module='anneal_memory.types')",
+     "graduations_validated": "ForwardRef('int', module='anneal_memory.types')",
+     "path": "ForwardRef('str', module='anneal_memory.types')",
+     "replayed": "ForwardRef('bool', module='anneal_memory.types')",
+     "wrap_id": "ForwardRef('int | None', module='anneal_memory.types')"
+    },
+    "optional": [],
+    "required": [
+     "chars",
+     "content_hash",
+     "episodes_compressed",
+     "graduations_demoted",
+     "graduations_validated",
+     "path",
+     "replayed",
+     "wrap_id"
+    ]
+   }
+  },
   "SaveContinuityResult": {
    "bases": [
     "builtins.dict"
@@ -5863,7 +5896,6 @@
      "path": "ForwardRef('str', module='anneal_memory.types')",
      "pattern_trust": "ForwardRef('dict[str, str]', module='anneal_memory.types')",
      "proven_without_contradicts_declaration": "ForwardRef('list[dict[str, Any]]', module='anneal_memory.types')",
-     "replayed": "ForwardRef('bool', module='anneal_memory.types')",
      "sections": "ForwardRef('dict[str, int]', module='anneal_memory.types')",
      "skipped_non_today": "ForwardRef('int', module='anneal_memory.types')",
      "stale_state": "ForwardRef('list[str]', module='anneal_memory.types')",
@@ -5878,7 +5910,6 @@
      "drift",
      "durable_warnings",
      "level_capped",
-     "replayed",
      "stale_state"
     ],
     "required": [
@@ -7834,7 +7865,7 @@
   "validated_save_continuity": {
    "kind": "function",
    "module": "anneal_memory.continuity",
-   "signature": "(store: 'Store', text: 'str', affective_state: 'AffectiveState | None' = None, *, today: 'str | None' = None, wrap_token: 'str | None' = None, allow_shrink: 'bool' = False, allow_unlinked: 'bool' = False, carryforward_cold_days: 'int | None' = 7, crystal_store: 'CrystalStore | None' = None, compost: 'list[str] | None' = None, session_id: 'str | None' = None, allow_sole_live: 'bool' = False, require_rederive: 'bool' = False, unattended: 'bool' = False, model: 'str | None' = None, idempotency_key: 'str | None' = None, lease_token: 'str | None' = None) -> 'SaveContinuityResult'"
+   "signature": "(store: 'Store', text: 'str', affective_state: 'AffectiveState | None' = None, *, today: 'str | None' = None, wrap_token: 'str | None' = None, allow_shrink: 'bool' = False, allow_unlinked: 'bool' = False, carryforward_cold_days: 'int | None' = 7, crystal_store: 'CrystalStore | None' = None, compost: 'list[str] | None' = None, session_id: 'str | None' = None, allow_sole_live: 'bool' = False, require_rederive: 'bool' = False, unattended: 'bool' = False, model: 'str | None' = None, idempotency_key: 'str | None' = None, lease_token: 'str | None' = None) -> 'SaveContinuityResult | SaveContinuityReplayResult'"
   },
   "verify_integrity": {
    "kind": "function",

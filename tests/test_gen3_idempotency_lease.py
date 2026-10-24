@@ -15,6 +15,7 @@ import pytest
 from anneal_memory import (
     IdempotencyConflictError,
     LeaseFencedError,
+    SaveContinuityReplayResult,
     Store,
     prepare_wrap,
     validated_save_continuity,
@@ -53,6 +54,12 @@ def test_t4_an_idempotency_key_reused_for_another_request_is_refused(tmp_path):
     with pytest.raises(IdempotencyConflictError) as erased:
         s.record("aba", EpisodeType.OBSERVATION, timestamp=ts, idempotency_key="req-aba")
     assert erased.value.reason == "effect_erased"
+    # B3 L3 r2 V2: set_trust after a keyed record is not an erasure; the retry
+    # replays the same episode.
+    trusted = s.record("trust moves", EpisodeType.OBSERVATION, idempotency_key="req-trust")
+    s.set_trust(trusted.id, "external")
+    assert s.record("trust moves", EpisodeType.OBSERVATION,
+                    idempotency_key="req-trust").id == trusted.id
 
     # The save: a keyed retry gets its result where an unkeyed one is a phantom
     # re-save, and the same key with other text changes nothing.
@@ -76,6 +83,8 @@ def test_t4_an_idempotency_key_reused_for_another_request_is_refused(tmp_path):
         s, _TEXT, wrap_token=p["wrap_token"], today="2026-10-23",
         compost=["gone_pattern"], idempotency_key="save-1")
     assert again["wrap_id"] == saved["wrap_id"] and again["replayed"] is True
+    # B3 L3 r2 V3: the replay is the allowlist, nothing more.
+    assert set(again) == set(SaveContinuityReplayResult.__annotations__)
     with pytest.raises(IdempotencyConflictError):
         validated_save_continuity(
             s, _TEXT.replace("Active.", "Other."), wrap_token=p["wrap_token"],

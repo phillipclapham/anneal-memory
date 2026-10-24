@@ -32,7 +32,7 @@ import logging
 import warnings
 from dataclasses import asdict
 from datetime import date, datetime
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, cast, overload
 
 from .graduation import (
     mask_explanations_text,
@@ -117,6 +117,7 @@ from .types import (
     Episode,
     FeltCurrency,
     PrepareWrapResult,
+    SaveContinuityReplayResult,
     SaveContinuityResult,
     SectionWriteResult,
     StalePatternDict,
@@ -1832,10 +1833,20 @@ def _compose_wrap_package(
     return package, derive_roots, frozen_identities
 
 
-def _save_replay(result_json: str | None) -> SaveContinuityResult:
-    """A keyed save's replay: the key row's non-content subset, marked
-    ``replayed`` (the documented replay shape, not the full result)."""
-    return cast(SaveContinuityResult, {**json.loads(result_json or "{}"), "replayed": True})
+# The save key row's fields a replay returns (B3 L3 r2 V3): an allowlist, so a
+# field the row ever gains never reaches the caller unnamed here.
+_SAVE_REPLAY_FIELDS = (
+    "wrap_id", "chars", "path", "content_hash", "episodes_compressed",
+    "graduations_validated", "graduations_demoted",
+)
+
+
+def _save_replay(result_json: str | None) -> SaveContinuityReplayResult:
+    """A keyed save's replay: the key row's non-content subset, projected by
+    ``_SAVE_REPLAY_FIELDS`` and marked ``replayed``, never the full result."""
+    stored = json.loads(result_json or "{}")
+    return cast(SaveContinuityReplayResult, {
+        **{name: stored.get(name) for name in _SAVE_REPLAY_FIELDS}, "replayed": True})
 
 
 def _package_fingerprint(package: Any) -> str:
@@ -2843,6 +2854,54 @@ def _gone_marks(
     return {cid: tuple(sorted(m)) for cid, m in marks.items()}
 
 
+# Only a keyed call can replay (B3 L3 r2 V3), so an unkeyed call is typed as
+# the full result and a keyed one as either shape.
+@overload
+def validated_save_continuity(
+    store: Store,
+    text: str,
+    affective_state: AffectiveState | None = None,
+    *,
+    today: str | None = None,
+    wrap_token: str | None = None,
+    allow_shrink: bool = False,
+    allow_unlinked: bool = False,
+    carryforward_cold_days: int | None = 7,
+    crystal_store: CrystalStore | None = None,
+    compost: list[str] | None = None,
+    session_id: str | None = None,
+    allow_sole_live: bool = False,
+    require_rederive: bool = False,
+    unattended: bool = False,
+    model: str | None = None,
+    idempotency_key: None = None,
+    lease_token: str | None = None,
+) -> SaveContinuityResult: ...
+
+
+@overload
+def validated_save_continuity(
+    store: Store,
+    text: str,
+    affective_state: AffectiveState | None = None,
+    *,
+    today: str | None = None,
+    wrap_token: str | None = None,
+    allow_shrink: bool = False,
+    allow_unlinked: bool = False,
+    carryforward_cold_days: int | None = 7,
+    crystal_store: CrystalStore | None = None,
+    compost: list[str] | None = None,
+    session_id: str | None = None,
+    allow_sole_live: bool = False,
+    require_rederive: bool = False,
+    unattended: bool = False,
+    model: str | None = None,
+    idempotency_key: str,
+    lease_token: str | None = None,
+) -> SaveContinuityResult | SaveContinuityReplayResult: ...
+
+
 def validated_save_continuity(
     store: Store,
     text: str,
@@ -2862,7 +2921,7 @@ def validated_save_continuity(
     model: str | None = None,
     idempotency_key: str | None = None,
     lease_token: str | None = None,
-) -> SaveContinuityResult:
+) -> SaveContinuityResult | SaveContinuityReplayResult:
     """Save continuity with the full validation pipeline.
 
     ``unattended`` and ``model`` are recorded on the wrap's row (an unattended
@@ -3024,7 +3083,8 @@ def validated_save_continuity(
             the stored result and writes nothing (where a retry without a key is
             refused as a phantom re-save); the same key with another request
             raises :class:`~anneal_memory.IdempotencyConflictError`. A replay
-            returns the key row's one stable shape, the non-content subset
+            returns :class:`~anneal_memory.SaveContinuityReplayResult`, the key
+            row's one stable shape, the non-content subset
             ``wrap_id``, ``chars``, ``path``, ``content_hash``,
             ``episodes_compressed``, ``graduations_validated``,
             ``graduations_demoted``, with ``replayed: True``; never the full

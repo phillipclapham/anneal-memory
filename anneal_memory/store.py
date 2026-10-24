@@ -10726,42 +10726,43 @@ class Store:
             (_IDEMPOTENCY_SCOPE, key, operation, request_hash, result_json, _now_utc()),
         )
 
-    def _episode_fingerprint(self, episode_id: str) -> str | None:
+    @staticmethod
+    def _row_fingerprint(row: sqlite3.Row) -> str:
         """sha256 over an episode row's identity fields (id, timestamp, type,
-        source, trust, content hash), or ``None`` when no such row exists. A
-        hash, never content, so a record key row holding it keeps erasure."""
-        row = self._conn.execute(
-            "SELECT e.id, e.timestamp, e.type, e.source, e.content, t.trust "
-            "FROM episodes e LEFT JOIN episode_trust t ON t.episode_id = e.id "
-            "WHERE e.id = ?", (episode_id,)).fetchone()
-        if row is None:
-            return None
+        source, content hash). A hash, never content, so a record key row
+        holding it keeps erasure. Trust is left out: ``set_trust`` changes it
+        after a record legitimately, and the request hash already binds the
+        trust the request asked for (B3 L3 r2 V2)."""
         return hashlib.sha256(json.dumps([
             row["id"], row["timestamp"], row["type"], row["source"],
-            row["trust"] or DEFAULT_TRUST,
             hashlib.sha256(row["content"].encode("utf-8")).hexdigest(),
         ]).encode("utf-8")).hexdigest()
 
     def _record_key_result(self, episode_id: str) -> str:
         """A record key row's result: the episode id and its fingerprint, read
         in the caller's transaction (B3 L3 r1 U3)."""
+        row = self._conn.execute(
+            "SELECT * FROM episodes WHERE id = ?", (episode_id,)).fetchone()
         return json.dumps({"episode_id": episode_id,
-                           "fingerprint": self._episode_fingerprint(episode_id)})
+                           "fingerprint": None if row is None else self._row_fingerprint(row)})
 
     def _record_replay(self, key: str, result_json: str | None) -> Episode:
         """The episode a committed keyed ``record`` made, returned only while the
         row under its id is that same episode (its fingerprint matches). Ids
         derive from content and timestamp, so a deleted episode recreated with
-        another type, source or trust reuses the id; that, or a deletion,
-        raises :class:`IdempotencyConflictError` (``effect_erased``)."""
+        another type or source reuses the id; that, or a deletion, raises
+        :class:`IdempotencyConflictError` (``effect_erased``). One read gives
+        both the fingerprint and the returned episode, so a delete and
+        recreate between two reads cannot replay the replacement (B3 L3 r2 V1)."""
         stored = json.loads(result_json or "{}")
         episode_id = stored.get("episode_id") if isinstance(stored, dict) else None
         episode: Episode | None = None
         if isinstance(episode_id, str):
             with self._db_boundary("record"):
-                current = self._episode_fingerprint(episode_id)
-            if current is not None and current == stored.get("fingerprint"):
-                episode = self.get(episode_id)
+                row = self._conn.execute(
+                    "SELECT * FROM episodes WHERE id = ?", (episode_id,)).fetchone()
+            if row is not None and self._row_fingerprint(row) == stored.get("fingerprint"):
+                episode = self._row_to_episode(row)
         if episode is None:
             raise IdempotencyConflictError(
                 f"idempotency_key {key!r} recorded episode {episode_id!r}, which has "

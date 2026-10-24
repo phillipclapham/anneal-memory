@@ -771,11 +771,23 @@ class _SaveContinuityOptional(TypedDict, total=False):
     # ``{"name", "written_level", "capped_to", "prior_level", "validated"}`` per
     # line, also delivered as a UserWarning and recorded in the audit chain.
     level_capped: list[dict[str, Any]]
-    # Present ONLY on a keyed retry's replay (``idempotency_key``, generation 3),
-    # always ``True``: the replay is the key row's non-content subset (``wrap_id``,
-    # ``chars``, ``path``, ``content_hash``, ``episodes_compressed``,
-    # ``graduations_validated``, ``graduations_demoted``), not the full shape.
-    replayed: bool
+
+
+class SaveContinuityReplayResult(TypedDict):
+    """Return shape of a keyed ``validated_save_continuity`` retry's replay
+    (``idempotency_key``, generation 3): the key row's non-content subset,
+    projected by an explicit allowlist, marked ``replayed``. Never the full
+    :class:`SaveContinuityResult`; text derived from episodes would outlive an
+    episode's erasure (B3 L3 r1 U7, r2 V3)."""
+
+    wrap_id: int | None
+    chars: int
+    path: str
+    content_hash: str
+    episodes_compressed: int
+    graduations_validated: int
+    graduations_demoted: int
+    replayed: bool  # always ``True``
 
 
 class SaveContinuityResult(_SaveContinuityOptional):

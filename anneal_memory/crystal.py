@@ -1328,13 +1328,15 @@ class CrystalStore:
 
     def _authority(self) -> str:
         """Which store holds this document: ``"db:<store_id>"`` beside a generation-3
-        store (its real path when it has no ``store_id``), else ``"file"``. Read-only;
-        a store busy past the read budget raises the retryable :class:`_StoreBusy`."""
-        db = self._db_path()
+        store (its real path when it has no ``store_id``), else ``"file"``. Read-only.
+        It waits the write budget (``snapshot``/``restore`` guard a rollback, which
+        must not fail on a briefly busy store, L3 r2); past it, the retryable
+        :class:`_StoreBusy`."""
+        db = self._db_path(timeout=_DB_TIMEOUT)
         if db is None:
             return "file"
         try:
-            conn = connect(db, read_only=True, timeout=_READ_TIMEOUT)
+            conn = connect(db, read_only=True, timeout=_DB_TIMEOUT)
             try:
                 row = conn.execute(
                     "SELECT value FROM metadata WHERE key = 'store_id'").fetchone()

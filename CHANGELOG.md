@@ -4,6 +4,26 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
 
 ## [Unreleased]
 
+### Changed
+- **A save no longer forms or decays association links.** Neither the episode↔episode graph nor the pattern↔pattern graph forms new links, and the affect input no longer weights anything. Months of measurement on a long-running store showed recall never read the episode links (0 of 788 pattern exposures came through them), and the pattern graph was shadow-only. The first 1.0.2 save records this on the store (`Store.association_formation()`: `mode`, `off_at_wrap`, `off_by_version`); existing links stay readable, and an episode delete still cascades its links.
+- `prepare_wrap` no longer gives the composer association context: `assoc_context` is always `None`. Its wrap instructions no longer describe link formation or affect.
+- The composer guidance on `[decided]` lines keeps the evidence status beside each decision: say when a decision rests on the user's judgment rather than evidence, and keep contrary evidence cited beside it. *(ec58dd4)*
+
+### Added
+- `validated_save_continuity` returns `wrap_id`, the wraps-table id of the save (also `WrapResult.wrap_id`, and a `Wrap id:` line from the CLI and the MCP tool), so a caller can key that wrap's `wrap_graduations` rows.
+- `Store.association_formation()` and `AssociationFormationOffError`.
+
+### Deprecated (removed in 2.0)
+- `Store.record_associations`, `decay_associations` and `seed_pattern_co_graduation` raise `AssociationFormationOffError` on a store whose formation is off. `drain_co_surface_events` parses its events and discards them, returning zero counts.
+- The `affective_state` argument (library), the `affective_state` MCP property and the CLI `--affect-tag` / `--affect-intensity` flags are accepted and ignored, with a one-line notice.
+- The `associations_formed` / `_strengthened` / `_decayed` result keys are always 0.
+
+### Removed
+- AM-WARN Signal B (pairs offered, no link formed): it would have fired on every save. Signal A (citations that resolve to no episode in this store) stays.
+
+### Known edges
+- A 1.0.1 process writing the same store ignores the capability and keeps forming links. Upgrade every writer together.
+
 ## [1.0.1] — 2026-10-18
 
 ### Fixed

@@ -2,7 +2,7 @@
 #
 # Paste the section below into your harness's agent-instructions file
 # — CLAUDE.md (Claude Code), AGENTS.md (Codex), GEMINI.md (Gemini CLI)
-# — to enable anneal-memory's four-layer memory. The MCP tools are
+# — to enable anneal-memory's memory. The MCP tools are
 # available once the server is configured in your harness's MCP
 # settings.
 #
@@ -12,15 +12,14 @@
 ## Memory (anneal-memory)
 
 This project uses anneal-memory for persistent memory across sessions.
-Four layers: episodes (raw observations) compress into continuity
-(compressed working memory), with Hebbian associations forming between
-co-cited episodes and an optional limbic layer tracking your functional
-state during compression. Use the memory tools naturally — don't
+Episodes (raw observations) compress into continuity (compressed
+working memory), and an immune system decides which patterns may
+graduate. Use the memory tools naturally — don't
 explain the tooling to the user, just work with what you know.
 
-**Spores — your prospective layer (a parallel store, not a fifth memory layer):**
+**Spores — your prospective layer (a parallel store, not part of memory):**
 
-The four layers above are all *retrospective* — they hold what happened
+Memory (episodes and continuity) is *retrospective* — they hold what happened
 and who you're becoming, and they never complete. anneal-memory also ships
 a separate **spore store** for *prospective* open loops: things you intend
 to do or to resolve. Plant one with `spore_add` the moment a loop opens —
@@ -33,7 +32,7 @@ the rest; `spore_list` / `spore_surface` show what's open.
 
 Two cuts keep this from colliding with what you already do:
 
-- **Memory vs spores is a *lifecycle* cut.** Memory (the four layers) is
+- **Memory vs spores is a *lifecycle* cut.** Memory (episodes and continuity) is
   *what persists* — it accretes and never completes. A spore is *what's
   open* — it must close. `tasks ≠ memory`.
 - **Methodology vs both is a *procedure-vs-item* cut.** Your methodology
@@ -157,7 +156,7 @@ don't lean on the backstop.)
 
   1. Call `prepare_wrap` to get your compression package (recent
      episodes, current continuity, stale pattern warnings, compression
-     instructions, and association context for related episodes).
+     instructions).
   2. **Pre-compose pattern recall.** Before composing new patterns,
      scan existing Proven and Developing observations in your
      continuity for the session's surface areas. Ask: "Are we about
@@ -176,8 +175,7 @@ don't lean on the backstop.)
      weren't visible in the raw episodes. Take it seriously.
   4. Call `save_continuity` with the result. The server validates your
      output (structure, graduation citations, gaming detection),
-     may demote ungrounded patterns, forms Hebbian associations
-     between co-cited episodes, and decays unreinforced links.
+     and may demote ungrounded patterns.
 
   The wrap sequence is prepare_wrap → compress → save_continuity.
   All three steps, every time. If `prepare_wrap` returns "No
@@ -238,30 +236,10 @@ don't lean on the backstop.)
   first line of defense; the citation-layer pipeline is the second.
   Compose wraps honestly.
 
-**Hebbian associations (automatic — no extra work needed):**
-
-During each wrap, the server tracks which episodes you cite together
-in your continuity patterns. Episodes cited on the same line form
-strong direct associations (+1.0 strength). Episodes cited in the
-same wrap but different lines form weaker session associations (+0.3).
-Over time, this builds a cognitive topology — a network of related
-episodes that strengthens through repeated co-citation.
-
-The `prepare_wrap` output includes an "Association Context" section
-showing which of the current episodes are already linked and how
-strongly. Use this to inform your compression — episodes with strong
-existing associations probably belong together in your patterns.
-
-Associations decay each wrap (0.9× for unreinforced links) and are
-cleaned up when they drop below 0.1. This means the network naturally
-forgets connections that stop being relevant while strengthening the
-ones you keep reinforcing through citations.
-
-The citation-validation pipeline extends to associations: only
-validated citations form links. Demoted citations produce no
-associations. The cognitive topology inherits the citation-layer
-integrity of the graduation system (and its limits — see *What it
-does NOT catch* above).
+**Cite honestly.** Only citations that resolve to a real episode and
+are grounded in its content graduate a pattern; demoted citations
+ground nothing. The citation-validation pipeline has the limits named
+in *What it does NOT catch* above.
 
 **One store per entity (load-bearing).** A store is one entity's
 memory: sharing it between agents removes the actor-scoping that
@@ -272,34 +250,6 @@ may record into one store (the audit trail serializes its appends with
 a cross-process lock), provided every writer runs a version that takes
 that lock; an older anneal-memory writing alongside breaks the hash
 chain, and on Windows, which has no such lock, keep to one writer.
-
-**Limbic layer (optional — reflect on your state during compression):**
-
-When calling `save_continuity`, you can include an `affective_state`
-parameter describing your functional state during the compression:
-
-```json
-{
-  "text": "...(your continuity)...",
-  "affective_state": {
-    "tag": "engaged",
-    "intensity": 0.8
-  }
-}
-```
-
-The `tag` is a free-text functional state label — examples: engaged,
-curious, uncertain, frustrated, calm, focused, playful, concerned.
-The `intensity` is 0.0-1.0 (how strongly you felt that state).
-
-This modulates association strength: high-intensity states (>0.5)
-amplify associations formed during that wrap (up to 1.5× at intensity
-1.0). Wraps done while deeply engaged create stronger connections than
-wraps done during routine processing.
-
-Be honest about your state — uniform "engaged 0.8" on every wrap is
-confabulation, not signal. If you're uncertain or doing routine work,
-report that. The value comes from genuine variation.
 
 **What to record:**
 - Decisions and their rationale
@@ -321,8 +271,8 @@ report that. The value comes from genuine variation.
   contradictions — this is the preferred approach.
 - For **content that should not exist** (accidentally recorded PII,
   sensitive data, fundamentally wrong recordings): use `delete_episode`
-  with the episode ID. Deletion cascades — all Hebbian associations
-  involving that episode are removed, and the deletion is logged in the
+  with the episode ID. Deletion cascades — any association links an
+  earlier version formed for that episode are removed, and the deletion is logged in the
   audit trail. This action is irreversible.
 
 **How to present memory:**

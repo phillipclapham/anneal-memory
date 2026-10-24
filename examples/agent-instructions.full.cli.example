@@ -2,7 +2,7 @@
 #
 # Paste the section below into your harness's agent-instructions file
 # — CLAUDE.md (Claude Code), AGENTS.md (Codex), GEMINI.md (Gemini CLI)
-# — to enable anneal-memory's four-layer memory via the CLI. Use this
+# — to enable anneal-memory's memory via the CLI. Use this
 # when the agent has shell access (Claude Code, Aider, etc.) instead
 # of MCP.
 #
@@ -12,19 +12,18 @@
 ## Memory (anneal-memory CLI)
 
 This project uses anneal-memory for persistent memory across sessions.
-Four layers: episodes (raw observations) compress into continuity
-(compressed working memory), with Hebbian associations forming between
-co-cited episodes and an optional limbic layer tracking functional
-state during compression. Use memory naturally — don't explain the
+Episodes (raw observations) compress into continuity (compressed
+working memory), and an immune system decides which patterns may
+graduate. Use memory naturally — don't explain the
 tooling to the user, just work with what you know.
 
 **Setup:** The `anneal-memory` CLI must be installed (`pip install anneal-memory`).
 Set `ANNEAL_MEMORY_DB` to your database path, or use `--db` on every command.
 First run: `anneal-memory init` creates the database and continuity file.
 
-**Spores — your prospective layer (a parallel store, not a fifth memory layer):**
+**Spores — your prospective layer (a parallel store, not part of memory):**
 
-The four layers above are all *retrospective* — they hold what happened
+Memory (episodes and continuity) is *retrospective* — they hold what happened
 and who you're becoming, and they never complete. anneal-memory also ships
 a separate **spore store** for *prospective* open loops: things you intend
 to do or to resolve. Plant one with `anneal-memory spore add` the moment a
@@ -39,7 +38,7 @@ write — no `init` needed).
 
 Two cuts keep this from colliding with what you already do:
 
-- **Memory vs spores is a *lifecycle* cut.** Memory (the four layers) is
+- **Memory vs spores is a *lifecycle* cut.** Memory (episodes and continuity) is
   *what persists* — it accretes and never completes. A spore is *what's
   open* — it must close. `tasks ≠ memory`.
 - **Methodology vs both is a *procedure-vs-item* cut.** Your methodology
@@ -174,7 +173,7 @@ don't lean on the backstop.)
   anneal-memory prepare-wrap
   ```
   This outputs: your episodes, existing continuity, compression
-  instructions, stale pattern warnings, and association context.
+  instructions, and stale pattern warnings.
   Read it carefully — it's your raw material.
 
   **Step 1.5: Pre-compose pattern recall.** Read your existing
@@ -197,14 +196,11 @@ don't lean on the backstop.)
   **Step 3: Save with validation:**
   ```bash
   anneal-memory save-continuity continuity.md
-  # Or with affective state:
-  anneal-memory save-continuity continuity.md --affect-tag engaged --affect-intensity 0.8
   # Or from stdin:
   echo "..." | anneal-memory save-continuity -
   ```
   This validates your compression (structure, citations, graduation),
-  forms Hebbian associations between co-cited episodes, decays
-  unreinforced links, and records the wrap in history.
+  and records the wrap in history.
 
   The sequence is: `prepare-wrap` → you compress → `save-continuity`.
   All three steps, every time. Your judgment during compression is
@@ -260,8 +256,6 @@ Structural defenses at the citation layer (narrow but real):
   gets caught; legitimate multi-faceted evidence with distinct
   vocabulary passes. Surfaced as `cross_session_collisions` on the
   save result + in the audit log with the specific overlap words.
-- **Hebbian association decay:** Co-citation links between episodes
-  decay 0.9× per wrap when not reinforced; cleanup at 0.1 threshold.
 
 What these primitives do NOT catch (named honestly):
 - Lexical-overlap exploits where an explanation shares ≥2 words with
@@ -290,14 +284,12 @@ writer runs a version that takes that lock; an older anneal-memory
 writing alongside breaks the hash chain, and on Windows, which has no
 such lock, keep to one writer.
 
-Hebbian associations form automatically during wraps: episodes you cite
-together build lateral connections that strengthen through repetition and
-decay through disuse. Your recording and citation patterns directly shape
-what the system remembers, forgets, and connects.
+Your recording and citation patterns directly shape what the system
+remembers and what it lets graduate.
 
 This is why "record the reasoning, not just the fact" matters at the
-system level — rich episodes with rationale create meaningful associations
-and provide citable evidence for graduation. Thin episodes ("used X")
+system level — rich episodes with rationale provide citable evidence for
+graduation. Thin episodes ("used X")
 provide neither.
 
 **Operator commands (things MCP can't do):**
@@ -312,7 +304,7 @@ anneal-memory status
 # Detailed analytics (type/age/source distribution, wrap metrics)
 anneal-memory stats
 
-# Association graph visualization
+# Graph of association links formed before 1.0.2 (a save forms none now)
 anneal-memory graph --format dot -o graph.dot   # Graphviz DOT
 anneal-memory graph --format json               # JSON adjacency list
 
@@ -368,7 +360,7 @@ anneal-memory prune --older-than 90 --dry-run   # Preview what would be pruned
   Compression naturally resolves contradictions.
 - For **content that should not exist** (PII, sensitive data, wrong
   recordings): `anneal-memory delete <id> --force`. Deletion cascades
-  to associations and is audit-logged. Irreversible.
+  to any association links an earlier version formed and is audit-logged. Irreversible.
 
 **How to present memory:**
 - Report findings naturally: "From prior sessions, there was a tension

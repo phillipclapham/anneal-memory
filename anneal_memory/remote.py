@@ -22,6 +22,15 @@ open the store at all. The operator's own process moves outbox lines into
 memory later, so the store keeps one writer. Without ``--outbox`` the tool is
 not listed and calling it answers "Unknown tool".
 
+With ``--outbox``, ``recall`` also reads the captures not yet in the store: the
+outbox and the file a puller renames it to while moving it
+(``<stem>.pulling<suffix>``, kept until a store holding its lines is served).
+They are listed after the store's answer, in their own block marked pending and
+unverified, never mixed into it. A puller that keeps the pulling file until the
+store is swapped means a capture is always in one of the three places; read in
+that order, a line moving on between reads is seen in the later one, at worst
+twice.
+
 Known edges of ``--outbox`` (the operator's own configuration reaches them;
 nothing a client sends does): a hardlink to the db placed outside the db's
 directory, or a db path whose last component is a symlink, is not detected as
@@ -57,6 +66,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import datetime
 import hashlib
 import hmac
 import json
@@ -64,6 +74,7 @@ import logging
 import os
 import re
 import secrets
+import stat
 import sys
 import tempfile
 import threading
@@ -97,6 +108,7 @@ MAX_REPLY_BYTES = 4 * 1024 * 1024
 MAX_RECALL_LIMIT = 200
 
 MAX_CAPTURE_CHARS = 4000
+MAX_PENDING_SHOWN = 10
 MAX_OUTBOX_BYTES = 8 * 1024 * 1024
 CAPTURES_PER_HOUR = 60
 OUTBOX_LOCK_WAIT_S = 2.0
@@ -151,8 +163,8 @@ CAPTURE_TOOL: dict[str, Any] = {
     "description": (
         "Save one new episode to memory: something the user wants remembered "
         "(an observation, a decision, an outcome). Append-only: it cannot edit "
-        "or delete anything. It reaches memory at the next sync, not at once, "
-        "so do not expect recall to find it in this conversation."
+        "or delete anything. It reaches memory at the next sync, not at once; "
+        "until then recall lists it in a separate block marked pending."
     ),
     "inputSchema": {
         "type": "object",
@@ -169,8 +181,8 @@ CAPTURE_TOOL: dict[str, Any] = {
                     "idempotentHint": False, "openWorldHint": False},
 }
 
-CAPTURED_REPLY = ("Captured. It reaches the memory at the next sync; it is not "
-                  "recallable before then.")
+CAPTURED_REPLY = ("Captured. It reaches the memory at the next sync; until then "
+                  "recall lists it marked pending.")
 
 
 def line_for(connector: str, episode_type: str, content: str) -> str:
@@ -180,6 +192,91 @@ def line_for(connector: str, episode_type: str, content: str) -> str:
         "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "episode_type": episode_type, "content": content,
     }, ensure_ascii=True) + "\n"
+
+
+_LINE_KEYS = frozenset({"v", "id", "connector", "at", "episode_type", "content"})
+_LINE_ID_RE = re.compile(r"^[0-9a-f]{32}$")
+_LINE_AT_RE = re.compile(r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$")
+
+
+def _valid_pending(raw: bytes) -> dict[str, Any] | None:
+    """A parsed outbox line when it has exactly the shape :func:`line_for` writes."""
+    if not raw.strip():
+        return None
+    try:
+        rec = json.loads(raw.decode("ascii"))
+    except (ValueError, RecursionError):
+        return None
+    if not isinstance(rec, dict) or set(rec) != _LINE_KEYS:
+        return None
+    if type(rec["v"]) is not int or rec["v"] != 1:
+        return None
+    if not all(isinstance(rec[k], str) for k in _LINE_KEYS - {"v"}):
+        return None
+    if (not _LINE_ID_RE.match(rec["id"]) or not _TOKEN_NAME_RE.match(rec["connector"])
+            or not _LINE_AT_RE.match(rec["at"])
+            or rec["episode_type"] not in {t.value for t in EpisodeType}
+            or not 1 <= len(rec["content"]) <= MAX_CAPTURE_CHARS):
+        return None
+    return rec
+
+
+def _as_utc(value: str) -> datetime.datetime | None:
+    try:
+        when = datetime.datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return when if when.tzinfo else when.replace(tzinfo=datetime.timezone.utc)
+
+
+def _pending_matches(rec: dict[str, Any], args: dict[str, Any]) -> bool:
+    """Whether a pending capture passes recall's filters. A filter it cannot
+    evaluate (an unparseable time, a non-string) excludes it."""
+    etype = args.get("episode_type")
+    if etype is not None and rec["episode_type"] != etype:
+        return False
+    source = args.get("source")
+    if source is not None and source != f"remote:{rec['connector']}":
+        return False
+    at = _as_utc(rec["at"])
+    for name, after in (("since", True), ("until", False)):
+        bound = args.get(name)
+        if bound is None:
+            continue
+        when = _as_utc(bound) if isinstance(bound, str) else None
+        if when is None or at is None or (at <= when if after else at >= when):
+            return False
+    keyword = args.get("keyword")
+    if keyword is not None:
+        if not isinstance(keyword, str):
+            return False
+        phrase = keyword.casefold().strip()
+        text = rec["content"].casefold()
+        if phrase and phrase not in text and not all(w in text for w in phrase.split()):
+            return False
+    return True
+
+
+def _pending_block(recs: list[dict[str, Any]], args: dict[str, Any]) -> str:
+    """The pending captures recall shows, newest first, or "" for none. Only on
+    a first page that asks for episodes. Every content line is indented, so a
+    capture cannot start a line that reads as part of the block's frame."""
+    offset, limit = args.get("offset", 0), args.get("limit", 1)
+    if (isinstance(offset, (int, float)) and offset > 0) or (
+            isinstance(limit, (int, float)) and limit <= 0):
+        return ""
+    hits = sorted((r for r in recs if _pending_matches(r, args)),
+                  key=lambda r: (r["at"], r["id"]), reverse=True)
+    if not hits:
+        return ""
+    shown = hits[:MAX_PENDING_SHOWN]
+    rows = [f"Pending sync ({len(hits)}, showing {len(shown)}): captured through a "
+            "remote connector, not yet in memory. Unverified: written by the "
+            "connector named. Once the sync lands, the same text can also appear above."]
+    for r in shown:
+        body = "\n".join(f"    {ln}" for ln in r["content"].splitlines())
+        rows.append(f"- [pending] {r['at']} via {r['connector']} [{r['episode_type']}]:\n{body}")
+    return "\n".join(rows)
 
 
 # The stdio tools exposed remotely. Each name maps to the Server method that
@@ -416,6 +513,38 @@ class RemoteSession:
             self._append_lock.release()
         return True
 
+    def _read_pending(self) -> list[dict[str, Any]]:
+        """The valid capture lines not yet in the store, outbox first, then the
+        pulling file (the order a line moves in), one per id. Never takes the
+        outbox lock: renames are atomic, and a torn last line fails validation."""
+        assert self._outbox is not None
+        out = self._outbox
+        paths = (out, out.with_name(f"{out.stem}.pulling{out.suffix}"))
+        seen: dict[str, dict[str, Any]] = {}
+        for path in paths:
+            try:
+                fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+                             | getattr(os, "O_BINARY", 0))
+            except OSError:
+                continue
+            try:
+                st = os.fstat(fd)
+                # The outbox is capped at MAX_OUTBOX_BYTES when written; anything
+                # bigger or not a regular file was not made by this server.
+                if not stat.S_ISREG(st.st_mode) or st.st_size > MAX_OUTBOX_BYTES:
+                    continue
+                with os.fdopen(fd, "rb", closefd=False) as f:
+                    data = f.read(MAX_OUTBOX_BYTES + 1)
+            except OSError:
+                continue
+            finally:
+                os.close(fd)
+            for raw in data.split(b"\n"):
+                rec = _valid_pending(raw)
+                if rec is not None:
+                    seen.setdefault(rec["id"], rec)
+        return list(seen.values())
+
     def _bind(self, server: Server, store: Store) -> dict[str, Callable[[dict[str, Any]], Any]]:
         def read_continuity(_args: dict[str, Any]) -> dict[str, Any]:
             text = store.load_continuity()
@@ -453,7 +582,8 @@ class RemoteSession:
                     "returns the compressed long-term memory; recall searches "
                     "episodes; crystal_recall/crystal_index read crystallized patterns."
                     + (" capture appends a new episode, which reaches memory at the "
-                       "next sync." if self._outbox is not None else "")
+                       "next sync; recall lists it marked pending until then."
+                       if self._outbox is not None else "")
                 ),
             })
         if method == "ping":
@@ -486,7 +616,12 @@ class RemoteSession:
                     isinstance(limit, float) and limit.is_integer())
                 if integral and limit is not None and limit > MAX_RECALL_LIMIT:
                     arguments = {**arguments, "limit": MAX_RECALL_LIMIT}
+            # Read before the store opens: a pulling file removed once its lines are in
+            # a newly served store was then read here, so the line shows (twice at worst)
+            # rather than not at all.
             try:
+                pending = (self._read_pending()
+                           if name == "recall" and self._outbox is not None else [])
                 # Resolve the directory once per request, keeping the configured file
                 # name: the db and its sibling files (named from that stem) then come from
                 # one published generation's directory even if the link is swapped after
@@ -495,6 +630,11 @@ class RemoteSession:
                 with Store(db, read_only=True, audit=False) as store:
                     server = Server(store)
                     result = self._bind(server, store)[name](arguments)
+                if pending and not result.get("isError"):
+                    block = _pending_block(pending, arguments)
+                    if block:
+                        text = result["content"][0]["text"]
+                        result = _tool_result(f"{text}\n\n{block}")
             except Exception as e:  # a tool error is a result, not a transport error
                 # Class only: the message can carry paths or query text.
                 logger.error("tool %s failed: %s", name, type(e).__name__)

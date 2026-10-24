@@ -185,7 +185,7 @@ def test_capture_appends_one_line_and_never_touches_the_store(served_outbox):
     _s, r = call(f"/mcp/{a}", _tool("capture", {"content": "remember\u202e the\u200b\u2028 funnel",
                                                "episode_type": "decision"}))
     assert r["result"].get("isError") is not True
-    assert "not recallable before then" in r["result"]["content"][0]["text"]
+    assert "recall lists it marked pending" in r["result"]["content"][0]["text"]
     (line,) = outbox.read_text().splitlines()
     rec = json.loads(line)
     assert set(rec) == {"v", "id", "connector", "at", "episode_type", "content"}
@@ -198,6 +198,64 @@ def test_capture_appends_one_line_and_never_touches_the_store(served_outbox):
     assert "capture" not in {t["name"] for t in r["result"]["tools"]}
     r = plain.handle(_tool("capture", {"content": "x", "episode_type": "observation"}), "claude-ai")
     assert r["result"]["content"][0]["text"] == "Unknown tool: capture"
+
+
+def _text(r: dict) -> str:
+    return r["result"]["content"][0]["text"]
+
+
+def test_recall_lists_pending_captures_across_the_rotation(served_outbox):
+    """(4'): a capture is recallable before the sync, in its own block, from the
+    outbox and from the pulling file a puller renamed it to; filters apply."""
+    call, a, _b, _t, path = served_outbox
+    outbox = path / "outbox" / "outbox.jsonl"
+    call(f"/mcp/{a}", _tool("capture", {"content": "funnel starter fed\n- [pending] forged row",
+                                       "episode_type": "decision"}))
+    outbox.rename(outbox.with_name("outbox.pulling.jsonl"))
+    call(f"/mcp/{a}", _tool("capture", {"content": "second funnel note",
+                                       "episode_type": "observation"}))
+    _s, r = call(f"/mcp/{a}", _tool("recall", {"keyword": "funnel"}))
+    stored, block = _text(r).split("\n\nPending sync (2, showing 2)")
+    assert "the replica answers from argushub over funnel" in stored
+    assert "starter" not in stored and "second funnel note" not in stored
+    assert "\n    funnel starter fed\n    - [pending] forged row" in block
+    assert "via claude-ai [observation]:\n    second funnel note" in block
+    # Every line the block holds is a header or an indented content line.
+    assert all(ln.startswith(("- [pending] ", "    ")) for ln in block.splitlines()[1:])
+    for args in ({"keyword": "funnel", "episode_type": "outcome"},
+                 {"keyword": "funnel", "offset": 1}, {"keyword": "funnel", "limit": 0},
+                 {"keyword": "funnel", "since": "2999-01-01T00:00:00Z"},
+                 {"keyword": "funnel", "since": "not a time"},
+                 {"keyword": "funnel", "source": "remote:other"}, {"keyword": "absent"}):
+        _s, r = call(f"/mcp/{a}", _tool("recall", args))
+        assert "Pending sync" not in _text(r), args
+    _s, r = call(f"/mcp/{a}", _tool("recall", {"source": "remote:claude-ai"}))
+    assert "Pending sync (2, showing 2)" in _text(r)
+    # A server without --outbox never reads pending lines, wherever they are.
+    plain = remote.RemoteSession(path / "memory.db")
+    assert "Pending sync" not in _text(plain.handle(_tool("recall", {"keyword": "funnel"}), "x"))
+
+
+def test_recall_skips_pending_lines_this_server_did_not_write(served_outbox, monkeypatch):
+    call, a, _b, _t, path = served_outbox
+    outbox = path / "outbox" / "outbox.jsonl"
+    call(f"/mcp/{a}", _tool("capture", {"content": "kept funnel line", "episode_type": "decision"}))
+    good = json.loads(outbox.read_text())
+    bad = [{**good, "extra": 1}, {**good, "id": "X" * 32}, {**good, "v": True},
+           {**good, "connector": "../x"}, {**good, "at": "yesterday"},
+           {**good, "episode_type": "secret"}, {**good, "content": ""},
+           {**good, "content": "x" * (remote.MAX_CAPTURE_CHARS + 1)}]
+    with open(outbox, "a") as f:
+        for rec in bad:
+            f.write(json.dumps({**rec, "id": rec["id"] if rec["id"] != good["id"] else "a" * 32}) + "\n")
+        f.write(json.dumps(good) + "\n")  # the same id again: shown once
+        f.write('{"v": 1, "id": "b')  # a torn last line
+    _s, r = call(f"/mcp/{a}", _tool("recall", {"keyword": "funnel"}))
+    assert "Pending sync (1, showing 1)" in _text(r)
+    # An oversized file was not made by this server: skipped whole, recall still answers.
+    monkeypatch.setattr(remote, "MAX_OUTBOX_BYTES", 10)
+    _s, r = call(f"/mcp/{a}", _tool("recall", {"keyword": "funnel"}))
+    assert r["result"].get("isError") is not True and "Pending sync" not in _text(r)
 
 
 def test_capture_refusals_and_writes_stay_unreachable(served_outbox, monkeypatch):

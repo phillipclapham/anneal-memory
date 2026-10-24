@@ -43,7 +43,6 @@ from __future__ import annotations
 
 import argparse
 import contextlib
-import fcntl
 import hashlib
 import hmac
 import json
@@ -158,10 +157,16 @@ def match_token(tokens: dict[str, str], presented: str | None) -> str | None:
 def _token_file_locked(path: Path) -> Iterator[dict[str, str]]:
     """Load, let the caller mutate, and durably rewrite the token file, all under
     an exclusive lock on a sibling lock file (L3 r1 codex: two unlocked edits
-    could resurrect a revoked token). Comment lines are not preserved."""
+    could resurrect a revoked token). Comment lines are not preserved. Where
+    fcntl does not exist (Windows) the edit runs unlocked: single writer only."""
+    try:
+        import fcntl
+    except ImportError:
+        fcntl = None  # type: ignore[assignment]
     lock_fd = os.open(path.with_name(path.name + ".lock"), os.O_RDWR | os.O_CREAT, 0o600)
     try:
-        fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        if fcntl is not None:
+            fcntl.flock(lock_fd, fcntl.LOCK_EX)
         tokens = load_tokens(path) if path.exists() else {}
         yield tokens
         body = "".join(f"{n}:{d}\n" for n, d in tokens.items())
@@ -385,6 +390,7 @@ class _Handler(BaseHTTPRequestHandler):
         except (TimeoutError, OSError):
             self.close_connection = True
             return None
+        self.connection.settimeout(REQUEST_TIMEOUT_S)
         return b"".join(chunks)
 
     def do_GET(self) -> None:
@@ -475,9 +481,10 @@ class _Handler(BaseHTTPRequestHandler):
 
 
 class _BoundedServer(ThreadingHTTPServer):
-    """At most MAX_CONNECTIONS handler threads: past that the accept loop waits,
-    and new connections queue in the listen backlog instead of each getting a
-    thread (L3 r1 codex: MAX_CONCURRENT bounded tool work, not threads)."""
+    """At most MAX_CONNECTIONS handler threads; a connection past that is closed
+    at once (L3 r1 codex: MAX_CONCURRENT bounded tool work, not threads). It is
+    refused, not queued: a blocking wait would let slow connections stall the
+    accept loop for everyone (L3 r2 complement)."""
 
     daemon_threads = True
 
@@ -486,7 +493,9 @@ class _BoundedServer(ThreadingHTTPServer):
         self._connections = threading.BoundedSemaphore(MAX_CONNECTIONS)
 
     def process_request(self, request: Any, client_address: Any) -> None:
-        self._connections.acquire()
+        if not self._connections.acquire(blocking=False):
+            self.shutdown_request(request)
+            return
         try:
             super().process_request(request, client_address)
         except BaseException:

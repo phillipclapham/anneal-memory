@@ -2,7 +2,7 @@
 
 All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project uses [SemVer](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.0.2] — 2026-10-24
 
 ### Changed
 - **A save no longer forms or decays association links.** Neither the episode↔episode graph nor the pattern↔pattern graph forms new links, and the affect input no longer weights anything. Months of measurement on a long-running store showed recall never read the episode links (0 of 788 pattern exposures came through them), and the pattern graph was shadow-only. The first 1.0.2 save records this on the store (`Store.association_formation()`: `mode`, `off_at_wrap`, `off_by_version`); existing links stay readable, and an episode delete still cascades its links.
@@ -23,6 +23,9 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
 
 ### Known edges
 - A 1.0.1 process writing the same store ignores the capability and keeps forming links. Upgrade every writer together.
+
+### Experimental (not part of the frozen public surface)
+- This release ships `anneal_memory/remote.py`: a read-only MCP server over Streamable HTTP with per-connector bearer tokens, started with `python -m anneal_memory.remote serve` (tokens with `token-add` / `token-revoke`), and an optional append-only capture tool behind `serve --outbox`. It is experimental and outside the surface `docs/stability.md` freezes: it can change or be removed in any release without a deprecation. No other module in the package imports it, so `anneal-memory serve` (stdio) does not use it.
 
 ## [1.0.1] — 2026-10-18
 

@@ -24,8 +24,14 @@ the token file already holds: a server run with a different token file can
 neither mint nor accept another server's tokens. There is no refresh token and
 no expiry beyond the token's own revocation (``token-revoke``).
 
-Redirect URIs must be https on a host in :data:`REDIRECT_HOSTS`. Codes live in
-memory; a restart between sign-in and exchange fails that sign-in only.
+Redirect URIs must be https on a host in :data:`REDIRECT_HOSTS`. Every Gemini app
+returns through those same hosts, so anyone's own app could be pointed here and
+its sign-in link sent to the operator. So the first sign-in that completes an
+exchange pins its exact redirect URI to a file (created exclusively, mode 0600),
+and from then on only that URI is accepted at registration and at sign-in; the
+sign-in page shows the full URI and, while nothing is pinned, says that the app
+allowed now becomes the only one. Deleting the pin file re-opens the first use.
+Codes live in memory; a restart between sign-in and exchange fails that sign-in only.
 """
 
 from __future__ import annotations
@@ -35,11 +41,13 @@ import hashlib
 import hmac
 import html
 import json
+import os
 import re
 import secrets
 import threading
 import time
 import urllib.parse
+from pathlib import Path
 from typing import Any
 
 CODE_TTL_S = 120
@@ -57,6 +65,9 @@ _VERIFIER_RE = re.compile(r"^[A-Za-z0-9._~-]{43,128}$")
 _CHALLENGE_RE = re.compile(r"^[A-Za-z0-9_-]{43}$")  # base64url(sha256), unpadded
 _CLIENT_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
 AUTH_METHODS = ("client_secret_basic", "client_secret_post", "none")
+# What a ``check_token`` callback returns when the token file cannot be read,
+# so a broken server is never reported to the operator as a wrong token.
+UNAVAILABLE = object()
 
 
 def redirect_ok(uri: Any) -> bool:
@@ -80,7 +91,7 @@ def s256(verifier: str) -> str:
 class OAuth:
     """Endpoints for one issuer. Each handler returns ``(status, headers, body)``."""
 
-    def __init__(self, issuer: str) -> None:
+    def __init__(self, issuer: str, pin_path: str | os.PathLike[str] | None = None) -> None:
         parts = urllib.parse.urlsplit(issuer)
         if parts.scheme != "https" or not parts.hostname or parts.path not in ("", "/") \
                 or parts.query or parts.fragment:
@@ -89,6 +100,38 @@ class OAuth:
         self.resource = self.issuer + "/mcp"
         self._codes: dict[str, dict[str, Any]] = {}
         self._lock = threading.Lock()
+        self._pin_path = Path(pin_path) if pin_path is not None else None
+
+    # -- the redirect pin --
+
+    def pinned(self) -> str | None:
+        """The redirect URI the first completed sign-in pinned, or None before one."""
+        if self._pin_path is None:
+            return None
+        try:
+            text = self._pin_path.read_text(encoding="ascii").strip()
+        except FileNotFoundError:
+            return None
+        if not redirect_ok(text):  # an unreadable pin refuses every redirect
+            return "\x00invalid pin"
+        return text
+
+    def _redirect_allowed(self, uri: Any) -> bool:
+        pin = self.pinned()
+        return redirect_ok(uri) and (pin is None or uri == pin)
+
+    def _pin(self, uri: str) -> None:
+        """Pin ``uri`` if nothing is pinned yet (created exclusively: first one wins)."""
+        if self._pin_path is None:
+            return
+        try:
+            fd = os.open(self._pin_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        except FileExistsError:
+            return
+        with os.fdopen(fd, "w", encoding="ascii") as f:
+            f.write(uri + "\n")
+            f.flush()
+            os.fsync(f.fileno())
 
     # -- discovery --
 
@@ -125,9 +168,11 @@ class OAuth:
             return 400, {"error": "invalid_client_metadata"}
         uris = meta.get("redirect_uris")
         if not isinstance(uris, list) or not uris or len(uris) > 16 \
-                or not all(redirect_ok(u) for u in uris):
+                or not all(redirect_ok(u) for u in uris) \
+                or (self.pinned() is not None and self.pinned() not in uris):
             return 400, {"error": "invalid_redirect_uri",
-                         "error_description": "redirect URIs must be https on an allowed host"}
+                         "error_description": "redirect URIs must be https on an allowed "
+                                              "host, and include the pinned one once pinned"}
         method = meta.get("token_endpoint_auth_method", "client_secret_basic")
         if method not in AUTH_METHODS:
             method = "client_secret_basic"
@@ -149,18 +194,17 @@ class OAuth:
 
     # -- authorization --
 
-    @staticmethod
-    def _request_problem(q: dict[str, str]) -> str | None:
+    def _request_problem(self, q: dict[str, str]) -> str | None:
         """Why an authorization request is refused, or None. Checked on the page
         and again on the submit, which carries the same fields."""
         if q.get("response_type") != "code":
             return "response_type must be code"
-        if not _CLIENT_ID_RE.match(q.get("client_id", "")):
+        if not _CLIENT_ID_RE.fullmatch(q.get("client_id", "")):
             return "missing or malformed client_id"
-        if not redirect_ok(q.get("redirect_uri")):
-            return "redirect_uri is not allowed"
+        if not self._redirect_allowed(q.get("redirect_uri")):
+            return "redirect_uri is not allowed (not the app this server was first connected to)"
         if q.get("code_challenge_method") != "S256" or \
-                not _CHALLENGE_RE.match(q.get("code_challenge", "")):
+                not _CHALLENGE_RE.fullmatch(q.get("code_challenge", "")):
             return "PKCE with S256 is required"
         state = q.get("state", "")
         if len(state) > MAX_STATE_CHARS or not state.isprintable():
@@ -188,10 +232,14 @@ class OAuth:
             f'<input type="hidden" name="{k}" value="{html.escape(q[k], quote=True)}">'
             for k in keep if k in q)
         err = f'<p class="err">{html.escape(error)}</p>' if error else ""
-        host = html.escape(urllib.parse.urlsplit(q["redirect_uri"]).hostname or "", quote=True)
+        where = html.escape(q["redirect_uri"], quote=True)
+        first = ("" if self.pinned() is not None else
+                 "<p><b>No app is connected yet: the one you allow now becomes the only "
+                 "one this server accepts.</b> Only continue if you started this from "
+                 "your own app.</p>")
         return _page("Connect to anneal memory", (
             f"<p>An app is asking for read access to this memory. It returns to "
-            f"<b>{host}</b>.</p>{err}"
+            f"<code>{where}</code>.</p>{first}{err}"
             f'<form method="post" action="/authorize">{hidden}'
             '<label>Connector token<br><input type="password" name="token" '
             'autocomplete="off" required></label><br>'
@@ -210,8 +258,10 @@ class OAuth:
             return 400, _page("Sign-in refused", f"<p>{html.escape(problem)}</p>")
         assert q is not None
         token = q.get("token", "").strip()
-        if not token or check_token(token) is None:
-            time.sleep(1)  # tokens are 32 random bytes; this only slows a script
+        checked = check_token(token) if token else None
+        if checked is UNAVAILABLE:
+            return 503, _page("Unavailable", "<p>The server cannot read its token file.</p>")
+        if checked is None:  # tokens are 32 random bytes: no delay buys anything
             return 401, self._form(q, "That token is not valid here.")
         code = secrets.token_urlsafe(32)
         now = time.monotonic()
@@ -248,24 +298,32 @@ class OAuth:
         client_id = q.get("client_id")
         if basic is not None:
             try:
-                user = base64.b64decode(basic, validate=True).decode("ascii").split(":", 1)[0]
-                basic_id = urllib.parse.unquote(user)
+                padded = basic + "=" * (-len(basic) % 4)
+                user = base64.b64decode(padded, validate=True).decode("ascii").split(":", 1)[0]
+                basic_id = urllib.parse.unquote_plus(user)  # RFC 6749 §2.3.1: form-encoded
             except (ValueError, UnicodeDecodeError):
                 return 401, {"error": "invalid_client"}
             if client_id is not None and client_id != basic_id:
                 return 400, {"error": "invalid_request"}
             client_id = basic_id
+        if not isinstance(client_id, str) or not _CLIENT_ID_RE.fullmatch(client_id):
+            return 400, {"error": "invalid_request"}  # also keeps compare_digest on ASCII
         with self._lock:
             entry = self._codes.pop(q.get("code", ""), None)  # single use, even when refused
         verifier = q.get("code_verifier", "")
         if (entry is None or entry["exp"] <= time.monotonic()
-                or not hmac.compare_digest(str(client_id), entry["client_id"])
-                or q.get("redirect_uri") != entry["redirect_uri"]
-                or not _VERIFIER_RE.match(verifier)
+                or not hmac.compare_digest(client_id, entry["client_id"])
+                # optional with PKCE (OAuth 2.1); when sent it must be the signed-in one
+                or q.get("redirect_uri", entry["redirect_uri"]) != entry["redirect_uri"]
+                or not _VERIFIER_RE.fullmatch(verifier)
                 or not hmac.compare_digest(s256(verifier), entry["challenge"])):
             return 400, {"error": "invalid_grant"}
-        if check_token(entry["token"]) is None:  # revoked since the sign-in
+        still = check_token(entry["token"])
+        if still is UNAVAILABLE:
+            return 503, {"error": "server_error"}
+        if still is None:  # revoked since the sign-in
             return 400, {"error": "invalid_grant"}
+        self._pin(entry["redirect_uri"])
         return 200, {"access_token": entry["token"], "token_type": "Bearer"}
 
 

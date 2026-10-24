@@ -121,6 +121,17 @@ def test_discovery_to_bearer_ends_with_a_token_the_file_already_holds(oauth_serv
     assert st == 200 and "recall" in body
     # The same code is single use.
     assert _exchange(req, reg, back["code"], verifier)[0] == 400
+    # The completed sign-in pinned its redirect: another app on the same Google
+    # host (someone else's custom app) is refused from now on, the pinned one is not.
+    pin = _tokens.with_name(_tokens.name + ".oauth-redirect")
+    assert pin.read_text().strip() == REDIRECT and pin.stat().st_mode & 0o777 == 0o600
+    other = "https://oauth-redirect.googleusercontent.com/r/user_bound_custom-mcp-attacker"
+    st, _h, _ = req("POST", "/register", json.dumps({"redirect_uris": [other]}).encode())
+    assert st == 400
+    assert req("GET", "/authorize?" + urllib.parse.urlencode({**q, "redirect_uri": other}))[0] == 400
+    assert _sign_in(req, {**q, "redirect_uri": other}, gem)[0] == 400
+    assert _register(req)["redirect_uris"] == [REDIRECT]
+    assert req("GET", "/authorize?" + urllib.parse.urlencode(q))[0] == 200
 
 
 def test_oauth_refusals(oauth_server, tmp_path):
@@ -146,6 +157,16 @@ def test_oauth_refusals(oauth_server, tmp_path):
     # A redirect URI other than the signed-in one is refused.
     code = _code_from(_sign_in(req, q, gem)[1])["code"]
     assert _exchange(req, reg, code, verifier, REDIRECT + "2")[0] == 400
+    # A non-ASCII client_id is a refusal, not a server error.
+    form = {"grant_type": "authorization_code", "code": "x", "code_verifier": verifier,
+            "client_id": "é"}
+    assert req("POST", "/token", urllib.parse.urlencode(form).encode())[0] == 400
+    # An unreadable token file is reported as the server's fault, never a wrong token.
+    saved = tokens.read_bytes()
+    tokens.write_text("not a token line\n")
+    st, page = _sign_in(req, q, gem)
+    assert st == 503 and "not valid" not in page
+    tokens.write_bytes(saved)
     # A token revoked between sign-in and exchange is not handed out.
     code = _code_from(_sign_in(req, q, gem)[1])["code"]
     remote.token_revoke(tokens, "gemini")

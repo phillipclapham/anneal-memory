@@ -87,7 +87,7 @@ from . import __version__
 from ._fsdir import _fsync_dir
 from .origin import strip_hidden_controls
 from .server import _RELAYED_LABEL, Server, _tool_result
-from .remote_oauth import MAX_FORM_BYTES, MAX_REGISTER_BYTES, PAGE_HEADERS, OAuth
+from .remote_oauth import MAX_FORM_BYTES, MAX_REGISTER_BYTES, PAGE_HEADERS, UNAVAILABLE, OAuth
 from .store import Store
 from .types import EpisodeType
 
@@ -787,7 +787,12 @@ class _Handler(BaseHTTPRequestHandler):
         return b"".join(chunks)
 
     def do_GET(self) -> None:
-        self._get()
+        try:
+            self._get()
+        except Exception as e:  # never a dropped connection with no answer
+            logger.error("request failed: %s", type(e).__name__)
+            with contextlib.suppress(OSError):
+                self._send(500)
 
     def do_DELETE(self) -> None:
         self._get()
@@ -875,17 +880,22 @@ class _Handler(BaseHTTPRequestHandler):
             scheme, _, value = auth.partition(" ")
             basic = value.strip() if scheme.lower() == "basic" else None
             status, obj = oauth.token(body, basic, self._check_token)
-            self._send(status, json.dumps(obj).encode("utf-8"), "application/json",
-                       {"Pragma": "no-cache"})
+            extra = {"Pragma": "no-cache"}
+            if status == 401:  # RFC 6749 §5.2
+                extra["WWW-Authenticate"] = 'Basic realm="anneal-memory"'
+            if status == 200:
+                logger.info("oauth sign-in completed for %s", oauth.pinned() or "?")
+            self._send(status, json.dumps(obj).encode("utf-8"), "application/json", extra)
         return True
 
-    def _check_token(self, token: str) -> str | None:
-        """The connector name ``token`` belongs to in this server's token file."""
+    def _check_token(self, token: str) -> object:
+        """The connector name ``token`` belongs to in this server's token file, None
+        when it holds no such token, UNAVAILABLE when the file cannot be read."""
         try:
             return match_token(load_tokens(self.tokens_path), token)
         except (OSError, ValueError):
             logger.exception("token file unreadable; refusing")
-            return None
+            return UNAVAILABLE
 
     def _post(self) -> None:
         if self._oauth_route():
@@ -982,7 +992,9 @@ def make_server(db_path: str | Path, tokens_path: str | Path,
     OAuth endpoints of :mod:`anneal_memory.remote_oauth` are served; they can only
     hand out tokens this ``tokens_path`` already holds."""
     load_tokens(tokens_path)
-    oauth = OAuth(oauth_issuer) if oauth_issuer is not None else None
+    # The redirect pin lives beside the token file it guards, so it cannot be left out.
+    oauth = (OAuth(oauth_issuer, Path(tokens_path).with_name(Path(tokens_path).name + ".oauth-redirect"))
+             if oauth_issuer is not None else None)
     if outbox is not None:
         # Anchored once, so a later chdir cannot move it off the checked directory.
         outbox = Path(outbox).parent.resolve() / Path(outbox).name

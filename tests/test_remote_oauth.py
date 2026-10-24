@@ -159,6 +159,29 @@ def test_gemini_registration_with_hosts_outside_the_set_keeps_the_allowed_ones(o
     assert st == 200 and json.loads(body)["access_token"] == gem
 
 
+def test_refusals_are_logged_without_query_or_userinfo(oauth_server, caplog):
+    """The operator's journal says why a sign-in step was refused and which redirect,
+    and never carries a query (state) or userinfo."""
+    req, gem, _tokens = oauth_server
+    caplog.set_level("INFO", logger="anneal-memory.remote")
+    secret_q = "?state=SECRETSTATE"
+    test_host = "https://u:pw@oauth-redirect-test.googleusercontent.com/r/x" + secret_q
+    st, _h, _ = req("POST", "/register", json.dumps(
+        {"redirect_uris": [REDIRECT, test_host, 5]}).encode())
+    assert st == 201
+    assert req("POST", "/register", json.dumps({"redirect_uris": [test_host]}).encode())[0] == 400
+    verifier, challenge = _pkce()
+    q = {"response_type": "code", "client_id": "c", "redirect_uri": test_host,
+         "code_challenge": challenge, "code_challenge_method": "S256", "state": "x"}
+    assert req("GET", "/authorize?" + urllib.parse.urlencode(q))[0] == 400
+    text = caplog.text
+    assert "oauth register accepted: 1 of 3" in text and "<int>" in text
+    assert "oauth register refused (no redirect URI" in text
+    assert ("oauth authorize refused (page): redirect_uri is not allowed" in text
+            and "oauth-redirect-test.googleusercontent.com/r/x" in text)
+    assert "SECRETSTATE" not in text and "pw@" not in text and gem not in text
+
+
 def test_oauth_refusals(oauth_server, tmp_path):
     req, gem, tokens = oauth_server
     st, _h, _ = req("POST", "/register", json.dumps(

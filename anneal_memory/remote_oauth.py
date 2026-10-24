@@ -436,6 +436,7 @@ class OAuth:
         if why:
             logger.info("oauth token refused: %s", why)
             return 400, {"error": "invalid_grant"}
+        assert entry is not None  # the first branch above refuses a missing entry
         resource = q.get("resource")
         if resource is not None and not self._resource_ok(resource) or \
                 entry["resource"] is not None and resource is not None \

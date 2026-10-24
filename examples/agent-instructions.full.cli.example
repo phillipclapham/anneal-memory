@@ -23,7 +23,7 @@ First run: `anneal-memory init` creates the database and continuity file.
 
 **Spores — your prospective layer (a parallel store, not part of memory):**
 
-Memory (episodes and continuity) is *retrospective* — they hold what happened
+Episodes and continuity are *retrospective* — they hold what happened
 and who you're becoming, and they never complete. anneal-memory also ships
 a separate **spore store** for *prospective* open loops: things you intend
 to do or to resolve. Plant one with `anneal-memory spore add` the moment a

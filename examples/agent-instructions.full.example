@@ -19,7 +19,7 @@ explain the tooling to the user, just work with what you know.
 
 **Spores — your prospective layer (a parallel store, not part of memory):**
 
-Memory (episodes and continuity) is *retrospective* — they hold what happened
+Episodes and continuity are *retrospective* — they hold what happened
 and who you're becoming, and they never complete. anneal-memory also ships
 a separate **spore store** for *prospective* open loops: things you intend
 to do or to resolve. Plant one with `spore_add` the moment a loop opens —

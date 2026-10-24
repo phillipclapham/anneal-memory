@@ -42,6 +42,8 @@ Bind to loopback and put a TLS-terminating proxy in front (Tailscale Funnel,
 from __future__ import annotations
 
 import argparse
+import contextlib
+import fcntl
 import hashlib
 import hmac
 import json
@@ -50,12 +52,15 @@ import os
 import re
 import secrets
 import sys
+import tempfile
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Iterator
 
 from . import __version__
+from ._fsdir import _fsync_dir
 from .server import Server, _tool_result
 from .store import Store
 
@@ -65,11 +70,13 @@ logger = logging.getLogger("anneal-memory.remote")
 # gets the newest (MCP lifecycle: the server answers with a version it supports).
 # Listed because the initialize/tools shapes this server sends do not differ
 # between them [judged by 1024+9 anneal seat, 2026-10-24, against the spec
-# changelogs; tests/test_remote.py drives 2025-06-18 only].
-SUPPORTED_PROTOCOL_VERSIONS = ("2025-11-25", "2025-06-18", "2025-03-26")
+# changelogs; tests/test_remote.py drives 2025-06-18 only]. 2025-03-26 is left
+# out: it still allowed JSON-RPC batches, which this server refuses.
+SUPPORTED_PROTOCOL_VERSIONS = ("2025-11-25", "2025-06-18")
 
 MAX_BODY_BYTES = 1024 * 1024
 MAX_CONCURRENT = 8
+MAX_CONNECTIONS = 32
 MAX_REPLY_BYTES = 4 * 1024 * 1024
 MAX_RECALL_LIMIT = 200
 
@@ -147,38 +154,49 @@ def match_token(tokens: dict[str, str], presented: str | None) -> str | None:
     return found
 
 
-def _write_token_file(path: Path, tokens: dict[str, str]) -> None:
-    body = "".join(f"{n}:{d}\n" for n, d in tokens.items())
-    tmp = path.with_name(path.name + ".tmp")
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w", encoding="utf-8") as f:
-        f.write(body)
-        f.flush()
-        os.fsync(f.fileno())
-    os.replace(tmp, path)
+@contextlib.contextmanager
+def _token_file_locked(path: Path) -> Iterator[dict[str, str]]:
+    """Load, let the caller mutate, and durably rewrite the token file, all under
+    an exclusive lock on a sibling lock file (L3 r1 codex: two unlocked edits
+    could resurrect a revoked token). Comment lines are not preserved."""
+    lock_fd = os.open(path.with_name(path.name + ".lock"), os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        tokens = load_tokens(path) if path.exists() else {}
+        yield tokens
+        body = "".join(f"{n}:{d}\n" for n, d in tokens.items())
+        fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=path.name + ".", suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(body)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp, path)
+        except BaseException:
+            Path(tmp).unlink(missing_ok=True)
+            raise
+        _fsync_dir(path.parent)
+    finally:
+        os.close(lock_fd)
 
 
 def token_add(path: str | Path, name: str) -> str:
     """Create a token for ``name``, store its hash, return the token (shown once)."""
     if not _TOKEN_NAME_RE.match(name):
         raise ValueError("token name: letters, digits, '_', '.', '-'; max 64")
-    p = Path(path)
-    tokens = load_tokens(p) if p.exists() else {}
-    if name in tokens:
-        raise ValueError(f"token {name!r} exists; revoke it first")
-    token = secrets.token_urlsafe(32)
-    tokens[name] = _hash_token(token)
-    _write_token_file(p, tokens)
+    with _token_file_locked(Path(path)) as tokens:
+        if name in tokens:
+            raise ValueError(f"token {name!r} exists; revoke it first")
+        token = secrets.token_urlsafe(32)
+        tokens[name] = _hash_token(token)
     return token
 
 
 def token_revoke(path: str | Path, name: str) -> None:
-    p = Path(path)
-    tokens = load_tokens(p)
-    if name not in tokens:
-        raise ValueError(f"no token named {name!r}")
-    del tokens[name]
-    _write_token_file(p, tokens)
+    with _token_file_locked(Path(path)) as tokens:
+        if name not in tokens:
+            raise ValueError(f"no token named {name!r}")
+        del tokens[name]
 
 
 # -- JSON-RPC over one request --
@@ -218,10 +236,10 @@ class RemoteSession:
         """The response for ``msg``, or None for a notification."""
         method = msg.get("method")
         msg_id = msg.get("id")
+        if msg.get("jsonrpc") != "2.0" or not isinstance(method, str):
+            return _rpc_error(msg_id if "id" in msg else None, -32600, "Invalid request")
         if "id" not in msg:
             return None
-        if not isinstance(method, str):
-            return _rpc_error(msg_id, -32600, "Invalid request")
         params = msg.get("params") or {}
         if not isinstance(params, dict):
             return _rpc_error(msg_id, -32602, "params must be an object")
@@ -245,7 +263,9 @@ class RemoteSession:
             return _rpc_result(msg_id, {"tools": _remote_tool_defs()})
         if method == "tools/call":
             name = params.get("name")
-            arguments = params.get("arguments") or {}
+            arguments = params.get("arguments")
+            if arguments is None:
+                arguments = {}
             if not isinstance(arguments, dict):
                 return _rpc_error(msg_id, -32602, "arguments must be an object")
             if name not in REMOTE_TOOLS:
@@ -253,8 +273,10 @@ class RemoteSession:
             if name == "recall":
                 # The stdio recall has no ceiling on limit; a remote reply does.
                 limit = arguments.get("limit")
-                if isinstance(limit, (int, float)) and not isinstance(limit, bool):
-                    arguments = {**arguments, "limit": min(limit, MAX_RECALL_LIMIT)}
+                integral = (isinstance(limit, int) and not isinstance(limit, bool)) or (
+                    isinstance(limit, float) and limit.is_integer())
+                if integral and limit is not None and limit > MAX_RECALL_LIMIT:
+                    arguments = {**arguments, "limit": MAX_RECALL_LIMIT}
             try:
                 with Store(self._db_path, read_only=True, audit=False) as store:
                     server = Server(store)
@@ -340,20 +362,36 @@ class _Handler(BaseHTTPRequestHandler):
             return None
         return name
 
-    def _guarded(self, fn: Callable[[], None]) -> None:
-        if not self.slots.acquire(blocking=False):
-            self._send(503, extra={"Retry-After": "2"})
-            return
+    def _read_body(self, length: int) -> bytes | None:
+        """Exactly ``length`` bytes within one deadline for the whole body (a
+        per-recv timeout alone lets a 1-byte-per-14s sender hold the thread for
+        days), or None after a refusal."""
+        deadline = time.monotonic() + REQUEST_TIMEOUT_S
+        chunks: list[bytes] = []
+        got = 0
         try:
-            fn()
-        finally:
-            self.slots.release()
+            while got < length:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    self._send(408)
+                    return None
+                self.connection.settimeout(remaining)
+                chunk = self.rfile.read1(min(65536, length - got))
+                if not chunk:
+                    self._send_json(400, _rpc_error(None, -32700, "Body shorter than Content-Length"))
+                    return None
+                chunks.append(chunk)
+                got += len(chunk)
+        except (TimeoutError, OSError):
+            self.close_connection = True
+            return None
+        return b"".join(chunks)
 
     def do_GET(self) -> None:
-        self._guarded(self._get)
+        self._get()
 
     def do_DELETE(self) -> None:
-        self._guarded(self._get)
+        self._get()
 
     def _get(self) -> None:
         if self._authorize() is None:
@@ -362,7 +400,14 @@ class _Handler(BaseHTTPRequestHandler):
         self._send(405, extra={"Allow": "POST"})
 
     def do_POST(self) -> None:
-        self._guarded(self._post)
+        try:
+            self._post()
+        except Exception as e:  # never a dropped connection with no answer
+            logger.error("request failed: %s", type(e).__name__)
+            try:
+                self._send_json(500, _rpc_error(None, -32603, "Internal error"))
+            except OSError:
+                pass
 
     def _post(self) -> None:
         connector = self._authorize()
@@ -376,14 +421,15 @@ class _Handler(BaseHTTPRequestHandler):
         if len(values) != 1 or not (values[0].isascii() and values[0].isdigit()):
             self._send(411)
             return
-        length = int(values[0])
-        if length > MAX_BODY_BYTES:
+        if len(values[0]) > 8 or int(values[0]) > MAX_BODY_BYTES:
             self._send(413)
             return
-        raw = self.rfile.read(length)
+        raw = self._read_body(int(values[0]))
+        if raw is None:
+            return
         try:
             msg = json.loads(raw)
-        except (json.JSONDecodeError, UnicodeDecodeError):
+        except (json.JSONDecodeError, UnicodeDecodeError, RecursionError):
             self._send_json(400, _rpc_error(None, -32700, "Parse error"))
             return
         if not isinstance(msg, dict):
@@ -391,10 +437,25 @@ class _Handler(BaseHTTPRequestHandler):
             self._send_json(400, _rpc_error(None, -32600, "Invalid request"))
             return
         if "method" not in msg:
-            # A client's response to a server request; this server sends none.
-            self._send(202)
+            if "result" in msg or "error" in msg:
+                # A client's response to a server request; this server sends none.
+                self._send(202)
+            else:
+                self._send_json(400, _rpc_error(msg.get("id"), -32600, "Invalid request"))
             return
-        reply = self.session.handle(msg)
+        version = self.headers.get("MCP-Protocol-Version")
+        if (msg.get("method") != "initialize" and version is not None
+                and version not in SUPPORTED_PROTOCOL_VERSIONS):
+            self._send_json(400, _rpc_error(msg.get("id"), -32600,
+                                            "Unsupported MCP-Protocol-Version"))
+            return
+        if not self.slots.acquire(blocking=False):
+            self._send(503, extra={"Retry-After": "2"})
+            return
+        try:
+            reply = self.session.handle(msg)
+        finally:
+            self.slots.release()
         method = msg.get("method")
         params = msg.get("params")
         tool = params.get("name") if method == "tools/call" and isinstance(params, dict) else None
@@ -413,6 +474,32 @@ class _Handler(BaseHTTPRequestHandler):
         self._send(200, body, "application/json")
 
 
+class _BoundedServer(ThreadingHTTPServer):
+    """At most MAX_CONNECTIONS handler threads: past that the accept loop waits,
+    and new connections queue in the listen backlog instead of each getting a
+    thread (L3 r1 codex: MAX_CONCURRENT bounded tool work, not threads)."""
+
+    daemon_threads = True
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self._connections = threading.BoundedSemaphore(MAX_CONNECTIONS)
+
+    def process_request(self, request: Any, client_address: Any) -> None:
+        self._connections.acquire()
+        try:
+            super().process_request(request, client_address)
+        except BaseException:
+            self._connections.release()
+            raise
+
+    def process_request_thread(self, request: Any, client_address: Any) -> None:
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self._connections.release()
+
+
 def make_server(db_path: str | Path, tokens_path: str | Path,
                 host: str = "127.0.0.1", port: int = 8765) -> ThreadingHTTPServer:
     """A ready (not yet serving) HTTP server. Fails fast on a bad token file or
@@ -425,9 +512,7 @@ def make_server(db_path: str | Path, tokens_path: str | Path,
         "session": RemoteSession(db_path),
         "slots": threading.BoundedSemaphore(MAX_CONCURRENT),
     })
-    httpd = ThreadingHTTPServer((host, port), handler)
-    httpd.daemon_threads = True
-    return httpd
+    return _BoundedServer((host, port), handler)
 
 
 def main(argv: list[str] | None = None) -> int:

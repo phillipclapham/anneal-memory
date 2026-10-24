@@ -95,6 +95,10 @@ from .retrieval import (
 )
 from .store import (
     AnnealMemoryError,
+    LeaseFencedError,
+    _IdempotentReplay,
+    _idempotency_request_hash,
+    _validate_idempotency_key,
     SaveAuthorityError,
     StoreDatabaseError,
     StoreError,
@@ -1751,6 +1755,8 @@ def prepare_wrap(
     session_id: str | None = None,
     allow_sole_live: bool = False,
     wrap_token: str | None = None,
+    idempotency_key: str | None = None,
+    lease_holder: str | None = None,
 ) -> PrepareWrapResult:
     """Run the full store-aware prepare_wrap pipeline.
 
@@ -1831,6 +1837,20 @@ def prepare_wrap(
             consolidate needs the baton (⚖ Phill, 2026-09-24, flow
             spore-1169), because sole-live is judged from a registry
             snapshot that a resume or a TTL crossing can race.
+        idempotency_key: A request key (generation 3), bound to the hash of
+            every argument here plus the store. The key row commits in the
+            transaction that opens the wrap. A retry with the same key and
+            request returns the stored result (the same token and package) and
+            opens nothing; the same key with another request raises
+            :class:`~anneal_memory.IdempotencyConflictError`. A call that opens
+            no wrap (empty or downgraded) stores no key.
+        lease_holder: Prepare under this holder's consolidation lease
+            (:meth:`Store.lease_acquire`). The holder's epoch and the latest
+            identity version are recorded with the wrap, and its save is
+            admitted only while the holder still holds that epoch, unexpired,
+            and no other identity version has been written. A holder with no
+            unexpired lease raises :class:`~anneal_memory.LeaseFencedError`
+            and no wrap is opened. ``None`` (default): no lease, as before.
         wrap_token: A caller-supplied token for the wrap this call opens, in
             ``uuid.uuid4().hex`` form (32 lowercase hex characters), or ``None``
             (default) to have one minted. A caller that mints its own holds the
@@ -1933,6 +1953,21 @@ def prepare_wrap(
                 "prepare_wrap: wrap_token must be 32 lowercase hex characters, the "
                 "form uuid.uuid4().hex produces."
             )
+    if lease_holder is not None and (not isinstance(lease_holder, str) or not lease_holder):
+        raise ValueError("prepare_wrap: lease_holder must be a non-empty str")
+    idem_hash = ""
+    if idempotency_key is not None:
+        _validate_idempotency_key(idempotency_key)
+        idem_hash = _idempotency_request_hash("wrap_started", None, store.store_id, {
+            "max_chars": max_chars, "staleness_days": staleness_days,
+            "crystal_store": None if crystal_store is None else str(crystal_store.path),
+            "session_id": session_id, "allow_sole_live": allow_sole_live,
+            "wrap_token": wrap_token, "lease_holder": lease_holder,
+        })
+        replayed, stored = store._idempotency_replay(
+            idempotency_key, idem_hash, "wrap_started")
+        if replayed:
+            return json.loads(stored or "null")
     # A meta written by a newer anneal-memory refuses HERE, before any wrap is opened or a
     # compose spent: the save would be refused at load_meta anyway (gen 2 sidecar rule).
     store.load_meta()
@@ -2179,6 +2214,24 @@ def prepare_wrap(
     token_bound = wrap_token is not None
     if wrap_token is None:
         wrap_token = uuid.uuid4().hex
+    # Built before the wrap opens, so a keyed call stores it in that transaction.
+    result = PrepareWrapResult(
+        status="ready",
+        message=f"Ready to compress {len(episodes)} episode(s).",
+        episode_count=len(episodes),
+        package=package,
+        assoc_context=assoc_context,
+        wrap_token=wrap_token,
+        uncovered_proven_to_check=package["uncovered_proven"],
+        schema_warning=schema_warning,
+        crystallization_candidates=package["crystallization_candidates"],
+        rewarm_candidates=package["rewarm_candidates"],
+    )
+    gen3_extras: dict[str, Any] = {}
+    if lease_holder is not None:
+        gen3_extras["lease_holder"] = lease_holder
+    if idempotency_key is not None:
+        gen3_extras["idempotency"] = (idempotency_key, idem_hash, json.dumps(result))
     # AM-SCHEMASNAPSHOT: freeze the EXACT schema we read above (line ~884) into
     # the wrap snapshot, so validated_save_continuity reads back this same schema
     # rather than re-reading a possibly-concurrently-changed live schema. Passing
@@ -2194,7 +2247,11 @@ def prepare_wrap(
             derive_roots=frozen_identities,
             **_wrap_started_extras(store, token_bound, package["today"]),
             **_continuity_check_extra(store, existing),
+            **gen3_extras,
         )
+    except _IdempotentReplay as replay:
+        # A concurrent call with the same key and request opened the wrap first.
+        return json.loads(replay.result_json or "null")
     except WrapWindowMovedError:
         return _downgraded_empty(
             "Consolidate downgraded to capture-only (downgraded-wrap-replaced): "
@@ -2229,18 +2286,7 @@ def prepare_wrap(
     # INSTRUCTION from it) — read it back from the package so the data
     # the caller inspects and the instruction the agent reads can never
     # drift apart.
-    return PrepareWrapResult(
-        status="ready",
-        message=f"Ready to compress {len(episodes)} episode(s).",
-        episode_count=len(episodes),
-        package=package,
-        assoc_context=assoc_context,
-        wrap_token=wrap_token,
-        uncovered_proven_to_check=package["uncovered_proven"],
-        schema_warning=schema_warning,
-        crystallization_candidates=package["crystallization_candidates"],
-        rewarm_candidates=package["rewarm_candidates"],
-    )
+    return result
 
 
 def felt_currency(store: Store) -> FeltCurrency:
@@ -2699,6 +2745,8 @@ def validated_save_continuity(
     require_rederive: bool = False,
     unattended: bool = False,
     model: str | None = None,
+    idempotency_key: str | None = None,
+    lease_holder: str | None = None,
 ) -> SaveContinuityResult:
     """Save continuity with the full validation pipeline.
 
@@ -2855,6 +2903,24 @@ def validated_save_continuity(
             static checks alone. A caller that checks the opt-in before opening
             the wrap passes this to cover a trust revoked before the save.
             Default ``False``.
+        idempotency_key: A request key (generation 3), bound to the hash of
+            every argument here plus the store. The key row commits in the
+            save's transaction. A retry with the same key and request returns
+            the stored result and writes nothing (where a retry without a key is
+            refused as a phantom re-save); the same key with another request
+            raises :class:`~anneal_memory.IdempotencyConflictError`. A crash
+            between the commit and the full result's write leaves a provisional
+            result (``wrap_id``, ``chars``, ``path``, ``content_hash``,
+            ``provisional: True``), which a retry returns.
+        lease_holder: The consolidation-lease holder making this save. When the
+            wrap was prepared under a lease (``prepare_wrap(lease_holder=...)``),
+            the save is admitted only if ONE predicate holds inside its write
+            transaction: this holder (default: the one that prepared) holds the
+            lease, at the prepared epoch, unexpired, and the latest identity
+            version is the one prepared from. Otherwise
+            :class:`~anneal_memory.LeaseFencedError` and nothing is written.
+            Passing a holder for a wrap prepared without a lease is refused the
+            same way. Neither: no lease, as before.
 
     Returns:
         :class:`SaveContinuityResult` — a :class:`TypedDict` with the
@@ -2943,6 +3009,29 @@ def validated_save_continuity(
             or :class:`StoreError` specifically to read ``.operation``
             and ``.path`` for clean error messages.
     """
+    # Generation 3: a keyed retry of a committed save gets its result back here,
+    # before the no-wrap refusal below would call it a phantom re-save.
+    if lease_holder is not None and (not isinstance(lease_holder, str) or not lease_holder):
+        raise ValueError("validated_save_continuity: lease_holder must be a non-empty str")
+    idem_hash = ""
+    if idempotency_key is not None:
+        _validate_idempotency_key(idempotency_key)
+        idem_hash = _idempotency_request_hash("save_continuity", None, store.store_id, {
+            "text": text,
+            "affective_state": None if affective_state is None else asdict(affective_state),
+            "today": today, "wrap_token": wrap_token, "allow_shrink": allow_shrink,
+            "allow_unlinked": allow_unlinked,
+            "carryforward_cold_days": carryforward_cold_days,
+            "crystal_store": None if crystal_store is None else str(crystal_store.path),
+            "compost": None if compost is None else list(compost),
+            "session_id": session_id, "allow_sole_live": allow_sole_live,
+            "require_rederive": require_rederive, "unattended": unattended,
+            "model": model, "lease_holder": lease_holder,
+        })
+        replayed, stored = store._idempotency_replay(
+            idempotency_key, idem_hash, "save_continuity")
+        if replayed:
+            return json.loads(stored or "null")
     # --- Wrap-state preconditions, checked BEFORE payload validation ---
     #
     # Ordering is deliberate: a save with no wrap to commit to is
@@ -3454,6 +3543,35 @@ def validated_save_continuity(
     # Phase 2: batched DB DML.
     with store._batch():
 
+        # Generation 3, first under the batch's write lock: a concurrent save
+        # with the same idempotency key (its result is returned; nothing is
+        # written yet), then the lease fence. Both read inside this
+        # transaction, never before it.
+        if idempotency_key is not None:
+            idem_status, idem_stored = store._idempotency_lookup(idempotency_key, idem_hash)
+            if idem_status == "match":
+                # A concurrent same request committed first. Nothing is written
+                # yet, so leaving the batch commits an empty transaction.
+                return json.loads(idem_stored or "null")
+            if idem_status == "conflict":
+                store._idempotency_conflict(idempotency_key, "save_continuity")
+        fence = store.wrap_lease_fence()
+        if fence is not None or lease_holder is not None:
+            if fence is None:
+                raise LeaseFencedError(
+                    f"validated_save_continuity: lease holder {lease_holder!r} named, "
+                    "but this wrap was not prepared under a lease. Nothing was saved.")
+            if not store._lease_fence_holds(
+                lease_holder if lease_holder is not None else fence["holder"],
+                fence["epoch"], fence["identity_version"],
+            ):
+                raise LeaseFencedError(
+                    "validated_save_continuity: the consolidation lease no longer "
+                    f"admits this save (prepared by {fence['holder']!r} at epoch "
+                    f"{fence['epoch']}, identity version {fence['identity_version']}): "
+                    "the lease expired, changed holder, or another identity version "
+                    "was written since. Nothing was saved; the wrap stays open.")
+
         # The meta read above may be stale: a save_meta committed since then
         # would be reverted by the version row below (L3 r1 codex HIGH). Re-read
         # it under the batch's write lock and apply this wrap's changes to the
@@ -3592,6 +3710,14 @@ def validated_save_continuity(
             grad_result.text, meta_json=store._meta_json(meta),
             source="wrap", wrap_id=wrap_result.wrap_id,
         )
+        if idempotency_key is not None:
+            # Provisional result, in this transaction; replaced by the full one
+            # after the commit (_idempotency_complete).
+            store._idempotency_insert(
+                idempotency_key, "save_continuity", idem_hash, json.dumps({
+                    "wrap_id": wrap_result.wrap_id, "chars": len(grad_result.text),
+                    "path": path, "content_hash": content_hash, "provisional": True,
+                }))
         # This save formed no association link. Recorded once (the first
         # such save wins), in this transaction, so the store says from
         # which wrap on and the legacy forming methods refuse from here.
@@ -4210,6 +4336,14 @@ def validated_save_continuity(
             "Re-derive is not enabled for this store at save, so no State line was "
             "checked at this save (pass require_rederive to refuse such a save)."
         )
+    if idempotency_key is not None:
+        try:
+            store._idempotency_complete(idempotency_key, json.dumps(result))
+        except Exception as exc:  # post-commit: the save stands
+            _warn_after_commit(
+                f"idempotency_key {idempotency_key!r}: the save committed, but its full "
+                f"result was not stored ({type(exc).__name__}); a retry returns the "
+                "provisional result.")
     return result
 
 

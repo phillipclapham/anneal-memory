@@ -441,6 +441,10 @@ StoreOperation = Literal[
     "saved_pattern_levels",
     # CAP-08 D2: the episodes that grounded each earned rung
     "pattern_grounding",
+    # Generation 3: the fenced consolidation lease
+    "lease_acquire",
+    "lease_renew",
+    "lease_release",
     "prune",
     "schema_init",
     "batch_begin",
@@ -1321,6 +1325,25 @@ class OriginKeyConflict(AnnealMemoryError, ValueError):
     a different payload is refused. Nothing was written."""
 
 
+class IdempotencyConflictError(StoreError):
+    """Raised when an ``idempotency_key`` is reused with a different request:
+    its stored request hash (:func:`_idempotency_request_hash`, over the
+    operation, principal, store and every outcome-changing argument) differs
+    from the call's. The key named one request; this call is another. Nothing
+    was written by this call, and the first request's effect stands."""
+
+
+class LeaseFencedError(AnnealMemoryError):
+    """Raised when the consolidation lease does not admit the caller.
+
+    From :meth:`Store.lease_acquire` when another holder's lease is unexpired;
+    from :meth:`Store.lease_renew` when the caller no longer holds it; from
+    ``prepare_wrap(lease_holder=...)`` when that holder holds no unexpired
+    lease; and from ``validated_save_continuity`` when the fence predicate
+    fails (holder, epoch, expiry and the prepared identity version, checked in
+    one statement inside the save's write transaction). Nothing was written."""
+
+
 class SectionError(AnnealMemoryError, ValueError):
     """Raised by :meth:`Store.read_section` when the continuity file cannot be
     read as one section under that heading: the heading is not in the schema,
@@ -1581,9 +1604,9 @@ _HOST_GUARD_CLEANUP_KEY = "host_guard_cleanup_done"
 # be named here: ``test_every_table_a_new_store_creates_is_on_the_guard_list``
 # fails until it is.
 _ANNEAL_TABLES = frozenset({
-    "associations", "audit_outbox", "drift_probes", "drift_results",
-    "episode_derived", "episode_trust", "episodes", "identity_versions",
-    "metadata", "pattern_aliases",
+    "associations", "audit_outbox", "consolidation_lease", "drift_probes",
+    "drift_results", "episode_derived", "episode_trust", "episodes",
+    "identity_versions", "idempotency_keys", "metadata", "pattern_aliases",
     "pattern_associations", "pattern_graph_projection_meta", "pattern_grounding",
     "pattern_history", "pattern_levels", "processed_co_surface_events",
     "retired_origin_keys", "rewire_origin", "state_keys", "supersessions",
@@ -2123,6 +2146,28 @@ CREATE TABLE IF NOT EXISTS audit_outbox (
     created_at TEXT NOT NULL
 );
 
+-- Generation 3: one row per idempotency key, inserted in the same transaction
+-- as the effect it names. request_hash binds the key to the whole request
+-- (_idempotency_request_hash). Rows never expire in this generation.
+CREATE TABLE IF NOT EXISTS idempotency_keys (
+    key TEXT PRIMARY KEY,
+    operation TEXT NOT NULL,
+    principal TEXT,
+    request_hash TEXT NOT NULL,
+    result_json TEXT,
+    created_at TEXT NOT NULL
+);
+
+-- Generation 3: the service consolidation lease (one row). The epoch moves on
+-- every change of holder and on every acquire after expiry, so a save prepared
+-- under an older epoch is fenced (Store._lease_fence_holds).
+CREATE TABLE IF NOT EXISTS consolidation_lease (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    holder TEXT NOT NULL,
+    epoch INTEGER NOT NULL,
+    expires_at TEXT NOT NULL
+);
+
 -- CAP-08 D3 R3: a removal leaves a sticky marker on every row that cited the id,
 -- whatever path removed it (raw SQL included): an unexplained removal is a
 -- failed ground (codex r3 #1). Store.prune sets the marker to the episode's
@@ -2242,12 +2287,56 @@ _DEFAULT_METADATA = {
     # wrap_token, so a value a binary that predates the key left behind can never
     # bind a later wrap. Additive lifecycle key, cleared on every terminal path.
     "wrap_bound_token": "",
+    # Generation 3: the lease fence a wrap was prepared under, JSON
+    # {"token", "holder", "epoch", "identity_version"}, else empty. Bound to the
+    # wrap's token, so a value left by an earlier wrap never fences a later one.
+    # Additive lifecycle key, cleared on every terminal path.
+    "wrap_lease": "",
 }
 
 
 def _now_utc() -> str:
     """Current time as ISO 8601 UTC string with microsecond precision."""
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+
+
+def _idempotency_request_hash(
+    operation: str, principal: str | None, store_id: str | None, args: dict[str, Any],
+) -> str:
+    """THE request hash an idempotency key is bound to (generation 3, design B3).
+
+    sha256 over the pinned canonical JSON (sorted keys, ``(",", ":")``
+    separators, ``ensure_ascii=False``, no NaN) of ``{operation, principal,
+    store_id, args}``, where ``args`` holds every argument that changes the
+    outcome, already reduced to JSON values by the caller. A value JSON cannot
+    carry raises ``TypeError`` rather than being stringified, so two different
+    requests can never share a hash through ``repr``. Every entry point that
+    accepts ``idempotency_key=`` hashes through this one function."""
+    canonical = json.dumps(
+        {"operation": operation, "principal": principal, "store_id": store_id,
+         "args": args},
+        sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False,
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _validate_idempotency_key(key: object) -> str:
+    """An idempotency key is a non-empty str of at most 256 characters."""
+    if not isinstance(key, str):
+        raise TypeError(f"idempotency_key must be a str, got {type(key).__name__}")
+    if not key or len(key) > 256:
+        raise ValueError("idempotency_key must be 1 to 256 characters")
+    return key
+
+
+class _IdempotentReplay(Exception):
+    """Internal: raised inside a write transaction that found its key already
+    committed with the same request hash (a concurrent duplicate won), so the
+    transaction rolls back and the caller returns ``result_json``."""
+
+    def __init__(self, result_json: str | None) -> None:
+        super().__init__("idempotent replay")
+        self.result_json = result_json
 
 
 def _today_local() -> str:
@@ -3529,6 +3618,7 @@ class Store:
         trust_via: str | None = None,
         derived_from: list[str] | tuple[str, ...] | None = None,
         origin_key: str | None = None,
+        idempotency_key: str | None = None,
     ) -> Episode:
         """Record a new episode.
 
@@ -3577,10 +3667,20 @@ class Store:
                 ``content``, ``type`` and ``source`` match; ``supersedes``, ``trust``,
                 ``metadata`` and ``derived_from`` are not compared, so a retry must
                 carry them unchanged. The key is checked before any other validation.
+            idempotency_key: A request key (generation 3), bound to the hash of
+                the whole request (every argument above, the store and the
+                operation). The key row commits with the episode. A retry with
+                the same key and the same request returns the episode it
+                recorded and writes nothing; the same key with any other request
+                raises :class:`IdempotencyConflictError`. Checked before
+                ``origin_key``. Keys never expire in this generation.
 
         Raises:
             SupersessionError: a ``supersedes`` link failed validation.
             OriginKeyConflict: ``origin_key`` is stored with another payload.
+            IdempotencyConflictError: ``idempotency_key`` is stored for another
+                request.
+            ValueError: ``idempotency_key`` recorded an episode since deleted.
             ValueError: ``origin_key`` is outside the grammar, or belonged to a
                 deleted episode (a key is never reused).
             ValueError: ``state_key`` is not a valid key.
@@ -3601,6 +3701,8 @@ class Store:
             raise ValueError("Episode content cannot be empty")
         if origin_key is not None:
             validate_origin_key(origin_key)
+        if idempotency_key is not None:
+            _validate_idempotency_key(idempotency_key)
 
         if isinstance(episode_type, str):
             episode_type = EpisodeType(episode_type)
@@ -3628,6 +3730,14 @@ class Store:
                 raise ValueError(f"derived_from: {raw!r} is not an episode id")
             if raw.strip().lower() not in source_ids:
                 source_ids.append(raw.strip().lower())
+        request_hash = ""
+        if idempotency_key is not None:
+            request_hash = _idempotency_request_hash("record", None, self.store_id, {
+                "content": content, "type": episode_type.value, "source": source,
+                "metadata": metadata, "timestamp": timestamp, "supersedes": old_ids,
+                "state_key": key, "trust": trust, "trust_via": trust_via,
+                "derived_from": source_ids, "origin_key": origin_key,
+            })
 
         # Retry with incrementing nonce on ID collision (birthday or duplicate content).
         # 10.5c.5 L3 Fix #17: batch-aware commit. If this method is
@@ -3665,6 +3775,13 @@ class Store:
             if not self._conn.in_transaction:
                 self._conn.execute("BEGIN IMMEDIATE")
             session_id = self._current_session_id()
+            # The idempotency key decides before everything else, under this write
+            # lock; its refusal is raised after the block, like every refusal here.
+            idem_status: str = "absent"
+            idem_result: str | None = None
+            if idempotency_key is not None:
+                idem_status, idem_result = self._idempotency_lookup(
+                    idempotency_key, request_hash)
             # The key decides first, before the source and supersession checks: a
             # retry of a keyed record whose first call already linked ``old_ids``
             # must get that episode back, not a SupersessionError (design r6 §11.5 item 4).
@@ -3672,7 +3789,7 @@ class Store:
             # what it meant to record.
             keyed_row = None
             key_retired = False
-            if origin_key is not None:
+            if origin_key is not None and idem_status == "absent":
                 keyed_row = self._conn.execute(
                     "SELECT * FROM episodes WHERE origin_key = ?", (origin_key,)
                 ).fetchone()
@@ -3684,7 +3801,7 @@ class Store:
             missing_sources: list[str] = []
             problem: str | None = None
             minted_key: str | None = None
-            if keyed_row is None and not key_retired:
+            if keyed_row is None and not key_retired and idem_status == "absent":
                 # Validated under the same write lock as the insert, so a target
                 # cannot vanish between the check and the link. ⛔ The refusal is
                 # raised AFTER this block (see _db_boundary's docstring).
@@ -3703,7 +3820,8 @@ class Store:
                         o, None, content, ts, new_trust=new_trust) for o in old_ids) if p),
                     None,
                 )
-            if keyed_row is None and not key_retired and problem is None and not missing_sources:
+            if (keyed_row is None and not key_retired and problem is None
+                    and not missing_sources and idem_status == "absent"):
                 # The key plan needs the inserted row (its rowid breaks a timestamp
                 # tie), so a refused key link is undone back to here.
                 self._conn.execute("SAVEPOINT record_state_key")
@@ -3772,11 +3890,28 @@ class Store:
                     minted_key = self._conn.execute(
                         "SELECT origin_key FROM episodes WHERE id = ?", (ep_id,)
                     ).fetchone()[0]
+                    if idempotency_key is not None:
+                        self._idempotency_insert(
+                            idempotency_key, "record", request_hash,
+                            json.dumps({"episode_id": ep_id}))
                 self._conn.execute("RELEASE record_state_key")
             # On a refusal this commits an empty transaction (releasing the
             # lock); inside a batch it leaves the batch's writes alone.
             if not self._defer_commit:
                 self._conn.commit()
+        if idem_status == "conflict":
+            self._idempotency_conflict(idempotency_key or "", "record")
+        if idem_status == "match":
+            # The episode, not its text, is what the row keeps: a key row holding
+            # content would outlive the episode's deletion (W3 erasure).
+            stored_id = json.loads(idem_result or "{}").get("episode_id")
+            replayed = self.get(stored_id) if isinstance(stored_id, str) else None
+            if replayed is None:
+                raise ValueError(
+                    f"idempotency_key {idempotency_key!r} recorded episode "
+                    f"{stored_id!r}, which has since been deleted. Nothing was recorded."
+                )
+            return replayed
         if keyed_row is not None:
             if (keyed_row["content"], keyed_row["type"], keyed_row["source"]) != (
                 content, episode_type.value, source
@@ -6946,6 +7081,8 @@ class Store:
         token_bound: bool = False,
         today: str | None = None,
         expect_continuity_sha256: str | None = None,
+        lease_holder: str | None = None,
+        idempotency: tuple[str, str, str] | None = None,
     ) -> None:
         """Mark that a wrap has been initiated (prepare_wrap called).
 
@@ -7029,6 +7166,17 @@ class Store:
                 (``prepare_wrap(wrap_token=...)``), so :meth:`wrap_cancelled`
                 refuses to end this wrap without ``expect_token`` or ``force``
                 (:class:`WrapCancelBoundError`). Must be a bool.
+            lease_holder: Prepare under this holder's consolidation lease
+                (generation 3): under this call's write lock, the holder's
+                unexpired lease epoch and the latest identity version are
+                recorded with the wrap (:meth:`wrap_lease_fence`), and the save
+                is admitted only while both still hold. No unexpired lease for
+                the holder raises :class:`LeaseFencedError`; nothing is written.
+            idempotency: ``(key, request_hash, result_json)`` from
+                ``prepare_wrap(idempotency_key=...)``: the key row is inserted in
+                this transaction. A key already committed for the same request
+                rolls back and raises ``_IdempotentReplay`` (its stored result);
+                for another request, :class:`IdempotencyConflictError`.
 
         Raises:
             ValueError: If ``token`` is empty. The canonical pipeline
@@ -7230,6 +7378,24 @@ class Store:
                 now_text = self.load_continuity() or ""
                 if hashlib.sha256(now_text.encode("utf-8")).hexdigest() != expect_continuity_sha256:
                     raise WrapContinuityMovedError()
+            if idempotency is not None:
+                status, stored = self._idempotency_lookup(idempotency[0], idempotency[1])
+                if status == "match":
+                    raise _IdempotentReplay(stored)
+                if status == "conflict":
+                    self._idempotency_conflict(idempotency[0], "wrap_started")
+            lease_json = ""
+            if lease_holder is not None:
+                lease_epoch = self._lease_epoch_held_by(lease_holder)
+                if lease_epoch is None:
+                    raise LeaseFencedError(
+                        f"{lease_holder!r} holds no unexpired consolidation lease, so "
+                        f"no wrap was prepared under it. Take the lease (lease_acquire) "
+                        f"first. Nothing was written.")
+                lease_json = json.dumps({
+                    "token": token, "holder": lease_holder, "epoch": lease_epoch,
+                    "identity_version": self._latest_identity_version(),
+                })
             frozen_schema = live_schema
             frozen_schema_json = json.dumps(frozen_schema)
             self._conn.execute(
@@ -7264,6 +7430,13 @@ class Store:
                 "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
                 ("wrap_today", today or ""),
             )
+            self._conn.execute(
+                "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
+                ("wrap_lease", lease_json),
+            )
+            if idempotency is not None:
+                self._idempotency_insert(
+                    idempotency[0], "wrap_started", idempotency[1], idempotency[2])
             self._conn.commit()
 
         if self._audit is not None:
@@ -7595,6 +7768,10 @@ class Store:
             self._conn.execute(
                 "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
                 ("wrap_today", ""),
+            )
+            self._conn.execute(
+                "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
+                ("wrap_lease", ""),
             )
             # AM-SCHEMASNAPSHOT: clear the frozen schema alongside the rest of
             # the wrap-in-progress state so section_schema_for_wrap() falls back
@@ -8370,6 +8547,10 @@ class Store:
             self._conn.execute(
                 "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
                 ("wrap_today", ""),
+            )
+            self._conn.execute(
+                "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
+                ("wrap_lease", ""),
             )
             # AM-SCHEMASNAPSHOT: clear the frozen wrap schema in the same
             # transaction as the other wrap-in-progress clears, so a completed
@@ -10318,6 +10499,234 @@ class Store:
         value = row["value"] if row else None
         return value if isinstance(value, str) and value else None
 
+    # -- Idempotency keys and the consolidation lease (generation 3, design B3) --
+
+    def _idempotency_lookup(
+        self, key: str, request_hash: str,
+    ) -> tuple[Literal["absent", "match", "conflict"], str | None]:
+        """THE idempotency decision: is ``key`` committed, and for this request?
+
+        ``("absent", None)``, ``("match", result_json)`` when the stored hash is
+        ``request_hash``, else ``("conflict", None)``. Never raises a refusal, so
+        it can run inside a batch whose refusals must come after the block.
+        A row is never updated in its hash nor deleted, so a ``match`` or
+        ``conflict`` read outside a transaction is final; only ``absent`` must be
+        re-read inside the effect's write transaction, which every caller does."""
+        row = self._conn.execute(
+            "SELECT request_hash, result_json FROM idempotency_keys WHERE key = ?",
+            (key,),
+        ).fetchone()
+        if row is None:
+            return "absent", None
+        if row["request_hash"] == request_hash:
+            return "match", row["result_json"]
+        return "conflict", None
+
+    def _idempotency_replay(
+        self, key: str, request_hash: str, operation: StoreOperation,
+    ) -> tuple[bool, str | None]:
+        """The early check an entry point runs before doing any work:
+        ``(True, result_json)`` for a committed same request, ``(False, None)``
+        when the key is unused, :class:`IdempotencyConflictError` for a
+        different request. Final in both positive answers (see
+        :meth:`_idempotency_lookup`); an unused key is re-checked inside the
+        effect's transaction."""
+        with self._db_boundary(operation):
+            status, result_json = self._idempotency_lookup(key, request_hash)
+        if status == "conflict":
+            self._idempotency_conflict(key, operation)
+        return status == "match", result_json
+
+    def _idempotency_conflict(self, key: str, operation: StoreOperation) -> NoReturn:
+        raise IdempotencyConflictError(
+            f"idempotency_key {key!r} was already used for a different request "
+            "(another operation, store or argument). Nothing was written; the "
+            "first request's effect stands. Use a new key for a new request.",
+            operation=operation, path=str(self._path),
+        )
+
+    def _idempotency_insert(
+        self, key: str, operation: StoreOperation, request_hash: str,
+        result_json: str | None,
+    ) -> None:
+        """Insert the key row. Caller-owned transaction: the effect's own, so the
+        key commits or rolls back with it. ``principal`` is NULL until a host
+        binds one (the service profile); the hash already covers it."""
+        self._conn.execute(
+            "INSERT INTO idempotency_keys "
+            "(key, operation, principal, request_hash, result_json, created_at) "
+            "VALUES (?, ?, NULL, ?, ?, ?)",
+            (key, operation, request_hash, result_json, _now_utc()),
+        )
+
+    def _idempotency_complete(self, key: str, result_json: str) -> None:
+        """Replace a committed key's provisional result with the full one, after
+        the effect's commit. The hash is never touched. Raises on failure: the
+        caller runs it under its post-commit warning guard."""
+        with self._db_boundary("save_continuity"):
+            self._conn.execute(
+                "UPDATE idempotency_keys SET result_json = ? WHERE key = ?",
+                (result_json, key),
+            )
+            self._conn.commit()
+
+    @staticmethod
+    def _lease_args(holder: object, ttl_seconds: object | None) -> None:
+        if not isinstance(holder, str) or not holder:
+            raise ValueError("lease holder must be a non-empty str")
+        if ttl_seconds is not None and (
+            isinstance(ttl_seconds, bool) or not isinstance(ttl_seconds, (int, float))
+            or not (0 < ttl_seconds < 10**9)
+        ):
+            raise ValueError("ttl_seconds must be a positive number of seconds")
+
+    def _lease_refuse_in_transaction(self, operation: StoreOperation) -> None:
+        if not self._closed and self._conn.in_transaction:
+            raise StoreError(
+                f"{operation} cannot run inside a batch or an open transaction",
+                operation=operation, path=str(self._path))
+
+    def lease_acquire(self, holder: str, ttl_seconds: float) -> int:
+        """Take (or extend) the consolidation lease for ``holder`` for
+        ``ttl_seconds``; returns its epoch.
+
+        The epoch is kept when ``holder`` already holds an unexpired lease, and
+        moves up by one when the lease changes holder or had expired (the same
+        holder included), so a wrap prepared under an earlier tenure is fenced
+        at its save. Raises :class:`LeaseFencedError` while another holder's
+        lease is unexpired. The service lease sits beside the baton and changes
+        nothing about it; a store that never acquires one behaves as before."""
+        self._lease_args(holder, ttl_seconds)
+        self._lease_refuse_in_transaction("lease_acquire")
+        held_by: str | None = None
+        epoch = 0
+        with self._db_boundary("lease_acquire"):
+            self._conn.execute("BEGIN IMMEDIATE")
+            now = datetime.now(timezone.utc)
+            now_s = now.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+            expires = (now + timedelta(seconds=ttl_seconds)).strftime(
+                "%Y-%m-%dT%H:%M:%S.%fZ")
+            row = self._conn.execute(
+                "SELECT holder, epoch, expires_at FROM consolidation_lease WHERE id = 1"
+            ).fetchone()
+            if row is None:
+                epoch = 1
+                self._conn.execute(
+                    "INSERT INTO consolidation_lease (id, holder, epoch, expires_at) "
+                    "VALUES (1, ?, 1, ?)", (holder, expires))
+            elif row["expires_at"] > now_s and row["holder"] != holder:
+                held_by = row["holder"]
+            else:
+                live_same = row["expires_at"] > now_s
+                epoch = row["epoch"] if live_same else row["epoch"] + 1
+                self._conn.execute(
+                    "UPDATE consolidation_lease SET holder = ?, epoch = ?, expires_at = ? "
+                    "WHERE id = 1", (holder, epoch, expires))
+            self._conn.commit()
+        if held_by is not None:
+            raise LeaseFencedError(
+                f"the consolidation lease is held by {held_by!r} until it expires or "
+                f"is released; {holder!r} cannot take it. Nothing was written.")
+        return epoch
+
+    def lease_renew(self, holder: str, ttl_seconds: float) -> int:
+        """Extend ``holder``'s unexpired lease to ``ttl_seconds`` from now; returns
+        its epoch (unchanged). Raises :class:`LeaseFencedError` when ``holder``
+        does not hold an unexpired lease: an expired lease is re-taken with
+        :meth:`lease_acquire`, which moves the epoch."""
+        self._lease_args(holder, ttl_seconds)
+        self._lease_refuse_in_transaction("lease_renew")
+        epoch: int | None = None
+        with self._db_boundary("lease_renew"):
+            self._conn.execute("BEGIN IMMEDIATE")
+            now = datetime.now(timezone.utc)
+            now_s = now.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+            expires = (now + timedelta(seconds=ttl_seconds)).strftime(
+                "%Y-%m-%dT%H:%M:%S.%fZ")
+            if self._conn.execute(
+                "UPDATE consolidation_lease SET expires_at = ? "
+                "WHERE id = 1 AND holder = ? AND expires_at > ?",
+                (expires, holder, now_s),
+            ).rowcount == 1:
+                epoch = self._conn.execute(
+                    "SELECT epoch FROM consolidation_lease WHERE id = 1").fetchone()[0]
+            self._conn.commit()
+        if epoch is None:
+            raise LeaseFencedError(
+                f"{holder!r} does not hold an unexpired consolidation lease; take it "
+                f"again with lease_acquire (the epoch moves). Nothing was written.")
+        return epoch
+
+    def lease_release(self, holder: str) -> bool:
+        """End ``holder``'s lease now. Returns ``False`` (writing nothing) when
+        ``holder`` held no unexpired lease. The row and its epoch stay, so the
+        next acquire moves the epoch and a wrap prepared before the release is
+        fenced even if the same holder takes the lease again."""
+        self._lease_args(holder, None)
+        self._lease_refuse_in_transaction("lease_release")
+        with self._db_boundary("lease_release"):
+            self._conn.execute("BEGIN IMMEDIATE")
+            now_s = _now_utc()
+            released = self._conn.execute(
+                "UPDATE consolidation_lease SET expires_at = ? "
+                "WHERE id = 1 AND holder = ? AND expires_at > ?",
+                (now_s, holder, now_s),
+            ).rowcount == 1
+            self._conn.commit()
+        return released
+
+    def _lease_epoch_held_by(self, holder: str) -> int | None:
+        """The epoch of ``holder``'s unexpired lease, else ``None``. Read by
+        :meth:`wrap_started` inside its write transaction (what a wrap is
+        prepared under); the save's admission is :meth:`_lease_fence_holds`."""
+        row = self._conn.execute(
+            "SELECT epoch FROM consolidation_lease "
+            "WHERE id = 1 AND holder = ? AND expires_at > ?",
+            (holder, _now_utc()),
+        ).fetchone()
+        return None if row is None else int(row[0])
+
+    def _latest_identity_version(self) -> int | None:
+        row = self._conn.execute("SELECT MAX(version) FROM identity_versions").fetchone()
+        return None if row is None or row[0] is None else int(row[0])
+
+    def wrap_lease_fence(self) -> dict[str, Any] | None:
+        """The lease fence the wrap in progress was prepared under
+        (``{"holder", "epoch", "identity_version"}``), or ``None`` when no wrap
+        is in progress or it was prepared without ``lease_holder``. Bound to the
+        current wrap token, so a fence an earlier wrap left is never returned."""
+        with self._db_boundary("load_wrap_snapshot"):
+            raw = self._get_metadata("wrap_lease")
+            token = self._get_metadata("wrap_token")
+        if not raw or not token:
+            return None
+        try:
+            fence = json.loads(raw)
+        except ValueError:
+            fence = None
+        if not isinstance(fence, dict) or fence.get("token") != token:
+            return None
+        return {k: fence.get(k) for k in ("holder", "epoch", "identity_version")}
+
+    def _lease_fence_holds(
+        self, holder: str, epoch: int, identity_version: int | None,
+    ) -> bool:
+        """THE fence predicate (design B3): ``holder`` holds the lease, at the
+        epoch the wrap was prepared under, unexpired, and the latest identity
+        version is the one the wrap was prepared from. One statement. Called
+        from the save only, inside its batch: the batch holds the write lock
+        from ``BEGIN IMMEDIATE``, so no acquire (itself a write) can move the
+        lease between this read and the commit; a lease that lapses by the
+        clock in that window lapses with no one able to take it over."""
+        with self._db_boundary("save_continuity"):
+            row = self._conn.execute(
+                "SELECT 1 FROM consolidation_lease WHERE id = 1 AND holder = ? "
+                "AND epoch = ? AND expires_at > ? "
+                "AND (SELECT MAX(version) FROM identity_versions) IS ?",
+                (holder, epoch, _now_utc(), identity_version),
+            ).fetchone()
+        return row is not None
+
     @property
     def section_schema(self) -> list[SectionSpec]:
         """The persisted continuity section schema (v0.3.4), read-lenient.
@@ -12036,8 +12445,10 @@ class Store:
         inside a batch. Two groups, unsafe for DIFFERENT reasons — the split
         matters because only the first is mechanically derivable:
         - DB-COMMITTING (``prune``, ``wrap_started``, ``wrap_cancelled``,
-          ``set_section_schema``) — these call ``commit()`` unconditionally
-          and would break the single-transaction invariant.
+          ``set_section_schema``, ``lease_acquire``, ``lease_renew``,
+          ``lease_release``) — these call ``commit()`` unconditionally
+          and would break the single-transaction invariant (the three lease
+          methods refuse inside a batch or an open transaction).
         - FILE-EXTERNALIZING (``save_continuity``, ``save_meta``) — these
           commit an identity version in their own transaction and then
           project a sidecar (generation 3). Inside a batch they refuse with

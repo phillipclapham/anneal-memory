@@ -106,10 +106,11 @@ import logging
 import os
 import re
 import sqlite3
+import stat
 import tempfile
 import unicodedata
 import warnings
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Iterator, Literal, NamedTuple, TypedDict, cast
@@ -452,7 +453,10 @@ def _seed_crystal_document(conn: sqlite3.Connection, db_path: str | os.PathLike[
     transaction; never commits. Nothing is seeded for an absent or invalid file (the
     file is left for the first mutation, which adopts a valid one and refuses an
     invalid one as before), or for a store not named ``*.db`` (the sibling convention
-    :meth:`CrystalStore._db_path` reads)."""
+    :meth:`CrystalStore._db_path` reads). A file present but unreadable is not
+    seeded either; that is warned (a copy of the .db alone would miss the crystals),
+    and the next write-capable open retries. The caller holds the crystal lock
+    (:func:`_crystal_seed_lock`), so the file cannot change under the seed."""
     db_path = Path(db_path)
     if db_path.suffix != ".db":
         return
@@ -462,7 +466,16 @@ def _seed_crystal_document(conn: sqlite3.Connection, db_path: str | os.PathLike[
     try:
         text = path.read_bytes().decode("utf-8")
         CrystalStore(path)._parse(text)
-    except (OSError, UnicodeDecodeError, CrystalError):
+    except FileNotFoundError:
+        return
+    except OSError as e:
+        _warn_quietly(
+            f"anneal-memory: {path} could not be read ({e}), so it was not seeded "
+            f"into {db_path.name}: a copy of the database alone does not carry these "
+            f"crystals yet. The next write-capable open retries."
+        )
+        return
+    except (UnicodeDecodeError, CrystalError):
         return
     conn.execute(
         "INSERT INTO crystal_document (id, doc_json, content_hash, prev_hash, updated_at) "
@@ -470,6 +483,50 @@ def _seed_crystal_document(conn: sqlite3.Connection, db_path: str | os.PathLike[
         (text, hashlib.sha256(text.encode("utf-8")).hexdigest(),
          datetime.now(timezone.utc).isoformat()),
     )
+
+
+@contextmanager
+def _crystal_seed_lock(conn: sqlite3.Connection, db_path: str | os.PathLike[str]) -> Iterator[bool]:
+    """Held around a write-capable Store open's schema transaction; yields whether
+    :func:`_seed_crystal_document` may run. When the open will seed (a ``*.db``
+    store with no ``crystal_document`` row yet and a ``<stem>.crystal.json`` beside
+    it) the crystal lock is taken HERE, before ``BEGIN IMMEDIATE``, and held through
+    the commit: the lock order is the crystal lock, then SQLite, everywhere, and a
+    file-mode writer (one that probed the store before the migration) finishes its
+    write before the seed reads the file, so its write is seeded, never filed as
+    ``.diverged`` (L3 r1 D1). An open that will not seed takes no lock and yields
+    False; so does one that cannot take the lock (warned; the next open retries).
+    ``conn`` is outside any transaction; the checks here are plain reads."""
+    db_path = Path(db_path)
+    if db_path.suffix != ".db":
+        yield False
+        return
+    path = db_path.with_name(db_path.stem + _CRYSTAL_SUFFIX)
+    try:
+        os.stat(path)
+    except FileNotFoundError:
+        yield False
+        return
+    except OSError:
+        pass  # present but unprobeable: the seed reads it and warns
+    has_table = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' "
+        "AND name = 'crystal_document' COLLATE NOCASE").fetchone() is not None
+    if has_table and conn.execute(
+            "SELECT 1 FROM crystal_document WHERE id = 1").fetchone() is not None:
+        yield False
+        return
+    with ExitStack() as stack:
+        try:
+            held = stack.enter_context(CrystalStore(path)._lock())
+        except OSError as e:
+            _warn_quietly(
+                f"anneal-memory: the crystal lock beside {path} could not be taken "
+                f"({e}), so the file was not seeded into {db_path.name}; the next "
+                f"write-capable open retries."
+            )
+            held = False
+        yield held
 
 
 def _reconcile_crystal_projection(conn: sqlite3.Connection, db_path: str | os.PathLike[str]) -> None:
@@ -504,17 +561,21 @@ class CrystalSnapshot:
     """What :meth:`CrystalStore.snapshot` read for some names; hand it back to
     :meth:`CrystalStore.restore`. Opaque on purpose: its content is not a stable
     format, and it is not meant to be stored or edited. ``names`` lists the names it
-    covers."""
+    covers. It is bound to the crystal file's canonical path AND to the store that
+    held the document (``authority``: the database's ``store_id``, or ``"file"``),
+    so one path read through two stores never restores across them (L3 r1 D5)."""
 
-    __slots__ = ("_priors", "_store_path")
+    __slots__ = ("_authority", "_priors", "_store_path")
 
     def __init__(
         self,
         priors: dict[str, tuple[str, int, dict] | None],
         store_path: str,
+        authority: str = "file",
     ) -> None:
         self._priors = priors
         self._store_path = store_path
+        self._authority = authority
 
     @property
     def names(self) -> tuple[str, ...]:
@@ -661,16 +722,23 @@ class CrystalStore:
         }
         return json.dumps(data, indent=2, ensure_ascii=False) + "\n"
 
-    def _db_path(self) -> Path | None:
+    def _db_path(self, *, timeout: float = _READ_TIMEOUT) -> Path | None:
         """The store that holds this document (generation >= 3), or None (the file
         is the document). Read-only probe of ``format_version``; never migrates.
+        ``timeout`` is the probe's busy wait: a read's bounded one by default, a
+        write's :data:`_DB_TIMEOUT` (L3 r1 D7).
 
-        File mode only when there is no ``<stem>.db`` file, or it holds no
-        generation >= 3 marker with the table. A ``.db`` that exists but cannot be
-        probed (busy, unreadable, a read-only directory, not a database) raises a
-        retryable :class:`CrystalError`: falling back to the file there would write
-        the file alone, or answer from a file the store may have replaced. A busy
-        one raises :class:`_StoreBusy`, on which a read answers from the file
+        A ``crystal_document`` table makes it the store, whatever the marker says
+        (L3 r1 D2). File mode only for an unambiguously pre-generation-3 sibling: no
+        ``<stem>.db`` at all (``ENOENT``), or no table and a parseable marker below
+        3, or a database that is not an anneal store (no ``metadata`` table).
+        Everything else raises :class:`CrystalError`, because the file alone
+        would be written and the next reconcile would discard it: a marker >= 3
+        without the table, a missing or garbled marker, a
+        ``.db`` that is not a regular file or whose ``stat`` fails other than
+        ``ENOENT`` (L3 r1 D3), and one that cannot be probed (busy, unreadable, a
+        read-only directory, not a database). A busy one raises the retryable
+        :class:`_StoreBusy`, on which a read answers from the file
         (:meth:`_load_busy`)."""
         if self._db_resolved is not None:
             return self._db_resolved
@@ -681,19 +749,35 @@ class CrystalStore:
             candidate = self.path.with_name(self.path.name[: -len(_CRYSTAL_SUFFIX)] + ".db")
         else:
             return None
-        if not candidate.is_file():
+        try:
+            mode = os.stat(candidate).st_mode
+        except FileNotFoundError:
             if explicit:
                 raise CrystalError(f"crystal store database {candidate} does not exist.")
             return None
+        except OSError as e:
+            raise CrystalError(
+                f"crystal store database {candidate} could not be probed ({e}); "
+                f"nothing was read or written, retry when it is readable."
+            ) from e
+        if not stat.S_ISREG(mode):
+            raise CrystalError(
+                f"crystal store database {candidate} is not a regular file; nothing "
+                f"was read or written."
+            )
         try:
-            conn = connect(candidate, read_only=True, timeout=_READ_TIMEOUT)
+            conn = connect(candidate, read_only=True, timeout=timeout)
             try:
                 tables = {str(r[0]).lower() for r in conn.execute(
                     "SELECT name FROM sqlite_master WHERE type = 'table'")}
-                # No metadata table: a database that is not an anneal store, so no marker.
+                # No metadata table: a database that is not an anneal store at any
+                # generation (a Store creates metadata and the table in one
+                # transaction), so the file is the document; a Store open that adopts
+                # this database seeds the file under the crystal lock.
+                anneal = "metadata" in tables
                 marker = conn.execute(
                     "SELECT value FROM metadata WHERE key = 'format_version'"
-                ).fetchone() if "metadata" in tables else None
+                ).fetchone() if anneal else None
                 has_table = "crystal_document" in tables
             finally:
                 conn.close()
@@ -703,12 +787,15 @@ class CrystalStore:
                 f"nothing was read or written, retry when it is readable."
             ) from e
         generation = _parse_format_version(marker[0]) if marker else None
-        if generation is None or generation < _CRYSTAL_DB_GENERATION or not has_table:
-            if explicit:
+        if not has_table:
+            if explicit or (anneal and (
+                    generation is None or generation >= _CRYSTAL_DB_GENERATION)):
                 raise CrystalError(
-                    f"crystal store database {candidate} is not at schema generation "
-                    f">= {_CRYSTAL_DB_GENERATION} with a crystal_document table; open "
-                    f"it with anneal_memory.Store first (that migrates it)."
+                    f"crystal store database {candidate} has no crystal_document table "
+                    f"(format_version {None if marker is None else marker[0]!r}); "
+                    f"nothing was read or written. Open it with anneal_memory.Store "
+                    f"first (that migrates a store below generation "
+                    f"{_CRYSTAL_DB_GENERATION}), or inspect it by hand."
                 )
             return None
         self._db_resolved = candidate
@@ -725,7 +812,14 @@ class CrystalStore:
         """The document, read without writing anything: from the row when a
         generation-3 store holds it (the file is re-projected by every crystal
         change and by every write-capable Store open, see
-        :func:`_reconcile_crystal_projection`), else from the file."""
+        :func:`_reconcile_crystal_projection`), else from the file.
+
+        Known edge: a file-mode (pre-generation-3) store is re-probed on every read,
+        and a generation-3 read opens two connections; a recall-path cost, not a
+        correctness issue.
+        Known edge: a ``mode=ro`` open of a WAL store in a non-writable copied
+        directory can fail (SQLite version-dependent); the read then raises, never
+        ``[]`` (``immutable=1`` is a possible later fallback)."""
         try:
             db = self._db_path()
         except _StoreBusy as e:
@@ -817,7 +911,9 @@ class CrystalStore:
         guards do not fence it; its write becomes a ``.diverged`` copy at the next
         writer's reconcile (upgrade every writer together).
         Known edge: a file two or more commits behind the row (an older backup) is
-        not in ``known``, so it is classed foreign and kept; non-destructive."""
+        not in ``known``, so it is classed foreign and kept; non-destructive.
+        Known edge: likewise after two consecutive failed projections, an ordinary
+        stale file is kept as ``.diverged`` with a warning; non-destructive."""
         payload = text.encode("utf-8")
         try:
             raw: bytes | None = self.path.read_bytes()
@@ -853,7 +949,12 @@ class CrystalStore:
             except FileExistsError:
                 continue
             try:
-                with os.fdopen(fd, "wb") as f:
+                try:
+                    f = os.fdopen(fd, "wb")
+                except BaseException:
+                    os.close(fd)  # fdopen didn't take ownership — close the raw fd
+                    raise
+                with f:
                     f.write(raw)
                     f.flush()
                     os.fsync(f.fileno())
@@ -926,7 +1027,7 @@ class CrystalStore:
         without ``fcntl`` (Windows) projections can land out of commit order; the
         next crystal change or write-capable Store open re-projects."""
         with self._lock():
-            db = self._db_path()
+            db = self._db_path(timeout=_DB_TIMEOUT)  # a write waits as long as its write does
             if db is None:
                 data = self._parse(self._read_file_text())
                 yield data
@@ -1225,6 +1326,26 @@ class CrystalStore:
         data["retired"] = [r for r in data["retired"] if r.get("name") != name]
         return cast("CrystalDict", matches[0])
 
+    def _authority(self) -> str:
+        """Which store holds this document: ``"db:<store_id>"`` beside a generation-3
+        store (its real path when it has no ``store_id``), else ``"file"``. Read-only;
+        a store busy past the read budget raises the retryable :class:`_StoreBusy`."""
+        db = self._db_path()
+        if db is None:
+            return "file"
+        try:
+            conn = connect(db, read_only=True, timeout=_READ_TIMEOUT)
+            try:
+                row = conn.execute(
+                    "SELECT value FROM metadata WHERE key = 'store_id'").fetchone()
+            finally:
+                conn.close()
+        except sqlite3.Error as e:
+            raise (_StoreBusy if _is_busy(e) else CrystalError)(
+                f"crystal store database {db} could not be read ({e}); retry."
+            ) from e
+        return f"db:{row[0]}" if row is not None else f"db:{os.path.realpath(db)}"
+
     # --- public API: read ---------------------------------------------------
 
     def snapshot(self, names: Iterable[str]) -> CrystalSnapshot:
@@ -1244,6 +1365,7 @@ class CrystalStore:
             if not isinstance(n, str):
                 raise TypeError(f"pattern names must be str, got {type(n).__name__}")
             wanted.append(self._validate_name(n))  # crystallize() stores the stripped name
+        authority = self._authority()
         data = self._load()
         priors: dict[str, tuple[str, int, dict] | None] = {}
         for n in wanted:
@@ -1254,7 +1376,7 @@ class CrystalStore:
                 if idx is not None:
                     priors[n] = (bucket, idx, json.loads(json.dumps(rows[idx])))
                     break
-        return CrystalSnapshot(priors, os.path.realpath(self.path))
+        return CrystalSnapshot(priors, os.path.realpath(self.path), authority)
 
     def restore(self, snapshot: CrystalSnapshot) -> None:
         """Undo what :meth:`crystallize` did to each name in ``snapshot``, in one
@@ -1270,10 +1392,12 @@ class CrystalStore:
         (in a wrap, the consolidate baton). On a store file that did not exist it creates the file, empty.
 
         Raises ``TypeError`` for anything that is not a :class:`CrystalSnapshot`, and
-        ``ValueError`` for a snapshot taken from a different store file."""
+        ``ValueError`` for a snapshot taken from a different store file or through a
+        different store (another ``db=``, or the file before a migration)."""
         if not isinstance(snapshot, CrystalSnapshot):
             raise TypeError("restore() takes the CrystalSnapshot that snapshot() returned")
-        if snapshot._store_path != os.path.realpath(self.path):
+        if (snapshot._store_path != os.path.realpath(self.path)
+                or snapshot._authority != self._authority()):
             raise ValueError("this snapshot was taken from a different crystal store")
         with self._transaction() as data:
             for bucket in ("crystal", "retired"):

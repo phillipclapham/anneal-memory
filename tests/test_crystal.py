@@ -530,6 +530,57 @@ def test_gen3_crystals_live_in_the_db_and_the_json_is_a_projection(tmp_path, mon
         conn.close()
     assert path.read_bytes() == doc_json.encode("utf-8")
 
+    # L3 r1 D1: a file-mode writer (it probed generation 2) holds the crystal lock;
+    # the migrating open's seed waits for it, so the writer's change is seeded, not
+    # filed as .diverged at the next open.
+    import threading
+
+    mig = tmp_path / "mig"
+    mig.mkdir()
+    mig_db, mig_path = mig / "memory.db", mig / "memory.crystal.json"
+    Store(mig_db, project_name="t3").close()
+    conn = connect(mig_db)
+    conn.execute("DROP TABLE crystal_document")
+    conn.execute("UPDATE metadata SET value = '2' WHERE key = 'format_version'")
+    conn.commit()
+    conn.close()
+    CrystalStore(mig_path).crystallize(name="legacy", level=2, explanation="gen 2", today=T0)
+    writer = CrystalStore(mig_path)._transaction()
+    data = writer.__enter__()
+    opened = threading.Event()
+    opener = threading.Thread(
+        target=lambda: (Store(mig_db, project_name="t3").close(), opened.set()))
+    opener.start()
+    assert not opened.wait(1.0)  # the seed waits behind the writer's lock
+    data["crystal"].append({**data["crystal"][0], "name": "mid_migration"})
+    writer.__exit__(None, None, None)
+    opener.join(30)
+    assert opened.is_set()
+    Store(mig_db, project_name="t3").close()
+    assert sorted(c["name"] for c in CrystalStore(mig_path).active()) == [
+        "legacy", "mid_migration"]
+    assert not list(mig.glob("*.diverged-*"))
+    # L3 r1 D2: once the table exists the store holds the document, whatever the
+    # marker says; a marker >= 3 without the table raises.
+    conn = connect(mig_db)
+    conn.execute("UPDATE metadata SET value = 'garbled' WHERE key = 'format_version'")
+    conn.commit()
+    conn.close()
+    CrystalStore(mig_path).crystallize(name="garbled", level=2, explanation="x", today=T0)
+    conn = connect(mig_db, read_only=True)
+    try:
+        (mig_json,) = conn.execute("SELECT doc_json FROM crystal_document").fetchone()
+    finally:
+        conn.close()
+    assert "garbled" in [c["name"] for c in json.loads(mig_json)["crystal"]]
+    conn = connect(mig_db)
+    conn.execute("DROP TABLE crystal_document")
+    conn.execute("UPDATE metadata SET value = '3' WHERE key = 'format_version'")
+    conn.commit()
+    conn.close()
+    with pytest.raises(CrystalError, match="no crystal_document table"):
+        CrystalStore(mig_path).crystallize(name="lost", level=2, explanation="x", today=T0)
+
     # r1 C2: one probe error on a write raises; neither the file nor the row moves.
     real_connect = _crystal.connect
 
@@ -596,3 +647,16 @@ class TestSnapshotRestore:
         assert json.loads(store.path.read_text())["retired"] == before
         with pytest.raises(ValueError):
             CrystalStore(tmp_path / "other.crystal.json").restore(snap)
+        # L3 r1 D5: one file path read through two stores (db=) is two stores.
+        from anneal_memory import Store
+
+        for stem in ("a", "b"):
+            Store(tmp_path / f"{stem}.db", project_name=stem).close()
+        shared = tmp_path / "shared.crystal.json"
+        in_a = CrystalStore(shared, db=tmp_path / "a.db")
+        in_b = CrystalStore(shared, db=tmp_path / "b.db")
+        in_a.crystallize(name="x", level=2, explanation="in A", today=T0)
+        in_b.crystallize(name="x", level=2, explanation="in B", today=T0)
+        with pytest.raises(ValueError):
+            in_b.restore(in_a.snapshot(["x"]))
+        assert in_b.get("x")["explanation"] == "in B"

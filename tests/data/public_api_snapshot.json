@@ -4911,7 +4911,7 @@
   },
   "CrystalSnapshot": {
    "bases": [],
-   "init": "(priors: 'dict[str, tuple[str, int, dict] | None]', store_path: 'str') -> 'None'",
+   "init": "(priors: 'dict[str, tuple[str, int, dict] | None]', store_path: 'str', authority: 'str' = 'file') -> 'None'",
    "kind": "class",
    "members": {
     "names": {

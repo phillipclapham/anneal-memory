@@ -32,7 +32,7 @@ import uuid
 import warnings
 from collections import deque
 from collections.abc import Iterable, Iterator
-from contextlib import AbstractContextManager, contextmanager
+from contextlib import AbstractContextManager, ExitStack, contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Literal, NamedTuple, NoReturn
@@ -3359,20 +3359,29 @@ class Store:
         -> ``5.21s call``. A standing test is a better oracle than a probe
         written to settle the argument it is settling.
         """
-        # ⛔ NOT ``executescript`` — it implicitly COMMITs and would drop the
-        # lock this method exists to hold. See ``_sql_statements``.
-        self._conn.execute("BEGIN IMMEDIATE")
-        try:
-            self._init_schema_locked()
-            self._conn.commit()
-        except BaseException:
+        # The crystal seed's lock, when this open will seed, is taken BEFORE
+        # ``BEGIN IMMEDIATE`` and held through the commit (crystal lock, then
+        # SQLite, everywhere; crystal.py owns it, imported here because it
+        # imports this module).
+        from .crystal import _crystal_seed_lock
+        with ExitStack() as seed_lock:
+            may_seed_crystals = (
+                self._path != Path(":memory:")
+                and seed_lock.enter_context(_crystal_seed_lock(self._conn, self._path)))
+            # ⛔ NOT ``executescript`` — it implicitly COMMITs and would drop the
+            # lock this method exists to hold. See ``_sql_statements``.
+            self._conn.execute("BEGIN IMMEDIATE")
             try:
-                self._conn.rollback()
-            except sqlite3.Error:
-                pass
-            raise
+                self._init_schema_locked(seed_crystals=may_seed_crystals)
+                self._conn.commit()
+            except BaseException:
+                try:
+                    self._conn.rollback()
+                except sqlite3.Error:
+                    pass
+                raise
 
-    def _init_schema_locked(self) -> None:
+    def _init_schema_locked(self, *, seed_crystals: bool = False) -> None:
         """The body of :meth:`_init_schema`, run under its writer lock.
 
         Split out so the lock acquisition, the commit and the rollback read as
@@ -3432,9 +3441,10 @@ class Store:
         self._migrate_episode_origin_key(commit=False)
         if pre_existing and not had_identity_table:
             self._seed_identity_from_files()
-        if self._path != Path(":memory:"):
+        if seed_crystals:
             # Seeds only while there is no row: at the migration, and for a new
-            # store created beside a legacy crystal file. crystal.py owns the crystal
+            # store created beside a legacy crystal file; only under the crystal
+            # lock :meth:`_init_schema` took for it. crystal.py owns the crystal
             # format; imported here because it imports this module. Never commits
             # (this transaction is the open's schema transaction).
             from .crystal import _seed_crystal_document

@@ -3,7 +3,7 @@
 # Paste the section below into your harness's agent-instructions file
 # (CLAUDE.md / AGENTS.md / GEMINI.md). This is the always-loaded MINIMUM —
 # the workflow an agent needs to act correctly. For the full reference
-# (immune-system internals, affective-state shape, operator commands),
+# (immune-system internals, operator commands),
 # install the anneal-memory SKILL (skill/anneal-memory/SKILL.md), which
 # loads on-demand, or see examples/agent-instructions.full.example.
 #

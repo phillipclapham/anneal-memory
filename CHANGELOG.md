@@ -14,8 +14,8 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
 - `Store.association_formation()` and `AssociationFormationOffError`.
 
 ### Deprecated (removed in 2.0)
-- `Store.record_associations`, `decay_associations` and `seed_pattern_co_graduation` raise `AssociationFormationOffError` on a store whose formation is off. `drain_co_surface_events` parses its events and discards them, returning zero counts.
-- The `affective_state` argument (library), the `affective_state` MCP property and the CLI `--affect-tag` / `--affect-intensity` flags are accepted and ignored, with a one-line notice.
+- `Store.record_associations`, `decay_associations` and `seed_pattern_co_graduation` raise `AssociationFormationOffError` on a store whose formation is off. `drain_co_surface_events` parses its events and discards them: `events_applied` and the pair counts are 0, and `events_seen` and `discarded` count the distinct events dropped.
+- The `affective_state` argument (library), the `affective_state` MCP property and the CLI `--affect-tag` / `--affect-intensity` flags are accepted and ignored. The library, the MCP tool and the CLI's `--affect-tag` print a one-line notice; `--affect-intensity` alone is ignored silently.
 - The `associations_formed` / `_strengthened` / `_decayed` result keys are always 0.
 
 ### Removed

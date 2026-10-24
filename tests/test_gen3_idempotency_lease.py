@@ -205,3 +205,19 @@ def test_t5_a_save_prepared_under_an_expired_lease_is_fenced(tmp_path):
     assert "C1 by B." in a.load_continuity() and _count(a, "identity_versions") == 2
     a.close()
     b.close()
+
+
+def test_a_corrupt_crystal_store_degrades_a_keyed_prepare_never_aborts_it(tmp_path):
+    # Integration L3 r6 (complement + codex MED, reproduced 10-24): the crystal pin
+    # added in r5 ran outside the degrade path, so a corrupt crystal file aborted the
+    # prepare. It must warn and compose without crystals, as before.
+    from anneal_memory import CrystalStore
+
+    s = Store(str(tmp_path / "m.db"), project_name="T")
+    (tmp_path / "m.crystal.json").write_text("{not json")
+    s.record("an observation", EpisodeType.OBSERVATION)
+    with pytest.warns(UserWarning, match="crystal store unreadable"):
+        p = prepare_wrap(s, crystal_store=CrystalStore(tmp_path / "m.crystal.json"),
+                         idempotency_key="k-corrupt")
+    assert p["status"] == "ready"
+    s.close()

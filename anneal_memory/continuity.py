@@ -1868,8 +1868,19 @@ def _pin_crystals(
     composition reads from, and the version it was read at, for the fingerprint
     (:meth:`CrystalStore._pinned`). ``(None, None)`` with no crystal store: a
     package composed without crystals is never refused for a crystal change
-    (integration L3 r4, codex MED)."""
-    return (None, None) if crystal_store is None else crystal_store._pinned()
+    (integration L3 r4, codex MED).
+
+    A crystal-store fault never breaks a wrap (:func:`_crystal_active_safe`,
+    integration L3 r6): on ``CrystalError`` / ``OSError`` the store is passed
+    through unpinned, so the composition's own reads degrade and warn as
+    before, and the version matches nothing, so a keyed retry refuses rather
+    than matching a package nobody can rebuild."""
+    if crystal_store is None:
+        return None, None
+    try:
+        return crystal_store._pinned()
+    except (CrystalError, OSError):
+        return crystal_store, "unread:" + uuid.uuid4().hex
 
 
 def _prepare_fingerprint(

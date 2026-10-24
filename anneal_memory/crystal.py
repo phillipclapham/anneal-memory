@@ -834,7 +834,7 @@ class CrystalStore:
         """One read of the document together with its version: a read-only view
         whose every read (:meth:`active`, :meth:`surface_rewarm_candidates`, ...)
         serves that one document, and the version it was read at. The version is
-        the row's ``content_hash``; ``None`` with no row or in file mode; on a busy
+        the row's ``content_hash``; with no row or in file mode, the sha256 of the file text read (``None`` with no file); on a busy
         store a value that matches nothing, so a fingerprint of it never matches.
         A prepare composes from the view and fingerprints the version, so the
         package and its fingerprint are one snapshot (integration L3 r5, codex:
@@ -870,8 +870,16 @@ class CrystalStore:
             db = self._db_path()
         except _StoreBusy as e:
             return self._load_busy(e), unread
+        def from_file() -> tuple[dict, str | None]:
+            # File mode, or a row-less store seeded from the file: the version is
+            # the text read (integration L3 r6, codex), None with no file.
+            text = self._read_file_text()
+            return self._parse(text), (
+                None if text is None
+                else "file:" + hashlib.sha256(text.encode("utf-8")).hexdigest())
+
         if db is None:
-            return self._parse(self._read_file_text()), None
+            return from_file()
         try:
             conn = connect(db, read_only=True, timeout=_READ_TIMEOUT)
             try:
@@ -884,7 +892,7 @@ class CrystalStore:
             raise CrystalError(f"crystal document in {db} could not be read ({e}).") from e
         if row is None:
             # No row yet: the file is the seed, adopted by the first mutation.
-            return self._parse(self._read_file_text()), None
+            return from_file()
         return self._parse(row[0], where=f"the crystal_document row of {db}"), row[1]
 
     def _load_busy(self, cause: Exception) -> dict:

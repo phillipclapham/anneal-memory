@@ -24,7 +24,9 @@ the token file already holds: a server run with a different token file can
 neither mint nor accept another server's tokens. There is no refresh token and
 no expiry beyond the token's own revocation (``token-revoke``).
 
-Redirect URIs must be https on a host in :data:`REDIRECT_HOSTS`. Every Gemini app
+Redirect URIs must be https on a host in :data:`REDIRECT_HOSTS`; a registration
+keeps the URIs that pass and drops the rest, and is refused only when none pass
+(the Gemini app also registers hosts outside the set). Every Gemini app
 returns through those same hosts, so anyone's own app could be pointed here and
 its sign-in link sent to the operator. So the first sign-in that completes an
 exchange pins its exact redirect URI to a file (created exclusively, mode 0600),
@@ -42,6 +44,7 @@ import hashlib
 import hmac
 import html
 import json
+import logging
 import os
 import re
 import secrets
@@ -50,6 +53,8 @@ import time
 import urllib.parse
 from pathlib import Path
 from typing import Any
+
+logger = logging.getLogger("anneal-memory.remote")
 
 
 def _fsync_dir_strict(path: Path) -> None:
@@ -73,7 +78,9 @@ MAX_REGISTER_BYTES = 16 * 1024
 # The hosts the Gemini app registers as redirect URIs (oauth-redirect,
 # oauth-redirect-sandbox), read from public reports 2026-10-24
 # (github.com/doobidoo/mcp-memory-service/issues/1553; discuss.ai.google.dev
-# t/186405). A redirect anywhere else is refused at registration and at sign-in.
+# t/186405). The app also registers oauth-redirect-test URIs in the same request
+# (github.com/BerriAI/litellm/issues/46640, 2026-10-15); those are dropped at
+# registration, never added here. Sign-in refuses any redirect outside this set.
 REDIRECT_HOSTS = frozenset({"oauth-redirect.googleusercontent.com",
                             "oauth-redirect-sandbox.googleusercontent.com"})
 _VERIFIER_RE = re.compile(r"^[A-Za-z0-9._~-]{43,128}$")
@@ -84,6 +91,19 @@ AUTH_METHODS = ("client_secret_basic", "client_secret_post", "none")
 # so a broken server is never reported to the operator as a wrong token.
 UNAVAILABLE = object()
 _INVALID_PIN = "\x00invalid pin"  # matches no redirect URI
+
+
+def _uri_for_log(uri: Any) -> str:
+    """scheme://host/path of a refused redirect URI, for the operator's log: no
+    query, fragment or userinfo, so no state or credential reaches the journal."""
+    if not isinstance(uri, str):
+        return f"<{type(uri).__name__}>"
+    try:
+        parts = urllib.parse.urlsplit(uri)
+        host = parts.hostname or ""
+    except ValueError:
+        return "<unparseable>"
+    return ascii(f"{parts.scheme}://{host}{parts.path}"[:200])
 
 
 def redirect_ok(uri: Any) -> bool:
@@ -215,12 +235,24 @@ class OAuth:
         if not isinstance(meta, dict):
             return 400, {"error": "invalid_client_metadata"}
         uris = meta.get("redirect_uris")
-        if not isinstance(uris, list) or not uris or len(uris) > 16 \
-                or not all(redirect_ok(u) for u in uris) \
-                or (self.pinned() is not None and self.pinned() not in uris):
+        if not isinstance(uris, list) or not uris or len(uris) > 16:
+            logger.info("oauth register refused: redirect_uris is not a list of 1-16")
+            return 400, {"error": "invalid_redirect_uri",
+                         "error_description": "redirect_uris must be a list of 1 to 16 URIs"}
+        # The Gemini app registers its redirect on several Google hosts at once, some
+        # outside REDIRECT_HOSTS. The client is registered with the URIs that pass and
+        # the rest are dropped (RFC 7591 §3.2.1 lets the server replace requested
+        # metadata); sign-in still accepts only an allowed, and once pinned the pinned, URI.
+        kept = [u for u in uris if redirect_ok(u)]
+        pinned = self.pinned()
+        dropped = [_uri_for_log(u) for u in uris if not redirect_ok(u)]
+        logger.info("oauth register: kept %d of %d redirect URIs%s", len(kept), len(uris),
+                    "; dropped " + ", ".join(dropped) if dropped else "")
+        if not kept or (pinned is not None and pinned not in kept):
             return 400, {"error": "invalid_redirect_uri",
                          "error_description": "redirect URIs must be https on an allowed "
                                               "host, and include the pinned one once pinned"}
+        uris = kept
         method = meta.get("token_endpoint_auth_method", "client_secret_basic")
         if method not in AUTH_METHODS:
             method = "client_secret_basic"

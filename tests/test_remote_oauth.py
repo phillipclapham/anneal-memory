@@ -137,6 +137,28 @@ def test_discovery_to_bearer_ends_with_a_token_the_file_already_holds(oauth_serv
     assert req("GET", "/authorize?" + urllib.parse.urlencode(q))[0] == 200
 
 
+def test_gemini_registration_with_hosts_outside_the_set_keeps_the_allowed_ones(oauth_server):
+    """The Gemini app's registration as reported 2026-10-15 (BerriAI/litellm#46640):
+    /r/ and /a/ on three Google hosts, one of them (oauth-redirect-test) not allowed.
+    Refusing the whole list was the live failure of 10-24."""
+    req, gem, _tokens = oauth_server
+    hosts = ("oauth-redirect-sandbox", "oauth-redirect-test", "oauth-redirect")
+    sent = [f"https://{h}.googleusercontent.com/{p}/user_bound_custom-mcp-x"
+            for p in ("r", "a") for h in hosts]
+    st, _h, body = req("POST", "/register", json.dumps(
+        {"redirect_uris": sent, "token_endpoint_auth_method": "client_secret_basic"}).encode())
+    reg = json.loads(body)
+    assert st == 201 and REDIRECT in reg["redirect_uris"]
+    assert reg["redirect_uris"] == [u for u in sent if "oauth-redirect-test" not in u]
+    test_only = [u for u in sent if "oauth-redirect-test" in u]
+    assert req("POST", "/register", json.dumps({"redirect_uris": test_only}).encode())[0] == 400
+    verifier, challenge = _pkce()
+    q = {"response_type": "code", "client_id": reg["client_id"], "redirect_uri": REDIRECT,
+         "code_challenge": challenge, "code_challenge_method": "S256", "state": "x"}
+    st, _h, body = _exchange(req, reg, _code_from(_sign_in(req, q, gem)[1])["code"], verifier)
+    assert st == 200 and json.loads(body)["access_token"] == gem
+
+
 def test_oauth_refusals(oauth_server, tmp_path):
     req, gem, tokens = oauth_server
     st, _h, _ = req("POST", "/register", json.dumps(

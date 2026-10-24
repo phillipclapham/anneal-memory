@@ -27,10 +27,10 @@ no expiry beyond the token's own revocation (``token-revoke``).
 Redirect URIs must be https on a host in :data:`REDIRECT_HOSTS`; a registration
 keeps the URIs that pass and drops the rest, and is refused only when none pass
 (the Gemini app also registers hosts outside the set). Every Gemini app
-returns through those same hosts, so anyone's own app could be pointed here and
+has its redirects on these same Google hosts, so anyone's own app could be pointed here and
 its sign-in link sent to the operator. So the first sign-in that completes an
 exchange pins its exact redirect URI to a file (created exclusively, mode 0600),
-and from then on only that URI is accepted at registration and at sign-in; the
+and from then on a registration must include that URI and sign-in accepts only it; the
 sign-in page shows the full URI and, while nothing is pinned, says that the app
 allowed now becomes the only one. Deleting the pin file re-opens the first use.
 Codes live in memory; a restart between sign-in and exchange fails that sign-in only.
@@ -103,7 +103,12 @@ def _uri_for_log(uri: Any) -> str:
         host = parts.hostname or ""
     except ValueError:
         return "<unparseable>"
-    return ascii(f"{parts.scheme}://{host}{parts.path}"[:200])
+    return ascii(f"{parts.scheme}://{host}{parts.path}"[:120])
+
+
+def _log_authorize_refusal(step: str, problem: str | None, q: dict[str, str] | None) -> None:
+    redirect = _uri_for_log(q.get("redirect_uri")) if q is not None else "-"
+    logger.info("oauth authorize refused (%s): %s; redirect %s", step, problem, redirect)
 
 
 def redirect_ok(uri: Any) -> bool:
@@ -243,12 +248,25 @@ class OAuth:
         # outside REDIRECT_HOSTS. The client is registered with the URIs that pass and
         # the rest are dropped (RFC 7591 §3.2.1 lets the server replace requested
         # metadata); sign-in still accepts only an allowed, and once pinned the pinned, URI.
-        kept = [u for u in uris if redirect_ok(u)]
+        kept: list[str] = []
+        dropped: list[Any] = []
+        for u in uris:
+            (kept if redirect_ok(u) else dropped).append(u)
         pinned = self.pinned()
-        dropped = [_uri_for_log(u) for u in uris if not redirect_ok(u)]
-        logger.info("oauth register: kept %d of %d redirect URIs%s", len(kept), len(uris),
-                    "; dropped " + ", ".join(dropped) if dropped else "")
-        if not kept or (pinned is not None and pinned not in kept):
+        if not kept:
+            refused = "no redirect URI is https on an allowed host"
+        elif pinned is not None and pinned not in kept:
+            refused = ("the pin file is unreadable" if pinned == _INVALID_PIN else
+                       f"the pinned redirect {_uri_for_log(pinned)} is not among them; "
+                       "delete the pin file to connect a new app")
+        else:
+            refused = ""
+        shown = ", ".join(_uri_for_log(u) for u in dropped[:6]) + \
+            (f" and {len(dropped) - 6} more" if len(dropped) > 6 else "")
+        logger.info("oauth register %s: %d of %d redirect URIs allowed%s",
+                    f"refused ({refused})" if refused else "accepted", len(kept), len(uris),
+                    f"; dropped {shown}" if dropped else "")
+        if refused:
             return 400, {"error": "invalid_redirect_uri",
                          "error_description": "redirect URIs must be https on an allowed "
                                               "host, and include the pinned one once pinned"}
@@ -311,6 +329,7 @@ class OAuth:
             return 400, _page("Sign-in refused", "<p>malformed query</p>")
         problem = "a field is repeated" if q is None else self._request_problem(q)
         if problem or q is None:  # never redirect on a bad request (RFC 6749 §4.1.2.1)
+            _log_authorize_refusal("page", problem, q)
             return 400, _page("Sign-in refused", f"<p>{html.escape(problem or '')}</p>")
         return 200, self._form(q, "")
 
@@ -344,6 +363,7 @@ class OAuth:
         q = self._fields(raw)
         problem = "a field is repeated" if q is None else self._request_problem(q)
         if problem:
+            _log_authorize_refusal("submit", problem, q)
             return 400, _page("Sign-in refused", f"<p>{html.escape(problem)}</p>")
         assert q is not None
         token = q.get("token", "").strip()
@@ -401,12 +421,20 @@ class OAuth:
         with self._lock:
             entry = self._codes.pop(q.get("code", ""), None)  # single use, even when refused
         verifier = q.get("code_verifier", "")
-        if (entry is None or entry["exp"] <= time.monotonic()
-                or not hmac.compare_digest(client_id, entry["client_id"])
-                # optional with PKCE (OAuth 2.1); when sent it must be the signed-in one
-                or q.get("redirect_uri", entry["redirect_uri"]) != entry["redirect_uri"]
-                or not _VERIFIER_RE.fullmatch(verifier)
-                or not hmac.compare_digest(s256(verifier), entry["challenge"])):
+        if entry is None or entry["exp"] <= time.monotonic():
+            why = "unknown, used or expired code"
+        elif not hmac.compare_digest(client_id, entry["client_id"]):
+            why = "client_id is not the signed-in one"
+        # optional with PKCE (OAuth 2.1); when sent it must be the signed-in one
+        elif q.get("redirect_uri", entry["redirect_uri"]) != entry["redirect_uri"]:
+            why = "redirect_uri is not the signed-in one"
+        elif not _VERIFIER_RE.fullmatch(verifier) \
+                or not hmac.compare_digest(s256(verifier), entry["challenge"]):
+            why = "PKCE verifier does not match"
+        else:
+            why = ""
+        if why:
+            logger.info("oauth token refused: %s", why)
             return 400, {"error": "invalid_grant"}
         resource = q.get("resource")
         if resource is not None and not self._resource_ok(resource) or \
@@ -417,6 +445,7 @@ class OAuth:
         if still is UNAVAILABLE:
             return 503, {"error": "server_error"}
         if still is None:  # revoked since the sign-in
+            logger.info("oauth token refused: the token was revoked after sign-in")
             return 400, {"error": "invalid_grant"}
         # The pin binds codes issued before it existed too: a second app's code,
         # signed in while nothing was pinned, is refused once the first one pinned.
@@ -426,6 +455,8 @@ class OAuth:
         except OSError:
             return 503, {"error": "server_error"}
         if not pinned_here:
+            logger.info("oauth token refused: redirect %s is not the pinned one",
+                        _uri_for_log(entry["redirect_uri"]))
             return 400, {"error": "invalid_grant"}
         return 200, {"access_token": entry["token"], "token_type": "Bearer"}
 

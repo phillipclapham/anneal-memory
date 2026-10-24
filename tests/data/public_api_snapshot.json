@@ -7546,7 +7546,7 @@
   "fold_surfaced": {
    "kind": "function",
    "module": "anneal_memory.worth",
-   "signature": "(crystal_store: 'CrystalStore', receipt_paths: 'Iterable[str | os.PathLike[str]]', *, now: 'datetime | None' = None, skew_seconds: 'int' = 60) -> 'FoldResult'"
+   "signature": "(crystal_store: 'CrystalStore', receipt_paths: 'Iterable[str | os.PathLike[str]]', *, now: 'datetime | None' = None, skew_seconds: 'int' = 60, lease_token: 'str | None' = None) -> 'FoldResult'"
   },
   "format_wrap_package_text": {
    "kind": "function",

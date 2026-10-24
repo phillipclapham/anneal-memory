@@ -840,9 +840,13 @@ def fold_surfaced(
     *,
     now: datetime | None = None,
     skew_seconds: int = DEFAULT_FOLD_SKEW_SECONDS,
+    lease_token: str | None = None,
 ) -> FoldResult:
     """Fold retrieval receipts into each live crystal's ``surfaced_count`` and
     ``last_surfaced_on``. Meant to run once per wrap, by the wrap's single writer.
+    Under a live consolidation lease that writer presents its fencing token
+    (``lease_token``), as every crystal change does; without it the fold is
+    refused (``LeaseFencedError``, ``lease_held``) and nothing is folded.
 
     A receipt is counted when its ``ts`` is after the store's previous fold mark
     and at or before the cutoff ``now - skew_seconds``; the cutoff then becomes the
@@ -917,7 +921,7 @@ def fold_surfaced(
     if not crystal_store.path.exists():
         return FoldResult(previous_mark=None, mark=None, paths_missing=missing,
                           store_missing=True)
-    with crystal_store._transaction() as data:
+    with crystal_store._transaction(lease_token) as data:
         state = data.get(FOLD_STATE_KEY)
         prev_mark_str: str | None = None
         prev_mark: datetime | None = None

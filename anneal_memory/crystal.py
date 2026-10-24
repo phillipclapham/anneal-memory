@@ -1105,7 +1105,8 @@ class CrystalStore:
                             (text, new_hash, old_hash,
                              datetime.now(timezone.utc).isoformat()),
                         )
-                        _rebaseline_wrap_crystal(conn, lease_token, new_hash)
+                        _rebaseline_wrap_crystal(
+                            conn, lease_token, None if row is None else row[1], new_hash)
                     conn.execute("COMMIT")
                 except sqlite3.Error as e:
                     raise CrystalError(

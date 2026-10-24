@@ -1863,21 +1863,27 @@ def _save_replay(store: Store, result_json: str | None) -> SaveContinuityReplayR
 
 
 def _prepare_fingerprint(
-    store: Store, episode_ids: list[str], schema: Any, continuity: str | None,
-    today: str | None,
+    episode_ids: list[str], schema: Any, continuity: str | None,
+    today: str | None, crystal_hash: str | None,
 ) -> str:
     """sha256 of what a keyed prepare's package is built FROM, never of the
     package (integration L3 I5): the frozen episode ids, the section schema,
     the prior continuity's hash, the wrap's day and the crystal document's
     hash. The re-derive flags and superseded marks a package carries are
     recomputed at replay time, so hashing them refused a legitimate retry on a
-    store a re-derive changed in between."""
+    store a re-derive changed in between.
+
+    Every input is the value the composition itself read, passed in, never
+    re-read here (integration L3 r2, codex MED): ``crystal_hash`` is read
+    BEFORE the package is composed, so a crystal change landing during the
+    composition makes every later replay mismatch (refused, never a second
+    package)."""
     return hashlib.sha256(json.dumps({
         "episode_ids": sorted(episode_ids),
         "schema": schema,
         "continuity_sha256": hashlib.sha256((continuity or "").encode("utf-8")).hexdigest(),
         "today": today or None,
-        "crystal_hash": _conn_crystal_hash(store._conn),
+        "crystal_hash": crystal_hash,
     }, sort_keys=True, default=str).encode("utf-8")).hexdigest()
 
 
@@ -1914,13 +1920,18 @@ def _replay_prepare(
     frozen = set(snapshot["episode_ids"])
     episodes = [ep for ep in store.episodes_since_wrap() if ep.id in frozen]
     schema = store.section_schema_for_wrap()
+    # One read of each input, for the composition and the fingerprint alike; the
+    # crystal hash is read on both sides of the composition, and a move refuses.
+    continuity = store.load_continuity()
+    wrap_today = store._get_metadata("wrap_today") or None
+    crystal_before = _conn_crystal_hash(store._conn)
     package, _roots, _identities = _compose_wrap_package(
-        store, episodes, store.load_continuity(), schema, max_chars=max_chars,
+        store, episodes, continuity, schema, max_chars=max_chars,
         staleness_days=staleness_days, crystal_store=crystal_store,
-        today=store._get_metadata("wrap_today") or None)
-    if _prepare_fingerprint(
-            store, snapshot["episode_ids"], schema, store.load_continuity(),
-            store._get_metadata("wrap_today") or None) != stored.get("package_sha256"):
+        today=wrap_today)
+    if (_conn_crystal_hash(store._conn) != crystal_before or _prepare_fingerprint(
+            snapshot["episode_ids"], schema, continuity, wrap_today,
+            crystal_before) != stored.get("package_sha256")):
         raise IdempotencyConflictError(
             f"prepare_wrap: this idempotency key's package can no longer be rebuilt "
             f"as it was returned (its sources moved since wrap {wrap_token!r} was "
@@ -2340,6 +2351,7 @@ def prepare_wrap(
     schema_warning = schema_role_warning(schema)
     if schema_warning is not None:
         warnings.warn(schema_warning, UserWarning, stacklevel=2)
+    crystal_before = _conn_crystal_hash(store._conn)  # read before composing (_prepare_fingerprint)
     package, derive_roots, frozen_identities = _compose_wrap_package(
         store, episodes, existing, schema, max_chars=max_chars,
         staleness_days=staleness_days, crystal_store=crystal_store)
@@ -2384,7 +2396,7 @@ def prepare_wrap(
         gen3_extras["idempotency"] = (
             idempotency_key, idem_hash, json.dumps({
                 "wrap_token": wrap_token, "package_sha256": _prepare_fingerprint(
-                    store, episode_ids, schema, existing, package["today"])}))
+                    episode_ids, schema, existing, package["today"], crystal_before)}))
     # AM-SCHEMASNAPSHOT: freeze the EXACT schema we read above (line ~884) into
     # the wrap snapshot, so validated_save_continuity reads back this same schema
     # rather than re-reading a possibly-concurrently-changed live schema. Passing

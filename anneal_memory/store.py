@@ -1465,15 +1465,25 @@ def _conn_crystal_hash(conn: sqlite3.Connection) -> str | None:
 
 
 def _rebaseline_wrap_crystal(
-    conn: sqlite3.Connection, lease_token: str | None, crystal_hash: str,
+    conn: sqlite3.Connection, lease_token: str | None, prior_hash: str | None,
+    crystal_hash: str,
 ) -> None:
     """Inside a crystal change's write transaction, after its gate passed: when
-    the change presents the lease token the open wrap was prepared under, it is
-    that wrap's own change (a wrap crystallizes between its prepare and its
-    save), so the wrap record's ``crystal_hash`` moves to ``crystal_hash``. Any
-    other crystal change leaves the record, and the wrap's save refuses
-    (``version_moved``). Known edge: an unleased wrap records no crystal hash,
-    since nothing tells its own crystal change from another writer's."""
+    the change presents the lease token the open wrap was prepared under AND
+    changes the very document the wrap record names (``prior_hash``, the row's
+    hash before this change; ``None`` with no row), it is that wrap's own change
+    (a wrap may crystallize between its prepare and its save, and undo it), so
+    the wrap record's ``crystal_hash`` moves to ``crystal_hash``. The baseline
+    only ever moves along an unbroken chain of the holder's own changes, as a
+    conditional write chains on the version its own last write returned (HTTP
+    If-Match / ETag); a change from any other document, or by anyone else,
+    leaves the record, and the wrap's save refuses (``version_moved``).
+
+    Ruled 2026-10-24 (1024+7 head, integration L3 r2 I1): only a LEASED wrap is
+    fenced on crystals. Without a lease nothing tells the wrap's own crystal
+    change from another writer's, and refusing every crystal change would refuse
+    every flow wrap that crystallizes; an unleased wrap keeps 1.0's behaviour
+    (no crystal precondition). A caller that needs the fence takes the lease."""
     if lease_token is None:
         return
     found = dict(conn.execute(
@@ -1486,7 +1496,8 @@ def _rebaseline_wrap_crystal(
     if (isinstance(fence, dict) and found.get("wrap_token")
             and fence.get("token") == found["wrap_token"]
             and fence.get("token_hash") == _lease_token_digest(lease_token)
-            and "crystal_hash" in fence):
+            and "crystal_hash" in fence
+            and fence["crystal_hash"] == prior_hash):
         fence["crystal_hash"] = crystal_hash
         conn.execute("UPDATE metadata SET value = ? WHERE key = 'wrap_lease'",
                      (json.dumps(fence),))
@@ -7899,7 +7910,12 @@ class Store:
         ``token_hash`` and a lease is live, the token presented must be that
         hash's or the live lease's; else :class:`LeaseFencedError`
         (``token_mismatch``). An unreadable record is not a leased wrap here: a
-        cancel is the recovery path, and must not be stranded by it."""
+        cancel is the recovery path, and must not be stranded by it.
+
+        Known edge, kept (1024+7 head, integration L3 r2 I4): a former holder
+        whose tenure lapsed can still cancel the wrap IT opened, with its old
+        token. One wrap is open at a time, so that is only its own leftover,
+        never the live holder's wrap; the live holder can cancel it too."""
         if not cancelled_token:
             return
         try:

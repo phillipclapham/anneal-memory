@@ -5669,6 +5669,11 @@ def build_parser() -> argparse.ArgumentParser:
     crystal_parser = subparsers.add_parser(
         "crystal",
         help="Crystallized-pattern tier: proven wisdom retrieved on-demand, not always loaded",
+        description="Crystallized-pattern tier: proven wisdom retrieved on-demand, not always "
+                    "loaded. Every subcommand that changes the crystal document is refused "
+                    "(LeaseFencedError, reason=lease_held) while a consolidation lease is live, "
+                    "and writes nothing: the lease holder makes crystal changes during its wrap. "
+                    "Run it again after the lease is released or has expired.",
     )
     crystal_parser.set_defaults(func=_require_crystal_subcommand)
     crystal_sub = crystal_parser.add_subparsers(dest="crystal_command")

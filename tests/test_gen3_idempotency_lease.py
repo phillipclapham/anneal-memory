@@ -179,6 +179,19 @@ def test_t5_a_save_prepared_under_an_expired_lease_is_fenced(tmp_path):
     a._conn.commit()
     assert save(b, gb.token, wrap=pb["wrap_token"])["wrap_id"] == 1
     assert (_count(a, "wraps"), _count(a, "identity_versions")) == (1, 1)
+    # Integration L3 r2 (codex MED, reproduced 10-24): the holder folds receipts
+    # under its own lease; a fold presenting no token is refused, folding nothing.
+    from anneal_memory.worth import fold_surfaced
+
+    receipts = tmp_path / "receipts.jsonl"
+    receipts.write_text(
+        '{"event_id": "e1", "ts": "2026-10-02T10:00:00Z", "exposed": '
+        '[{"pattern": "the_wraps_own", "rank": 0, "source": "evidence_edge"}]}\n')
+    crystal = CrystalStore(tmp_path / "lease.crystal.json")
+    with pytest.raises(LeaseFencedError) as unfolded:
+        fold_surfaced(crystal, [receipts])
+    assert unfolded.value.reason == "lease_held"
+    assert fold_surfaced(crystal, [receipts], lease_token=gb.token).exposures_counted == 1
 
     # B3 L3 r1 U1: every save carries the identity version it was prepared on,
     # leased or not, so an unleased wrap never overwrites a later version.

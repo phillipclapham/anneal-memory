@@ -114,7 +114,8 @@ def _remote_tool_defs() -> list[dict[str, Any]]:
 
     by_name = {t["name"]: t for t in TOOLS}
     defs = [by_name[name] for name in _SERVER_READ_TOOLS] + [READ_CONTINUITY_TOOL]
-    return [{**d, "annotations": dict(_READ_ONLY_ANNOTATIONS)} for d in defs]
+    return [{**d, "annotations": {**d.get("annotations", {}), **_READ_ONLY_ANNOTATIONS}}
+            for d in defs]
 
 
 # The stdio tools exposed remotely. Each name maps to the Server method that
@@ -293,10 +294,12 @@ class RemoteSession:
                 if integral and limit is not None and limit > MAX_RECALL_LIMIT:
                     arguments = {**arguments, "limit": MAX_RECALL_LIMIT}
             try:
-                # Resolve once per request: a db reached through a swapped symlink
-                # (a published generation) and its sibling files then come from one
-                # generation, even if the link moves mid-request.
-                with Store(self._db_path.resolve(), read_only=True, audit=False) as store:
+                # Resolve the directory once per request, keeping the configured file
+                # name: the db and its sibling files (named from that stem) then come from
+                # one published generation's directory even if the link is swapped after
+                # this line. A generation deleted mid-request fails the call; it never mixes.
+                db = self._db_path.parent.resolve() / self._db_path.name
+                with Store(db, read_only=True, audit=False) as store:
                     server = Server(store)
                     result = self._bind(server, store)[name](arguments)
             except Exception as e:  # a tool error is a result, not a transport error

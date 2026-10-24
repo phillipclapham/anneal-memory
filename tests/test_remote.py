@@ -4,7 +4,10 @@ real loopback socket."""
 from __future__ import annotations
 
 import json
+import logging
+import socket
 import threading
+from datetime import date
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -12,6 +15,7 @@ from pathlib import Path
 import pytest
 
 from anneal_memory import remote
+from anneal_memory.crystal import CrystalStore
 from anneal_memory.store import Store
 
 
@@ -21,6 +25,9 @@ def served(tmp_path: Path):
     with Store(db) as s:
         s.record("the replica answers from argushub over funnel", "observation")
         s.save_continuity("# Agent — Memory (v1)\n\n## State\nremote test state\n")
+    CrystalStore(tmp_path / "memory.crystal.json").crystallize(
+        name="funnel_pattern", level=2, explanation="the replica answers over funnel",
+        today=date(2026, 1, 1))
     tokens = tmp_path / "tokens"
     a = remote.token_add(tokens, "claude-ai")
     b = remote.token_add(tokens, "other")
@@ -28,12 +35,14 @@ def served(tmp_path: Path):
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
     base = f"http://127.0.0.1:{httpd.server_address[1]}"
 
-    def call(path: str, body=None, auth: str | None = None):
+    def call(path: str, body=None, auth: str | None = None, origin: str | None = None):
         data = json.dumps(body).encode() if body is not None else None
         req = urllib.request.Request(base + path, data=data, method="POST" if data else "GET")
         req.add_header("Content-Type", "application/json")
         if auth:
             req.add_header("Authorization", auth)
+        if origin:
+            req.add_header("Origin", origin)
         try:
             with urllib.request.urlopen(req, timeout=30) as r:
                 raw = r.read()
@@ -42,6 +51,7 @@ def served(tmp_path: Path):
             return e.code, None
 
     try:
+        call.port = httpd.server_address[1]  # type: ignore[attr-defined]
         yield call, a, b, tokens, tmp_path
     finally:
         httpd.shutdown()
@@ -67,6 +77,20 @@ def test_refused_without_a_valid_token(served):
     assert call("/other", _LIST, f"Bearer {a}")[0] == 404
     assert call("/mcp", _LIST, f"Bearer {a}")[0] == 200
     assert call(f"/mcp/{a}", _LIST)[0] == 200
+    assert call(f"/mcp/{a}", _LIST, origin="https://evil.example")[0] == 403
+    assert call(f"/mcp/{a}", _LIST, origin="https://claude.ai")[0] == 200
+    # A refused request's unread body must not be parsed as a second request on a
+    # kept-alive socket: exactly one response, then the server closes.
+    inner = (f"POST /mcp/{a} HTTP/1.1\r\nHost: x\r\nContent-Length: 2\r\n\r\n{{}}").encode()
+    raw = (b"POST /mcp HTTP/1.1\r\nHost: x\r\nContent-Length: " + str(len(inner)).encode()
+           + b"\r\n\r\n" + inner)
+    with socket.create_connection(("127.0.0.1", call.port), timeout=10) as sock:
+        sock.sendall(raw)
+        got = b""
+        while chunk := sock.recv(65536):
+            got += chunk
+    assert got.count(b"HTTP/1.") == 1 and got.startswith(b"HTTP/1.1 401")
+    assert b"Connection: close" in got
 
 
 def test_no_write_or_consolidate_tool_is_reachable(served):
@@ -90,12 +114,20 @@ def test_recall_round_trip_writes_nothing(served):
     assert "the replica answers from argushub over funnel" in r["result"]["content"][0]["text"]
     _s, r = call("/mcp", _tool("read_continuity"), f"Bearer {a}")
     assert "remote test state" in r["result"]["content"][0]["text"]
+    _s, r = call("/mcp", _tool("crystal_index"), f"Bearer {a}")
+    assert "funnel_pattern" in r["result"]["content"][0]["text"]
+    _s, r = call("/mcp", _tool("crystal_recall", {"query": "replica funnel"}), f"Bearer {a}")
+    assert r["result"].get("isError") is not True
     after = {p.name: p.stat().st_mtime_ns for p in path.iterdir()}
     assert after == before
 
 
-def test_tokens_are_per_connector_and_never_stored(served):
+def test_tokens_are_per_connector_and_never_stored(served, caplog):
     call, a, b, tokens, _p = served
+    caplog.set_level(logging.DEBUG)
+    call(f"/mcp/{a}", _tool("recall", {"keyword": "funnel"}))
+    call(f"/mcp/{a}x", _LIST)
+    assert a not in caplog.text and "/mcp/" not in caplog.text
     text = tokens.read_text()
     assert a not in text and b not in text
     remote.token_revoke(tokens, "other")

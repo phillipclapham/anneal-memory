@@ -70,6 +70,12 @@ SUPPORTED_PROTOCOL_VERSIONS = ("2025-11-25", "2025-06-18", "2025-03-26")
 
 MAX_BODY_BYTES = 1024 * 1024
 MAX_CONCURRENT = 8
+MAX_REPLY_BYTES = 4 * 1024 * 1024
+MAX_RECALL_LIMIT = 200
+
+# Browsers send Origin; claude.ai's backend calls are expected not to. A present
+# Origin outside this set is refused (Streamable HTTP: 403 on an invalid Origin).
+ALLOWED_ORIGINS = frozenset({"https://claude.ai", "https://claude.com"})
 REQUEST_TIMEOUT_S = 15
 
 _TOKEN_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
@@ -244,13 +250,20 @@ class RemoteSession:
                 return _rpc_error(msg_id, -32602, "arguments must be an object")
             if name not in REMOTE_TOOLS:
                 return _rpc_result(msg_id, _tool_result(f"Unknown tool: {name}", is_error=True))
+            if name == "recall":
+                # The stdio recall has no ceiling on limit; a remote reply does.
+                limit = arguments.get("limit")
+                if isinstance(limit, (int, float)) and not isinstance(limit, bool):
+                    arguments = {**arguments, "limit": min(limit, MAX_RECALL_LIMIT)}
             try:
                 with Store(self._db_path, read_only=True, audit=False) as store:
                     server = Server(store)
-                    return _rpc_result(msg_id, self._bind(server, store)[name](arguments))
+                    result = self._bind(server, store)[name](arguments)
             except Exception as e:  # a tool error is a result, not a transport error
-                logger.exception("tool %s failed", name)
+                # Class only: the message can carry paths or query text.
+                logger.error("tool %s failed: %s", name, type(e).__name__)
                 return _rpc_result(msg_id, _tool_result(f"Error: {type(e).__name__}", is_error=True))
+            return _rpc_result(msg_id, result)
         return _rpc_error(msg_id, -32601, f"Method not found: {method}")
 
 
@@ -274,7 +287,15 @@ class _Handler(BaseHTTPRequestHandler):
 
     def _send(self, status: int, body: bytes = b"", ctype: str | None = None,
               extra: dict[str, str] | None = None) -> None:
+        # One request per connection. A refusal sent before the body is read
+        # would otherwise leave that body on a kept-alive socket to be parsed
+        # as the next request (L1/L2 1024+9: request smuggling through the
+        # proxy's connection pool), and no early return can forget this.
+        self.close_connection = True
+        if status >= 400:
+            logger.info("refused %d %s", status, self.command)
         self.send_response(status)
+        self.send_header("Connection", "close")
         if ctype:
             self.send_header("Content-Type", ctype)
         for k, v in (extra or {}).items():
@@ -289,7 +310,11 @@ class _Handler(BaseHTTPRequestHandler):
         self._send(status, json.dumps(obj).encode("utf-8"), "application/json")
 
     def _authorize(self) -> str | None:
-        """The connector name, or None after sending 404/401."""
+        """The connector name, or None after sending a refusal."""
+        origin = self.headers.get("Origin")
+        if origin is not None and origin not in ALLOWED_ORIGINS:
+            self._send(403)
+            return None
         path = self.path.split("?", 1)[0]
         presented: str | None = None
         if path == "/mcp":
@@ -346,12 +371,13 @@ class _Handler(BaseHTTPRequestHandler):
         if self.headers.get("Transfer-Encoding"):
             self._send(411)
             return
-        try:
-            length = int(self.headers.get("Content-Length", ""))
-        except ValueError:
+        values = self.headers.get_all("Content-Length") or []
+        # Digits only, exactly one header: int() also takes "+5", " 5", "1_0".
+        if len(values) != 1 or not (values[0].isascii() and values[0].isdigit()):
             self._send(411)
             return
-        if length < 0 or length > MAX_BODY_BYTES:
+        length = int(values[0])
+        if length > MAX_BODY_BYTES:
             self._send(413)
             return
         raw = self.rfile.read(length)
@@ -369,13 +395,22 @@ class _Handler(BaseHTTPRequestHandler):
             self._send(202)
             return
         reply = self.session.handle(msg)
-        tool = (msg.get("params") or {}).get("name") if msg.get("method") == "tools/call" else None
-        logger.info("connector=%s method=%s%s", connector, msg.get("method"),
+        method = msg.get("method")
+        params = msg.get("params")
+        tool = params.get("name") if method == "tools/call" and isinstance(params, dict) else None
+        logger.info("connector=%s method=%s%s", connector,
+                    method if isinstance(method, str) and method.isprintable() else "?",
                     f" tool={tool}" if isinstance(tool, str) and tool in REMOTE_TOOLS else "")
         if reply is None:
             self._send(202)
-        else:
-            self._send_json(200, reply)
+            return
+        body = json.dumps(reply).encode("utf-8")
+        if len(body) > MAX_REPLY_BYTES:
+            reply = _rpc_result(reply.get("id"), _tool_result(
+                f"Error: reply over {MAX_REPLY_BYTES} bytes; narrow the query or lower limit",
+                is_error=True))
+            body = json.dumps(reply).encode("utf-8")
+        self._send(200, body, "application/json")
 
 
 def make_server(db_path: str | Path, tokens_path: str | Path,

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import time
 import warnings
+from unittest import mock
 
 import pytest
 
@@ -47,7 +48,17 @@ def test_t4_an_idempotency_key_reused_for_another_request_is_refused(tmp_path):
     # The save: a keyed retry gets its result where an unkeyed one is a phantom
     # re-save, and the same key with other text changes nothing.
     p = prepare_wrap(s, idempotency_key="prep-1")
-    assert prepare_wrap(s, idempotency_key="prep-1")["wrap_token"] == p["wrap_token"]
+    assert prepare_wrap(s, idempotency_key="prep-1") == p  # rebuilt from the open snapshot
+    # r1 T4: the key row keeps the wrap token, never the package's episode text.
+    row = s._conn.execute("SELECT result_json FROM idempotency_keys WHERE key = 'prep-1'").fetchone()
+    assert "idem one" not in row[0] and p["wrap_token"] in row[0]
+    # r1 T3: a retry whose early read raced its first call is a replay at every
+    # later wrap-in-progress check, prepare_wrap's own and wrap_started's.
+    with mock.patch.object(Store, "_idempotency_replay", side_effect=[(False, None), (True, row[0])]):
+        assert prepare_wrap(s, idempotency_key="prep-1")["wrap_token"] == p["wrap_token"]
+    with mock.patch.object(Store, "_idempotency_replay", return_value=(False, None)), \
+            mock.patch.object(Store, "get_wrap_started_at", return_value=None):
+        assert prepare_wrap(s, idempotency_key="prep-1")["wrap_token"] == p["wrap_token"]
     saved = validated_save_continuity(
         s, _TEXT, wrap_token=p["wrap_token"], today="2026-10-23", idempotency_key="save-1")
     again = validated_save_continuity(
@@ -59,6 +70,9 @@ def test_t4_an_idempotency_key_reused_for_another_request_is_refused(tmp_path):
             today="2026-10-23", idempotency_key="save-1")
     assert (_count(s, "wraps"), _count(s, "identity_versions")) == (1, 1)
     assert s.load_continuity() == _TEXT
+    with pytest.raises(IdempotencyConflictError) as closed:  # r1 T4: never a stale package
+        prepare_wrap(s, idempotency_key="prep-1")
+    assert closed.value.reason == "wrap_closed"
     s.close()
 
 
@@ -67,24 +81,40 @@ def test_t5_a_save_prepared_under_an_expired_lease_is_fenced(tmp_path):
     a = Store(path, project_name="T")
     b = Store(path, project_name="T")  # another process on the same store
     a.record("obs", EpisodeType.OBSERVATION)
-    assert a.lease_acquire("A", ttl_seconds=0.3) == 1
-    pa = prepare_wrap(a, lease_holder="A")
+    ga = a.lease_acquire("A", ttl_seconds=0.6)
+    assert ga.epoch == 1 and ga.token not in repr(ga)
+    pa = prepare_wrap(a, lease_token=ga.token)
     assert a.wrap_lease_fence() == {"holder": "A", "epoch": 1, "identity_version": None}
-    time.sleep(0.4)
 
-    def save(store, holder, text=_TEXT, token=pa["wrap_token"]):
+    def save(store, token, text=_TEXT, wrap=pa["wrap_token"]):
         return validated_save_continuity(
-            store, text, wrap_token=token, today="2026-10-23", lease_holder=holder)
+            store, text, wrap_token=wrap, today="2026-10-23", lease_token=token)
+
+    # r1 T1: with A's lease live, another writer presenting no token or the wrong
+    # one cannot commit A's wrap (draft 1 checked it as the preparer and let B in).
+    for token in (None, "0" * 32):
+        with pytest.raises(LeaseFencedError) as fenced:
+            save(b, token, text=_TEXT.replace("Active.", "B's text."))
+        assert fenced.value.reason == "token_mismatch"
+    with pytest.raises(LeaseFencedError):  # one holder name is not one tenure
+        b.lease_acquire("A", ttl_seconds=60)
+    # r1 T2: every identity commit on a leased store presents the token.
+    with pytest.raises(LeaseFencedError) as raw:
+        b.save_continuity(_TEXT.replace("Active.", "raw."))
+    assert raw.value.reason == "lease_held"
+    assert _count(a, "identity_versions") == 0
+    time.sleep(0.7)
 
     # Expired with no one taking over: refused all the same (draft 2 checked the
     # epoch only, and let this commit).
     with pytest.raises(LeaseFencedError):
-        save(a, "A")
-    assert b.lease_acquire("B", ttl_seconds=60) == 2
+        save(a, ga.token)
+    gb = b.lease_acquire("B", ttl_seconds=60)
+    assert gb.epoch == 2
     with pytest.raises(LeaseFencedError):
-        save(a, "A")
-    with pytest.raises(LeaseFencedError):  # the token is not ownership
-        save(b, "B", text=_TEXT.replace("Active.", "B's text."))
+        save(a, ga.token)
+    with pytest.raises(LeaseFencedError):  # the wrap token is not ownership
+        save(b, gb.token, text=_TEXT.replace("Active.", "B's text."))
     with pytest.raises(LeaseFencedError):
         validated_save_continuity(b, _TEXT, wrap_token=pa["wrap_token"], today="2026-10-23")
     assert (_count(a, "wraps"), _count(a, "identity_versions")) == (0, 0)
@@ -94,8 +124,8 @@ def test_t5_a_save_prepared_under_an_expired_lease_is_fenced(tmp_path):
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         b.wrap_cancelled()
-    pb = prepare_wrap(b, lease_holder="B")
-    assert save(b, "B", token=pb["wrap_token"])["wrap_id"] == 1
+    pb = prepare_wrap(b, lease_token=gb.token)
+    assert save(b, gb.token, wrap=pb["wrap_token"])["wrap_id"] == 1
     assert (_count(a, "wraps"), _count(a, "identity_versions")) == (1, 1)
     a.close()
     b.close()

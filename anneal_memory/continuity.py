@@ -95,7 +95,8 @@ from .retrieval import (
 )
 from .store import (
     AnnealMemoryError,
-    LeaseFencedError,
+    IdempotencyConflictError,
+    _IDEMPOTENCY_SCOPE,
     _IdempotentReplay,
     _idempotency_request_hash,
     _validate_idempotency_key,
@@ -1746,6 +1747,139 @@ def _consolidate_gate(
     )
 
 
+def _compose_wrap_package(
+    store: Store,
+    episodes: list[Episode],
+    existing: str | None,
+    schema: list[SectionSpec],
+    *,
+    max_chars: int | None,
+    staleness_days: int,
+    crystal_store: CrystalStore | None,
+    today: str | None = None,
+) -> tuple[WrapPackageDict, Any, Any]:
+    """The package a prepare hands the composer, from the window's episodes, the
+    continuity and the schema: ``(package, derive_roots, frozen_identities)``.
+    One code path for :func:`prepare_wrap` and for a keyed prepare's replay
+    (:func:`_replay_prepare`), which rebuilds from the open wrap's snapshot."""
+    # Mark episodes in the window that a later episode replaced, so the agent
+    # does not graduate a pattern on a stale fact (L2 review: unmarked, a 2x
+    # citing only the superseded episode validated).
+    _replaced = store.superseded_by_map([ep.id for ep in episodes])
+    package = _build_wrap_package(
+        [
+            dataclasses.replace(ep, superseded_by=_replaced[ep.id])
+            if ep.id in _replaced else ep
+            for ep in episodes
+        ],
+        existing,
+        store.project_name,
+        max_chars=max_chars,
+        staleness_days=staleness_days,
+        today=today,
+        schema=schema,
+        crystal_store=crystal_store,
+    )
+    # spore-1233: the composer sees each State line with the flag a re-derive
+    # run gives it now, so it can rewrite what no longer holds. Measured
+    # 2026-09-30: without this the model cannot see which lines are stale.
+    # Commands run only on an opted-in store, under the containment in
+    # docs/rederive.md. The header line is NOT handed over: a composer can move
+    # it anywhere, and a verdict outside the State lines would outlive the save
+    # (L3 r2). Flags sit after a State line's annotation, where every save
+    # strips them.
+    # spore-1282: the root map is read ONCE, used for these flags and frozen into
+    # the wrap by prepare_wrap, so the save compares against the map the composer saw.
+    derive_roots = (
+        trusted_roots(store.path)
+        if any(s["role"] == "derived-state" for s in schema)
+        else None
+    )
+    # Identities are taken BEFORE the flags run, so a directory replaced while
+    # they run is a different identity from the one frozen (codex L3 r1).
+    frozen_identities = None if derive_roots is None else root_identities(derive_roots)
+    if existing is not None and derive_roots is not None:
+        derive_report = rederive_text(existing, schema, derive_roots)
+        package["continuity"] = drop_header(derive_report.text)
+        if derive_report.enabled:
+            note = (
+                "\n\n**Re-derive flags in the current continuity.** Each State line "
+                "below carries the flag a re-derive run for this wrap gave it. Flags "
+                "are true only now and the save strips them: do not copy them."
+            )
+            unconfirmed = [
+                f"line {r.index + 1}: {r.flag}"
+                for r in derive_report.results
+                if r.status not in ("ok", "judged")
+            ]
+            if unconfirmed:
+                package["unconfirmed_state"] = unconfirmed
+                note += (
+                    " A line flagged STALE no longer holds as written: rewrite it to "
+                    "what is true now, with a [derive: ...] that holds, or remove it. "
+                    "A line flagged DERIVE ERROR, REFUSED, NO DERIVE or UNBOUND would "
+                    "refuse this save: fix its annotation or remove the line (UNBOUND "
+                    "means its [derive@LABEL: ...] names a root this store has not "
+                    "bound; only the operator can bind one). A line flagged "
+                    "NOT DERIVED was not checked."
+                )
+        else:
+            note = (
+                "\n\n**State was not re-derived.** This store is not opted in to "
+                "re-derive, so no State line was checked for this wrap."
+            )
+        package["instructions"] += note
+    return package, derive_roots, frozen_identities
+
+
+def _replay_prepare(
+    store: Store,
+    result_json: str | None,
+    *,
+    max_chars: int | None,
+    staleness_days: int,
+    crystal_store: CrystalStore | None,
+) -> PrepareWrapResult:
+    """A keyed ``prepare_wrap`` retry: its key row holds only the wrap token
+    (never the package, whose episode text would outlive an episode's deletion).
+    While that wrap is the open one, the package is rebuilt from its frozen
+    snapshot (episode ids, schema, the prepare's day) by the same code a prepare
+    runs; once it is saved or cancelled, ``IdempotencyConflictError`` with
+    ``reason="wrap_closed"``, never a stale package.
+
+    Known edge: what is true only now is recomputed, as on any prepare: the
+    re-derive flags and the superseded marks. The other arguments are the
+    first call's (they are in the request hash)."""
+    stored = json.loads(result_json or "{}")
+    wrap_token = stored.get("wrap_token") if isinstance(stored, dict) else None
+    snapshot = store.load_wrap_snapshot()
+    if snapshot is None or wrap_token is None or snapshot["token"] != wrap_token:
+        raise IdempotencyConflictError(
+            f"prepare_wrap: this idempotency key opened wrap {wrap_token!r}, which "
+            "is no longer open (saved or cancelled), so there is no package to "
+            "return. Nothing was written. Prepare again with a new key.",
+            operation="wrap_started", path=str(store.path), reason="wrap_closed")
+    frozen = set(snapshot["episode_ids"])
+    episodes = [ep for ep in store.episodes_since_wrap() if ep.id in frozen]
+    schema = store.section_schema_for_wrap()
+    package, _roots, _identities = _compose_wrap_package(
+        store, episodes, store.load_continuity(), schema, max_chars=max_chars,
+        staleness_days=staleness_days, crystal_store=crystal_store,
+        today=store._get_metadata("wrap_today") or None)
+    return PrepareWrapResult(
+        status="ready",
+        message=f"Ready to compress {len(episodes)} episode(s).",
+        episode_count=len(episodes),
+        package=package,
+        assoc_context=None,
+        wrap_token=wrap_token,
+        uncovered_proven_to_check=package["uncovered_proven"],
+        schema_warning=schema_role_warning(schema),
+        crystallization_candidates=package["crystallization_candidates"],
+        rewarm_candidates=package["rewarm_candidates"],
+    )
+
+
 def prepare_wrap(
     store: Store,
     *,
@@ -1756,7 +1890,7 @@ def prepare_wrap(
     allow_sole_live: bool = False,
     wrap_token: str | None = None,
     idempotency_key: str | None = None,
-    lease_holder: str | None = None,
+    lease_token: str | None = None,
 ) -> PrepareWrapResult:
     """Run the full store-aware prepare_wrap pipeline.
 
@@ -1840,17 +1974,23 @@ def prepare_wrap(
         idempotency_key: A request key (generation 3), bound to the hash of
             every argument here plus the store. The key row commits in the
             transaction that opens the wrap. A retry with the same key and
-            request returns the stored result (the same token and package) and
-            opens nothing; the same key with another request raises
-            :class:`~anneal_memory.IdempotencyConflictError`. A call that opens
-            no wrap (empty or downgraded) stores no key.
-        lease_holder: Prepare under this holder's consolidation lease
-            (:meth:`Store.lease_acquire`). The holder's epoch and the latest
-            identity version are recorded with the wrap, and its save is
-            admitted only while the holder still holds that epoch, unexpired,
-            and no other identity version has been written. A holder with no
-            unexpired lease raises :class:`~anneal_memory.LeaseFencedError`
-            and no wrap is opened. ``None`` (default): no lease, as before.
+            request returns the same token and package and opens nothing (the
+            key row keeps only the token; the package is rebuilt from the open
+            wrap's snapshot, its re-derive flags and superseded marks as of now; once
+            that wrap is saved or cancelled the retry
+            raises :class:`~anneal_memory.IdempotencyConflictError` with
+            ``reason="wrap_closed"``); the same key with another request raises
+            it with ``reason="request_mismatch"``. A call that opens no wrap
+            (empty or downgraded) stores no key.
+        lease_token: Prepare under the consolidation lease this fencing token
+            names (``Store.lease_acquire(...).token``). The token's hash, the
+            lease's epoch and the latest identity version are recorded with the
+            wrap, and its save must present the same token and is admitted only
+            while that tenure is unexpired and no other identity version has
+            been written. A token that is not the live lease's raises
+            :class:`~anneal_memory.LeaseFencedError` and no wrap is opened.
+            ``None`` (default): no lease, as before (on a store where another
+            holds an unexpired lease, the save is then refused).
         wrap_token: A caller-supplied token for the wrap this call opens, in
             ``uuid.uuid4().hex`` form (32 lowercase hex characters), or ``None``
             (default) to have one minted. A caller that mints its own holds the
@@ -1953,21 +2093,23 @@ def prepare_wrap(
                 "prepare_wrap: wrap_token must be 32 lowercase hex characters, the "
                 "form uuid.uuid4().hex produces."
             )
-    if lease_holder is not None and (not isinstance(lease_holder, str) or not lease_holder):
-        raise ValueError("prepare_wrap: lease_holder must be a non-empty str")
+    if lease_token is not None and (not isinstance(lease_token, str) or not lease_token):
+        raise ValueError("prepare_wrap: lease_token must be a non-empty str")
     idem_hash = ""
     if idempotency_key is not None:
         _validate_idempotency_key(idempotency_key)
-        idem_hash = _idempotency_request_hash("wrap_started", None, store.store_id, {
+        idem_hash = _idempotency_request_hash("wrap_started", _IDEMPOTENCY_SCOPE, store.store_id, {
             "max_chars": max_chars, "staleness_days": staleness_days,
             "crystal_store": None if crystal_store is None else str(crystal_store.path),
             "session_id": session_id, "allow_sole_live": allow_sole_live,
-            "wrap_token": wrap_token, "lease_holder": lease_holder,
+            "wrap_token": wrap_token, "lease_token": lease_token,
         })
         replayed, stored = store._idempotency_replay(
             idempotency_key, idem_hash, "wrap_started")
         if replayed:
-            return json.loads(stored or "null")
+            return _replay_prepare(
+                store, stored, max_chars=max_chars, staleness_days=staleness_days,
+                crystal_store=crystal_store)
     # A meta written by a newer anneal-memory refuses HERE, before any wrap is opened or a
     # compose spent: the save would be refused at load_meta anyway (gen 2 sidecar rule).
     store.load_meta()
@@ -2106,6 +2248,15 @@ def prepare_wrap(
     # concurrent library caller).
     started = store.get_wrap_started_at()
     if started:
+        if idempotency_key is not None:
+            # A keyed retry whose first call opened the wrap after the early check
+            # above is a replay, not a refusal (B3 r1 T3; wrap_started does the same).
+            replayed, stored = store._idempotency_replay(
+                idempotency_key, idem_hash, "wrap_started")
+            if replayed:
+                return _replay_prepare(
+                    store, stored, max_chars=max_chars, staleness_days=staleness_days,
+                    crystal_store=crystal_store)
         raise WrapInProgressError(started_at=started)
 
     # All store reads and package construction happen BEFORE wrap_started().
@@ -2126,72 +2277,9 @@ def prepare_wrap(
     schema_warning = schema_role_warning(schema)
     if schema_warning is not None:
         warnings.warn(schema_warning, UserWarning, stacklevel=2)
-    # Mark episodes in the window that a later episode replaced, so the agent
-    # does not graduate a pattern on a stale fact (L2 review: unmarked, a 2x
-    # citing only the superseded episode validated).
-    _replaced = store.superseded_by_map([ep.id for ep in episodes])
-    package = _build_wrap_package(
-        [
-            dataclasses.replace(ep, superseded_by=_replaced[ep.id])
-            if ep.id in _replaced else ep
-            for ep in episodes
-        ],
-        existing,
-        store.project_name,
-        max_chars=max_chars,
-        staleness_days=staleness_days,
-        schema=schema,
-        crystal_store=crystal_store,
-    )
-    # spore-1233: the composer sees each State line with the flag a re-derive
-    # run gives it now, so it can rewrite what no longer holds. Measured
-    # 2026-09-30: without this the model cannot see which lines are stale.
-    # Commands run only on an opted-in store, under the containment in
-    # docs/rederive.md. The header line is NOT handed over: a composer can move
-    # it anywhere, and a verdict outside the State lines would outlive the save
-    # (L3 r2). Flags sit after a State line's annotation, where every save
-    # strips them.
-    # spore-1282: the root map is read ONCE, used for these flags and frozen into
-    # the wrap below, so the save compares against the map the composer saw.
-    derive_roots = (
-        trusted_roots(store.path)
-        if any(s["role"] == "derived-state" for s in schema)
-        else None
-    )
-    # Identities are taken BEFORE the flags run, so a directory replaced while
-    # they run is a different identity from the one frozen (codex L3 r1).
-    frozen_identities = None if derive_roots is None else root_identities(derive_roots)
-    if existing is not None and derive_roots is not None:
-        derive_report = rederive_text(existing, schema, derive_roots)
-        package["continuity"] = drop_header(derive_report.text)
-        if derive_report.enabled:
-            note = (
-                "\n\n**Re-derive flags in the current continuity.** Each State line "
-                "below carries the flag a re-derive run for this wrap gave it. Flags "
-                "are true only now and the save strips them: do not copy them."
-            )
-            unconfirmed = [
-                f"line {r.index + 1}: {r.flag}"
-                for r in derive_report.results
-                if r.status not in ("ok", "judged")
-            ]
-            if unconfirmed:
-                package["unconfirmed_state"] = unconfirmed
-                note += (
-                    " A line flagged STALE no longer holds as written: rewrite it to "
-                    "what is true now, with a [derive: ...] that holds, or remove it. "
-                    "A line flagged DERIVE ERROR, REFUSED, NO DERIVE or UNBOUND would "
-                    "refuse this save: fix its annotation or remove the line (UNBOUND "
-                    "means its [derive@LABEL: ...] names a root this store has not "
-                    "bound; only the operator can bind one). A line flagged "
-                    "NOT DERIVED was not checked."
-                )
-        else:
-            note = (
-                "\n\n**State was not re-derived.** This store is not opted in to "
-                "re-derive, so no State line was checked for this wrap."
-            )
-        package["instructions"] += note
+    package, derive_roots, frozen_identities = _compose_wrap_package(
+        store, episodes, existing, schema, max_chars=max_chars,
+        staleness_days=staleness_days, crystal_store=crystal_store)
     episode_ids = [ep.id for ep in episodes]
     # Always None since 1.0.2 (the composer no longer sees association links).
     assoc_context = None
@@ -2214,7 +2302,6 @@ def prepare_wrap(
     token_bound = wrap_token is not None
     if wrap_token is None:
         wrap_token = uuid.uuid4().hex
-    # Built before the wrap opens, so a keyed call stores it in that transaction.
     result = PrepareWrapResult(
         status="ready",
         message=f"Ready to compress {len(episodes)} episode(s).",
@@ -2228,10 +2315,11 @@ def prepare_wrap(
         rewarm_candidates=package["rewarm_candidates"],
     )
     gen3_extras: dict[str, Any] = {}
-    if lease_holder is not None:
-        gen3_extras["lease_holder"] = lease_holder
+    if lease_token is not None:
+        gen3_extras["lease_token"] = lease_token
     if idempotency_key is not None:
-        gen3_extras["idempotency"] = (idempotency_key, idem_hash, json.dumps(result))
+        gen3_extras["idempotency"] = (
+            idempotency_key, idem_hash, json.dumps({"wrap_token": wrap_token}))
     # AM-SCHEMASNAPSHOT: freeze the EXACT schema we read above (line ~884) into
     # the wrap snapshot, so validated_save_continuity reads back this same schema
     # rather than re-reading a possibly-concurrently-changed live schema. Passing
@@ -2251,7 +2339,9 @@ def prepare_wrap(
         )
     except _IdempotentReplay as replay:
         # A concurrent call with the same key and request opened the wrap first.
-        return json.loads(replay.result_json or "null")
+        return _replay_prepare(
+            store, replay.result_json, max_chars=max_chars,
+            staleness_days=staleness_days, crystal_store=crystal_store)
     except WrapWindowMovedError:
         return _downgraded_empty(
             "Consolidate downgraded to capture-only (downgraded-wrap-replaced): "
@@ -2746,7 +2836,7 @@ def validated_save_continuity(
     unattended: bool = False,
     model: str | None = None,
     idempotency_key: str | None = None,
-    lease_holder: str | None = None,
+    lease_token: str | None = None,
 ) -> SaveContinuityResult:
     """Save continuity with the full validation pipeline.
 
@@ -2912,15 +3002,18 @@ def validated_save_continuity(
             between the commit and the full result's write leaves a provisional
             result (``wrap_id``, ``chars``, ``path``, ``content_hash``,
             ``provisional: True``), which a retry returns.
-        lease_holder: The consolidation-lease holder making this save. When the
-            wrap was prepared under a lease (``prepare_wrap(lease_holder=...)``),
-            the save is admitted only if ONE predicate holds inside its write
-            transaction: this holder (default: the one that prepared) holds the
-            lease, at the prepared epoch, unexpired, and the latest identity
-            version is the one prepared from. Otherwise
-            :class:`~anneal_memory.LeaseFencedError` and nothing is written.
-            Passing a holder for a wrap prepared without a lease is refused the
-            same way. Neither: no lease, as before.
+        lease_token: The consolidation lease's fencing token, presented by the
+            writer. When the wrap was prepared under a lease
+            (``prepare_wrap(lease_token=...)``), the save is admitted only if ONE
+            predicate holds inside its write transaction (``Store._lease_gate``):
+            this token hashes to the one prepared under, the lease still holds
+            that hash and epoch, unexpired, and the latest identity version is
+            the one prepared from. A leased wrap's save that presents no token
+            is refused, never defaulted. A wrap prepared without a lease, on a
+            store where an unexpired lease exists, must present that lease's
+            token. Otherwise :class:`~anneal_memory.LeaseFencedError` (with its
+            ``reason``) and nothing is written. No lease and no token: as
+            before.
 
     Returns:
         :class:`SaveContinuityResult` — a :class:`TypedDict` with the
@@ -3011,12 +3104,12 @@ def validated_save_continuity(
     """
     # Generation 3: a keyed retry of a committed save gets its result back here,
     # before the no-wrap refusal below would call it a phantom re-save.
-    if lease_holder is not None and (not isinstance(lease_holder, str) or not lease_holder):
-        raise ValueError("validated_save_continuity: lease_holder must be a non-empty str")
+    if lease_token is not None and (not isinstance(lease_token, str) or not lease_token):
+        raise ValueError("validated_save_continuity: lease_token must be a non-empty str")
     idem_hash = ""
     if idempotency_key is not None:
         _validate_idempotency_key(idempotency_key)
-        idem_hash = _idempotency_request_hash("save_continuity", None, store.store_id, {
+        idem_hash = _idempotency_request_hash("save_continuity", _IDEMPOTENCY_SCOPE, store.store_id, {
             "text": text,
             "affective_state": None if affective_state is None else asdict(affective_state),
             "today": today, "wrap_token": wrap_token, "allow_shrink": allow_shrink,
@@ -3026,7 +3119,7 @@ def validated_save_continuity(
             "compost": None if compost is None else list(compost),
             "session_id": session_id, "allow_sole_live": allow_sole_live,
             "require_rederive": require_rederive, "unattended": unattended,
-            "model": model, "lease_holder": lease_holder,
+            "model": model, "lease_token": lease_token,
         })
         replayed, stored = store._idempotency_replay(
             idempotency_key, idem_hash, "save_continuity")
@@ -3555,22 +3648,10 @@ def validated_save_continuity(
                 return json.loads(idem_stored or "null")
             if idem_status == "conflict":
                 store._idempotency_conflict(idempotency_key, "save_continuity")
-        fence = store.wrap_lease_fence()
-        if fence is not None or lease_holder is not None:
-            if fence is None:
-                raise LeaseFencedError(
-                    f"validated_save_continuity: lease holder {lease_holder!r} named, "
-                    "but this wrap was not prepared under a lease. Nothing was saved.")
-            if not store._lease_fence_holds(
-                lease_holder if lease_holder is not None else fence["holder"],
-                fence["epoch"], fence["identity_version"],
-            ):
-                raise LeaseFencedError(
-                    "validated_save_continuity: the consolidation lease no longer "
-                    f"admits this save (prepared by {fence['holder']!r} at epoch "
-                    f"{fence['epoch']}, identity version {fence['identity_version']}): "
-                    "the lease expired, changed holder, or another identity version "
-                    "was written since. Nothing was saved; the wrap stays open.")
+        # The gate runs again at the version insert below; run here first, a
+        # refusal costs no graduation work. A refused save leaves the wrap open.
+        lease_prepared = store._wrap_lease_prepared()
+        store._lease_gate("validated_save_continuity", lease_token, lease_prepared)
 
         # The meta read above may be stale: a save_meta committed since then
         # would be reverted by the version row below (L3 r1 codex HIGH). Re-read
@@ -3709,10 +3790,13 @@ def validated_save_continuity(
         store._insert_identity_version(
             grad_result.text, meta_json=store._meta_json(meta),
             source="wrap", wrap_id=wrap_result.wrap_id,
+            lease_token=lease_token, lease_prepared=lease_prepared,
         )
         if idempotency_key is not None:
             # Provisional result, in this transaction; replaced by the full one
-            # after the commit (_idempotency_complete).
+            # after the commit (_idempotency_complete). Known edge: a retry inside
+            # that window, or after a crash in it, gets this subset with
+            # ``provisional: True``. It holds no episode text (path, counts, hashes).
             store._idempotency_insert(
                 idempotency_key, "save_continuity", idem_hash, json.dumps({
                     "wrap_id": wrap_result.wrap_id, "chars": len(grad_result.text),
@@ -4472,7 +4556,8 @@ def _pipeline_tmp_present(store: "Store") -> bool:
 
 
 def replace_section(
-    store: "Store", heading: str, body: str, *, expected_version: str
+    store: "Store", heading: str, body: str, *, expected_version: str,
+    lease_token: str | None = None,
 ) -> SectionWriteResult:
     """:meth:`Store.replace_section`."""
     from .origin import canonical_section_markdown
@@ -4556,7 +4641,7 @@ def replace_section(
                                 or not validate_structure(new_canon, schema)):
                             result = refused("invalid_body")
                         else:
-                            _write_continuity_in_place(store, new_raw)
+                            _write_continuity_in_place(store, new_raw, lease_token)
                             result = SectionWriteResult(
                                 outcome="written", heading=heading,
                                 version=_section_version(new_body))
@@ -4588,7 +4673,9 @@ def replace_section(
     return result
 
 
-def _write_continuity_in_place(store: "Store", text: str) -> None:
+def _write_continuity_in_place(
+    store: "Store", text: str, lease_token: str | None = None,
+) -> None:
     """Record ``text`` as the next identity version (``source='section_edit'``,
     the latest meta carried forward) in the caller's transaction. Generation 3:
     the file is written by :meth:`Store._project_identity` after the caller's
@@ -4597,5 +4684,5 @@ def _write_continuity_in_place(store: "Store", text: str) -> None:
     store._insert_identity_version(
         text, meta_json=(latest["meta_json"] if latest is not None
                          else store._read_meta_file_json(store.meta_path)),
-        source="section_edit",
+        source="section_edit", lease_token=lease_token,
     )

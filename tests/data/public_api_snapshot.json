@@ -44,6 +44,7 @@
   "Germination",
   "IdempotencyConflictError",
   "LeaseFencedError",
+  "LeaseGrant",
   "LogBinding",
   "MAX_PATTERNS",
   "MIGRATION_MANIFEST",
@@ -5269,7 +5270,7 @@
    "bases": [
     "anneal_memory.store.StoreError"
    ],
-   "init": "(message: 'str', *, operation: 'StoreOperation', path: 'str | None' = None, cause_type_name: 'str | None' = None) -> 'None'",
+   "init": "(message: 'str', *, operation: 'StoreOperation', path: 'str | None' = None, cause_type_name: 'str | None' = None, reason: 'str' = 'request_mismatch') -> 'None'",
    "kind": "class",
    "members": {},
    "module": "anneal_memory.store"
@@ -5278,7 +5279,14 @@
    "bases": [
     "anneal_memory.store.AnnealMemoryError"
    ],
-   "init": null,
+   "init": "(message: 'str', *, reason: 'LeaseFenceReason', holder: 'str | None' = None, epoch: 'int | None' = None, expires_at: 'str | None' = None) -> 'None'",
+   "kind": "class",
+   "members": {},
+   "module": "anneal_memory.store"
+  },
+  "LeaseGrant": {
+   "bases": [],
+   "init": "(holder: 'str', epoch: 'int', token: 'str', expires_at: 'str') -> None",
    "kind": "class",
    "members": {},
    "module": "anneal_memory.store"
@@ -6300,15 +6308,15 @@
     },
     "lease_acquire": {
      "kind": "method",
-     "signature": "(self, holder: 'str', ttl_seconds: 'float') -> 'int'"
+     "signature": "(self, holder: 'str', ttl_seconds: 'float') -> 'LeaseGrant'"
     },
     "lease_release": {
      "kind": "method",
-     "signature": "(self, holder: 'str') -> 'bool'"
+     "signature": "(self, lease_token: 'str') -> 'bool'"
     },
     "lease_renew": {
      "kind": "method",
-     "signature": "(self, holder: 'str', ttl_seconds: 'float') -> 'int'"
+     "signature": "(self, lease_token: 'str', ttl_seconds: 'float') -> 'LeaseGrant'"
     },
     "list_drift_probes": {
      "kind": "method",
@@ -6392,7 +6400,7 @@
     },
     "replace_section": {
      "kind": "method",
-     "signature": "(self, heading: 'str', body: 'str', *, expected_version: 'str') -> 'SectionWriteResult'"
+     "signature": "(self, heading: 'str', body: 'str', *, expected_version: 'str', lease_token: 'str | None' = None) -> 'SectionWriteResult'"
     },
     "replaced_matches": {
      "kind": "method",
@@ -6404,11 +6412,11 @@
     },
     "save_continuity": {
      "kind": "method",
-     "signature": "(self, text: 'str') -> 'str'"
+     "signature": "(self, text: 'str', *, lease_token: 'str | None' = None) -> 'str'"
     },
     "save_meta": {
      "kind": "method",
-     "signature": "(self, meta: 'dict') -> 'str'"
+     "signature": "(self, meta: 'dict', *, lease_token: 'str | None' = None) -> 'str'"
     },
     "saved_pattern_levels": {
      "kind": "method",
@@ -6540,7 +6548,7 @@
     },
     "wrap_started": {
      "kind": "method",
-     "signature": "(self, *, token: 'str', episode_ids: 'list[str]', section_schema: 'list[SectionSpec] | None' = None, allow_restart: 'bool' = False, gated_session_id: 'str | None' = None, expect_last_wrap_id: 'int | None' = None, derive_roots: 'dict[str | None, str] | None' = None, token_bound: 'bool' = False, today: 'str | None' = None, expect_continuity_sha256: 'str | None' = None, lease_holder: 'str | None' = None, idempotency: 'tuple[str, str, str] | None' = None) -> 'None'"
+     "signature": "(self, *, token: 'str', episode_ids: 'list[str]', section_schema: 'list[SectionSpec] | None' = None, allow_restart: 'bool' = False, gated_session_id: 'str | None' = None, expect_last_wrap_id: 'int | None' = None, derive_roots: 'dict[str | None, str] | None' = None, token_bound: 'bool' = False, today: 'str | None' = None, expect_continuity_sha256: 'str | None' = None, lease_token: 'str | None' = None, idempotency: 'tuple[str, str, str] | None' = None) -> 'None'"
     },
     "wrap_status_snapshot": {
      "kind": "method",
@@ -7575,7 +7583,7 @@
   "prepare_wrap": {
    "kind": "function",
    "module": "anneal_memory.continuity",
-   "signature": "(store: 'Store', *, max_chars: 'int | None' = None, staleness_days: 'int' = 7, crystal_store: 'CrystalStore | None' = None, session_id: 'str | None' = None, allow_sole_live: 'bool' = False, wrap_token: 'str | None' = None, idempotency_key: 'str | None' = None, lease_holder: 'str | None' = None) -> 'PrepareWrapResult'"
+   "signature": "(store: 'Store', *, max_chars: 'int | None' = None, staleness_days: 'int' = 7, crystal_store: 'CrystalStore | None' = None, session_id: 'str | None' = None, allow_sole_live: 'bool' = False, wrap_token: 'str | None' = None, idempotency_key: 'str | None' = None, lease_token: 'str | None' = None) -> 'PrepareWrapResult'"
   },
   "receipt_crystal_names": {
    "kind": "function",
@@ -7824,7 +7832,7 @@
   "validated_save_continuity": {
    "kind": "function",
    "module": "anneal_memory.continuity",
-   "signature": "(store: 'Store', text: 'str', affective_state: 'AffectiveState | None' = None, *, today: 'str | None' = None, wrap_token: 'str | None' = None, allow_shrink: 'bool' = False, allow_unlinked: 'bool' = False, carryforward_cold_days: 'int | None' = 7, crystal_store: 'CrystalStore | None' = None, compost: 'list[str] | None' = None, session_id: 'str | None' = None, allow_sole_live: 'bool' = False, require_rederive: 'bool' = False, unattended: 'bool' = False, model: 'str | None' = None, idempotency_key: 'str | None' = None, lease_holder: 'str | None' = None) -> 'SaveContinuityResult'"
+   "signature": "(store: 'Store', text: 'str', affective_state: 'AffectiveState | None' = None, *, today: 'str | None' = None, wrap_token: 'str | None' = None, allow_shrink: 'bool' = False, allow_unlinked: 'bool' = False, carryforward_cold_days: 'int | None' = 7, crystal_store: 'CrystalStore | None' = None, compost: 'list[str] | None' = None, session_id: 'str | None' = None, allow_sole_live: 'bool' = False, require_rederive: 'bool' = False, unattended: 'bool' = False, model: 'str | None' = None, idempotency_key: 'str | None' = None, lease_token: 'str | None' = None) -> 'SaveContinuityResult'"
   },
   "verify_integrity": {
    "kind": "function",

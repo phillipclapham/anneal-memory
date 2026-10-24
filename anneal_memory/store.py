@@ -9682,6 +9682,20 @@ class Store:
             return None
         return json.dumps(data, sort_keys=True) if isinstance(data, dict) else None
 
+    @staticmethod
+    def _projectable_meta(latest: sqlite3.Row) -> str | None:
+        """A version row's ``meta_json`` as ``_meta_json`` text, or None when
+        it is absent or not a JSON object: an unprojectable meta is not
+        projected, so the sidecar is left alone and ``load_meta`` reads the
+        defaults (L3 r2 S2)."""
+        if latest["meta_json"] is None:
+            return None
+        try:
+            data = json.loads(latest["meta_json"])
+        except (TypeError, ValueError):
+            return None
+        return json.dumps(data, sort_keys=True) if isinstance(data, dict) else None
+
     def _seed_identity_from_files(self) -> None:
         """Generation 2 -> 3: version 1 from the continuity file and its meta
         sidecar, in the migration's transaction; no row when there is no file.
@@ -9805,8 +9819,9 @@ class Store:
                 ) from exc
             renamed = True
         found = self._read_meta_file_json(self.meta_path)
-        if latest["meta_json"] is not None and found != latest["meta_json"]:
-            tmp = self._prepare_meta_write(json.loads(latest["meta_json"]))
+        meta_json = self._projectable_meta(latest)
+        if meta_json is not None and found != meta_json:
+            tmp = self._prepare_meta_write(json.loads(meta_json))
             try:
                 if self.meta_path.exists() and (found is None or self._conn.execute(
                         "SELECT 1 FROM identity_versions WHERE meta_json = ? LIMIT 1",
@@ -9969,8 +9984,9 @@ class Store:
         """Whether either projection (the continuity file or the meta sidecar)
         differs from ``latest``, so a failed meta projection is retried even
         when the continuity file is current."""
-        if (latest["meta_json"] is not None
-                and self._read_meta_file_json(self.meta_path) != latest["meta_json"]):
+        meta_json = self._projectable_meta(latest)
+        if (meta_json is not None
+                and self._read_meta_file_json(self.meta_path) != meta_json):
             return True
         try:
             raw = self.continuity_path.read_bytes()
@@ -10186,6 +10202,8 @@ class Store:
             StoreError: On file-I/O failure of the atomic write.
                 Stale temp file is cleaned up before raising.
                 ``.operation == "save_meta"``, ``.path == str(meta_path)``.
+            StoreError: ``.operation == "save_meta"`` when called inside a
+                batch or an open transaction on a generation-3 store.
             Exception: Non-``OSError`` failures (``TypeError`` from a
                 non-JSON-serializable ``meta`` value, etc.) propagate
                 bare. Stale temp file is still cleaned up via the
@@ -10211,7 +10229,14 @@ class Store:
         takes them), so a first identity commit from another writer cannot
         land between them and leave this meta in a sidecar the DB overrides.
         With a row it adds a version carrying the latest text; with none it
-        writes the sidecar inside the transaction."""
+        writes the sidecar inside the transaction.
+
+        Known edges: the continuity lock is held while ``BEGIN IMMEDIATE``
+        waits its busy timeout (the lock order every user takes; no
+        deadlock). A read-only handle on a store with the identity table and
+        no row fails at ``BEGIN IMMEDIATE`` (it used to write the sidecar).
+        A sidecar written with no row is not a version, so the first wrap
+        keeps it as a meta ``.diverged`` copy and warns: noise, no loss."""
         path = self.meta_path
         if not self._closed and self._conn.in_transaction:
             raise StoreError(
@@ -12255,9 +12280,12 @@ class Store:
         transaction: two processes flushing (an open and a batch's replay)
         are serialized by it, so an event is logged once. A row is deleted
         only when its append returned normally and counted no failure. The
-        first append that fails (counted as today) or raises ends the flush:
-        its row and the rest stay for the next flush, so the write lock is
-        held across at most one audit-lock timeout (L3 r1). A row that does
+        first append that counts a failure (a sink failure or an audit-lock
+        timeout) ends the flush: its row and the rest stay for the next flush,
+        so the write lock is held across at most one audit-lock timeout (L3
+        r1). An append that raises an ``Exception`` without counting one is
+        that row's own failure: the row is kept and counted, and the flush
+        goes on to the next (L3 r2 S1). A row that does
         not parse is deleted in this transaction and counted as an audit
         write failure, never retried. Never raises an ``Exception``: it runs
         after a commit and at open. A ``SystemExit`` from an append propagates
@@ -12270,7 +12298,9 @@ class Store:
         before this commit logs that event again; never a loss); boxed events
         are logged before the unboxed ones of the same batch, so the chain
         order can differ from the emit order; payloads round-trip JSON (tuples
-        become lists)."""
+        become lists); a kept row's failed append records a ``dropped_before``
+        gap, and a later flush delivers it, so the chain can name a gap that
+        was later filled."""
         if self._audit is None or self._read_only or self._closed:
             return
         try:
@@ -12301,25 +12331,30 @@ class Store:
                 # write lock. Known edge: a callback that writes through THIS
                 # Store commits the flush transaction early (its commit is not
                 # deferred), so the deletes after it run outside one.
-                appended = False
                 try:
                     self._audit_log_after_commit(
                         event, payload, method=method, committed=committed,
                         stacklevel=1, batch_aware=False, **kwargs,
                     )
-                    appended = self._audit_write_failures == failures
-                except Exception:
-                    pass  # recorded by that method's own channels, or not at all
+                except Exception as exc:
+                    if self._audit_write_failures == failures:
+                        # Raised without counting (L3 r2 S1): this row's own
+                        # failure, not the sink's. Kept and counted; the flush
+                        # goes on, so one poison row never blocks the queue.
+                        # Known edge: it is retried, and counted, every flush.
+                        self._note_failed_outbox_row(row[0], exc)
+                        continue
+                    break
                 except BaseException:
                     if not contain_terminal:
                         raise
-                if not appended:
-                    # Only a row whose append returned normally and counted no
-                    # failure is deleted. The first failure (an append error or
-                    # an audit-lock timeout) ends the flush: the rest stay for
-                    # the next one, so this write transaction spends at most one
-                    # audit-lock timeout. Known edge: a sink that always fails keeps
-                    # its rows and counts one failure on every flush.
+                    break
+                if self._audit_write_failures != failures:
+                    # A counted sink failure or audit-lock timeout ends the
+                    # flush: the row and the rest stay for the next one, so
+                    # this write transaction spends at most one audit-lock
+                    # timeout. Known edge: a sink that always fails keeps its
+                    # rows and counts one failure on every flush.
                     break
                 self._conn.execute("DELETE FROM audit_outbox WHERE id = ?", (row[0],))
             self._conn.commit()
@@ -12347,6 +12382,19 @@ class Store:
         it is counted and reported like a failed append (the chained
         ``dropped_before`` marker, the counter ``status()`` reads, the logger,
         a warning). The flush deletes the row; it is never retried."""
+        self._note_outbox_row_failure(row_id, exc, kept=False)
+
+    def _note_failed_outbox_row(self, row_id: int, exc: BaseException) -> None:
+        """An ``audit_outbox`` row whose append raised without counting a
+        failure: counted and reported on the same channels; the flush keeps
+        the row for the next one (L3 r2 S1)."""
+        self._note_outbox_row_failure(row_id, exc, kept=True)
+
+    def _note_outbox_row_failure(
+        self, row_id: int, exc: BaseException, *, kept: bool,
+    ) -> None:
+        what = "failed to append" if kept else "unreadable"
+        fate = "kept for the next flush" if kept else "dropped"
         missing_seq: int | None = None
         try:
             if self._audit is not None:
@@ -12359,18 +12407,18 @@ class Store:
         self._audit_write_failures += 1
         self._audit_failures_unpersisted += 1
         self._audit_last_failure = (
-            f"audit_outbox row {row_id}: unreadable ({exc!r}){where} at {when}")
+            f"audit_outbox row {row_id}: {what} ({exc!r}){where} at {when}")
         try:
-            _LOG.warning("audit outbox row %s is unreadable and was dropped: %r",
-                         row_id, exc)
+            _LOG.warning("audit outbox row %s: %s (%r); %s", row_id, what, exc, fate)
         except Exception:
             pass
         try:
             warnings.warn(
-                f"anneal-memory: audit_outbox row {row_id} could not be read "
-                f"({exc!r}); it was dropped and counted as an audit write "
-                "failure. The audit trail is missing that event.",
-                UserWarning, stacklevel=3,
+                f"anneal-memory: audit_outbox row {row_id}: {what} ({exc!r}); it "
+                f"was {fate} and counted as an audit write failure. The audit "
+                "trail is missing that event"
+                + (" until a flush appends it." if kept else "."),
+                UserWarning, stacklevel=4,
             )
         except Exception:
             pass

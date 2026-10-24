@@ -3639,11 +3639,33 @@ class TestCodexL3TwentySixOhNineOhFour:
                 del store._audit_log_after_commit
                 assert store._conn.execute(
                     "SELECT COUNT(*) FROM audit_outbox").fetchone()[0] == 1, escaped
+            # L3 r2 S1: a row whose append raises every time is kept and
+            # counted, and never blocks the healthy row behind it.
+            store._conn.execute("INSERT INTO audit_outbox (event_json, created_at) "
+                                "VALUES (?, 'x')", (good.replace("outbox_good", "outbox_after"),))
+            store._conn.commit()
+            real_append = store._audit_log_after_commit
+
+            def poisoned(event, *args, **kwargs):
+                if event == "outbox_kept":
+                    raise RuntimeError("this row, every time")
+                return real_append(event, *args, **kwargs)
+            store._audit_log_after_commit = poisoned
+            failures = store.status().audit_write_failures
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                store._flush_audit_outbox()
+            del store._audit_log_after_commit
+            assert [json.loads(r[0])["event"] for r in store._conn.execute(
+                "SELECT event_json FROM audit_outbox")] == ["outbox_kept"]
+            assert store.status().audit_write_failures == failures + 1
             store._flush_audit_outbox()
         finally:
             store.close()
-        assert [json.loads(line)["event"] for line in (tmp_path / "tail.audit.jsonl")
-                .read_text(encoding="utf-8").splitlines()].count("outbox_good") == 1
+        logged = [json.loads(line)["event"] for line in (tmp_path / "tail.audit.jsonl")
+                  .read_text(encoding="utf-8").splitlines()]
+        assert logged.count("outbox_good") == 1
+        assert logged.count("outbox_after") == 1 and logged.count("outbox_kept") == 1
 
     # -- #4h3: WHERE a terminal exception is suppressed is a policy (09-06) --
 

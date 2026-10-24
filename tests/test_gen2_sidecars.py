@@ -135,6 +135,17 @@ class TestContinuityMeta:
         store.meta_path.write_text("{not json")
         assert store.load_meta() == {"sessions_produced": 0, "citations_seen": False,
                                      "format_version": 1}
+        # L3 r2 S2: a version row whose meta_json does not parse is not
+        # projected, and neither read raises out of the reconcile.
+        store.meta_path.unlink()
+        self._wrapped(store)
+        store._conn.execute(
+            "UPDATE identity_versions SET meta_json = 'not json' WHERE version = "
+            "(SELECT MAX(version) FROM identity_versions)")
+        store._conn.commit()
+        assert store.load_continuity() == _CONT
+        assert store.load_meta() == {"sessions_produced": 0, "citations_seen": False,
+                                     "format_version": 1}
 
     def test_a_wrap_over_a_newer_meta_is_refused_and_writes_nothing(self, store):
         """RUN case M: the save read format_version 99 as its own and wrote it

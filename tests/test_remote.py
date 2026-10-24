@@ -225,3 +225,20 @@ def test_capture_refusals_and_writes_stay_unreachable(served_outbox, monkeypatch
     # A refused write gives its rate slot back: b used 1 of 2 and can still write.
     monkeypatch.setattr(remote, "MAX_OUTBOX_BYTES", 10**6)
     assert call(f"/mcp/{b}", _tool("capture", ok))[1]["result"].get("isError") is not True
+    # A torn write is cut back off: the outbox is byte-identical after the failure.
+    before = outbox.read_bytes()
+    real_write = remote.os.write
+    calls = []
+
+    def short_then_fail(fd, data):
+        calls.append(1)
+        if len(calls) == 1:
+            return real_write(fd, bytes(data[:5]))
+        raise OSError("disk full")
+    monkeypatch.setattr(remote.os, "write", short_then_fail)
+    _s, r = call(f"/mcp/{b}", _tool("capture", ok))
+    monkeypatch.setattr(remote.os, "write", real_write)
+    assert r["result"]["isError"] is True and outbox.read_bytes() == before
+    # The outbox may not share the store's directory (it could alias the db).
+    with pytest.raises(ValueError):
+        remote.make_server(path / "memory.db", path / "tokens", port=0, outbox=path / "memory.db")

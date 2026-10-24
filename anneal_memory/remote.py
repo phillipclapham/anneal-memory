@@ -92,6 +92,11 @@ MAX_RECALL_LIMIT = 200
 MAX_CAPTURE_CHARS = 4000
 MAX_OUTBOX_BYTES = 8 * 1024 * 1024
 CAPTURES_PER_HOUR = 60
+OUTBOX_LOCK_WAIT_S = 2.0
+
+
+class _OutboxBusy(Exception):
+    """The outbox lock was not free in time (a puller is moving the file)."""
 
 # Browsers send Origin; claude.ai's backend calls are expected not to. A present
 # Origin outside this set is refused (Streamable HTTP: 403 on an invalid Origin).
@@ -290,6 +295,7 @@ class RemoteSession:
         self._db_path = Path(db_path)
         self._outbox = Path(outbox) if outbox is not None else None
         self._rate_lock = threading.Lock()
+        self._append_lock = threading.Lock()
         self._recent: dict[str, list[float]] = {}
 
     def _tools(self) -> tuple[str, ...]:
@@ -327,6 +333,9 @@ class RemoteSession:
         written = False
         try:
             written = self._append(line_for(connector, etype, content))
+        except _OutboxBusy:
+            return _tool_result("Error: capture is busy (a sync is running); try again",
+                                is_error=True)
         finally:
             if not written:  # a refused or failed write gives its slot back
                 with self._rate_lock:
@@ -339,35 +348,59 @@ class RemoteSession:
         return _tool_result(CAPTURED_REPLY)
 
     def _append(self, line: str) -> bool:
-        """Append ``line`` under the outbox lock; False when the outbox is full."""
+        """Append ``line`` whole or not at all; False when the outbox is full.
+        Raises :class:`_OutboxBusy` when the lock is not free within OUTBOX_LOCK_WAIT_S."""
         assert self._outbox is not None
+        data = line.encode("ascii")
         try:
             import fcntl
         except ImportError:
             fcntl = None  # type: ignore[assignment]
-        # Contract for a puller: rename the outbox only while holding this lock. The
-        # append opens by path under the lock, so it lands wholly before or after.
-        lock_fd = os.open(self._outbox.with_name(self._outbox.name + ".lock"),
-                          os.O_RDWR | os.O_CREAT, 0o600)
-        try:
-            if fcntl is not None:
-                fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        # The thread lock serializes this process even where fcntl is missing; the
+        # flock is the contract for a puller: rename the outbox only while holding
+        # it. The append opens by path under the lock, so it lands wholly before or after.
+        with self._append_lock:
+            lock_fd = os.open(self._outbox.with_name(self._outbox.name + ".lock"),
+                              os.O_RDWR | os.O_CREAT, 0o600)
             try:
-                size = self._outbox.stat().st_size
-            except FileNotFoundError:
-                size = 0
-            if size + len(line) > MAX_OUTBOX_BYTES:
-                return False
-            fd = os.open(self._outbox, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
-            try:
-                os.write(fd, line.encode("ascii"))
-                os.fsync(fd)
+                if fcntl is not None:
+                    deadline = time.monotonic() + OUTBOX_LOCK_WAIT_S
+                    while True:
+                        try:
+                            fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                            break
+                        except BlockingIOError:
+                            if time.monotonic() >= deadline:
+                                raise _OutboxBusy() from None
+                            time.sleep(0.05)
+                flags = (os.O_WRONLY | os.O_APPEND | os.O_CREAT
+                         | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0))
+                fd = os.open(self._outbox, flags, 0o600)
+                try:
+                    size = os.fstat(fd).st_size
+                    if size + len(data) > MAX_OUTBOX_BYTES:
+                        return False
+                    try:
+                        view = memoryview(data)
+                        while view:
+                            n = os.write(fd, view)
+                            if n <= 0:
+                                raise OSError("outbox write made no progress")
+                            view = view[n:]
+                        os.fsync(fd)
+                    except BaseException:
+                        # A torn or undurable line is cut back off, so a refusal
+                        # never leaves a fragment or a line the client will retry.
+                        with contextlib.suppress(OSError):
+                            os.ftruncate(fd, size)
+                            os.fsync(fd)
+                        raise
+                finally:
+                    os.close(fd)
+                if size == 0:  # possibly a new file: make its directory entry durable
+                    _fsync_dir(self._outbox.parent)
             finally:
-                os.close(fd)
-            if size == 0:  # possibly a new file: make its directory entry durable
-                _fsync_dir(self._outbox.parent)
-        finally:
-            os.close(lock_fd)
+                os.close(lock_fd)
         return True
 
     def _bind(self, server: Server, store: Store) -> dict[str, Callable[[dict[str, Any]], Any]]:
@@ -692,8 +725,14 @@ def make_server(db_path: str | Path, tokens_path: str | Path,
     """A ready (not yet serving) HTTP server. Fails fast on a bad token file, a
     store that cannot be opened read-only, or an outbox whose directory is missing."""
     load_tokens(tokens_path)
-    if outbox is not None and not Path(outbox).parent.is_dir():
-        raise ValueError(f"outbox directory does not exist: {Path(outbox).parent}")
+    if outbox is not None:
+        out_dir = Path(outbox).parent
+        if not out_dir.is_dir():
+            raise ValueError(f"outbox directory does not exist: {out_dir}")
+        # The store and its sidecars live beside the db; an outbox there could be
+        # one of them (or a link to one), and capture must never write the store.
+        if out_dir.resolve() == Path(db_path).parent.resolve():
+            raise ValueError("the outbox must not be in the store's directory")
     with Store(db_path, read_only=True, audit=False):
         pass
     handler = type("Handler", (_Handler,), {

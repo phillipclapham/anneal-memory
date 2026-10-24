@@ -152,3 +152,13 @@ def test_head_and_options_answer_behind_auth(served):
         assert go("/elsewhere")[0] == 404
         assert go(f"/mcp/{a}") == (ok, b"")
         assert go("/mcp", f"Bearer {a}") == (ok, b"")
+    # On the wire: a refused HEAD sends headers only; a 204 has no Content-Length.
+    for request, status in ((b"HEAD /mcp HTTP/1.1", b"401"), (f"OPTIONS /mcp/{a} HTTP/1.1".encode(), b"204")):
+        with socket.create_connection(("127.0.0.1", call.port), timeout=10) as sock:
+            sock.sendall(request + b"\r\nHost: x\r\n\r\n")
+            got = b""
+            while chunk := sock.recv(65536):
+                got += chunk
+        head, _, rest = got.partition(b"\r\n\r\n")
+        assert head.split()[1] == status and rest == b""
+        assert (b"Content-Length" in head) is (status != b"204")

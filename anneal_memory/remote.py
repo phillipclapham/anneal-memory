@@ -83,6 +83,8 @@ MAX_RECALL_LIMIT = 200
 # Origin outside this set is refused (Streamable HTTP: 403 on an invalid Origin).
 ALLOWED_ORIGINS = frozenset({"https://claude.ai", "https://claude.com"})
 REQUEST_TIMEOUT_S = 15
+# The methods a request can succeed with; GET and DELETE answer 405 (no SSE stream, no sessions).
+ALLOWED_METHODS = "POST, HEAD, OPTIONS"
 
 _TOKEN_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
 _SHA256_HEX_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -343,10 +345,11 @@ class _Handler(BaseHTTPRequestHandler):
             self.send_header("Content-Type", ctype)
         for k, v in (extra or {}).items():
             self.send_header(k, v)
-        self.send_header("Content-Length", str(len(body)))
+        if status != 204:  # RFC 9110 §8.6: no Content-Length on a 204
+            self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
         self.end_headers()
-        if body:
+        if body and self.command != "HEAD":  # a HEAD reply never carries a body, refusals included
             self.wfile.write(body)
 
     def _send_json(self, status: int, obj: Any) -> None:
@@ -420,18 +423,19 @@ class _Handler(BaseHTTPRequestHandler):
         # the default 501 read as "server cannot be reached" there (10-24).
         if self._authorize() is None:
             return
-        self._send(200, extra={"Allow": "POST"})
+        self._send(200, extra={"Allow": ALLOWED_METHODS})
 
     def do_OPTIONS(self) -> None:
         if self._authorize() is None:
             return
-        self._send(204, extra={"Allow": "POST, GET, HEAD, DELETE, OPTIONS"})
+        # Method discovery only; no CORS preflight (every client here calls server-side).
+        self._send(204, extra={"Allow": ALLOWED_METHODS})
 
     def _get(self) -> None:
         if self._authorize() is None:
             return
         # No server-initiated SSE stream and no sessions to end.
-        self._send(405, extra={"Allow": "POST"})
+        self._send(405, extra={"Allow": ALLOWED_METHODS})
 
     def do_POST(self) -> None:
         try:

@@ -493,7 +493,8 @@ def test_gen3_crystals_live_in_the_db_and_the_json_is_a_projection(tmp_path, mon
     assert hashlib.sha256(projected).hexdigest() == content_hash
 
     path.unlink()  # a copy of the .db alone is the whole crystal state
-    (tmp_path / "memory.crystal.json.lock").unlink()
+    # no fcntl on Windows, so no lock file there (CrystalStore._transaction)
+    (tmp_path / "memory.crystal.json.lock").unlink(missing_ok=sys.platform == "win32")
     before = files()
     assert CrystalStore(path).get("kept_in_db")["explanation"] == "lives in the row"
     assert files() == before  # the read wrote nothing
@@ -567,20 +568,24 @@ def test_gen3_crystals_live_in_the_db_and_the_json_is_a_projection(tmp_path, mon
     conn.commit()
     conn.close()
     CrystalStore(mig_path).crystallize(name="legacy", level=2, explanation="gen 2", today=T0)
-    writer = CrystalStore(mig_path)._transaction()
-    data = writer.__enter__()
-    opened = threading.Event()
-    opener = threading.Thread(
-        target=lambda: (Store(mig_db, project_name="t3").close(), opened.set()))
-    opener.start()
-    assert not opened.wait(1.0)  # the seed waits behind the writer's lock
-    data["crystal"].append({**data["crystal"][0], "name": "mid_migration"})
-    writer.__exit__(None, None, None)
-    opener.join(30)
-    assert opened.is_set()
-    Store(mig_db, project_name="t3").close()
-    assert sorted(c["name"] for c in CrystalStore(mig_path).active()) == [
-        "legacy", "mid_migration"]
+    if sys.platform == "win32":  # no fcntl: no lock for the seed to wait behind
+        Store(mig_db, project_name="t3").close()
+        assert [c["name"] for c in CrystalStore(mig_path).active()] == ["legacy"]
+    else:
+        writer = CrystalStore(mig_path)._transaction()
+        data = writer.__enter__()
+        opened = threading.Event()
+        opener = threading.Thread(
+            target=lambda: (Store(mig_db, project_name="t3").close(), opened.set()))
+        opener.start()
+        assert not opened.wait(1.0)  # the seed waits behind the writer's lock
+        data["crystal"].append({**data["crystal"][0], "name": "mid_migration"})
+        writer.__exit__(None, None, None)
+        opener.join(30)
+        assert opened.is_set()
+        Store(mig_db, project_name="t3").close()
+        assert sorted(c["name"] for c in CrystalStore(mig_path).active()) == [
+            "legacy", "mid_migration"]
     assert not list(mig.glob("*.diverged-*"))
     # L3 r1 D2: once the table exists the store holds the document, whatever the
     # marker says; a marker >= 3 without the table raises.

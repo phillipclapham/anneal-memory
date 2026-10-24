@@ -4466,10 +4466,14 @@ class TestGenerationGuards:
                 os.replace(tmp_path / "gen2.tmp", cont)
 
         writer = threading.Thread(target=gen2_write)
-        writer.start()
-        held.wait()
+        if sys.platform == "win32":  # no fcntl: the lock is a no-op, nothing to wait behind
+            writer.run()
+        else:
+            writer.start()
+            held.wait()
         Store(db).close()
-        writer.join()
+        if sys.platform != "win32":
+            writer.join()
         assert len(sorted(tmp_path.glob("m.db.gen2-*.bak"))) == 1
         conn = sqlite3.connect(str(db))
         try:

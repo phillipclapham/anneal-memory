@@ -3554,6 +3554,13 @@ class TestL3Fixes:
         finally:
             conn.close()
         assert wrap_hash == two
+        # Review r1 F1: the wrap's continuity_saved is an outbox row in the
+        # batch, so the kill after the commit did not lose its record.
+        import json
+        saved = [json.loads(line) for line in (tmp_path / "kill.audit.jsonl").read_text(
+            encoding="utf-8").splitlines() if line.strip()]
+        assert [e["data"]["content_hash"] for e in saved
+                if e["event"] == "continuity_saved"][-1:] == [two]
 
     @staticmethod
     def _wrap(store, text):

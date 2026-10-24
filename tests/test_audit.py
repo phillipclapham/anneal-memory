@@ -3596,6 +3596,29 @@ class TestCodexL3TwentySixOhNineOhFour:
             "verify() walks the gap and reports a clean trail"
         )
 
+        # Review r1 F6: one unreadable outbox row neither blocks the tail nor
+        # re-appends the events before it at every open; it is dropped, counted.
+        store = Store(db)
+        good = json.dumps({"event": "outbox_good", "payload": {}, "kwargs": {},
+                           "method": "t", "committed": "t"})
+        store._conn.execute("INSERT INTO audit_outbox (event_json, created_at) "
+                            "VALUES (?, 'x'), ('not json', 'x')", (good,))
+        store._conn.commit()
+        failures = store.status().audit_write_failures
+        store.close()
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            for _ in range(3):
+                Store(db).close()
+        store = Store(db)
+        try:
+            assert store._conn.execute("SELECT COUNT(*) FROM audit_outbox").fetchone()[0] == 0
+            assert store.status().audit_write_failures == failures + 1
+        finally:
+            store.close()
+        assert [json.loads(line)["event"] for line in (tmp_path / "tail.audit.jsonl")
+                .read_text(encoding="utf-8").splitlines()].count("outbox_good") == 1
+
     # -- #4h3: WHERE a terminal exception is suppressed is a policy (09-06) --
 
     def test_the_terminal_exception_policy_is_split_by_call_site(self, tmp_path):

@@ -24,6 +24,7 @@ import tempfile
 import urllib.parse
 import re
 import secrets
+import shutil
 import sqlite3
 import time
 import unicodedata
@@ -9592,29 +9593,48 @@ class Store:
         return int(version)
 
     def _commit_identity_version(
-        self, text: str, *, meta_json: str | None, source: str,
+        self, text: str | None, *, meta_json: str | None, source: str,
         operation: StoreOperation,
-    ) -> None:
+        audit_event: tuple[str, dict[str, Any], str, str] | None = None,
+    ) -> bool:
         """One version row in its own write transaction (the raw writers).
         ``meta_json=None`` carries the latest version's meta forward (the meta
-        sidecar's when there is no row yet). Refused inside a batch or an open
-        transaction, where its commit would end the caller's."""
+        sidecar's when there is no row yet); ``text=None`` carries the latest
+        version's text forward. Both are read inside the transaction, so a
+        version another writer committed in between is not reverted.
+        ``audit_event`` (event, payload, method, committed) becomes an
+        ``audit_outbox`` row in the same transaction; returns whether it was
+        boxed (the caller flushes after its projection). Refused inside a batch
+        or an open transaction, where its commit would end the caller's."""
         if not self._closed and self._conn.in_transaction:
             raise StoreError(
                 f"{operation} cannot run inside a batch or an open transaction",
                 operation=operation, path=str(self.continuity_path))
+        boxed = False
         with self._db_boundary(operation):
             self._conn.execute("BEGIN IMMEDIATE")
             try:
-                if meta_json is None:
+                if meta_json is None or text is None:
                     latest = self._latest_identity()
-                    meta_json = (latest["meta_json"] if latest is not None
-                                 else self._read_meta_file_json(self.meta_path))
+                    if meta_json is None:
+                        meta_json = (latest["meta_json"] if latest is not None
+                                     else self._read_meta_file_json(self.meta_path))
+                    if text is None:
+                        if latest is None:
+                            raise StoreError(
+                                f"{operation}: no identity version to carry forward",
+                                operation=operation, path=str(self.continuity_path))
+                        text = str(latest["text"])
                 self._insert_identity_version(text, meta_json=meta_json, source=source)
+                if audit_event is not None and self._audit is not None:
+                    event, payload, method, committed = audit_event
+                    boxed = self._box_audit_event(
+                        event, payload, {}, method=method, committed=committed)
                 self._conn.commit()
             except BaseException:
                 self._rollback_quietly()
                 raise
+        return boxed
 
     def _project_after_commit(self, committed: str, *, locked: bool = False) -> None:
         """:meth:`_project_identity` after a committed write: a failure warns
@@ -9696,7 +9716,16 @@ class Store:
         Reads the row under the continuity lock (``locked=True``: the caller
         holds it), so two writers projecting after their commits both write the
         newest row. Raises ``StoreError`` on a file-I/O failure; the DB is
-        unaffected and the next open or load re-projects."""
+        unaffected and the next open or load re-projects.
+
+        The ONE place that decides the fate of a file on disk, for the write
+        paths and for the open/load reconcile alike (design B1 rule 5): absent
+        or equal to an ``identity_versions`` row (a stale projection) is
+        replaced; anything else, undecodable bytes included, is a foreign edit
+        and is kept as ``<name>.diverged-<UTC stamp>`` (a hard link or copy, so
+        the name is never absent) before the name is atomically replaced, with
+        a warning naming the copy. A wraps row's hash is NOT known: a text the
+        identity table cannot reproduce is foreign."""
         if not locked:
             with continuity_lock(self.continuity_path):
                 self._project_identity(locked=True)
@@ -9704,16 +9733,28 @@ class Store:
         latest = self._latest_identity()
         if latest is None:
             return
+        kept: list[Path] = []
+        try:
+            self._project_identity_files(latest, kept)
+        finally:
+            self._warn_diverged(kept)
+
+    def _project_identity_files(self, latest: sqlite3.Row, kept: list[Path]) -> None:
         try:
             on_disk: bytes | None = self.continuity_path.read_bytes()
         except FileNotFoundError:
             on_disk = None
         renamed = False
-        if on_disk is None or hashlib.sha256(on_disk).hexdigest() != latest["content_hash"]:
+        digest = hashlib.sha256(on_disk).hexdigest() if on_disk is not None else None
+        if digest != latest["content_hash"]:
             tmp = self._prepare_continuity_write(latest["text"])
             try:
                 if on_disk is not None:  # keep the file's mode (a 0600 file stays 0600)
                     os.chmod(tmp, os.stat(self.continuity_path).st_mode & 0o7777)
+                    if self._conn.execute(
+                            "SELECT 1 FROM identity_versions WHERE content_hash = ? "
+                            "LIMIT 1", (digest,)).fetchone() is None:
+                        kept.append(self._keep_diverged(self.continuity_path))
                 tmp.replace(self.continuity_path)
             except OSError as exc:
                 _safe_unlink(tmp)
@@ -9722,10 +9763,14 @@ class Store:
                     operation="save_continuity", path=str(self.continuity_path),
                 ) from exc
             renamed = True
-        if latest["meta_json"] is not None and (
-                self._read_meta_file_json(self.meta_path) != latest["meta_json"]):
+        found = self._read_meta_file_json(self.meta_path)
+        if latest["meta_json"] is not None and found != latest["meta_json"]:
             tmp = self._prepare_meta_write(json.loads(latest["meta_json"]))
             try:
+                if self.meta_path.exists() and (found is None or self._conn.execute(
+                        "SELECT 1 FROM identity_versions WHERE meta_json = ? LIMIT 1",
+                        (found,)).fetchone() is None):
+                    kept.append(self._keep_diverged(self.meta_path))
                 tmp.replace(self.meta_path)
             except OSError as exc:
                 _safe_unlink(tmp)
@@ -9737,19 +9782,28 @@ class Store:
         if renamed:
             _fsync_dir(self.continuity_path.parent)
 
+    def _warn_diverged(self, kept: list[Path]) -> None:
+        for copy in kept:
+            warnings.warn(
+                f"anneal-memory: {copy.name.split('.diverged-')[0]} differed from the "
+                f"store's identity (an edit outside anneal, or an older anneal); it was "
+                f"kept as {copy} and the file is projected from the database. Write "
+                "to the identity through replace_section or save_continuity (a wrap "
+                "through validated_save_continuity); the file is a projection.",
+                UserWarning, stacklevel=4,
+            )
+
     def _reconcile_identity_files(self) -> None:
         """Make the files agree with the DB (design B1 rule 5). Write-capable
         handles only, outside any transaction, and only when the continuity
         lock is free (a busy lock means a writer is projecting).
 
         With no version row, an existing continuity file is adopted as version
-        1 (``source='adopted_file'``). Otherwise a file whose bytes match an
-        older version or a committed wrap's ``content_hash`` is a stale
-        projection and is re-projected; any other content is a foreign edit:
-        it is kept as ``<name>.diverged-<UTC stamp>``, re-projected from the
-        DB, and named in a warning. The meta sidecar is compared as JSON the
-        same way. Then orphan tmps whose content is a version (projection
-        debris) are removed; the generation-2 orphan scan reports the rest."""
+        1 (``source='adopted_file'``). Otherwise the files are re-projected by
+        :meth:`_project_identity`, which decides a stale projection from a
+        foreign edit (kept as ``<name>.diverged-<UTC stamp>``). Then orphan
+        tmps whose content is a version (projection debris) are removed; the
+        generation-2 orphan scan reports the rest."""
         if (self._read_only or self._defer_commit or self._conn.in_transaction
                 or not self._identity_table_present()):
             return
@@ -9761,28 +9815,11 @@ class Store:
             if self._latest_identity() is None:
                 self._adopt_continuity_file()
                 return
+            self._project_identity(locked=True)
             known = {row[0] for row in self._conn.execute(
-                "SELECT content_hash FROM identity_versions UNION "
-                "SELECT content_hash FROM wraps WHERE content_hash IS NOT NULL")}
+                "SELECT content_hash FROM identity_versions")}
             known_meta = {row[0] for row in self._conn.execute(
                 "SELECT meta_json FROM identity_versions WHERE meta_json IS NOT NULL")}
-            latest = self._latest_identity()
-            if latest is None:  # unreachable: checked above under this lock
-                return
-            kept: list[Path] = []
-            try:
-                raw: bytes | None = self.continuity_path.read_bytes()
-            except FileNotFoundError:
-                raw = None
-            if raw is not None:
-                digest = hashlib.sha256(raw).hexdigest()
-                if digest != latest["content_hash"] and digest not in known:
-                    kept.append(self._keep_diverged(self.continuity_path))
-            if latest["meta_json"] is not None and self.meta_path.exists():
-                found = self._read_meta_file_json(self.meta_path)
-                if found != latest["meta_json"] and found not in known_meta:
-                    kept.append(self._keep_diverged(self.meta_path))
-            self._project_identity(locked=True)
             for tmp in self._find_orphan_tmp_files():
                 if tmp.name.endswith(".md.tmp"):
                     try:
@@ -9793,20 +9830,19 @@ class Store:
                     is_version = self._read_meta_file_json(tmp) in known_meta
                 if is_version:
                     _safe_unlink(tmp)
-        for copy in kept:
-            warnings.warn(
-                f"anneal-memory: {copy.name.split('.diverged-')[0]} differed from the "
-                f"store's identity (an edit outside anneal, or an older anneal); it was "
-                f"kept as {copy} and the file was re-projected from the database. "
-                "Bring any change you want into the identity through a section edit "
-                "or a wrap.",
-                UserWarning, stacklevel=3,
-            )
 
     def _keep_diverged(self, path: Path) -> Path:
+        """A second name for ``path``'s current content (a hard link, or a
+        copy where links are refused); the caller then replaces ``path``, so
+        the original name is never absent."""
         stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
         copy = path.with_name(f"{path.name}.diverged-{stamp}")
-        path.replace(copy)
+        try:
+            os.link(path, copy)
+        except OSError:
+            shutil.copy2(path, copy)
+            with open(copy, "rb") as f:
+                os.fsync(f.fileno())
         return copy
 
     def _adopt_continuity_file(self) -> None:
@@ -9965,19 +10001,29 @@ class Store:
         # latest meta forward), committed in its own transaction; the file is
         # then projected from it. A projection failure warns instead of
         # raising: the save has committed, and the next open re-projects.
-        self._commit_identity_version(
-            text, meta_json=None, source="raw_save", operation="save_continuity")
-        self._project_after_commit("the continuity save")
-
-        # ⛔ POST-COMMIT: the version row has ALREADY committed. A bare emit
-        # raised a raw OSError with the continuity on disk (measured
-        # 2026-09-04) — a caller whose error path retries or falls back then
-        # writes over correct state.
-        self._audit_log_after_commit("continuity_saved", {
+        # The ``continuity_saved`` event is an ``audit_outbox`` row in the
+        # version's transaction, so a kill after the commit cannot lose the
+        # record of a committed identity version; it is flushed after the
+        # projection.
+        payload = {
             "chars": len(text),
             "content_hash": hashlib.sha256(text.encode("utf-8")).hexdigest(),
-        }, method="save_continuity", committed="the continuity file",
-            batch_aware=False)
+        }
+        boxed = self._commit_identity_version(
+            text, meta_json=None, source="raw_save", operation="save_continuity",
+            audit_event=("continuity_saved", payload, "save_continuity",
+                         "the continuity file"))
+        self._project_after_commit("the continuity save")
+        if boxed:
+            self._flush_audit_outbox()
+        else:
+            # ⛔ POST-COMMIT: the version row has ALREADY committed. A bare emit
+            # raised a raw OSError with the continuity on disk (measured
+            # 2026-09-04) — a caller whose error path retries or falls back
+            # then writes over correct state.
+            self._audit_log_after_commit(
+                "continuity_saved", payload, method="save_continuity",
+                committed="the continuity file", batch_aware=False)
 
         return str(path)
 
@@ -10078,9 +10124,11 @@ class Store:
         with self._db_boundary("save_meta"):
             latest = self._latest_identity()
         if latest is not None:
+            # text=None: the latest text is read inside the write transaction,
+            # so a save that committed after the check above is carried, not
+            # reverted.
             self._commit_identity_version(
-                str(latest["text"]), meta_json=meta_json, source="raw_save",
-                operation="save_meta")
+                None, meta_json=meta_json, source="raw_save", operation="save_meta")
             self._project_after_commit("the meta save")
             return str(path)
         # 10.5c.5: delegate the tmp-write to the shared primitive.
@@ -12057,11 +12105,23 @@ class Store:
         """Generation 3: write the event just appended to ``_deferred_audits``
         as an ``audit_outbox`` row in the batch's transaction, so it commits
         with the batch's writes and a crash after the commit leaves it for the
-        next flush instead of losing it. Covers the batched pipeline only: an
-        event fired outside a batch keeps the best-effort path (a loss there is
-        still counted, not prevented; spore-774). A payload JSON cannot hold
-        stays in memory only (``_deferred_unboxed``), as before."""
+        next flush instead of losing it. A payload JSON cannot hold stays in
+        memory only (``_deferred_unboxed``), as before."""
         event, payload, kwargs, method, committed = self._deferred_audits[-1]
+        if not self._box_audit_event(event, payload, kwargs, method=method,
+                                     committed=committed):
+            self._deferred_unboxed.append(len(self._deferred_audits) - 1)
+
+    def _box_audit_event(
+        self, event: str, payload: dict[str, Any] | None, kwargs: dict[str, Any],
+        *, method: str, committed: str,
+    ) -> bool:
+        """One ``audit_outbox`` row in the caller's open transaction; False
+        (nothing written) when the event is not JSON. The boxed sites are the
+        batched pipeline and the identity writers (``save_continuity``,
+        ``replace_section``). Every other event fired outside a batch keeps the
+        best-effort post-commit path: a loss there is counted, not prevented
+        (spore-774: NOT EVERY LOSS IS RECORDED)."""
         try:
             event_json = json.dumps(
                 {"event": event, "payload": payload, "kwargs": kwargs,
@@ -12069,23 +12129,33 @@ class Store:
                 sort_keys=True,
             )
         except (TypeError, ValueError):
-            self._deferred_unboxed.append(len(self._deferred_audits) - 1)
-            return
+            return False
         self._conn.execute(
             "INSERT INTO audit_outbox (event_json, created_at) VALUES (?, ?)",
             (event_json, _now_utc()),
         )
+        return True
 
-    def _flush_audit_outbox(self) -> None:
+    def _flush_audit_outbox(self, *, contain_terminal: bool = False) -> None:
         """Append every ``audit_outbox`` event to the audit log, oldest first,
         deleting each row once its append succeeded, all under one write
         transaction: two processes flushing (an open and a batch's replay)
-        are serialized by it, so an event is logged once. A crash after an
-        append and before the commit logs that event again at the next flush
-        (a duplicate, never a loss). A failed append is counted as today,
-        keeps its row for the next flush, and the rest are still attempted
-        (one bad event never costs the tail). Never raises: it runs after a
-        commit and at open."""
+        are serialized by it, so an event is logged once. A failed append is
+        counted as today, keeps its row for the next flush, and the rest are
+        still attempted (one bad event never costs the tail). A row that does
+        not parse is deleted in this transaction and counted as an audit
+        write failure, never retried. Never raises an ``Exception``: it runs
+        after a commit and at open. A ``SystemExit`` from an append propagates
+        once the rows already appended are committed (the rest stay for the
+        next flush), as on every unbatched post-commit path;
+        ``contain_terminal=True`` is the batched replay's mode, which owns the
+        suppression per event (``_replay_deferred_audits``).
+
+        Known edges: delivery is at-least-once (a crash after an append and
+        before this commit logs that event again; never a loss); boxed events
+        are logged before the unboxed ones of the same batch, so the chain
+        order can differ from the emit order; payloads round-trip JSON (tuples
+        become lists)."""
         if self._audit is None or self._read_only or self._closed:
             return
         try:
@@ -12094,34 +12164,89 @@ class Store:
                 return
             self._conn.execute("BEGIN IMMEDIATE")
         except sqlite3.Error:
-            return  # busy or absent: the rows stay for the next flush
+            # Busy or absent: the rows stay for the next batch or open; a
+            # long-lived process that never batches again delays them.
+            return
         try:
             rows = self._conn.execute(
                 "SELECT id, event_json FROM audit_outbox ORDER BY id").fetchall()
             for row in rows:
-                entry = json.loads(row[1])
+                try:
+                    entry = json.loads(row[1])
+                    event, payload = entry["event"], entry["payload"]
+                    method, committed = entry["method"], entry["committed"]
+                    kwargs = dict(entry["kwargs"])
+                except (ValueError, TypeError, KeyError, AttributeError) as exc:
+                    self._conn.execute("DELETE FROM audit_outbox WHERE id = ?", (row[0],))
+                    self._note_unreadable_outbox_row(row[0], exc)
+                    continue
                 failures = self._audit_write_failures
+                # An on_audit_event callback that opens a second writer waits
+                # its busy timeout here, per event: this transaction holds the
+                # write lock.
                 try:
                     self._audit_log_after_commit(
-                        entry["event"], entry["payload"], method=entry["method"],
-                        committed=entry["committed"], stacklevel=1,
-                        batch_aware=False, **entry["kwargs"],
+                        event, payload, method=method, committed=committed,
+                        stacklevel=1, batch_aware=False, **kwargs,
                     )
-                except BaseException:
+                except Exception:
                     pass  # recorded by that method's own channels
+                except BaseException:
+                    if not contain_terminal:
+                        raise
                 if self._audit_write_failures != failures:
                     continue  # kept for the next flush; the rest still go
                 self._conn.execute("DELETE FROM audit_outbox WHERE id = ?", (row[0],))
             self._conn.commit()
-        except BaseException:
+        except Exception:
             self._rollback_quietly()
             try:
                 _LOG.warning("audit outbox flush failed; its rows stay for the "
                              "next flush", exc_info=True)
             except Exception:
                 pass
+        except BaseException:
+            try:  # keep the appends that landed, so they are not logged twice
+                self._conn.commit()
+            except Exception:
+                self._rollback_quietly()
+            raise
+        finally:
+            try:
+                self._persist_audit_health()
+            except Exception:
+                pass
+
+    def _note_unreadable_outbox_row(self, row_id: int, exc: BaseException) -> None:
+        """An ``audit_outbox`` row that does not parse: its event is lost, so
+        it is counted and reported like a failed append (the chained
+        ``dropped_before`` marker, the counter ``status()`` reads, the logger,
+        a warning). The flush deletes the row; it is never retried."""
+        missing_seq: int | None = None
         try:
-            self._persist_audit_health()
+            if self._audit is not None:
+                missing_seq = self._audit.note_write_failure()
+        except Exception:
+            pass
+        where = (f" [dropped before audit seq {missing_seq}]"
+                 if missing_seq is not None else "")
+        when = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+        self._audit_write_failures += 1
+        self._audit_failures_unpersisted += 1
+        self._audit_last_failure = (
+            f"audit_outbox row {row_id}: unreadable ({exc!r}){where} at {when}")
+        try:
+            _LOG.warning("audit outbox row %s is unreadable and was dropped: %r",
+                         row_id, exc)
+        except Exception:
+            pass
+        try:
+            warnings.warn(
+                f"anneal-memory: audit_outbox row {row_id} could not be read "
+                f"({exc!r}); it was dropped and counted as an audit write "
+                "failure. The audit trail is missing that event.",
+                UserWarning, stacklevel=3,
+            )
         except Exception:
             pass
 
@@ -12151,7 +12276,7 @@ class Store:
             if commit_succeeded and self._audit is not None:
                 # Generation 3: the batch's boxed events (and any a crash left)
                 # come out of ``audit_outbox`` first, in id order.
-                self._flush_audit_outbox()
+                self._flush_audit_outbox(contain_terminal=True)
                 for event, payload, kwargs, origin_method, origin_committed in deferred:
                     # The "future pass" this loop's comment promised: routed
                     # through the shared after-commit helper, so a failed flush

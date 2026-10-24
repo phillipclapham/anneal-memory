@@ -3397,9 +3397,9 @@ def validated_save_continuity(
     #          holds the text and meta) without intermediate commits; the
     #          batch's audit events become ``audit_outbox`` rows in the same
     #          transaction. The batch commits once and flushes the outbox.
+    #          The continuity_saved event (Phase 4) is one of those rows.
     # Phase 3: after the commit, project the continuity file and meta
     #          sidecar from the committed row (Store._project_identity).
-    # Phase 4: fire the continuity_saved audit event.
     #
     # Crash windows:
     #   - Before the batch commit: the DB rolls back; nothing was written
@@ -3718,6 +3718,106 @@ def validated_save_continuity(
                     "DELETE FROM metadata WHERE key = ?", (INERT_TOKENS_KEY,)
                 )
         _check_save_authority(store, session_id, wrap_token, allow_sole_live)
+        # Phase 4 (generation 3): the continuity_saved event is queued here,
+        # inside the batch, so it is an ``audit_outbox`` row in this
+        # transaction: a kill after the commit cannot lose the record of the
+        # committed identity. The batch's exit flushes it with the other boxed
+        # events (before the Phase 3 projection).
+        if store._audit is not None:
+            audit_payload: dict[str, Any] = {
+                "chars": len(grad_result.text),
+                # AM-SNAPSHOT ①: the SAME hash persisted in the wraps row above
+                # (computed once near tmp_pair_id) — the audit event and the
+                # durable recovery oracle are guaranteed identical.
+                "content_hash": content_hash,
+            }
+            try:
+                audit_payload["allow_shrink"] = shrink_override
+                if drift_results:
+                    audit_payload["drift"] = _drift_summary(drift_results)
+                # Capture Proven-tier pattern omissions in the audit chain.
+                # detect_pattern_omissions returns an empty list for the
+                # common case (first wrap, or all prior Proven-tier patterns
+                # carried forward at some level), in which case we omit
+                # the key entirely to keep the routine-case audit entry
+                # lean. When omissions DID happen, the audit chain records
+                # exactly which graduated patterns disappeared at this
+                # wrap — operators and downstream review (Diogenes,
+                # consultation, audit-chain queries) can see what was
+                # dropped without re-reading prior continuity files.
+                if grad_result.level_capped:
+                    audit_payload["level_capped"] = [
+                        asdict(cap) for cap in grad_result.level_capped
+                    ]
+                if grad_result.omitted_patterns:
+                    audit_payload["omitted_patterns"] = [
+                        {"name": op.name, "prior_level": op.prior_level}
+                        for op in grad_result.omitted_patterns
+                    ]
+                # Cross-session collisions ride into the audit chain on
+                # the same "only when they fired" basis as omissions —
+                # routine wraps stay lean, but any drift attempt that
+                # tripped the cross-session check leaves a hash-chained
+                # record naming the pattern, the level it tried to reach,
+                # the meaningful words that overlapped with the prior
+                # session, and the prior session's explanation text. Full
+                # forensic trail for operator review.
+                if grad_result.cross_session_collisions:
+                    audit_payload["cross_session_collisions"] = [
+                        {
+                            "name": coll.name,
+                            "today_level": coll.today_level,
+                            "overlap_words": list(coll.overlap_words),
+                            "prior_explanation": coll.prior_explanation,
+                        }
+                        for coll in grad_result.cross_session_collisions
+                    ]
+                # Move #4 library layer audit signal (v0.3.2): new Proven
+                # graduations that landed without explicit contradiction-
+                # stance declaration ride into the hash-chained audit log
+                # so operator-review (Diogenes weekly sweep) can find them.
+                # Lean omission when no new Provens skipped declaration.
+                if proven_without_declaration:
+                    audit_payload["proven_without_contradicts_declaration"] = [
+                        {"name": p.name, "level": p.level}
+                        for p in proven_without_declaration
+                    ]
+                # CAP-08: graduations held back for tool/external-only grounding,
+                # and any graduation grounded above the default trust. Lean when
+                # empty, like the keys above.
+                if grad_result.uncorroborated:
+                    audit_payload["uncorroborated"] = [
+                        {"name": u.name, "level": u.level, "trust": u.trust,
+                         "citations": list(u.citations)}
+                        for u in grad_result.uncorroborated
+                    ]
+                raised_trust = {
+                    name: t for name, t in grad_result.pattern_trust.items()
+                    if t != DEFAULT_TRUST
+                }
+                if raised_trust:
+                    audit_payload["pattern_trust"] = raised_trust
+                # Durable facts (B1): a drop by marker is recorded here, and only
+                # here, so the hash-chained audit log is the trail of every durable
+                # line that left the store. Re-insertions ride along, lean when
+                # empty like the keys above.
+                if durable_report is not None:
+                    if durable_report.dropped:
+                        audit_payload["durable_dropped"] = list(durable_report.dropped)
+                    if durable_report.reinserted:
+                        audit_payload["durable_reinserted"] = list(
+                            durable_report.reinserted
+                        )
+            except Exception:
+                # The optional keys must not fail the wrap; the event still
+                # carries chars and content_hash.
+                pass
+            store._audit_log_after_commit(
+                "continuity_saved",
+                audit_payload,
+                method="validated_save_continuity",
+                committed="the wrap",
+            )
         # Batch context manager commits here on successful exit.
 
     # Warned only after Phase 3, through _warn_after_commit.
@@ -3730,119 +3830,6 @@ def validated_save_continuity(
     # succeeds: the DB holds the identity and the next open or
     # load_continuity re-projects.
     store._project_after_commit("the wrap")
-
-    # Phase 4: fire the continuity_saved audit event (after the projection
-    # was attempted; the identity committed in Phase 2). The earlier DB-side
-    # audit events (e.g. wrap_completed) were already flushed from the outbox
-    # by the batch context manager at its successful exit.
-    #
-    # Audit exceptions are swallowed here — same pattern and
-    # rationale as the batch's deferred-audit flush. At this point
-    # the wrap is fully committed; an audit log
-    # failure must not cause the pipeline to report failure to the
-    # caller. L3 complement F4.
-    if store._audit is not None:
-        try:
-            audit_payload: dict[str, Any] = {
-                "chars": len(grad_result.text),
-                # AM-SNAPSHOT ①: the SAME hash persisted in the wraps row above
-                # (computed once near tmp_pair_id) — the audit event and the
-                # durable recovery oracle are guaranteed identical.
-                "content_hash": content_hash,
-            }
-            audit_payload["allow_shrink"] = shrink_override
-            if drift_results:
-                audit_payload["drift"] = _drift_summary(drift_results)
-            # Capture Proven-tier pattern omissions in the audit chain.
-            # detect_pattern_omissions returns an empty list for the
-            # common case (first wrap, or all prior Proven-tier patterns
-            # carried forward at some level), in which case we omit
-            # the key entirely to keep the routine-case audit entry
-            # lean. When omissions DID happen, the audit chain records
-            # exactly which graduated patterns disappeared at this
-            # wrap — operators and downstream review (Diogenes,
-            # consultation, audit-chain queries) can see what was
-            # dropped without re-reading prior continuity files.
-            if grad_result.level_capped:
-                audit_payload["level_capped"] = [
-                    asdict(cap) for cap in grad_result.level_capped
-                ]
-            if grad_result.omitted_patterns:
-                audit_payload["omitted_patterns"] = [
-                    {"name": op.name, "prior_level": op.prior_level}
-                    for op in grad_result.omitted_patterns
-                ]
-            # Cross-session collisions ride into the audit chain on
-            # the same "only when they fired" basis as omissions —
-            # routine wraps stay lean, but any drift attempt that
-            # tripped the cross-session check leaves a hash-chained
-            # record naming the pattern, the level it tried to reach,
-            # the meaningful words that overlapped with the prior
-            # session, and the prior session's explanation text. Full
-            # forensic trail for operator review.
-            if grad_result.cross_session_collisions:
-                audit_payload["cross_session_collisions"] = [
-                    {
-                        "name": coll.name,
-                        "today_level": coll.today_level,
-                        "overlap_words": list(coll.overlap_words),
-                        "prior_explanation": coll.prior_explanation,
-                    }
-                    for coll in grad_result.cross_session_collisions
-                ]
-            # Move #4 library layer audit signal (v0.3.2): new Proven
-            # graduations that landed without explicit contradiction-
-            # stance declaration ride into the hash-chained audit log
-            # so operator-review (Diogenes weekly sweep) can find them.
-            # Lean omission when no new Provens skipped declaration.
-            if proven_without_declaration:
-                audit_payload["proven_without_contradicts_declaration"] = [
-                    {"name": p.name, "level": p.level}
-                    for p in proven_without_declaration
-                ]
-            # CAP-08: graduations held back for tool/external-only grounding,
-            # and any graduation grounded above the default trust. Lean when
-            # empty, like the keys above.
-            if grad_result.uncorroborated:
-                audit_payload["uncorroborated"] = [
-                    {"name": u.name, "level": u.level, "trust": u.trust,
-                     "citations": list(u.citations)}
-                    for u in grad_result.uncorroborated
-                ]
-            raised_trust = {
-                name: t for name, t in grad_result.pattern_trust.items()
-                if t != DEFAULT_TRUST
-            }
-            if raised_trust:
-                audit_payload["pattern_trust"] = raised_trust
-            # Durable facts (B1): a drop by marker is recorded here, and only
-            # here, so the hash-chained audit log is the trail of every durable
-            # line that left the store. Re-insertions ride along, lean when
-            # empty like the keys above.
-            if durable_report is not None:
-                if durable_report.dropped:
-                    audit_payload["durable_dropped"] = list(durable_report.dropped)
-                if durable_report.reinserted:
-                    audit_payload["durable_reinserted"] = list(
-                        durable_report.reinserted
-                    )
-            # ⛔ POST-COMMIT, and routed through the store's shared
-            # after-commit helper so this site cannot drift from the other
-            # four. Behaviour change: a failed emit now WARNS instead of
-            # vanishing silently — a missing entry is a real gap in a
-            # tamper-evident record. It still cannot propagate: the wrap is
-            # fully committed and success is the only correct outcome.
-            store._audit_log_after_commit(
-                "continuity_saved",
-                audit_payload,
-                method="validated_save_continuity",
-                committed="the wrap",
-            )
-        except Exception:
-            # Belt-and-suspenders: the helper swallows sink failures, but the
-            # payload ASSEMBLY above (grad_result access, hashing) is inside
-            # this try as well and must not fail a committed wrap either.
-            pass
 
     # Phase 5: auto-prune if retention is configured. In the pre-10.5c.5
     # pipeline this ran inside wrap_completed via ``self.prune()``;
@@ -4361,6 +4348,8 @@ def replace_section(
     result: SectionWriteResult
     old_version: str | None = None
     spec: SectionSpec | None = None
+    audit_payload: dict[str, Any] | None = None
+    boxed = False
     with store.continuity_lock(require=True):
         conn = store._conn
         try:
@@ -4424,6 +4413,16 @@ def replace_section(
                             result = SectionWriteResult(
                                 outcome="written", heading=heading,
                                 version=_section_version(new_body))
+                            # The event is an audit_outbox row in the version's
+                            # transaction: a kill after the commit cannot lose it.
+                            audit_payload = {
+                                "heading": spec["heading"],
+                                "old_version": old_version,
+                                "new_version": result.version,
+                            }
+                            boxed = store._audit is not None and store._box_audit_event(
+                                "section_replaced", audit_payload, {},
+                                method="replace_section", committed="the section edit")
             conn.commit()
         except BaseException:
             try:
@@ -4433,12 +4432,12 @@ def replace_section(
             raise
         if result.outcome == "written":
             store._project_after_commit("the section edit", locked=True)
-    if result.outcome == "written" and spec is not None:
-        store._audit_log_after_commit("section_replaced", {
-            "heading": spec["heading"],
-            "old_version": old_version,
-            "new_version": result.version,
-        }, method="replace_section", committed="the section edit")
+    if result.outcome == "written" and boxed:
+        store._flush_audit_outbox()
+    elif result.outcome == "written" and audit_payload is not None:
+        store._audit_log_after_commit(
+            "section_replaced", audit_payload, method="replace_section",
+            committed="the section edit")
     return result
 
 

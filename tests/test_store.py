@@ -2453,10 +2453,33 @@ class TestStoreError:
             "\n## Patterns\np\n\n## Decisions\nd\n\n## Context\nc\n"
         )
         assert Path(path).exists()
+        # Review r1 F2: a save over a hand edit keeps the edit as a copy.
+        Path(path).write_text("# hand edit\n", encoding="utf-8")
+        with pytest.warns(UserWarning, match="replace_section or save_continuity"):
+            store.save_continuity("# T — Memory (v1)\n\n## State\ny\n")
+        kept = list(Path(path).parent.glob("*.continuity.md.diverged-*"))
+        assert [k.read_text(encoding="utf-8") for k in kept] == ["# hand edit\n"]
 
     def test_successful_save_meta(self, store):
+        store.save_continuity("# T — Memory (v1)\n\n## State\nold\n")
         path = store.save_meta({"sessions_produced": 3, "citations_seen": True})
         assert Path(path).exists()
+        # Review r1 F4: a save that commits between save_meta's check and its
+        # transaction is carried forward, not reverted.
+        other = Store(store.path)
+        real = store._commit_identity_version
+
+        def racing(*args, **kwargs):
+            other.save_continuity("# T — Memory (v1)\n\n## State\nnewer\n")
+            return real(*args, **kwargs)
+
+        store._commit_identity_version = racing
+        try:
+            store.save_meta({"sessions_produced": 4})
+        finally:
+            del store._commit_identity_version
+            other.close()
+        assert store.load_continuity() == "# T — Memory (v1)\n\n## State\nnewer\n"
 
 
 class TestValidatedSaveContinuity:
@@ -4382,6 +4405,20 @@ class TestGenerationGuards:
         with pytest.raises(sqlite3.IntegrityError, match="schema generation 3"):
             gen2.execute("INSERT INTO metadata (key, value) VALUES ('x', 'y')")
         gen2.close()
+        # Review r1 F3: a pre-migration text restored over the file (a wraps
+        # hash, never a version) is foreign: kept aside, not silently replaced.
+        older = "# M — Memory (v1)\n\n## State\nan older wrap.\n"
+        gen3 = self._old_writer(db, 3)
+        gen3.execute("INSERT INTO wraps (episodes_compressed, content_hash) VALUES (0, ?)",
+                     (hashlib.sha256(older.encode("utf-8")).hexdigest(),))
+        gen3.commit()
+        gen3.close()
+        cont.write_text(older, encoding="utf-8", newline="")
+        with pytest.warns(UserWarning, match="differed from the store's identity"):
+            Store(db).close()
+        assert [p.read_text(encoding="utf-8") for p in
+                tmp_path.glob("m.continuity.md.diverged-*")] == [older]
+        assert cont.read_bytes() == text.encode("utf-8")
 
     def test_every_table_carries_this_generations_three_guards(self, tmp_path):
         from anneal_memory.store import _SCHEMA_VERSION

@@ -458,16 +458,24 @@ def test_rev_survives_a_lone_surrogate_on_disk(tmp_path):
     assert CrystalStore(p).get("x")["rev"]
 
 
-def test_gen3_crystals_live_in_the_db_and_the_json_is_a_projection(tmp_path):
+def test_gen3_crystals_live_in_the_db_and_the_json_is_a_projection(tmp_path, monkeypatch):
     """Design B2 T3. Beside a generation-3 store, a crystal mutation is in the
-    store's ``crystal_document`` row, so deleting the JSON loses nothing and the next
-    read re-projects it byte-identical. A foreign edit to the JSON is kept as
-    ``.diverged-`` (on a read and on a write, never overwriting an earlier copy) and
-    never becomes the crystal state."""
+    store's ``crystal_document`` row, so deleting the JSON loses nothing: reads come
+    from the row and NEVER write (review r1 C1: no file, lock file or ``.diverged``
+    copy, even in a copied snapshot directory), and the next write-capable Store
+    open re-projects it byte-identical. A foreign edit to the JSON is kept as
+    ``.diverged-`` (at that open and on a write, never overwriting an earlier copy)
+    and never becomes the crystal state. A ``.db`` that cannot be probed raises,
+    never falling to the file (r1 C2, C3)."""
     import hashlib
+    import sqlite3
 
     from anneal_memory import Store
     from anneal_memory.store import connect
+
+    def files():  # SQLite's own -wal/-shm aside: a mode=ro open of a WAL db may create them
+        return {f.name: f.read_bytes() for f in tmp_path.iterdir()
+                if not f.name.endswith(("-wal", "-shm"))}
 
     db = tmp_path / "memory.db"
     Store(db, project_name="t3").close()
@@ -485,15 +493,22 @@ def test_gen3_crystals_live_in_the_db_and_the_json_is_a_projection(tmp_path):
     assert hashlib.sha256(projected).hexdigest() == content_hash
 
     path.unlink()  # a copy of the .db alone is the whole crystal state
+    (tmp_path / "memory.crystal.json.lock").unlink()
+    before = files()
     assert CrystalStore(path).get("kept_in_db")["explanation"] == "lives in the row"
+    assert files() == before  # the read wrote nothing
+    Store(db, project_name="t3").close()  # a write-capable open re-projects
     assert path.read_bytes() == projected
 
     foreign = json.loads(projected)
     foreign["crystal"][0]["explanation"] = "a hand edit"
     foreign_bytes = json.dumps(foreign).encode("utf-8")
     path.write_bytes(foreign_bytes)
+    before = files()
+    assert CrystalStore(path).get("kept_in_db")["explanation"] == "lives in the row"
+    assert files() == before  # nor on a foreign file: no rewrite, no .diverged copy
     with pytest.warns(UserWarning, match="diverged"):
-        assert CrystalStore(path).get("kept_in_db")["explanation"] == "lives in the row"
+        Store(db, project_name="t3").close()
     assert path.read_bytes() == projected
     first = list(tmp_path.glob("memory.crystal.json.diverged-*"))
     assert [c.read_bytes() for c in first] == [foreign_bytes]
@@ -514,6 +529,29 @@ def test_gen3_crystals_live_in_the_db_and_the_json_is_a_projection(tmp_path):
     finally:
         conn.close()
     assert path.read_bytes() == doc_json.encode("utf-8")
+
+    # r1 C2: one probe error on a write raises; neither the file nor the row moves.
+    real_connect = _crystal.connect
+
+    def probe_fails(message):
+        def fake(target, **kw):
+            if kw.get("read_only"):
+                raise sqlite3.OperationalError(message)
+            return real_connect(target, **kw)
+        return fake
+
+    monkeypatch.setattr(_crystal, "connect", probe_fails("database is locked"))
+    with pytest.raises(CrystalError, match="could not be probed"):
+        CrystalStore(path).crystallize(name="third", level=2, explanation="x", today=T0)
+    monkeypatch.setattr(_crystal, "connect", real_connect)
+    assert path.read_bytes() == doc_json.encode("utf-8")
+    assert sorted(c["name"] for c in CrystalStore(path).active()) == ["kept_in_db", "second"]
+    # r1 C3: an unprobeable store with the file absent raises, never [].
+    path.unlink()
+    monkeypatch.setattr(_crystal, "connect",
+                        probe_fails("attempt to write a readonly database"))
+    with pytest.raises(CrystalError, match="could not be probed"):
+        CrystalStore(path).active()
 
 
 class TestSnapshotRestore:

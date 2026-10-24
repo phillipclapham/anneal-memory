@@ -2859,6 +2859,10 @@ class Store:
     Use as a context manager (``with Store(...) as s:``) to ensure the
     connection is closed properly.
 
+    The crystal store beside it follows the sibling convention ``<stem>.db`` /
+    ``<stem>.crystal.json``; under any other database name a
+    :class:`~anneal_memory.crystal.CrystalStore` needs an explicit ``db=``.
+
     **Wrap-lifecycle invariants (10.5c.4):** The wrap state machine is
     tracked across three metadata keys — ``wrap_started_at``,
     ``wrap_token``, ``wrap_episode_ids`` — that MUST stay in sync:
@@ -3229,6 +3233,21 @@ class Store:
                         f"unaffected; load_continuity retries.",
                         stacklevel=3,
                     )
+                # The crystal file likewise (design B2): a crystal read never
+                # writes, so the writer side keeps the projection current.
+                if (not self._defer_commit and not self._conn.in_transaction
+                        and self._path != Path(":memory:")):
+                    try:
+                        from .crystal import _reconcile_crystal_projection
+                        _reconcile_crystal_projection(self._conn, self._path)
+                    except Exception as crystal_exc:
+                        _warn_after_commit(
+                            f"anneal-memory: the crystal file could not be "
+                            f"re-projected at open ({type(crystal_exc).__name__}: "
+                            f"{crystal_exc}). The crystals in the database are "
+                            f"unaffected; the next crystal change or open retries.",
+                            stacklevel=3,
+                        )
                 try:
                     self._warn_orphan_tmp_files()
                 except Exception as orphan_exc:
@@ -3383,10 +3402,6 @@ class Store:
             "SELECT 1 FROM sqlite_master WHERE type = 'table' "
             "AND name = 'identity_versions' COLLATE NOCASE"
         ).fetchone() is not None
-        had_crystal_table = self._conn.execute(
-            "SELECT 1 FROM sqlite_master WHERE type = 'table' "
-            "AND name = 'crystal_document' COLLATE NOCASE"
-        ).fetchone() is not None
         for script in (
             _SCHEMA_SQL,
             _ASSOCIATIONS_SCHEMA_SQL,
@@ -3417,9 +3432,11 @@ class Store:
         self._migrate_episode_origin_key(commit=False)
         if pre_existing and not had_identity_table:
             self._seed_identity_from_files()
-        if pre_existing and not had_crystal_table and self._path != Path(":memory:"):
-            # crystal.py owns the crystal format; imported here because it imports
-            # this module. Never commits (this transaction is the migration's).
+        if self._path != Path(":memory:"):
+            # Seeds only while there is no row: at the migration, and for a new
+            # store created beside a legacy crystal file. crystal.py owns the crystal
+            # format; imported here because it imports this module. Never commits
+            # (this transaction is the open's schema transaction).
             from .crystal import _seed_crystal_document
             _seed_crystal_document(self._conn, self._path)
 

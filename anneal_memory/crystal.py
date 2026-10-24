@@ -80,10 +80,11 @@ beyond the Python stdlib.
 Generation 3 (design B2): beside a store at schema generation >= 3 the document
 lives in the store's ``crystal_document`` row and the JSON file is its projection,
 so a copy of the ``.db`` carries the crystals. A mutation commits the row under
-the DB write lock, then projects the file; reads come from the row. A file that
-is neither the row nor its previous version is kept as ``.diverged-<UTC stamp>``
-and re-projected (:meth:`CrystalStore._project`). Without such a store beside it,
-the file is the document, as before.
+the DB write lock, then projects the file; reads come from the row and never
+write. A write-capable :class:`Store` open re-projects a stale or missing file. A
+file that is neither the row nor its previous version is kept as
+``.diverged-<UTC stamp>`` and re-projected (:meth:`CrystalStore._project`). Without
+such a store beside it, the file is the document, as before.
 
 Dates: ``crystallized_on`` / ``last_activated_on`` / ``retirement.on`` are
 ``YYYY-MM-DD`` **logical dates** in the operator's frame — injectable via ``today``
@@ -222,6 +223,17 @@ class CrystalError(AnnealMemoryError):
     catches crystal-store failures in the same boundary as episodic- and
     spore-store ones.
     """
+
+
+class _StoreBusy(CrystalError):
+    """The generation-3 probe found the store busy past the read budget
+    (retryable). A read answers from the file (:meth:`CrystalStore._load_busy`);
+    a write raises it."""
+
+
+def _is_busy(e: sqlite3.Error) -> bool:
+    return isinstance(e, sqlite3.OperationalError) and (
+        "locked" in str(e) or "busy" in str(e))
 
 
 # Field on a crystal record listing evidence ids ground_empty_evidence recorded (KL-09).
@@ -432,15 +444,19 @@ def _warn_quietly(message: str) -> None:
 
 
 def _seed_crystal_document(conn: sqlite3.Connection, db_path: str | os.PathLike[str]) -> None:
-    """Generation 2 -> 3 (design B2): the ``<stem>.crystal.json`` beside a
-    ``<stem>.db`` store becomes its ``crystal_document`` row, verbatim, when it is a
-    valid crystal document. Called inside the migration's transaction; never
-    commits. Nothing is seeded for an absent or invalid file (the file is left for
-    the first mutation, which adopts a valid one and refuses an invalid one as
-    before), or for a store not named ``*.db`` (the sibling convention
+    """Design B2: while the store has no ``crystal_document`` row, the
+    ``<stem>.crystal.json`` beside a ``<stem>.db`` store becomes that row, verbatim,
+    when it is a valid crystal document: at the generation 2 -> 3 migration and at
+    every later write-capable open (a new store created beside a legacy file, so a
+    copy of the .db alone carries the crystals). Called inside the open's schema
+    transaction; never commits. Nothing is seeded for an absent or invalid file (the
+    file is left for the first mutation, which adopts a valid one and refuses an
+    invalid one as before), or for a store not named ``*.db`` (the sibling convention
     :meth:`CrystalStore._db_path` reads)."""
     db_path = Path(db_path)
     if db_path.suffix != ".db":
+        return
+    if conn.execute("SELECT 1 FROM crystal_document WHERE id = 1").fetchone() is not None:
         return
     path = db_path.with_name(db_path.stem + _CRYSTAL_SUFFIX)
     try:
@@ -454,6 +470,34 @@ def _seed_crystal_document(conn: sqlite3.Connection, db_path: str | os.PathLike[
         (text, hashlib.sha256(text.encode("utf-8")).hexdigest(),
          datetime.now(timezone.utc).isoformat()),
     )
+
+
+def _reconcile_crystal_projection(conn: sqlite3.Connection, db_path: str | os.PathLike[str]) -> None:
+    """A write-capable Store open brings ``<stem>.crystal.json`` in line with the
+    ``crystal_document`` row through :meth:`CrystalStore._project` (the one
+    divergence decision), as it does the continuity files: reads never write, so
+    the flow scripts that read the file directly rely on the writers keeping it
+    current. Only when the file is not already the row, and only when the crystal
+    lock is free (a held lock means a writer is projecting). ``conn`` is the
+    Store's connection, outside any transaction. The caller warns on a raise."""
+    db_path = Path(db_path)
+    if db_path.suffix != ".db":
+        return
+    row = CrystalStore._read_row(conn)
+    if row is None:
+        return  # nothing to project; take no lock (no lock file either)
+    store = CrystalStore(db_path.with_name(db_path.stem + _CRYSTAL_SUFFIX), db=db_path)
+    try:
+        if hashlib.sha256(store.path.read_bytes()).hexdigest() == row[1]:
+            return
+    except FileNotFoundError:
+        pass
+    with store._lock(blocking=False) as held:
+        if not held:
+            return
+        row = CrystalStore._read_row(conn)  # re-read under the lock
+        if row is not None:
+            store._project(row[0], {row[1], row[2]})
 
 
 class CrystalSnapshot:
@@ -504,8 +548,12 @@ class CrystalStore:
         """``path`` is the crystal JSON file. ``db`` names the store that holds the
         document (a :class:`Store` or its database path); without it, a ``<stem>.db``
         beside a ``<stem>.crystal.json`` path is used when it is at generation >= 3.
-        Nothing is opened here. A ``db`` Store opened read-only makes this store
-        read-only: reads never re-project and mutations raise :class:`CrystalError`."""
+        Nothing is opened here. A read never writes, in any mode. A ``db`` Store
+        opened read-only makes this store read-only: mutations raise
+        :class:`CrystalError`.
+
+        The sibling convention is ``<stem>.db`` beside ``<stem>.crystal.json``; a
+        store under any other name needs an explicit ``db=``."""
         self.path = Path(path)
         self._read_only = False
         if isinstance(db, Store):
@@ -615,7 +663,15 @@ class CrystalStore:
 
     def _db_path(self) -> Path | None:
         """The store that holds this document (generation >= 3), or None (the file
-        is the document). Read-only probe of ``format_version``; never migrates."""
+        is the document). Read-only probe of ``format_version``; never migrates.
+
+        File mode only when there is no ``<stem>.db`` file, or it holds no
+        generation >= 3 marker with the table. A ``.db`` that exists but cannot be
+        probed (busy, unreadable, a read-only directory, not a database) raises a
+        retryable :class:`CrystalError`: falling back to the file there would write
+        the file alone, or answer from a file the store may have replaced. A busy
+        one raises :class:`_StoreBusy`, on which a read answers from the file
+        (:meth:`_load_busy`)."""
         if self._db_resolved is not None:
             return self._db_resolved
         explicit = self._db is not None
@@ -632,22 +688,20 @@ class CrystalStore:
         try:
             conn = connect(candidate, read_only=True, timeout=_READ_TIMEOUT)
             try:
+                tables = {str(r[0]).lower() for r in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table'")}
+                # No metadata table: a database that is not an anneal store, so no marker.
                 marker = conn.execute(
                     "SELECT value FROM metadata WHERE key = 'format_version'"
-                ).fetchone()
-                has_table = conn.execute(
-                    "SELECT 1 FROM sqlite_master WHERE type = 'table' "
-                    "AND name = 'crystal_document' COLLATE NOCASE"
-                ).fetchone() is not None
+                ).fetchone() if "metadata" in tables else None
+                has_table = "crystal_document" in tables
             finally:
                 conn.close()
         except sqlite3.Error as e:
-            # Not an anneal store, unreadable, or busy past the read budget: beside a
-            # path-only caller the file answers this call (nothing is cached, so the
-            # next call probes again), as before generation 3.
-            if explicit:
-                raise CrystalError(f"crystal store database {candidate}: {e}") from e
-            return None
+            raise (_StoreBusy if _is_busy(e) else CrystalError)(
+                f"crystal store database {candidate} could not be probed ({e}); "
+                f"nothing was read or written, retry when it is readable."
+            ) from e
         generation = _parse_format_version(marker[0]) if marker else None
         if generation is None or generation < _CRYSTAL_DB_GENERATION or not has_table:
             if explicit:
@@ -668,7 +722,14 @@ class CrystalStore:
         return None if row is None else (row[0], row[1], row[2])
 
     def _load(self) -> dict:
-        db = self._db_path()
+        """The document, read without writing anything: from the row when a
+        generation-3 store holds it (the file is re-projected by every crystal
+        change and by every write-capable Store open, see
+        :func:`_reconcile_crystal_projection`), else from the file."""
+        try:
+            db = self._db_path()
+        except _StoreBusy as e:
+            return self._load_busy(e)
         if db is None:
             return self._parse(self._read_file_text())
         try:
@@ -677,53 +738,35 @@ class CrystalStore:
                 row = self._read_row(conn)
             finally:
                 conn.close()
-        except sqlite3.OperationalError as e:
-            if "locked" not in str(e) and "busy" not in str(e):
-                raise CrystalError(f"crystal document in {db} could not be read ({e}).") from e
-            # Store held by a writer past the read budget: answer from the projection,
-            # which a committed write has already updated (stale only after a crash
-            # between a commit and its projection, until the next read repairs it).
-            _log.debug("crystal read: %s busy, reading the projection %s", db, self.path)
-            return self._parse(self._read_file_text())
         except sqlite3.Error as e:
+            if _is_busy(e):
+                return self._load_busy(e)
             raise CrystalError(f"crystal document in {db} could not be read ({e}).") from e
         if row is None:
             # No row yet: the file is the seed, adopted by the first mutation.
             return self._parse(self._read_file_text())
-        text, content_hash, prev_hash = row
-        data = self._parse(text, where=f"the crystal_document row of {db}")
-        if not self._read_only:
-            self._reproject_if_stale(db, content_hash)
-        return data
+        return self._parse(row[0], where=f"the crystal_document row of {db}")
 
-    def _reproject_if_stale(self, db: Path, content_hash: str) -> None:
-        """A read's repair: re-project when the file is not the row. Only when the
-        crystal lock is free (a held lock means a writer is projecting), and never
-        raising: the read already has its answer from the row."""
-        try:
-            try:
-                if hashlib.sha256(self.path.read_bytes()).hexdigest() == content_hash:
-                    return
-            except FileNotFoundError:
-                pass
-            with self._lock(blocking=False) as held:
-                if not held:
-                    return
-                conn = connect(db, must_exist=True, timeout=_READ_TIMEOUT)
-                try:
-                    row = self._read_row(conn)
-                finally:
-                    conn.close()
-                if row is not None:
-                    self._project(row[0], {row[1], row[2]})
-        except Exception as e:  # noqa: BLE001 - a read never fails on its repair
-            _warn_quietly(
-                f"anneal-memory: could not re-project {self.path} from the store ({e}); "
-                f"reads come from the store, the file is stale until the next write."
-            )
+    def _load_busy(self, cause: Exception) -> dict:
+        """A store busy past the read budget (test_worth's locked-db bound): the
+        file answers when it exists; an absent file raises a retryable
+        :class:`CrystalError`, never an empty answer.
+
+        Known edge (review r1 C4, routed): the file is not validated here, since
+        every read of a busy store, its hashes included, is busy too; a foreign
+        file answers until the store frees."""
+        text = self._read_file_text()
+        if text is None:
+            raise CrystalError(
+                f"the crystal store beside {self.path} is busy ({cause}) and the file "
+                f"is absent; retry."
+            ) from cause
+        _log.debug("crystal read: store busy (%s), reading %s", cause, self.path)
+        return self._parse(text)
 
     def _write_file(self, text: str) -> None:
-        """Atomically replace the crystal file with ``text``."""
+        """Atomically replace the crystal file with ``text``. Known edge: the
+        unique ``.tmp`` a kill mid-write leaves is not removed."""
         target_dir = self.path.parent
         os.makedirs(target_dir, exist_ok=True)
         # A UNIQUE tmp sibling, never a fixed ``<name>.tmp``: two writers must not
@@ -768,7 +811,12 @@ class CrystalStore:
         lost. Returns the kept copy, if any; the caller warns.
 
         Known edge: a writer that ignores the crystal lock (a human editor) can land
-        between the read below and the replace; that write is not fenced."""
+        between the read below and the replace; that write is not fenced.
+        Known edge: an older anneal writing the file never opens the DB, so the gen-3
+        guards do not fence it; its write becomes a ``.diverged`` copy at the next
+        writer's reconcile (upgrade every writer together).
+        Known edge: a file two or more commits behind the row (an older backup) is
+        not in ``known``, so it is classed foreign and kept; non-destructive."""
         payload = text.encode("utf-8")
         try:
             raw: bytes | None = self.path.read_bytes()
@@ -861,18 +909,21 @@ class CrystalStore:
         commit order. The DB write lock is what makes the mutation atomic with the
         store; the advisory lock is kept so two writers' post-commit projections
         cannot land out of order. A failed projection is a warning, never an error:
-        the row is the document and the next read re-projects.
+        the row is the document, and the next crystal change or write-capable
+        :class:`Store` open re-projects.
 
         Reads (:meth:`get` / :meth:`list_crystal` / :meth:`surface_rewarm_candidates`
         / :meth:`active`) stay lock-free: the file is replaced atomically and the row
         is read in its own snapshot, so a reader always sees a committed document.
-        (A read that finds the file stale tries the lock without waiting, to
-        re-project; see :meth:`_reproject_if_stale`.)
+        A read never writes: not the file, not a lock file, not a ``.diverged``
+        copy (a read may run in a copied snapshot directory).
 
         Platform: ``fcntl`` is POSIX-only and reliable on a LOCAL filesystem; on a
         non-POSIX platform the lock degrades to a no-op (the unique-tmp +
         atomic-replace write still protects a single-process writer; cross-process
-        serialization is guaranteed only on a local POSIX filesystem)."""
+        serialization is guaranteed only on a local POSIX filesystem). Known edge:
+        without ``fcntl`` (Windows) projections can land out of commit order; the
+        next crystal change or write-capable Store open re-projects."""
         with self._lock():
             db = self._db_path()
             if db is None:
@@ -945,7 +996,8 @@ class CrystalStore:
                 _warn_quietly(
                     f"anneal-memory: the crystal change committed to {db} but "
                     f"{self.path} could not be projected ({e}); reads come from the "
-                    f"store and the next read re-projects the file."
+                    f"store and the next crystal change or write-capable Store open "
+                    f"re-projects the file."
                 )
 
     # --- internal lookups ---------------------------------------------------

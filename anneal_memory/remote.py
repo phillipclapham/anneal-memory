@@ -671,8 +671,10 @@ class RemoteSession:
                             {**first, "text": f"{first['text']}\n\n{block}"},
                             *result["content"][1:]]}
                         # Left out rather than turn the store's answer into the
-                        # reply-size refusal (headroom for the JSON-RPC envelope).
-                        if len(json.dumps(merged)) <= MAX_REPLY_BYTES - 1024:
+                        # reply-size refusal: measured as the HTTP layer measures it,
+                        # whole envelope (the caller's id included), UTF-8 bytes.
+                        envelope = json.dumps(_rpc_result(msg_id, merged)).encode("utf-8")
+                        if len(envelope) <= MAX_REPLY_BYTES:
                             result = merged
                 except Exception as e:
                     logger.error("pending block failed: %s", type(e).__name__)

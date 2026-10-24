@@ -158,7 +158,12 @@ class OAuth:
             return True
         current = self.pinned()
         if current is not None:
-            return current == uri
+            if current != uri:
+                return False
+            # Synced on every release, not only the first: a pin linked by an
+            # attempt whose directory sync failed is visible but maybe not durable.
+            _fsync_dir_strict(self._pin_path.parent)
+            return True
         tmp = self._pin_path.with_name(f"{self._pin_path.name}.{secrets.token_hex(8)}.tmp")
         fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         try:

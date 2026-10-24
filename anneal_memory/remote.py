@@ -415,6 +415,18 @@ class _Handler(BaseHTTPRequestHandler):
     def do_DELETE(self) -> None:
         self._get()
 
+    def do_HEAD(self) -> None:
+        # The Gemini app probes the server URL with HEAD before anything else;
+        # the default 501 read as "server cannot be reached" there (10-24).
+        if self._authorize() is None:
+            return
+        self._send(200, extra={"Allow": "POST"})
+
+    def do_OPTIONS(self) -> None:
+        if self._authorize() is None:
+            return
+        self._send(204, extra={"Allow": "POST, GET, HEAD, DELETE, OPTIONS"})
+
     def _get(self) -> None:
         if self._authorize() is None:
             return

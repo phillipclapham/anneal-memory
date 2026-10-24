@@ -133,3 +133,22 @@ def test_tokens_are_per_connector_and_never_stored(served, caplog):
     remote.token_revoke(tokens, "other")
     assert call(f"/mcp/{b}", _LIST)[0] == 401
     assert call(f"/mcp/{a}", _LIST)[0] == 200
+
+
+def test_head_and_options_answer_behind_auth(served):
+    call, a, _b, _t, _p = served
+    for method, ok in (("HEAD", 200), ("OPTIONS", 204)):
+        def go(path, auth=None):
+            req = urllib.request.Request(f"http://127.0.0.1:{call.port}{path}", method=method)
+            if auth:
+                req.add_header("Authorization", auth)
+            try:
+                with urllib.request.urlopen(req, timeout=10) as r:
+                    return r.status, r.read()
+            except urllib.error.HTTPError as e:
+                return e.code, b""
+        assert go("/mcp")[0] == 401
+        assert go("/mcp/wrong")[0] == 401
+        assert go("/elsewhere")[0] == 404
+        assert go(f"/mcp/{a}") == (ok, b"")
+        assert go("/mcp", f"Bearer {a}") == (ok, b"")

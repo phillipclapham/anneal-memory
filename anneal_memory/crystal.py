@@ -128,7 +128,15 @@ from .graduation import (
     _is_graduating_heading,
 )
 from .schema import DEFAULT_GRADUATING
-from .store import AnnealMemoryError, Store, _parse_format_version, connect
+from .store import (
+    AnnealMemoryError,
+    Store,
+    _conn_lease_live,
+    _lease_gate,
+    _rebaseline_wrap_crystal,
+    _parse_format_version,
+    connect,
+)
 
 _log = logging.getLogger(__name__)
 
@@ -463,6 +471,16 @@ def _seed_crystal_document(conn: sqlite3.Connection, db_path: str | os.PathLike[
     if conn.execute("SELECT 1 FROM crystal_document WHERE id = 1").fetchone() is not None:
         return
     path = db_path.with_name(db_path.stem + _CRYSTAL_SUFFIX)
+    if _conn_lease_live(conn):
+        # Integration L3 I1, as identity adoption (B3 L3 r1 U2): no crystal commit
+        # under another's tenure without its token. The file stays; the next
+        # write-capable open with no live lease seeds it.
+        _warn_quietly(
+            f"anneal-memory: {path} was not seeded into {db_path.name} while a "
+            f"consolidation lease is live; the next write-capable open with no live "
+            f"lease seeds it."
+        )
+        return
     try:
         text = path.read_bytes().decode("utf-8")
         CrystalStore(path)._parse(text)
@@ -991,7 +1009,7 @@ class CrystalStore:
                 os.close(lock_fd)
 
     @contextmanager
-    def _transaction(self) -> Iterator[dict]:
+    def _transaction(self, lease_token: str | None = None) -> Iterator[dict]:
         """Serialize a full load→mutate→save against concurrent processes.
 
         Identical contract to :meth:`SporeStore._transaction`: crystallization runs
@@ -1013,6 +1031,13 @@ class CrystalStore:
         cannot land out of order. A failed projection is a warning, never an error:
         the row is the document, and the next crystal change or write-capable
         :class:`Store` open re-projects.
+
+        Every mutator's ``lease_token`` reaches here: inside ``BEGIN IMMEDIATE``
+        the store's one lease fence (:func:`anneal_memory.store._lease_gate`) runs
+        on this connection, so under an unexpired consolidation lease a change
+        without its token raises :class:`~anneal_memory.LeaseFencedError` and
+        writes nothing; a change presenting the token a leased wrap was prepared
+        under moves that wrap's recorded crystal hash with it.
 
         Reads (:meth:`get` / :meth:`list_crystal` / :meth:`surface_rewarm_candidates`
         / :meth:`active`) stay lock-free: the file is replaced atomically and the row
@@ -1046,6 +1071,10 @@ class CrystalStore:
             try:
                 try:
                     conn.execute("BEGIN IMMEDIATE")
+                    # The store's one lease fence, on this connection inside this
+                    # write transaction (integration L3 I1): under a live lease a
+                    # crystal change presents its token. Raises LeaseFencedError.
+                    _lease_gate(conn, "crystal change", lease_token, None)
                     row = self._read_row(conn)
                 except sqlite3.Error as e:
                     raise CrystalError(f"crystal document in {db} could not be read ({e}).") from e
@@ -1076,6 +1105,7 @@ class CrystalStore:
                             (text, new_hash, old_hash,
                              datetime.now(timezone.utc).isoformat()),
                         )
+                        _rebaseline_wrap_crystal(conn, lease_token, new_hash)
                     conn.execute("COMMIT")
                 except sqlite3.Error as e:
                     raise CrystalError(
@@ -1181,6 +1211,7 @@ class CrystalStore:
         source: str | None = None,
         today: date | None = None,
         expect: str | None | _Unset = _UNSET,
+        lease_token: str | None = None,
     ) -> CrystalDict:
         """Crystallize a graduated pattern OUT of the working set into the on-demand
         store. UPSERT by ``name``: re-crystallizing an existing live pattern updates
@@ -1233,7 +1264,7 @@ class CrystalStore:
         tags_clean = _clean_str_list(tags, "tags")
         now = (today or date.today()).isoformat()
 
-        with self._transaction() as data:
+        with self._transaction(lease_token) as data:
             self._check_expect(data, name, expect)
             existing = self._find_live(data, name)
             if existing is not None:
@@ -1380,7 +1411,7 @@ class CrystalStore:
                     break
         return CrystalSnapshot(priors, os.path.realpath(self.path), authority)
 
-    def restore(self, snapshot: CrystalSnapshot) -> None:
+    def restore(self, snapshot: CrystalSnapshot, *, lease_token: str | None = None) -> None:
         """Undo what :meth:`crystallize` did to each name in ``snapshot``, in one
         locked transaction: every row carrying the name is removed, then the recorded
         row goes back where it was (live, or retired for a name crystallize had
@@ -1401,7 +1432,7 @@ class CrystalStore:
         if (snapshot._store_path != os.path.realpath(self.path)
                 or snapshot._authority != self._authority()):
             raise ValueError("this snapshot was taken from a different crystal store")
-        with self._transaction() as data:
+        with self._transaction(lease_token) as data:
             for bucket in ("crystal", "retired"):
                 data[bucket] = [
                     r for r in data.get(bucket, []) if r.get("name") not in snapshot._priors
@@ -1497,7 +1528,9 @@ class CrystalStore:
 
     # --- public API: activate / surgery -------------------------------------
 
-    def touch(self, name: str, *, today: date | None = None) -> CrystalDict:
+    def touch(
+        self, name: str, *, today: date | None = None, lease_token: str | None = None,
+    ) -> CrystalDict:
         """Record that a live pattern was activated (leaned on / re-surfaced):
         ``last_activated_on`` → today, re-heating its activation tier. Meant for a
         crystallized pattern that was cited in a wrap or pulled back by the composer,
@@ -1509,7 +1542,7 @@ class CrystalStore:
         a tier ages from the last crystallize of that name. The re-heat is what
         makes a dormant pattern a re-warm candidate again."""
         now = (today or date.today()).isoformat()
-        with self._transaction() as data:
+        with self._transaction(lease_token) as data:
             item = self._require_live(data, name)
             item["last_activated_on"] = now
             item["rev"] = _rev(cast(dict, item), live=True)
@@ -1529,6 +1562,7 @@ class CrystalStore:
         add_note: str | None = None,
         today: date | None = None,
         expect: str | None | _Unset = _UNSET,
+        lease_token: str | None = None,
     ) -> CrystalDict:
         """Metadata surgery on a live pattern (re-route the 2 axes, re-tag, sharpen
         the explanation) without re-crystallizing. Omitted arguments are left
@@ -1542,7 +1576,7 @@ class CrystalStore:
         before anything is mutated: a mismatch raises :class:`CrystalConflictError`
         and writes nothing."""
         self._validate_expect(expect)
-        with self._transaction() as data:
+        with self._transaction(lease_token) as data:
             self._check_expect(data, name, expect)
             item = self._require_live(data, name)
             if not isinstance(explanation, _Unset):
@@ -1586,6 +1620,7 @@ class CrystalStore:
         limit: int = 4,
         dry_run: bool = False,
         today: date | None = None,
+        lease_token: str | None = None,
     ) -> dict[str, GroundingResult]:
         """Fill the evidence of each live pattern that has none, from the OLDEST
         ``limit`` live (not superseded) episodes in ``store`` that name the pattern as
@@ -1645,17 +1680,19 @@ class CrystalStore:
                 status = "would_ground" if dry_run else "grounded"
                 if not dry_run:
                     try:
-                        self._set_provisional_evidence(name, ids, item["rev"], today)
+                        self._set_provisional_evidence(
+                            name, ids, item["rev"], today, lease_token=lease_token)
                     except CrystalConflictError:
                         status, ids = "conflict", []
             out[name] = GroundingResult(status=status, evidence=ids, hubs_skipped=hubs)
         return out
 
     def _set_provisional_evidence(
-        self, name: str, ids: list[str], expect: str, today: date | None,
+        self, name: str, ids: list[str], expect: str, today: date | None, *,
+        lease_token: str | None = None,
     ) -> None:
         stamp = (today or date.today()).isoformat()
-        with self._transaction() as data:
+        with self._transaction(lease_token) as data:
             self._check_expect(data, name, expect)
             item = self._require_live(data, name)
             item["evidence"] = list(ids)
@@ -1678,6 +1715,7 @@ class CrystalStore:
         today: date | None = None,
         now: datetime | None = None,
         expect: str | None | _Unset = _UNSET,
+        lease_token: str | None = None,
     ) -> CrystalDict:
         """Retire a crystallized pattern (it was falsified / superseded / merged /
         obsolete). Moves it to the ``retired`` set with a retirement record — kept for
@@ -1698,7 +1736,7 @@ class CrystalStore:
             if now.tzinfo is None:
                 raise ValueError("now must be timezone-aware (got a naive datetime).")
             now = now.astimezone(timezone.utc)
-        with self._transaction() as data:
+        with self._transaction(lease_token) as data:
             self._check_expect(data, name, expect)
             item = self._require_live(data, name)
             # Fail loud on a duplicate live name rather than dropping both rows

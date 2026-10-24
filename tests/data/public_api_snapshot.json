@@ -4932,7 +4932,7 @@
     },
     "crystallize": {
      "kind": "method",
-     "signature": "(self, *, name: 'str', level: 'int', explanation: 'str', evidence: 'list[str] | None' = None, permanence: 'Permanence' = 'timeless', activation_mode: 'ActivationMode' = 'just-in-time', tags: 'list[str] | None' = None, source: 'str | None' = None, today: 'date | None' = None, expect: 'str | None | _Unset' = <anneal_memory.crystal._Unset object>) -> 'CrystalDict'"
+     "signature": "(self, *, name: 'str', level: 'int', explanation: 'str', evidence: 'list[str] | None' = None, permanence: 'Permanence' = 'timeless', activation_mode: 'ActivationMode' = 'just-in-time', tags: 'list[str] | None' = None, source: 'str | None' = None, today: 'date | None' = None, expect: 'str | None | _Unset' = <anneal_memory.crystal._Unset object>, lease_token: 'str | None' = None) -> 'CrystalDict'"
     },
     "get": {
      "kind": "method",
@@ -4940,7 +4940,7 @@
     },
     "ground_empty_evidence": {
      "kind": "method",
-     "signature": "(self, store: 'Store', *, limit: 'int' = 4, dry_run: 'bool' = False, today: 'date | None' = None) -> 'dict[str, GroundingResult]'"
+     "signature": "(self, store: 'Store', *, limit: 'int' = 4, dry_run: 'bool' = False, today: 'date | None' = None, lease_token: 'str | None' = None) -> 'dict[str, GroundingResult]'"
     },
     "list_crystal": {
      "kind": "method",
@@ -4948,11 +4948,11 @@
     },
     "restore": {
      "kind": "method",
-     "signature": "(self, snapshot: 'CrystalSnapshot') -> 'None'"
+     "signature": "(self, snapshot: 'CrystalSnapshot', *, lease_token: 'str | None' = None) -> 'None'"
     },
     "retire": {
      "kind": "method",
-     "signature": "(self, name: 'str', *, kind: 'str', reason: 'str | None' = None, today: 'date | None' = None, now: 'datetime | None' = None, expect: 'str | None | _Unset' = <anneal_memory.crystal._Unset object>) -> 'CrystalDict'"
+     "signature": "(self, name: 'str', *, kind: 'str', reason: 'str | None' = None, today: 'date | None' = None, now: 'datetime | None' = None, expect: 'str | None | _Unset' = <anneal_memory.crystal._Unset object>, lease_token: 'str | None' = None) -> 'CrystalDict'"
     },
     "snapshot": {
      "kind": "method",
@@ -4964,11 +4964,11 @@
     },
     "touch": {
      "kind": "method",
-     "signature": "(self, name: 'str', *, today: 'date | None' = None) -> 'CrystalDict'"
+     "signature": "(self, name: 'str', *, today: 'date | None' = None, lease_token: 'str | None' = None) -> 'CrystalDict'"
     },
     "update": {
      "kind": "method",
-     "signature": "(self, name: 'str', *, explanation: 'str | _Unset' = <anneal_memory.crystal._Unset object>, level: 'int | _Unset' = <anneal_memory.crystal._Unset object>, evidence: 'list[str] | _Unset' = <anneal_memory.crystal._Unset object>, permanence: 'Permanence | _Unset' = <anneal_memory.crystal._Unset object>, activation_mode: 'ActivationMode | _Unset' = <anneal_memory.crystal._Unset object>, tags: 'list[str] | _Unset' = <anneal_memory.crystal._Unset object>, source: 'str | None | _Unset' = <anneal_memory.crystal._Unset object>, add_note: 'str | None' = None, today: 'date | None' = None, expect: 'str | None | _Unset' = <anneal_memory.crystal._Unset object>) -> 'CrystalDict'"
+     "signature": "(self, name: 'str', *, explanation: 'str | _Unset' = <anneal_memory.crystal._Unset object>, level: 'int | _Unset' = <anneal_memory.crystal._Unset object>, evidence: 'list[str] | _Unset' = <anneal_memory.crystal._Unset object>, permanence: 'Permanence | _Unset' = <anneal_memory.crystal._Unset object>, activation_mode: 'ActivationMode | _Unset' = <anneal_memory.crystal._Unset object>, tags: 'list[str] | _Unset' = <anneal_memory.crystal._Unset object>, source: 'str | None | _Unset' = <anneal_memory.crystal._Unset object>, add_note: 'str | None' = None, today: 'date | None' = None, expect: 'str | None | _Unset' = <anneal_memory.crystal._Unset object>, lease_token: 'str | None' = None) -> 'CrystalDict'"
     }
    },
    "module": "anneal_memory.crystal"
@@ -6561,7 +6561,7 @@
     },
     "wrap_cancelled": {
      "kind": "method",
-     "signature": "(self, *, expect_token: 'str | None' = None, session_id: 'str | None' = None, force: 'bool' = False, expect_partial: 'bool' = False) -> \"'WrapCancelReceipt'\""
+     "signature": "(self, *, expect_token: 'str | None' = None, session_id: 'str | None' = None, force: 'bool' = False, expect_partial: 'bool' = False, lease_token: 'str | None' = None) -> \"'WrapCancelReceipt'\""
     },
     "wrap_completed": {
      "kind": "method",

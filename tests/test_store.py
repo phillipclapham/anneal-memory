@@ -4446,13 +4446,30 @@ class TestGenerationGuards:
         db = tmp_path / "m.db"
         Store(db).close()
         self._as_generation_2(db)
+        from anneal_memory import continuity_lock
+
         text = "# M — Memory (v1)\r\n\r\n## State\r\nkept byte for byte.\r\n"
         cont = tmp_path / "m.continuity.md"
-        cont.write_bytes(text.encode("utf-8"))
+        cont.write_bytes(b"# M - an older text the gen-2 writer is replacing\n")
         (tmp_path / "m.continuity.meta.json").write_text(
             json.dumps({"sessions_produced": 4, "citations_seen": True}), encoding="utf-8")
         gen2 = self._old_writer(db, 2)  # an older release still holding the store
+        # Integration L3 I2: a gen-2 writer mid-write holds the continuity lock;
+        # the seed waits for its rename, so the text seeded is the one it wrote.
+        held = threading.Event()
+
+        def gen2_write():
+            with continuity_lock(cont):
+                held.set()
+                time.sleep(0.5)
+                (tmp_path / "gen2.tmp").write_bytes(text.encode("utf-8"))
+                os.replace(tmp_path / "gen2.tmp", cont)
+
+        writer = threading.Thread(target=gen2_write)
+        writer.start()
+        held.wait()
         Store(db).close()
+        writer.join()
         assert len(sorted(tmp_path.glob("m.db.gen2-*.bak"))) == 1
         conn = sqlite3.connect(str(db))
         try:

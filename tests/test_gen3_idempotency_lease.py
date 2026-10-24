@@ -154,8 +154,29 @@ def test_t5_a_save_prepared_under_an_expired_lease_is_fenced(tmp_path):
 
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        b.wrap_cancelled()
+        # Integration L3 I4: a leased wrap under a live lease is cancelled only
+        # by a token that owns it (here the live holder's).
+        with pytest.raises(LeaseFencedError) as uncancelled:
+            b.wrap_cancelled(force=True)
+        assert uncancelled.value.reason == "token_mismatch"
+        b.wrap_cancelled(lease_token=gb.token)
     pb = prepare_wrap(b, lease_token=gb.token)
+    # Integration L3 I1: a leased wrap records the crystal document. The holder's
+    # own crystal change (its token) moves the record with it; a change outside
+    # the fence refuses the save (version_moved).
+    from anneal_memory import CrystalStore
+
+    CrystalStore(tmp_path / "lease.crystal.json").crystallize(
+        name="the_wraps_own", level=2, explanation="crystallized mid-wrap",
+        lease_token=gb.token)
+    own = a._conn.execute("SELECT content_hash FROM crystal_document").fetchone()[0]
+    a._conn.execute("UPDATE crystal_document SET content_hash = 'elsewhere'")
+    a._conn.commit()
+    with pytest.raises(LeaseFencedError) as moved:
+        save(b, gb.token, wrap=pb["wrap_token"])
+    assert moved.value.reason == "version_moved"
+    a._conn.execute("UPDATE crystal_document SET content_hash = ?", (own,))
+    a._conn.commit()
     assert save(b, gb.token, wrap=pb["wrap_token"])["wrap_id"] == 1
     assert (_count(a, "wraps"), _count(a, "identity_versions")) == (1, 1)
 

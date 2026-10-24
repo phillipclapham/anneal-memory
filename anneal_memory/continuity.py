@@ -95,6 +95,7 @@ from .retrieval import (
 )
 from .store import (
     AnnealMemoryError,
+    _conn_crystal_hash,
     IdempotencyConflictError,
     _IDEMPOTENCY_SCOPE,
     _IdempotentReplay,
@@ -1841,18 +1842,43 @@ _SAVE_REPLAY_FIELDS = (
 )
 
 
-def _save_replay(result_json: str | None) -> SaveContinuityReplayResult:
+def _save_replay(store: Store, result_json: str | None) -> SaveContinuityReplayResult:
     """A keyed save's replay: the key row's non-content subset, projected by
-    ``_SAVE_REPLAY_FIELDS`` and marked ``replayed``, never the full result."""
-    stored = json.loads(result_json or "{}")
+    ``_SAVE_REPLAY_FIELDS`` and marked ``replayed``, never the full result. A
+    row that does not parse or lacks a field raises
+    ``IdempotencyConflictError(reason="malformed_row")``, never a ``None``
+    standing in for a value (integration L3 I6)."""
+    try:
+        stored = json.loads(result_json or "")
+    except ValueError:
+        stored = None
+    if not isinstance(stored, dict) or any(name not in stored for name in _SAVE_REPLAY_FIELDS):
+        raise IdempotencyConflictError(
+            "validated_save_continuity: this idempotency key's stored result is "
+            "malformed, so the first call's result cannot be returned. Nothing "
+            "was written.", operation="save_continuity", path=str(store.path),
+            reason="malformed_row")
     return cast(SaveContinuityReplayResult, {
         **{name: stored.get(name) for name in _SAVE_REPLAY_FIELDS}, "replayed": True})
 
 
-def _package_fingerprint(package: Any) -> str:
-    """sha256 of a wrap package's canonical JSON (keys sorted)."""
-    return hashlib.sha256(json.dumps(
-        package, sort_keys=True, default=str).encode("utf-8")).hexdigest()
+def _prepare_fingerprint(
+    store: Store, episode_ids: list[str], schema: Any, continuity: str | None,
+    today: str | None,
+) -> str:
+    """sha256 of what a keyed prepare's package is built FROM, never of the
+    package (integration L3 I5): the frozen episode ids, the section schema,
+    the prior continuity's hash, the wrap's day and the crystal document's
+    hash. The re-derive flags and superseded marks a package carries are
+    recomputed at replay time, so hashing them refused a legitimate retry on a
+    store a re-derive changed in between."""
+    return hashlib.sha256(json.dumps({
+        "episode_ids": sorted(episode_ids),
+        "schema": schema,
+        "continuity_sha256": hashlib.sha256((continuity or "").encode("utf-8")).hexdigest(),
+        "today": today or None,
+        "crystal_hash": _conn_crystal_hash(store._conn),
+    }, sort_keys=True, default=str).encode("utf-8")).hexdigest()
 
 
 def _replay_prepare(
@@ -1872,10 +1898,10 @@ def _replay_prepare(
     ``reason="sources_moved"`` (B3 L3 r1 U4). Once the wrap is saved or
     cancelled, ``reason="wrap_closed"``. Never a package other than the first.
 
-    Known edge: what is true only now is recomputed, as on any prepare (the
-    re-derive flags and the superseded marks); when it moved, the fingerprint
-    refuses the replay. The other arguments are the first call's (they are in
-    the request hash)."""
+    The fingerprint covers the package's stable inputs (:func:`_prepare_fingerprint`):
+    what is true only now (the re-derive flags and the superseded marks) is
+    recomputed, as on any prepare, and returned as it is now. The other
+    arguments are the first call's (they are in the request hash)."""
     stored = json.loads(result_json or "{}")
     wrap_token = stored.get("wrap_token") if isinstance(stored, dict) else None
     snapshot = store.load_wrap_snapshot()
@@ -1892,7 +1918,9 @@ def _replay_prepare(
         store, episodes, store.load_continuity(), schema, max_chars=max_chars,
         staleness_days=staleness_days, crystal_store=crystal_store,
         today=store._get_metadata("wrap_today") or None)
-    if _package_fingerprint(package) != stored.get("package_sha256"):
+    if _prepare_fingerprint(
+            store, snapshot["episode_ids"], schema, store.load_continuity(),
+            store._get_metadata("wrap_today") or None) != stored.get("package_sha256"):
         raise IdempotencyConflictError(
             f"prepare_wrap: this idempotency key's package can no longer be rebuilt "
             f"as it was returned (its sources moved since wrap {wrap_token!r} was "
@@ -2237,11 +2265,11 @@ def prepare_wrap(
             )
         try:
             if observed is not None:
-                store.wrap_cancelled(expect_token=observed["token"])
+                store.wrap_cancelled(expect_token=observed["token"], lease_token=lease_token)
             elif observed_partial:
                 # Clear only the partial state observed above: a peer that cleared it and
                 # started a fresh wrap meanwhile (gated or not) must not be destroyed.
-                store.wrap_cancelled(expect_partial=True)
+                store.wrap_cancelled(expect_partial=True, lease_token=lease_token)
         except WrapOwnershipError as exc:
             if exc.actual is not None or exc.partial_state:
                 return _downgraded_empty(
@@ -2355,7 +2383,8 @@ def prepare_wrap(
     if idempotency_key is not None:
         gen3_extras["idempotency"] = (
             idempotency_key, idem_hash, json.dumps({
-                "wrap_token": wrap_token, "package_sha256": _package_fingerprint(package)}))
+                "wrap_token": wrap_token, "package_sha256": _prepare_fingerprint(
+                    store, episode_ids, schema, existing, package["today"])}))
     # AM-SCHEMASNAPSHOT: freeze the EXACT schema we read above (line ~884) into
     # the wrap snapshot, so validated_save_continuity reads back this same schema
     # rather than re-reading a possibly-concurrently-changed live schema. Passing
@@ -2902,6 +2931,29 @@ def validated_save_continuity(
 ) -> SaveContinuityResult | SaveContinuityReplayResult: ...
 
 
+@overload
+def validated_save_continuity(
+    store: Store,
+    text: str,
+    affective_state: AffectiveState | None = None,
+    *,
+    today: str | None = None,
+    wrap_token: str | None = None,
+    allow_shrink: bool = False,
+    allow_unlinked: bool = False,
+    carryforward_cold_days: int | None = 7,
+    crystal_store: CrystalStore | None = None,
+    compost: list[str] | None = None,
+    session_id: str | None = None,
+    allow_sole_live: bool = False,
+    require_rederive: bool = False,
+    unattended: bool = False,
+    model: str | None = None,
+    idempotency_key: str | None = None,
+    lease_token: str | None = None,
+) -> SaveContinuityResult | SaveContinuityReplayResult: ...
+
+
 def validated_save_continuity(
     store: Store,
     text: str,
@@ -3232,7 +3284,7 @@ def validated_save_continuity(
         replayed, stored = store._idempotency_replay(
             idempotency_key, idem_hash, "save_continuity")
         if replayed:
-            return _save_replay(stored)
+            return _save_replay(store, stored)
     # --- Wrap-state preconditions, checked BEFORE payload validation ---
     #
     # Ordering is deliberate: a save with no wrap to commit to is
@@ -3734,7 +3786,7 @@ def validated_save_continuity(
             if idem_status == "match":
                 # A concurrent same request committed first. Nothing is written
                 # yet, so leaving the batch commits an empty transaction.
-                return _save_replay(idem_stored)
+                return _save_replay(store, idem_stored)
             if idem_status == "conflict":
                 store._idempotency_conflict(idempotency_key, "save_continuity")
         # The gate runs again at the version insert below; run here first, a

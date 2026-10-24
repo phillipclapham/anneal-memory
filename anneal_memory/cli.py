@@ -55,7 +55,7 @@ import sys
 from dataclasses import asdict
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, NoReturn
+from typing import Any, NoReturn, cast
 
 from . import __version__
 from . import sessions
@@ -2011,7 +2011,7 @@ def cmd_wrap_cancel(args: argparse.Namespace) -> None:
                 expect_token=expect_token,
                 session_id=getattr(args, "session_id", None),
                 force=bool(getattr(args, "force", False)),
-                **({"expect_partial": True} if partial else {}),
+                **(cast(dict[str, Any], {"expect_partial": True}) if partial else {}),
             )
         except WrapCancelBoundError:
             # No recipe, as for the gated refusal below.

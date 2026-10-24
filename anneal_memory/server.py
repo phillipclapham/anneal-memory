@@ -1068,7 +1068,7 @@ class Server:
                 expect_token=expect_token,
                 session_id=session_id,
                 force=force,
-                **({"expect_partial": True} if partial else {}),
+                **(cast(dict[str, Any], {"expect_partial": True}) if partial else {}),
             )
         except WrapCancelBoundError:
             # No recipe, as for the gated refusal below.

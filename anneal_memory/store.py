@@ -1369,15 +1369,18 @@ class LeaseFencedError(AnnealMemoryError):
     from ``validated_save_continuity`` when the fence predicate fails; and from
     every identity commit (``save_continuity``, ``save_meta``,
     ``replace_section``, a wrap's save) on a store where an unexpired lease
-    exists and the caller does not present its token. Nothing was written.
+    exists and the caller does not present its token; from every crystal
+    change (:class:`~anneal_memory.crystal.CrystalStore`) on the same terms;
+    and from ``wrap_cancelled`` of a leased wrap under a live lease without a
+    token that owns it. Nothing was written.
 
     ``reason`` says which: ``held_by_other`` (another tenure holds the lease),
     ``no_lease`` (no lease row, or none for the presented token),
     ``token_mismatch`` (the token presented is not the one the wrap was
     prepared under or the live lease's, or a leased wrap's save presented
     none, or the wrap's lease record is unreadable), ``expired`` (the tenure the token names has lapsed or was
-    released), ``version_moved`` (another identity version was written since
-    the prepare), ``lease_held`` (an unexpired lease exists and the commit
+    released), ``version_moved`` (another identity version, or a
+    crystal document the wrap recorded, was written since the prepare), ``lease_held`` (an unexpired lease exists and the commit
     presented no token). ``holder``, ``epoch`` and ``expires_at`` describe the
     lease row when one was read, else ``None``."""
 
@@ -1403,6 +1406,175 @@ def _reconstruct_lease_fenced(
 ) -> LeaseFencedError:
     """Pickle reconstructor for :class:`LeaseFencedError` (keyword-only fields)."""
     return cls(message, reason=reason, holder=holder, epoch=epoch, expires_at=expires_at)
+
+
+# Lock order, one for every writer (integration L3 I2): the crystal flock
+# (``<stem>.crystal.json.lock``), then the continuity flock
+# (``<stem>.continuity.md.lock``, :func:`continuity_lock`), then the SQLite
+# write lock (``BEGIN IMMEDIATE``). A writer takes only the locks it needs, but
+# never one earlier in this order while it holds a later one.
+
+
+def _lease_token_digest(token: str) -> str:
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def _conn_has_table(conn: sqlite3.Connection, name: str) -> bool:
+    return conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", (name,)
+    ).fetchone() is not None
+
+
+def _conn_latest_identity_version(conn: sqlite3.Connection) -> int | None:
+    """The latest ``identity_versions`` version on ``conn``; ``None`` when
+    there is none or the table is absent (a generation-2 store)."""
+    if not _conn_has_table(conn, "identity_versions"):
+        return None
+    version = conn.execute("SELECT MAX(version) FROM identity_versions").fetchone()[0]
+    return None if version is None else int(version)
+
+
+def _conn_lease_row(conn: sqlite3.Connection) -> dict[str, Any] | None:
+    """The consolidation lease row on ``conn`` as a dict (``holder``,
+    ``epoch``, ``token_hash``, ``expires_at``, ``latest_version``), whatever
+    the connection's row factory; ``None`` with no row or no lease table."""
+    if not _conn_has_table(conn, "consolidation_lease"):
+        return None
+    row = conn.execute(
+        "SELECT holder, epoch, token_hash, expires_at FROM consolidation_lease "
+        "WHERE id = 1").fetchone()
+    if row is None:
+        return None
+    return {"holder": row[0], "epoch": row[1], "token_hash": row[2],
+            "expires_at": row[3], "latest_version": _conn_latest_identity_version(conn)}
+
+
+def _conn_lease_live(conn: sqlite3.Connection) -> bool:
+    """Whether an unexpired consolidation lease exists on ``conn``."""
+    row = _conn_lease_row(conn)
+    return row is not None and row["expires_at"] > _now_utc()
+
+
+def _conn_crystal_hash(conn: sqlite3.Connection) -> str | None:
+    """The ``crystal_document`` row's ``content_hash``; ``None`` with no row
+    or no table."""
+    if not _conn_has_table(conn, "crystal_document"):
+        return None
+    row = conn.execute("SELECT content_hash FROM crystal_document WHERE id = 1").fetchone()
+    return None if row is None else row[0]
+
+
+def _rebaseline_wrap_crystal(
+    conn: sqlite3.Connection, lease_token: str | None, crystal_hash: str,
+) -> None:
+    """Inside a crystal change's write transaction, after its gate passed: when
+    the change presents the lease token the open wrap was prepared under, it is
+    that wrap's own change (a wrap crystallizes between its prepare and its
+    save), so the wrap record's ``crystal_hash`` moves to ``crystal_hash``. Any
+    other crystal change leaves the record, and the wrap's save refuses
+    (``version_moved``). Known edge: an unleased wrap records no crystal hash,
+    since nothing tells its own crystal change from another writer's."""
+    if lease_token is None:
+        return
+    found = dict(conn.execute(
+        "SELECT key, value FROM metadata WHERE key IN ('wrap_lease', 'wrap_token')"
+    ).fetchall())
+    try:
+        fence = json.loads(found.get("wrap_lease") or "null")
+    except ValueError:
+        return
+    if (isinstance(fence, dict) and found.get("wrap_token")
+            and fence.get("token") == found["wrap_token"]
+            and fence.get("token_hash") == _lease_token_digest(lease_token)
+            and "crystal_hash" in fence):
+        fence["crystal_hash"] = crystal_hash
+        conn.execute("UPDATE metadata SET value = ? WHERE key = 'wrap_lease'",
+                     (json.dumps(fence),))
+
+
+def _lease_fenced_error(
+    row: Any, reason: LeaseFenceReason, what: str,
+) -> LeaseFencedError:
+    why = {
+        "held_by_other": "another tenure holds the consolidation lease",
+        "no_lease": "no consolidation lease exists for the token presented",
+        "token_mismatch": "the lease token presented is not the one this write "
+                          "needs (none was presented, or another one)",
+        "expired": "the lease tenure the token names has expired or was released",
+        "version_moved": "another identity version, or another crystal document, "
+                         "was written since the prepare",
+        "lease_held": "an unexpired consolidation lease exists and no lease token "
+                      "was presented",
+    }[reason]
+    return LeaseFencedError(
+        f"{what}: {why} (reason={reason}). Nothing was written.",
+        reason=reason,
+        holder=None if row is None else row["holder"],
+        epoch=None if row is None else int(row["epoch"]),
+        expires_at=None if row is None or not row["expires_at"] else row["expires_at"],
+    )
+
+
+def _lease_gate(
+    conn: sqlite3.Connection, what: str, lease_token: str | None,
+    prepared: dict[str, Any] | None,
+) -> None:
+    """THE lease fence (design B3, r1 T1/T2; integration L3 I1), one
+    function on a connection: every identity commit, every crystal mutation
+    (:class:`~anneal_memory.crystal.CrystalStore`, on its own connection) and
+    the save of a wrap run it inside their write transaction (the write lock is
+    held from ``BEGIN IMMEDIATE``, so no acquire, itself a write, can move the
+    lease before the commit; a lease that lapses by the clock in that window
+    lapses with no one able to take it over). The writer presents the token;
+    the store compares it.
+
+    Two mechanisms, never conflated. Ownership (fencing tokens): with
+    ``prepared`` holding a ``token_hash`` (the wrap was prepared under a
+    lease), admitted only when the token presented hashes to it and the lease
+    row still holds that hash and epoch, unexpired; a leased wrap's save that
+    presents no token is refused, never defaulted. Otherwise, with an
+    unexpired lease the token presented must be its own (none:
+    ``lease_held``); with none, a write that presents no token passes as it
+    always has, and one that presents a token is refused (it asserts a tenure
+    it does not hold). Optimistic concurrency (B3 L3 r1 U1, integration L3
+    I1): any ``prepared`` record, leased or not, carries the identity version
+    the wrap was prepared on, and a record that carries ``crystal_hash`` also
+    the crystal document's hash; the save is refused (``version_moved``) when
+    either moved. Raises :class:`LeaseFencedError`."""
+    row = _conn_lease_row(conn)
+    now = _now_utc()
+    live = row is not None and row["expires_at"] > now
+    presented = None if lease_token is None else _lease_token_digest(lease_token)
+    reason: LeaseFenceReason | None = None
+    if prepared is not None and prepared.get("token_hash") is not None:
+        if presented is None or presented != prepared.get("token_hash"):
+            reason = "token_mismatch"
+        elif row is None:
+            reason = "no_lease"
+        elif row["token_hash"] != presented or int(row["epoch"]) != prepared.get("epoch"):
+            reason = "held_by_other" if live else "expired"
+        elif not live:
+            reason = "expired"
+    elif presented is None:
+        if live:
+            reason = "lease_held"
+    elif live and row is not None and row["token_hash"] == presented:
+        pass
+    elif row is None:
+        reason = "no_lease"
+    elif row["token_hash"] == presented:
+        reason = "expired"
+    elif live:
+        reason = "token_mismatch"
+    else:
+        reason = "no_lease"
+    if reason is None and prepared is not None and (
+            _conn_latest_identity_version(conn) != prepared.get("identity_version")
+            or ("crystal_hash" in prepared
+                and _conn_crystal_hash(conn) != prepared["crystal_hash"])):
+        reason = "version_moved"
+    if reason is not None:
+        raise _lease_fenced_error(row, reason, what)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -3368,6 +3540,17 @@ class Store:
             may_seed_crystals = (
                 self._path != Path(":memory:")
                 and seed_lock.enter_context(_crystal_seed_lock(self._conn, self._path)))
+            # Integration L3 I2: when this open may seed the identity (a store
+            # that predates generation 3, with a continuity file beside it), the
+            # continuity lock is taken here too, after the crystal lock and before
+            # SQLite (the order above ``_lease_token_digest``), and held through
+            # the seed's commit: a generation-2 writer mid-write finishes its
+            # rename first, so its text is seeded, never filed as ``.diverged``.
+            if (self._path != Path(":memory:")
+                    and _conn_has_table(self._conn, "episodes")
+                    and not _conn_has_table(self._conn, "identity_versions")
+                    and os.path.lexists(self.continuity_path)):
+                seed_lock.enter_context(continuity_lock(self.continuity_path))
             # ⛔ NOT ``executescript`` — it implicitly COMMITs and would drop the
             # lock this method exists to hold. See ``_sql_statements``.
             self._conn.execute("BEGIN IMMEDIATE")
@@ -3917,6 +4100,7 @@ class Store:
         # compression window. BEGIN IMMEDIATE takes the write lock before the read,
         # so the read and the write see the same wraps table.
         max_retries = 3
+        boxed = False
         # Inside a _batch() the BEGIN opens the batch's transaction, which the
         # batch's exit commits or rolls back; on any error _db_boundary rolls
         # back what is open.
@@ -4053,6 +4237,24 @@ class Store:
                             idempotency_key, "record", request_hash,
                             self._record_key_result(ep_id))
                 self._conn.execute("RELEASE record_state_key")
+            # Integration L3 I3: a keyed record's audit events are
+            # ``audit_outbox`` rows in its transaction, so a kill after the
+            # commit (which every retry replays) cannot lose them; flushed below.
+            # Inside a batch the batch-aware path boxes them already.
+            if (idempotency_key is not None and minted_key is not None
+                    and not self._defer_commit and self._audit is not None):
+                events = self._record_audit_events(
+                    ep_id, episode_type, content, source, trust, trust_via,
+                    source_ids, old_ids, key, key_links)
+                try:  # all boxed or none, so no event is both boxed and emitted
+                    json.dumps([payload for _e, payload, _w in events], sort_keys=True)
+                except (TypeError, ValueError):
+                    pass
+                else:
+                    for event, payload, what in events:
+                        self._box_audit_event(event, payload, {"actor": source},
+                                              method="record", committed=what)
+                    boxed = True
             # On a refusal this commits an empty transaction (releasing the
             # lock); inside a batch it leaves the batch's writes alone.
             if not self._defer_commit:
@@ -4098,7 +4300,26 @@ class Store:
         # batch — the helper is batch-aware and defers in that case). Measured
         # 2026-09-04: a bare emit raised a raw OSError with the episode already
         # persisted, so the caller was told record() failed and would write it
-        # again — a duplicate-episode path.
+        # again — a duplicate-episode path. A keyed record boxed its events in
+        # its transaction (above); they are logged from the outbox.
+        if boxed:
+            self._flush_audit_outbox()
+            return episode
+        for event, payload, what in self._record_audit_events(
+                ep_id, episode_type, content, source, trust, trust_via,
+                source_ids, old_ids, key, key_links):
+            self._audit_log_after_commit(
+                event, payload, method="record", committed=what, actor=source)
+        return episode
+
+    def _record_audit_events(
+        self, ep_id: str, episode_type: EpisodeType, content: str, source: str,
+        trust: str, trust_via: str | None, source_ids: list[str], old_ids: list[str],
+        key: str | None, key_links: list[tuple[str, str]],
+    ) -> list[tuple[str, dict[str, Any], str]]:
+        """A recorded episode's audit events, ``(event, payload, committed)``
+        in emit order: the record, each supersession it links, each state-key
+        link (as :meth:`_audit_state_key_links` emits them)."""
         record_event: dict[str, Any] = {
             "episode_id": ep_id,
             "type": episode_type.value,
@@ -4111,18 +4332,14 @@ class Store:
             record_event["trust_via"] = trust_via
         if source_ids:
             record_event["derived_from"] = source_ids
-        self._audit_log_after_commit(
-            "record", record_event, method="record", committed="the episode", actor=source,
-        )
-        for old_id in old_ids:
-            self._audit_log_after_commit("supersede", {
-                "old_id": old_id,
-                "new_id": ep_id,
-                "source": source,
-            }, method="record", committed="the supersession", actor=source)
-        self._audit_state_key_links(key, key_links, source, method="record")
-
-        return episode
+        events: list[tuple[str, dict[str, Any], str]] = [
+            ("record", record_event, "the episode")]
+        events += [("supersede", {"old_id": old_id, "new_id": ep_id, "source": source},
+                    "the supersession") for old_id in old_ids]
+        events += [("supersede", {"old_id": old_id, "new_id": new_id, "source": source,
+                                  "state_key": key}, "the supersession")
+                   for old_id, new_id in key_links]
+        return events
 
     def supersede(
         self, *, old_id: str, new_id: str, source: str = "agent",
@@ -7552,7 +7769,11 @@ class Store:
             # never opens the global wrap under another's tenure.
             lease_json = ""
             if lease_token is not None:
-                lease_json = json.dumps({"token": token, **self._lease_prepare(lease_token)})
+                # A leased wrap also records the crystal document it was prepared
+                # on (integration L3 I1); the holder's own crystal changes move it
+                # (:func:`_rebaseline_wrap_crystal`), anyone else's refuse the save.
+                lease_json = json.dumps({"token": token, **self._lease_prepare(lease_token),
+                                         "crystal_hash": _conn_crystal_hash(self._conn)})
             elif self._identity_table_present():
                 self._lease_gate("prepare_wrap", None, None)
                 lease_json = json.dumps({
@@ -7595,12 +7816,42 @@ class Store:
                 "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
                 ("wrap_lease", lease_json),
             )
+            started_event = {
+                "wrap_token": token,
+                "wrap_episode_count": len(ids_list),
+                "wrap_episode_ids": ids_list,
+                # Full normalized schema (heading + role), not just headings:
+                # roles are load-bearing (the felt-gate keys on the
+                # narrative-timeless role), so headings alone are not full
+                # chain-of-custody for which schema this wrap froze. (codex
+                # L3 LOW-2.)
+                "wrap_section_schema": frozen_schema,
+                # Who prepared the wrap under the consolidate gate (None when
+                # ungated): the chain of custody for who may commit it.
+                "wrap_gated_session": gated_session_id,
+                # The token came from the caller, so a tokenless cancel is refused.
+                "wrap_token_bound": token_bound,
+                # The root map the save will compare against (spore-1282).
+                "wrap_derive_roots": (
+                    None if derive_roots is None
+                    else {("" if k is None else k): v for k, v in derive_roots.items()}
+                ),
+            }
+            boxed = False
             if idempotency is not None:
                 self._idempotency_insert(
                     idempotency[0], "wrap_started", idempotency[1], idempotency[2])
+                # Integration L3 I3: a keyed prepare's retry replays and never
+                # re-emits, so its event is an ``audit_outbox`` row in this
+                # transaction (flushed below), never a post-commit emit alone.
+                boxed = self._audit is not None and self._box_audit_event(
+                    "wrap_started", started_event, {}, method="wrap_started",
+                    committed="the wrap start")
             self._conn.commit()
 
-        if self._audit is not None:
+        if boxed:
+            self._flush_audit_outbox()
+        elif self._audit is not None:
             # Record both the count (for fast integrity scans) and
             # the full ID list (for forensic reconstruction). The
             # audit trail is the tamper-evident record, so logging
@@ -7631,27 +7882,7 @@ class Store:
             # through the very release that closed it.
             self._audit_log_after_commit(
                 "wrap_started",
-                {
-                    "wrap_token": token,
-                    "wrap_episode_count": len(ids_list),
-                    "wrap_episode_ids": ids_list,
-                    # Full normalized schema (heading + role), not just headings:
-                    # roles are load-bearing (the felt-gate keys on the
-                    # narrative-timeless role), so headings alone are not full
-                    # chain-of-custody for which schema this wrap froze. (codex
-                    # L3 LOW-2.)
-                    "wrap_section_schema": frozen_schema,
-                    # Who prepared the wrap under the consolidate gate (None when
-                    # ungated): the chain of custody for who may commit it.
-                    "wrap_gated_session": gated_session_id,
-                    # The token came from the caller, so a tokenless cancel is refused.
-                    "wrap_token_bound": token_bound,
-                    # The root map the save will compare against (spore-1282).
-                    "wrap_derive_roots": (
-                        None if derive_roots is None
-                        else {("" if k is None else k): v for k, v in derive_roots.items()}
-                    ),
-                },
+                started_event,
                 method="wrap_started",
                 committed="the wrap start",
                 # Commits unconditionally above (no _defer_commit guard), so
@@ -7660,6 +7891,31 @@ class Store:
                 batch_aware=False,
             )
 
+    def _wrap_cancel_lease_gate(
+        self, cancelled_token: str | None, lease_token: str | None,
+    ) -> None:
+        """:meth:`wrap_cancelled`'s fence, inside its write transaction: when
+        the open wrap's lease record (bound to its token) carries a
+        ``token_hash`` and a lease is live, the token presented must be that
+        hash's or the live lease's; else :class:`LeaseFencedError`
+        (``token_mismatch``). An unreadable record is not a leased wrap here: a
+        cancel is the recovery path, and must not be stranded by it."""
+        if not cancelled_token:
+            return
+        try:
+            fence = json.loads(self._get_metadata("wrap_lease") or "null")
+        except ValueError:
+            return
+        if (not isinstance(fence, dict) or fence.get("token") != cancelled_token
+                or fence.get("token_hash") is None):
+            return
+        row = self._lease_row()
+        if row is None or not row["expires_at"] > _now_utc():
+            return
+        presented = None if lease_token is None else self._lease_token_hash(lease_token)
+        if presented is None or presented not in (fence["token_hash"], row["token_hash"]):
+            raise self._lease_fenced(row, "token_mismatch", "wrap_cancelled")
+
     def wrap_cancelled(
         self,
         *,
@@ -7667,6 +7923,7 @@ class Store:
         session_id: str | None = None,
         force: bool = False,
         expect_partial: bool = False,
+        lease_token: str | None = None,
     ) -> "WrapCancelReceipt":
         """Clear wrap-in-progress flag without recording a completed wrap.
 
@@ -7706,6 +7963,13 @@ class Store:
                 changed in either case. Cannot be combined with ``expect_token``;
                 ``session_id`` and ``force`` do not affect it (a partial state is
                 never gated).
+            lease_token: Required when the open wrap was prepared under a
+                consolidation lease and a lease is live (integration L3 I4): the
+                token the wrap was prepared under, or the live lease's (its holder
+                may clear a lapsed tenure's wrap); else
+                :class:`LeaseFencedError` (``token_mismatch``) and nothing
+                changes, ``force`` included. A wrap prepared without a lease, or
+                any wrap while no lease is live, cancels as before.
 
         Returns a :class:`WrapCancelReceipt` describing **what this call
         actually cleared**, read inside the same transaction as the clear —
@@ -7784,6 +8048,8 @@ class Store:
             )
         if expect_partial and expect_token is not None:
             raise ValueError("wrap_cancelled: expect_partial and expect_token are exclusive.")
+        if lease_token is not None and (not isinstance(lease_token, str) or not lease_token):
+            raise ValueError("wrap_cancelled: lease_token must be a non-empty str")
         with self._db_boundary("wrap_cancelled"):
             # Take the write lock BEFORE the reads so no peer connection can
             # replace the wrap between what we report and what we clear. See
@@ -7901,6 +8167,10 @@ class Store:
                 raise WrapCancelGatedError(
                     gated_session=cancelled_gated_raw, session_id=session_id
                 )
+
+            # Integration L3 I4: a leased wrap under a live lease is cancelled only
+            # by a token that owns it, read under the same write lock as the clear.
+            self._wrap_cancel_lease_gate(cancelled_token, lease_token)
 
             self._conn.execute(
                 "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
@@ -10840,36 +11110,14 @@ class Store:
 
     @staticmethod
     def _lease_token_hash(token: str) -> str:
-        return hashlib.sha256(token.encode("utf-8")).hexdigest()
+        return _lease_token_digest(token)
 
-    def _lease_row(self) -> sqlite3.Row | None:
-        return self._conn.execute(
-            "SELECT holder, epoch, token_hash, expires_at, "
-            "(SELECT MAX(version) FROM identity_versions) AS latest_version "
-            "FROM consolidation_lease WHERE id = 1"
-        ).fetchone()
+    def _lease_row(self) -> dict[str, Any] | None:
+        return _conn_lease_row(self._conn)
 
     @staticmethod
-    def _lease_fenced(
-        row: sqlite3.Row | None, reason: LeaseFenceReason, what: str,
-    ) -> LeaseFencedError:
-        why = {
-            "held_by_other": "another tenure holds the consolidation lease",
-            "no_lease": "no consolidation lease exists for the token presented",
-            "token_mismatch": "the lease token presented is not the one this write "
-                              "needs (none was presented, or another one)",
-            "expired": "the lease tenure the token names has expired or was released",
-            "version_moved": "another identity version was written since the prepare",
-            "lease_held": "an unexpired consolidation lease exists and no lease token "
-                          "was presented",
-        }[reason]
-        return LeaseFencedError(
-            f"{what}: {why} (reason={reason}). Nothing was written.",
-            reason=reason,
-            holder=None if row is None else row["holder"],
-            epoch=None if row is None else int(row["epoch"]),
-            expires_at=None if row is None or not row["expires_at"] else row["expires_at"],
-        )
+    def _lease_fenced(row: Any, reason: LeaseFenceReason, what: str) -> LeaseFencedError:
+        return _lease_fenced_error(row, reason, what)
 
     def lease_acquire(self, holder: str, ttl_seconds: float) -> LeaseGrant:
         """Take the consolidation lease for ``ttl_seconds``; returns its
@@ -10971,74 +11219,19 @@ class Store:
     def _lease_gate(
         self, what: str, lease_token: str | None, prepared: dict[str, Any] | None,
     ) -> None:
-        """THE lease fence (design B3, r1 T1/T2), one function: every identity
-        commit and the save of a leased wrap run it inside their write
-        transaction (the write lock is held from ``BEGIN IMMEDIATE``, so no
-        acquire, itself a write, can move the lease before the commit; a lease
-        that lapses by the clock in that window lapses with no one able to take
-        it over). The writer presents the token; the store compares it.
-
-        Two mechanisms, never conflated. Ownership (fencing tokens): with
-        ``prepared`` holding a ``token_hash`` (the wrap was prepared under a
-        lease), admitted only when the token presented hashes to it and the
-        lease row still holds that hash and epoch, unexpired; a leased wrap's
-        save that presents no token is refused, never defaulted. Otherwise, with
-        an unexpired lease the token presented must be its own (none:
-        ``lease_held``); with none, a write that presents no token passes as it
-        always has, and one that presents a token is refused (it asserts a tenure
-        it does not hold). Optimistic concurrency (B3 L3 r1 U1): any
-        ``prepared`` record, leased or not, carries the identity version the
-        wrap was prepared on, and the save is refused (``version_moved``) when
-        the latest version is another. Raises :class:`LeaseFencedError`."""
-        row = self._lease_row()
-        now = _now_utc()
-        live = row is not None and row["expires_at"] > now
-        presented = None if lease_token is None else self._lease_token_hash(lease_token)
-        reason: LeaseFenceReason | None = None
-        if prepared is not None and prepared.get("token_hash") is not None:
-            if presented is None or presented != prepared.get("token_hash"):
-                reason = "token_mismatch"
-            elif row is None:
-                reason = "no_lease"
-            elif row["token_hash"] != presented or int(row["epoch"]) != prepared.get("epoch"):
-                reason = "held_by_other" if live else "expired"
-            elif not live:
-                reason = "expired"
-        elif presented is None:
-            if live:
-                reason = "lease_held"
-        elif live and row is not None and row["token_hash"] == presented:
-            pass
-        elif row is None:
-            reason = "no_lease"
-        elif row["token_hash"] == presented:
-            reason = "expired"
-        elif live:
-            reason = "token_mismatch"
-        else:
-            reason = "no_lease"
-        if (reason is None and prepared is not None
-                and self._latest_identity_version() != prepared.get("identity_version")):
-            reason = "version_moved"
-        if reason is not None:
-            raise self._lease_fenced(row, reason, what)
+        """The module-level :func:`_lease_gate` on this handle's connection:
+        the one predicate Store and CrystalStore share (integration L3 I1)."""
+        _lease_gate(self._conn, what, lease_token, prepared)
 
     def _latest_identity_version(self) -> int | None:
         """The latest ``identity_versions`` version, or ``None`` when there is
         none or the table is absent (a generation-2 handle)."""
-        if not self._identity_table_present():
-            return None
-        version = self._conn.execute(
-            "SELECT MAX(version) FROM identity_versions").fetchone()[0]
-        return None if version is None else int(version)
+        return _conn_latest_identity_version(self._conn)
 
     def _lease_live(self) -> bool:
         """Whether an unexpired consolidation lease exists (``False`` on a
         generation-2 handle, which has no lease table)."""
-        if not self._identity_table_present():
-            return False
-        row = self._lease_row()
-        return row is not None and row["expires_at"] > _now_utc()
+        return _conn_lease_live(self._conn)
 
     def _lease_prepare(self, lease_token: str) -> dict[str, Any]:
         """What a wrap prepared under ``lease_token`` records (read by
@@ -13023,8 +13216,9 @@ class Store:
     ) -> bool:
         """One ``audit_outbox`` row in the caller's open transaction; False
         (nothing written) when the event is not JSON. The boxed sites are the
-        batched pipeline and the identity writers (``save_continuity``,
-        ``replace_section``). Every other event fired outside a batch keeps the
+        batched pipeline, the identity writers (``save_continuity``,
+        ``replace_section``), and a keyed ``record`` and ``wrap_started``
+        (integration L3 I3). Every other event fired outside a batch keeps the
         best-effort post-commit path: a loss there is counted, not prevented
         (spore-774: NOT EVERY LOSS IS RECORDED)."""
         try:
@@ -13067,7 +13261,13 @@ class Store:
         order can differ from the emit order; payloads round-trip JSON (tuples
         become lists); a kept row's failed append records a ``dropped_before``
         gap, and a later flush delivers it, so the chain can name a gap that
-        was later filled."""
+        was later filled. Known edge (integration L3, carried to 1.1 as the
+        claim-then-acknowledge outbox): the flush holds ``BEGIN IMMEDIATE``
+        across each append and its ``on_audit_event`` callback, so an
+        ``on_audit_event`` callback must not write to the store (a crystal
+        change, ``replace_section``, ``save_meta``, or this ``Store``): a write
+        through another connection times out, and one through this ``Store``
+        commits the flush early."""
         if self._audit is None or self._read_only or self._closed:
             return
         try:

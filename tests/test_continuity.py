@@ -3566,6 +3566,33 @@ class TestL3Fixes:
         assert [e["data"]["content_hash"] for e in saved
                 if e["event"] == "continuity_saved"][-1:] == [two]
 
+        # Integration L3 I3: a keyed record killed after its commit, before its
+        # audit append. Every retry replays, so only the outbox row it committed
+        # with the episode can log it: once, at the next open.
+        child = (
+            "import os, sys\n"
+            "from anneal_memory import Store\n"
+            "real = Store._audit_log_after_commit\n"
+            "def dying(self, event, *a, **k):\n"
+            "    if event == 'record':\n"
+            "        os._exit(18)\n"
+            "    return real(self, event, *a, **k)\n"
+            "Store._audit_log_after_commit = dying\n"
+            "Store(sys.argv[1], project_name='Kill').record(\n"
+            "    'keyed, killed before its audit', 'observation', idempotency_key='k-kill')\n"
+        )
+        assert subprocess.run([sys.executable, "-c", child, str(db)]).returncode == 18
+        store = Store(str(db), project_name="Kill")
+        try:
+            retried = store.record("keyed, killed before its audit", "observation",
+                                   idempotency_key="k-kill")
+        finally:
+            store.close()
+        logged = [json.loads(line) for line in (tmp_path / "kill.audit.jsonl").read_text(
+            encoding="utf-8").splitlines() if line.strip()]
+        assert [e["data"]["episode_id"] for e in logged
+                if e["event"] == "record"].count(retried.id) == 1
+
     @staticmethod
     def _wrap(store, text):
         from anneal_memory import prepare_wrap, validated_save_continuity

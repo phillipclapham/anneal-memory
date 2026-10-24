@@ -530,6 +530,28 @@ def test_gen3_crystals_live_in_the_db_and_the_json_is_a_projection(tmp_path, mon
         conn.close()
     assert path.read_bytes() == doc_json.encode("utf-8")
 
+    # Integration L3 I1: the store's one lease fence covers crystal changes: under
+    # a live lease a change without its token is refused and writes nothing.
+    from anneal_memory import LeaseFencedError
+
+    leased = Store(db, project_name="t3")
+    grant = leased.lease_acquire("A", ttl_seconds=60)
+    with pytest.raises(LeaseFencedError) as fenced:
+        CrystalStore(path).crystallize(name="stranger", level=2, explanation="no token",
+                                       today=T0)
+    assert fenced.value.reason == "lease_held" and CrystalStore(path).get("stranger") is None
+    with pytest.raises(LeaseFencedError):
+        CrystalStore(path).retire("second", kind="obsolete", lease_token="0" * 32)
+    prior = CrystalStore(path).snapshot(["leased"])
+    CrystalStore(path).crystallize(name="leased", level=2, explanation="the holder's",
+                                   today=T0, lease_token=grant.token)
+    with pytest.raises(LeaseFencedError):  # the rollback path is fenced too
+        CrystalStore(path).restore(prior)
+    CrystalStore(path).restore(prior, lease_token=grant.token)
+    assert path.read_bytes() == doc_json.encode("utf-8")
+    assert leased.lease_release(grant.token)
+    leased.close()
+
     # L3 r1 D1: a file-mode writer (it probed generation 2) holds the crystal lock;
     # the migrating open's seed waits for it, so the writer's change is seeded, not
     # filed as .diverged at the next open.

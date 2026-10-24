@@ -77,6 +77,14 @@ load→mutate→save, while reads stay lock-free (atomic ``os.replace`` means a 
 always sees a complete committed document). POSIX-only locking. Zero dependencies
 beyond the Python stdlib.
 
+Generation 3 (design B2): beside a store at schema generation >= 3 the document
+lives in the store's ``crystal_document`` row and the JSON file is its projection,
+so a copy of the ``.db`` carries the crystals. A mutation commits the row under
+the DB write lock, then projects the file; reads come from the row. A file that
+is neither the row nor its previous version is kept as ``.diverged-<UTC stamp>``
+and re-projected (:meth:`CrystalStore._project`). Without such a store beside it,
+the file is the document, as before.
+
 Dates: ``crystallized_on`` / ``last_activated_on`` / ``retirement.on`` are
 ``YYYY-MM-DD`` **logical dates** in the operator's frame — injectable via ``today``
 for deterministic runs, defaulting to ``date.today()``. ``retirement.at`` is an
@@ -93,8 +101,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import re
+import sqlite3
 import tempfile
 import unicodedata
 import warnings
@@ -116,9 +126,23 @@ from .graduation import (
     _is_graduating_heading,
 )
 from .schema import DEFAULT_GRADUATING
-from .store import AnnealMemoryError, Store
+from .store import AnnealMemoryError, Store, _parse_format_version, connect
+
+_log = logging.getLogger(__name__)
 
 CRYSTAL_SCHEMA_VERSION = 1
+
+# The file-name convention that ties a crystal file to its store: ``<stem>.db``
+# beside ``<stem>.crystal.json`` (cli.py and flow/levain build paths this way).
+_CRYSTAL_SUFFIX = ".crystal.json"
+# The first store generation that holds the crystal document (design B2).
+_CRYSTAL_DB_GENERATION = 3
+# Seconds a crystal write waits for the store's write lock.
+_DB_TIMEOUT = 30.0
+# Seconds a crystal READ waits for the store. Reads fire on every recall turn and
+# must stay bounded (tests/test_worth.py, the locked-db pull test): a store held
+# busy past this is read through its projection, the file (see :meth:`_load`).
+_READ_TIMEOUT = 1.0
 
 Permanence = Literal["timeless", "phase-specific"]
 ActivationMode = Literal["just-in-time", "catastrophic"]
@@ -392,6 +416,46 @@ def activation_tier(crystal: CrystalDict, today: date | None = None) -> Activati
 # the store
 # ---------------------------------------------------------------------------
 
+def _warn_quietly(message: str) -> None:
+    """A diagnostic after a committed change (or on a read's repair) that never
+    raises: under an error warnings-filter ``warnings.warn`` raises, and a committed
+    crystal change must not be reported as failed (the class B1's L3 R3 fixed;
+    same contract as ``continuity._warn_after_commit``). Falls back to the log; a
+    raising log handler is swallowed too."""
+    try:
+        warnings.warn(message, UserWarning, stacklevel=3)
+    except Exception:  # noqa: BLE001
+        try:
+            _log.warning("%s", message)
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def _seed_crystal_document(conn: sqlite3.Connection, db_path: str | os.PathLike[str]) -> None:
+    """Generation 2 -> 3 (design B2): the ``<stem>.crystal.json`` beside a
+    ``<stem>.db`` store becomes its ``crystal_document`` row, verbatim, when it is a
+    valid crystal document. Called inside the migration's transaction; never
+    commits. Nothing is seeded for an absent or invalid file (the file is left for
+    the first mutation, which adopts a valid one and refuses an invalid one as
+    before), or for a store not named ``*.db`` (the sibling convention
+    :meth:`CrystalStore._db_path` reads)."""
+    db_path = Path(db_path)
+    if db_path.suffix != ".db":
+        return
+    path = db_path.with_name(db_path.stem + _CRYSTAL_SUFFIX)
+    try:
+        text = path.read_bytes().decode("utf-8")
+        CrystalStore(path)._parse(text)
+    except (OSError, UnicodeDecodeError, CrystalError):
+        return
+    conn.execute(
+        "INSERT INTO crystal_document (id, doc_json, content_hash, prev_hash, updated_at) "
+        "VALUES (1, ?, ?, NULL, ?)",
+        (text, hashlib.sha256(text.encode("utf-8")).hexdigest(),
+         datetime.now(timezone.utc).isoformat()),
+    )
+
+
 class CrystalSnapshot:
     """What :meth:`CrystalStore.snapshot` read for some names; hand it back to
     :meth:`CrystalStore.restore`. Opaque on purpose: its content is not a stable
@@ -416,7 +480,9 @@ class CrystalSnapshot:
 class CrystalStore:
     """A JSON-backed store of crystallized patterns (the on-demand graduated tier).
 
-    Mirrors :class:`SporeStore` exactly — an explicit path (no magic default), the
+    Mirrors :class:`SporeStore` (beside a generation-3 store the document lives in its
+    ``crystal_document`` row and the file is a projection; see :meth:`_transaction`):
+    an explicit path (no magic default), the
     atomic-write durability (unique-tmp + fsync + rename + dir-fsync), and an
     exclusive advisory lock spanning every mutation's load→mutate→save so concurrent
     writers serialize with no lost updates and reads stay lock-free. The keyed
@@ -432,22 +498,34 @@ class CrystalStore:
     next save).
     """
 
-    def __init__(self, path: str | os.PathLike[str]) -> None:
+    def __init__(
+        self, path: str | os.PathLike[str], *, db: Store | str | os.PathLike[str] | None = None,
+    ) -> None:
+        """``path`` is the crystal JSON file. ``db`` names the store that holds the
+        document (a :class:`Store` or its database path); without it, a ``<stem>.db``
+        beside a ``<stem>.crystal.json`` path is used when it is at generation >= 3.
+        Nothing is opened here. A ``db`` Store opened read-only makes this store
+        read-only: reads never re-project and mutations raise :class:`CrystalError`."""
         self.path = Path(path)
+        self._read_only = False
+        if isinstance(db, Store):
+            self._read_only = db._read_only
+            db = db.path
+        self._db: Path | None = None if db is None else Path(db)
+        self._db_resolved: Path | None = None  # cached once found: a store never leaves gen 3
 
     # --- io -----------------------------------------------------------------
 
-    def _load(self) -> dict:
+    def _empty(self) -> dict:
+        return {"crystal": [], "retired": [], "schema_version": CRYSTAL_SCHEMA_VERSION}
+
+    def _read_file_text(self) -> str | None:
+        """The crystal file's text, or None when it does not exist."""
         try:
-            with open(self.path, "r", encoding="utf-8") as f:
-                data = json.load(f)
+            return self.path.read_bytes().decode("utf-8")
         except FileNotFoundError:
-            return {
-                "crystal": [],
-                "retired": [],
-                "schema_version": CRYSTAL_SCHEMA_VERSION,
-            }
-        except (json.JSONDecodeError, UnicodeDecodeError) as e:
+            return None
+        except UnicodeDecodeError as e:
             # UnicodeDecodeError (a ValueError, NOT an OSError) is the non-UTF-8
             # corruption path — normalize it to CrystalError at the source so every
             # reader (the wrap path + the CLI index/recall surfaces) is covered by
@@ -468,16 +546,31 @@ class CrystalStore:
                 f"{self.path} could not be read ({e}); refusing to proceed — "
                 f"inspect it (and any .tmp sidecar) by hand."
             ) from e
+
+    def _parse(self, text: str | None, where: object = None) -> dict:
+        """Validate a crystal document's text (None = no document: empty). ``where``
+        names its home in errors (the file, or the store's row)."""
+        where = self.path if where is None else where
+        if text is None:
+            return self._empty()
+        try:
+            data = json.loads(text)
+        except json.JSONDecodeError as e:
+            raise CrystalError(
+                f"{where} is not valid JSON ({e}); refusing to proceed so "
+                f"recoverable crystallized patterns aren't overwritten on the next "
+                f"save — inspect it (and any .tmp sidecar) by hand."
+            ) from e
         if not isinstance(data, dict):
             raise CrystalError(
-                f"{self.path} must contain a JSON object, got {type(data).__name__}."
+                f"{where} must contain a JSON object, got {type(data).__name__}."
             )
         data.setdefault("crystal", [])
         data.setdefault("retired", [])
         data.setdefault("schema_version", CRYSTAL_SCHEMA_VERSION)
         if not isinstance(data["crystal"], list) or not isinstance(data["retired"], list):
             raise CrystalError(
-                f"{self.path} is structurally invalid ('crystal' and 'retired' must "
+                f"{where} is structurally invalid ('crystal' and 'retired' must "
                 f"be lists); refusing to proceed so recoverable patterns aren't lost "
                 f"— inspect it by hand."
             )
@@ -485,30 +578,32 @@ class CrystalStore:
             isinstance(s, dict) for s in data["retired"]
         ):
             raise CrystalError(
-                f"{self.path} has non-object rows in 'crystal'/'retired'; refusing "
+                f"{where} has non-object rows in 'crystal'/'retired'; refusing "
                 f"to proceed — inspect it by hand."
             )
         version = data["schema_version"]
         if not isinstance(version, int) or isinstance(version, bool):
             raise CrystalError(
-                f"{self.path} has a non-integer schema_version ({version!r}); "
+                f"{where} has a non-integer schema_version ({version!r}); "
                 f"refusing to proceed — inspect it by hand."
             )
         if version > CRYSTAL_SCHEMA_VERSION:
             raise CrystalError(
-                f"{self.path} was written by a newer crystal schema "
+                f"{where} was written by a newer crystal schema "
                 f"(v{version} > v{CRYSTAL_SCHEMA_VERSION}); refusing to read it so "
                 f"fields this version doesn't understand aren't silently dropped on "
                 f"the next save."
             )
-        # In memory only: :meth:`_save` strips it, so the file format is unchanged.
+        # In memory only: :meth:`_serialize` strips it, so the format is unchanged.
         for row in data["crystal"]:
             row["rev"] = _rev(row, live=True)
         for row in data["retired"]:
             row["rev"] = _rev(row, live=False)
         return data
 
-    def _save(self, data: dict) -> None:
+    @staticmethod
+    def _serialize(data: dict) -> str:
+        """The document's exact text: the file's bytes and the row's ``doc_json``."""
         # ``rev`` is computed, never stored: strip it from every row, including one a
         # caller built from a read and inserted (e.g. a rollback's preimage).
         data = {
@@ -516,6 +611,119 @@ class CrystalStore:
             "crystal": [{k: v for k, v in r.items() if k != "rev"} for r in data["crystal"]],
             "retired": [{k: v for k, v in r.items() if k != "rev"} for r in data["retired"]],
         }
+        return json.dumps(data, indent=2, ensure_ascii=False) + "\n"
+
+    def _db_path(self) -> Path | None:
+        """The store that holds this document (generation >= 3), or None (the file
+        is the document). Read-only probe of ``format_version``; never migrates."""
+        if self._db_resolved is not None:
+            return self._db_resolved
+        explicit = self._db is not None
+        if explicit:
+            candidate = cast(Path, self._db)
+        elif self.path.name.endswith(_CRYSTAL_SUFFIX) and len(self.path.name) > len(_CRYSTAL_SUFFIX):
+            candidate = self.path.with_name(self.path.name[: -len(_CRYSTAL_SUFFIX)] + ".db")
+        else:
+            return None
+        if not candidate.is_file():
+            if explicit:
+                raise CrystalError(f"crystal store database {candidate} does not exist.")
+            return None
+        try:
+            conn = connect(candidate, read_only=True, timeout=_READ_TIMEOUT)
+            try:
+                marker = conn.execute(
+                    "SELECT value FROM metadata WHERE key = 'format_version'"
+                ).fetchone()
+                has_table = conn.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type = 'table' "
+                    "AND name = 'crystal_document' COLLATE NOCASE"
+                ).fetchone() is not None
+            finally:
+                conn.close()
+        except sqlite3.Error as e:
+            # Not an anneal store, unreadable, or busy past the read budget: beside a
+            # path-only caller the file answers this call (nothing is cached, so the
+            # next call probes again), as before generation 3.
+            if explicit:
+                raise CrystalError(f"crystal store database {candidate}: {e}") from e
+            return None
+        generation = _parse_format_version(marker[0]) if marker else None
+        if generation is None or generation < _CRYSTAL_DB_GENERATION or not has_table:
+            if explicit:
+                raise CrystalError(
+                    f"crystal store database {candidate} is not at schema generation "
+                    f">= {_CRYSTAL_DB_GENERATION} with a crystal_document table; open "
+                    f"it with anneal_memory.Store first (that migrates it)."
+                )
+            return None
+        self._db_resolved = candidate
+        return candidate
+
+    @staticmethod
+    def _read_row(conn: sqlite3.Connection) -> tuple[str, str, str | None] | None:
+        row = conn.execute(
+            "SELECT doc_json, content_hash, prev_hash FROM crystal_document WHERE id = 1"
+        ).fetchone()
+        return None if row is None else (row[0], row[1], row[2])
+
+    def _load(self) -> dict:
+        db = self._db_path()
+        if db is None:
+            return self._parse(self._read_file_text())
+        try:
+            conn = connect(db, read_only=True, timeout=_READ_TIMEOUT)
+            try:
+                row = self._read_row(conn)
+            finally:
+                conn.close()
+        except sqlite3.OperationalError as e:
+            if "locked" not in str(e) and "busy" not in str(e):
+                raise CrystalError(f"crystal document in {db} could not be read ({e}).") from e
+            # Store held by a writer past the read budget: answer from the projection,
+            # which a committed write has already updated (stale only after a crash
+            # between a commit and its projection, until the next read repairs it).
+            _log.debug("crystal read: %s busy, reading the projection %s", db, self.path)
+            return self._parse(self._read_file_text())
+        except sqlite3.Error as e:
+            raise CrystalError(f"crystal document in {db} could not be read ({e}).") from e
+        if row is None:
+            # No row yet: the file is the seed, adopted by the first mutation.
+            return self._parse(self._read_file_text())
+        text, content_hash, prev_hash = row
+        data = self._parse(text, where=f"the crystal_document row of {db}")
+        if not self._read_only:
+            self._reproject_if_stale(db, content_hash)
+        return data
+
+    def _reproject_if_stale(self, db: Path, content_hash: str) -> None:
+        """A read's repair: re-project when the file is not the row. Only when the
+        crystal lock is free (a held lock means a writer is projecting), and never
+        raising: the read already has its answer from the row."""
+        try:
+            try:
+                if hashlib.sha256(self.path.read_bytes()).hexdigest() == content_hash:
+                    return
+            except FileNotFoundError:
+                pass
+            with self._lock(blocking=False) as held:
+                if not held:
+                    return
+                conn = connect(db, must_exist=True, timeout=_READ_TIMEOUT)
+                try:
+                    row = self._read_row(conn)
+                finally:
+                    conn.close()
+                if row is not None:
+                    self._project(row[0], {row[1], row[2]})
+        except Exception as e:  # noqa: BLE001 - a read never fails on its repair
+            _warn_quietly(
+                f"anneal-memory: could not re-project {self.path} from the store ({e}); "
+                f"reads come from the store, the file is stale until the next write."
+            )
+
+    def _write_file(self, text: str) -> None:
+        """Atomically replace the crystal file with ``text``."""
         target_dir = self.path.parent
         os.makedirs(target_dir, exist_ok=True)
         # A UNIQUE tmp sibling, never a fixed ``<name>.tmp``: two writers must not
@@ -528,13 +736,12 @@ class CrystalStore:
         tmp_path = Path(tmp_name)
         try:
             try:
-                f = os.fdopen(fd, "w", encoding="utf-8")
+                f = os.fdopen(fd, "w", encoding="utf-8", newline="")
             except BaseException:
                 os.close(fd)  # fdopen didn't take ownership — close the raw fd
                 raise
             with f:
-                json.dump(data, f, indent=2, ensure_ascii=False)
-                f.write("\n")
+                f.write(text)
                 f.flush()
                 os.fsync(f.fileno())
             os.replace(tmp_path, self.path)
@@ -546,6 +753,93 @@ class CrystalStore:
             raise
         _fsync_dir(target_dir)
 
+    def _save(self, data: dict) -> None:
+        self._write_file(self._serialize(data))
+
+    def _project(self, text: str, known: set[str | None]) -> Path | None:
+        """THE one divergence decision for the crystal projection (design B1 rule 5,
+        applied to B2). Caller holds the crystal lock. The file is left alone when
+        it is already ``text``; replaced quietly when absent or when its sha256 is
+        in ``known`` (hashes the store holds: the row's and its previous one, so a
+        projection a crash left behind is stale, not foreign); otherwise it is
+        foreign (a hand edit, an older anneal writing the file, undecodable bytes):
+        its bytes are first kept as ``<name>.diverged-<UTC stamp>`` and only then is
+        the file replaced, so the original name is never absent and the edit never
+        lost. Returns the kept copy, if any; the caller warns.
+
+        Known edge: a writer that ignores the crystal lock (a human editor) can land
+        between the read below and the replace; that write is not fenced."""
+        payload = text.encode("utf-8")
+        try:
+            raw: bytes | None = self.path.read_bytes()
+        except FileNotFoundError:
+            raw = None
+        kept: Path | None = None
+        if raw is not None:
+            found = hashlib.sha256(raw).hexdigest()
+            if found == hashlib.sha256(payload).hexdigest():
+                return None
+            if found not in known:
+                kept = self._keep_diverged(raw)
+        self._write_file(text)
+        if kept is not None:
+            _warn_quietly(
+                f"anneal-memory: {self.path.name} differed from the store's crystal "
+                f"document (an edit outside anneal, or an older anneal); it was kept as "
+                f"{kept} and the file is projected from the database. Change crystals "
+                f"through CrystalStore; the file is a projection."
+            )
+        return kept
+
+    def _keep_diverged(self, raw: bytes) -> Path:
+        """Write ``raw`` to a NEW ``<name>.diverged-<UTC stamp>`` file, created
+        exclusively: an earlier copy is never overwritten (a collision takes the
+        next suffix)."""
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+        for attempt in range(1000):
+            suffix = stamp if attempt == 0 else f"{stamp}-{attempt}"
+            copy = self.path.with_name(f"{self.path.name}.diverged-{suffix}")
+            try:
+                fd = os.open(copy, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+            except FileExistsError:
+                continue
+            try:
+                with os.fdopen(fd, "wb") as f:
+                    f.write(raw)
+                    f.flush()
+                    os.fsync(f.fileno())
+            except BaseException:
+                try:
+                    copy.unlink()
+                except OSError:
+                    pass
+                raise
+            _fsync_dir(self.path.parent)
+            return copy
+        raise OSError(f"no free .diverged- name beside {self.path}")
+
+    @contextmanager
+    def _lock(self, *, blocking: bool = True) -> Iterator[bool]:
+        """The exclusive advisory lock on the sibling ``<store>.lock``; yields
+        whether it is held (always True when ``blocking``; a no-op True where
+        ``fcntl`` is absent)."""
+        os.makedirs(self.path.parent, exist_ok=True)
+        lock_fd: int | None = None
+        try:
+            if fcntl is not None:
+                lock_path = self.path.with_name(self.path.name + ".lock")
+                lock_fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o644)
+                try:
+                    fcntl.flock(lock_fd, fcntl.LOCK_EX if blocking
+                                else fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    yield False
+                    return
+            yield True
+        finally:
+            if lock_fd is not None:
+                os.close(lock_fd)
+
     @contextmanager
     def _transaction(self) -> Iterator[dict]:
         """Serialize a full load→mutate→save against concurrent processes.
@@ -556,30 +850,103 @@ class CrystalStore:
         and (re)loads the document INSIDE the lock — no lost updates, no name
         collisions. The lock releases when the fd closes or the process dies, so a
         crashed holder can never strand it. NOT reentrant (``flock`` is per-fd; a
-        mutator must never call another mutator). :meth:`_save` runs only on a clean
-        exit; an exception in the body skips the save and releases the lock.
+        mutator must never call another mutator). The save runs only on a clean
+        exit; an exception in the body skips it and releases the lock.
+
+        With a generation-3 store (:meth:`_db_path`) the body runs inside
+        ``BEGIN IMMEDIATE``: the document is read from the ``crystal_document`` row
+        (the file adopted when there is no row yet), the mutated document is written
+        to the row and committed, and THEN the file is projected
+        (:meth:`_project`), still under the advisory lock, so projections land in
+        commit order. The DB write lock is what makes the mutation atomic with the
+        store; the advisory lock is kept so two writers' post-commit projections
+        cannot land out of order. A failed projection is a warning, never an error:
+        the row is the document and the next read re-projects.
 
         Reads (:meth:`get` / :meth:`list_crystal` / :meth:`surface_rewarm_candidates`
-        / :meth:`active`) stay lock-free: :meth:`_save` commits via atomic
-        ``os.replace``, so a reader always sees a complete committed document.
+        / :meth:`active`) stay lock-free: the file is replaced atomically and the row
+        is read in its own snapshot, so a reader always sees a committed document.
+        (A read that finds the file stale tries the lock without waiting, to
+        re-project; see :meth:`_reproject_if_stale`.)
 
         Platform: ``fcntl`` is POSIX-only and reliable on a LOCAL filesystem; on a
         non-POSIX platform the lock degrades to a no-op (the unique-tmp +
         atomic-replace write still protects a single-process writer; cross-process
         serialization is guaranteed only on a local POSIX filesystem)."""
-        os.makedirs(self.path.parent, exist_ok=True)
-        lock_fd: int | None = None
-        try:
-            if fcntl is not None:
-                lock_path = self.path.with_name(self.path.name + ".lock")
-                lock_fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o644)
-                fcntl.flock(lock_fd, fcntl.LOCK_EX)
-            data = self._load()
-            yield data
-            self._save(data)
-        finally:
-            if lock_fd is not None:
-                os.close(lock_fd)
+        with self._lock():
+            db = self._db_path()
+            if db is None:
+                data = self._parse(self._read_file_text())
+                yield data
+                self._save(data)
+                return
+            if self._read_only:
+                raise CrystalError(
+                    f"{self.path}: this crystal store was opened through a read-only "
+                    f"Store; it does not write."
+                )
+            try:
+                conn = connect(db, must_exist=True, timeout=_DB_TIMEOUT)
+            except sqlite3.Error as e:
+                raise CrystalError(f"crystal document in {db} could not be opened ({e}).") from e
+            conn.isolation_level = None  # explicit BEGIN/COMMIT below
+            try:
+                try:
+                    conn.execute("BEGIN IMMEDIATE")
+                    row = self._read_row(conn)
+                except sqlite3.Error as e:
+                    raise CrystalError(f"crystal document in {db} could not be read ({e}).") from e
+                if row is None:
+                    seed = self._read_file_text()
+                    data = self._parse(seed)
+                    known: set[str | None] = {
+                        None if seed is None
+                        else hashlib.sha256(seed.encode("utf-8")).hexdigest()}
+                    old_hash = next(iter(known))
+                else:
+                    data = self._parse(row[0], where=f"the crystal_document row of {db}")
+                    known = {row[1], row[2]}
+                    old_hash = row[1]
+                yield data
+                text = self._serialize(data)
+                new_hash = hashlib.sha256(text.encode("utf-8")).hexdigest()
+                try:
+                    if row is None or new_hash != row[1]:
+                        conn.execute(
+                            "INSERT INTO crystal_document "
+                            "(id, doc_json, content_hash, prev_hash, updated_at) "
+                            "VALUES (1, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET "
+                            "doc_json = excluded.doc_json, "
+                            "content_hash = excluded.content_hash, "
+                            "prev_hash = excluded.prev_hash, "
+                            "updated_at = excluded.updated_at",
+                            (text, new_hash, old_hash,
+                             datetime.now(timezone.utc).isoformat()),
+                        )
+                    conn.execute("COMMIT")
+                except sqlite3.Error as e:
+                    raise CrystalError(
+                        f"crystal document in {db} could not be written ({e}); "
+                        f"nothing was changed."
+                    ) from e
+            except BaseException:
+                if conn.in_transaction:
+                    try:
+                        conn.execute("ROLLBACK")
+                    except sqlite3.Error:
+                        pass
+                raise
+            finally:
+                conn.close()
+            # Committed. Nothing below may report the mutation as failed.
+            try:
+                self._project(text, known | {new_hash})
+            except Exception as e:  # noqa: BLE001 - see the docstring
+                _warn_quietly(
+                    f"anneal-memory: the crystal change committed to {db} but "
+                    f"{self.path} could not be projected ({e}); reads come from the "
+                    f"store and the next read re-projects the file."
+                )
 
     # --- internal lookups ---------------------------------------------------
 

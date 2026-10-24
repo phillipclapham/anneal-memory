@@ -26,7 +26,7 @@ from anneal_memory.store import (
 
 # Tables that never hold an episode id, each named so a new table is a decision.
 UNRELATED = {
-    "audit_outbox", "identity_versions",  # gen 3: no episode-id column
+    "audit_outbox", "crystal_document", "identity_versions",  # gen 3: no episode-id column
     "idempotency_keys", "consolidation_lease",  # gen 3 (B3): no episode-id column
     "drift_probes", "drift_results", "metadata", "pattern_aliases", "pattern_associations",
     "pattern_graph_projection_meta", "pattern_history", "pattern_levels",

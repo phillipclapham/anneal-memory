@@ -4923,7 +4923,7 @@
   },
   "CrystalStore": {
    "bases": [],
-   "init": "(path: 'str | os.PathLike[str]') -> 'None'",
+   "init": "(path: 'str | os.PathLike[str]', *, db: 'Store | str | os.PathLike[str] | None' = None) -> 'None'",
    "kind": "class",
    "members": {
     "active": {

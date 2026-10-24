@@ -458,6 +458,64 @@ def test_rev_survives_a_lone_surrogate_on_disk(tmp_path):
     assert CrystalStore(p).get("x")["rev"]
 
 
+def test_gen3_crystals_live_in_the_db_and_the_json_is_a_projection(tmp_path):
+    """Design B2 T3. Beside a generation-3 store, a crystal mutation is in the
+    store's ``crystal_document`` row, so deleting the JSON loses nothing and the next
+    read re-projects it byte-identical. A foreign edit to the JSON is kept as
+    ``.diverged-`` (on a read and on a write, never overwriting an earlier copy) and
+    never becomes the crystal state."""
+    import hashlib
+
+    from anneal_memory import Store
+    from anneal_memory.store import connect
+
+    db = tmp_path / "memory.db"
+    Store(db, project_name="t3").close()
+    path = tmp_path / "memory.crystal.json"
+    CrystalStore(path).crystallize(name="kept_in_db", level=2,
+                                   explanation="lives in the row", today=T0)
+    projected = path.read_bytes()
+    conn = connect(db, read_only=True)
+    try:
+        doc_json, content_hash = conn.execute(
+            "SELECT doc_json, content_hash FROM crystal_document WHERE id = 1").fetchone()
+    finally:
+        conn.close()
+    assert doc_json.encode("utf-8") == projected
+    assert hashlib.sha256(projected).hexdigest() == content_hash
+
+    path.unlink()  # a copy of the .db alone is the whole crystal state
+    assert CrystalStore(path).get("kept_in_db")["explanation"] == "lives in the row"
+    assert path.read_bytes() == projected
+
+    foreign = json.loads(projected)
+    foreign["crystal"][0]["explanation"] = "a hand edit"
+    foreign_bytes = json.dumps(foreign).encode("utf-8")
+    path.write_bytes(foreign_bytes)
+    with pytest.warns(UserWarning, match="diverged"):
+        assert CrystalStore(path).get("kept_in_db")["explanation"] == "lives in the row"
+    assert path.read_bytes() == projected
+    first = list(tmp_path.glob("memory.crystal.json.diverged-*"))
+    assert [c.read_bytes() for c in first] == [foreign_bytes]
+
+    path.write_bytes(foreign_bytes + b" ")  # a second edit, then a write over it
+    with pytest.warns(UserWarning, match="diverged"):
+        CrystalStore(path).crystallize(name="second", level=2,
+                                       explanation="after the edit", today=T0)
+    copies = sorted(tmp_path.glob("memory.crystal.json.diverged-*"))
+    assert len(copies) == 2 and first[0].read_bytes() == foreign_bytes
+    assert foreign_bytes + b" " in [c.read_bytes() for c in copies]
+    state = CrystalStore(path)
+    assert state.get("kept_in_db")["explanation"] == "lives in the row"
+    assert sorted(c["name"] for c in state.active()) == ["kept_in_db", "second"]
+    conn = connect(db, read_only=True)
+    try:
+        (doc_json,) = conn.execute("SELECT doc_json FROM crystal_document").fetchone()
+    finally:
+        conn.close()
+    assert path.read_bytes() == doc_json.encode("utf-8")
+
+
 class TestSnapshotRestore:
     """snapshot()/restore() undo a crystallize for the named patterns only (the flow caller)."""
 

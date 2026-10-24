@@ -1647,7 +1647,8 @@ _NEW_FORMAT_PAIR_ID_RE = re.compile(r"[0-9a-f]{12}-[0-9a-f]{8}")
 # (Phill 2026-10-13, "yes, let's have it in 1.0"); it changes no layout, it
 # arms the write guard below (tests/test_store.py, ``TestGenerationGuards``).
 # Generation 3 makes the database the identity's home: ``identity_versions``
-# holds every continuity version (the files are projections of the latest) and
+# holds every continuity version (the files are projections of the latest),
+# ``crystal_document`` holds the crystal store (its JSON file a projection) and
 # ``audit_outbox`` holds a batched write's audit events until they are logged.
 _SCHEMA_VERSION = 3
 # The continuity meta sidecar's own ``format_version`` (every wrap writes it
@@ -1683,8 +1684,8 @@ _HOST_GUARD_CLEANUP_KEY = "host_guard_cleanup_done"
 # be named here: ``test_every_table_a_new_store_creates_is_on_the_guard_list``
 # fails until it is.
 _ANNEAL_TABLES = frozenset({
-    "associations", "audit_outbox", "consolidation_lease", "drift_probes",
-    "drift_results", "episode_derived", "episode_trust", "episodes",
+    "associations", "audit_outbox", "consolidation_lease", "crystal_document",
+    "drift_probes", "drift_results", "episode_derived", "episode_trust", "episodes",
     "identity_versions", "idempotency_keys", "metadata", "pattern_aliases",
     "pattern_associations", "pattern_graph_projection_meta", "pattern_grounding",
     "pattern_history", "pattern_levels", "processed_co_surface_events",
@@ -2215,6 +2216,20 @@ CREATE TABLE IF NOT EXISTS identity_versions (
     source TEXT NOT NULL CHECK (source IN
         ('wrap', 'section_edit', 'raw_save', 'migration', 'adopted_file')),
     created_at TEXT NOT NULL
+);
+
+-- Generation 3: the crystal store's document (crystal.py). One row; the
+-- <stem>.crystal.json file is its projection. content_hash is the sha256 of
+-- doc_json's UTF-8 bytes (the projection's exact bytes); prev_hash is the
+-- content_hash the row replaced (or the hash of the file a first write adopted),
+-- so a projection a crash left one write behind is recognised as stale rather
+-- than foreign.
+CREATE TABLE IF NOT EXISTS crystal_document (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    doc_json TEXT NOT NULL,
+    content_hash TEXT NOT NULL,
+    prev_hash TEXT,
+    updated_at TEXT NOT NULL
 );
 
 -- Generation 3: audit events of a batched write, inserted in its transaction
@@ -3368,6 +3383,10 @@ class Store:
             "SELECT 1 FROM sqlite_master WHERE type = 'table' "
             "AND name = 'identity_versions' COLLATE NOCASE"
         ).fetchone() is not None
+        had_crystal_table = self._conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' "
+            "AND name = 'crystal_document' COLLATE NOCASE"
+        ).fetchone() is not None
         for script in (
             _SCHEMA_SQL,
             _ASSOCIATIONS_SCHEMA_SQL,
@@ -3398,6 +3417,11 @@ class Store:
         self._migrate_episode_origin_key(commit=False)
         if pre_existing and not had_identity_table:
             self._seed_identity_from_files()
+        if pre_existing and not had_crystal_table and self._path != Path(":memory:"):
+            # crystal.py owns the crystal format; imported here because it imports
+            # this module. Never commits (this transaction is the migration's).
+            from .crystal import _seed_crystal_document
+            _seed_crystal_document(self._conn, self._path)
 
         # Insert default metadata (ignore if already exists)
         # format_version read now, not from the import-time dict, so the

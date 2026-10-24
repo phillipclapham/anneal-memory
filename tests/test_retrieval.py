@@ -509,10 +509,19 @@ class TestAssociativeRetrieval:
             evidence=[e.id], today=T0,
         )
         # Hand-corrupt the evidence field to a non-list — the read path must not crash.
+        # Beside a generation-3 store the document is the crystal_document row (an
+        # edit to the JSON is a foreign edit, kept aside), so corrupt the row.
         import json
+        from anneal_memory.store import connect
         data = json.loads(crystal.path.read_text())
         data["crystal"][0]["evidence"] = "not-a-list"
-        crystal.path.write_text(json.dumps(data))
+        conn = connect(store.path)
+        try:
+            with conn:
+                conn.execute("UPDATE crystal_document SET doc_json = ? WHERE id = 1",
+                             (json.dumps(data),))
+        finally:
+            conn.close()
         r = retrieve_relevant(store, crystal, self._QUERY, now=NOW, today=T0)
         assert "invisible_infrastructure_failure" not in {p.name for p in r.patterns}
 

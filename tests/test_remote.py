@@ -226,10 +226,12 @@ def test_recall_lists_pending_captures_across_the_rotation(served_outbox):
     assert lines[1] == remote._RELAYED_LABEL and len(lines) == 4
     assert all(ln.startswith("- [pending] ") for ln in lines[2:])
     # Read as the store reads filters: empty is none, since/until include the bound.
-    for args in ({"keyword": "funnel", "source": "", "since": ""},
-                 {"keyword": "starter", "since": first_at, "until": first_at}):
+    for args, want in (({"keyword": "funnel", "source": "", "since": ""}, "(2, showing 2)"),
+                       ({"keyword": "starter", "since": first_at, "until": first_at},
+                        "(1, showing 1)"),
+                       ({"keyword": "funnel", "limit": 1}, "(2, showing 1)")):
         _s, r = call(f"/mcp/{a}", _tool("recall", args))
-        assert "Pending sync (1, showing 1)" in _text(r) or "Pending sync (2" in _text(r), args
+        assert f"Pending sync {want}" in _text(r), args
     for args in ({"keyword": "funnel", "episode_type": "outcome"},
                  {"keyword": "funnel", "offset": 1}, {"keyword": "funnel", "limit": 0},
                  {"keyword": "funnel", "since": "2999-01-01T00:00:00Z"},
@@ -258,7 +260,7 @@ def test_recall_skips_pending_lines_this_server_did_not_write(served_outbox, mon
         for rec in bad:
             f.write(json.dumps({**rec, "id": rec["id"] if rec["id"] != good["id"] else "a" * 32}) + "\n")
         f.write(json.dumps(good) + "\n")  # the same id again: shown once
-        f.write('{"v": 1, "id": "b')  # a torn last line
+        f.write(json.dumps({**good, "id": "c" * 32}))  # valid but not yet terminated
     _s, r = call(f"/mcp/{a}", _tool("recall", {"keyword": "funnel"}))
     assert "Pending sync (1, showing 1)" in _text(r)
     # An oversized file was not made by this server: skipped whole, recall still answers.

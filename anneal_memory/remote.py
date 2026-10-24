@@ -66,7 +66,6 @@ from __future__ import annotations
 
 import argparse
 import contextlib
-import datetime
 import hashlib
 import hmac
 import json
@@ -227,31 +226,23 @@ def _valid_pending(raw: bytes) -> dict[str, Any] | None:
     return rec
 
 
-def _as_utc(value: str) -> datetime.datetime | None:
-    try:
-        when = datetime.datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
-    except ValueError:
-        return None
-    return when if when.tzinfo else when.replace(tzinfo=datetime.timezone.utc)
-
-
 def _pending_matches(rec: dict[str, Any], args: dict[str, Any]) -> bool:
     """Whether a pending capture passes recall's filters, read as the store reads
-    them: an empty filter is no filter, and since/until include their bound. A
-    filter it cannot evaluate (an unparseable time, a non-string) excludes it."""
+    them: an empty filter is no filter, and since/until compare the timestamp
+    strings, bound included (``Store._recall_conditions``: ``timestamp >= ?``). A
+    filter that is not a string excludes it. Keyword matching is an approximation
+    of the store's (the phrase, or every word of it), shown in its own block."""
     etype = args.get("episode_type")
     if etype and rec["episode_type"] != etype:
         return False
     source = args.get("source")
     if source and source != f"remote:{rec['connector']}":
         return False
-    at = _as_utc(rec["at"])
     for name, after in (("since", True), ("until", False)):
         bound = args.get(name)
         if not bound:
             continue
-        when = _as_utc(bound) if isinstance(bound, str) else None
-        if when is None or at is None or (at < when if after else at > when):
+        if not isinstance(bound, str) or (rec["at"] < bound if after else rec["at"] > bound):
             return False
     keyword = args.get("keyword")
     if keyword:
@@ -280,7 +271,11 @@ def _pending_block(recs: list[dict[str, Any]], args: dict[str, Any]) -> str:
                   key=lambda r: (r["at"], r["id"]), reverse=True)
     if not hits:
         return ""
-    shown = hits[:MAX_PENDING_SHOWN]
+    limit = args.get("limit")
+    cap = MAX_PENDING_SHOWN
+    if isinstance(limit, (int, float)) and not isinstance(limit, bool):
+        cap = min(cap, int(limit))
+    shown = hits[:cap]
     rows = [f"Pending sync ({len(hits)}, showing {len(shown)}): captured through a "
             "remote connector and not yet in memory; once the sync lands, the same "
             "text can also appear above.", _RELAYED_LABEL]
@@ -412,6 +407,8 @@ class RemoteSession:
         self._rate_lock = threading.Lock()
         self._append_lock = threading.Lock()
         self._recent: dict[str, list[float]] = {}
+        self._cache_lock = threading.Lock()
+        self._pending_cache: dict[str, tuple[tuple[int, ...], list[dict[str, Any]]]] = {}
 
     def _tools(self) -> tuple[str, ...]:
         return (*REMOTE_TOOLS, "capture") if self._outbox is not None else REMOTE_TOOLS
@@ -527,36 +524,49 @@ class RemoteSession:
     def _read_pending(self) -> list[dict[str, Any]]:
         """The valid capture lines not yet in the store, outbox first, then the
         pulling file (the order a line moves in), one per id. Never takes the
-        outbox lock: renames are atomic, and a torn last line fails validation."""
+        outbox lock: renames are atomic, and only newline-terminated lines count,
+        so a line still being written is not read. Each file's parse is cached on
+        its identity, size and mtime, so a full outbox is parsed once per change,
+        not once per recall."""
         assert self._outbox is not None
         out = self._outbox
         paths = (out, out.with_name(f"{out.stem}.pulling{out.suffix}"))
         seen: dict[str, dict[str, Any]] = {}
         for path in paths:
-            try:
-                # O_NONBLOCK: a FIFO at the path would otherwise block the open itself,
-                # before the regular-file check below could refuse it.
-                fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
-                             | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0))
-            except OSError:
-                continue
-            try:
-                st = os.fstat(fd)
-                # The outbox is capped at MAX_OUTBOX_BYTES when written; anything
-                # bigger or not a regular file was not made by this server.
-                if not stat.S_ISREG(st.st_mode) or st.st_size > MAX_OUTBOX_BYTES:
-                    continue
-                with os.fdopen(fd, "rb", closefd=False) as f:
-                    data = f.read(MAX_OUTBOX_BYTES + 1)
-            except OSError:
-                continue
-            finally:
-                os.close(fd)
-            for raw in data.split(b"\n"):
-                rec = _valid_pending(raw)
-                if rec is not None:
-                    seen.setdefault(rec["id"], rec)
+            for rec in self._pending_in(path):
+                seen.setdefault(rec["id"], rec)
         return list(seen.values())
+
+    def _pending_in(self, path: Path) -> list[dict[str, Any]]:
+        try:
+            # O_NONBLOCK: a FIFO at the path would otherwise block the open itself,
+            # before the regular-file check below could refuse it.
+            fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+                         | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0))
+        except OSError:
+            return []
+        try:
+            st = os.fstat(fd)
+            # The outbox is capped at MAX_OUTBOX_BYTES when written; anything
+            # bigger or not a regular file was not made by this server.
+            if not stat.S_ISREG(st.st_mode) or st.st_size > MAX_OUTBOX_BYTES:
+                return []
+            key = (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns)
+            with self._cache_lock:
+                hit = self._pending_cache.get(str(path))
+            if hit is not None and hit[0] == key:
+                return hit[1]
+            with os.fdopen(fd, "rb", closefd=False) as f:
+                data = f.read(MAX_OUTBOX_BYTES + 1)
+        except OSError:
+            return []
+        finally:
+            os.close(fd)
+        lines = data.split(b"\n")[:-1]  # the last piece is unterminated (or empty)
+        recs = [r for r in map(_valid_pending, lines) if r is not None]
+        with self._cache_lock:
+            self._pending_cache[str(path)] = (key, recs)
+        return recs
 
     def _bind(self, server: Server, store: Store) -> dict[str, Callable[[dict[str, Any]], Any]]:
         def read_continuity(_args: dict[str, Any]) -> dict[str, Any]:
@@ -656,7 +666,14 @@ class RemoteSession:
                 try:
                     block = _pending_block(pending, arguments)
                     if block:
-                        result = _tool_result(f"{result['content'][0]['text']}\n\n{block}")
+                        first = result["content"][0]
+                        merged = {**result, "content": [
+                            {**first, "text": f"{first['text']}\n\n{block}"},
+                            *result["content"][1:]]}
+                        # Left out rather than turn the store's answer into the
+                        # reply-size refusal (headroom for the JSON-RPC envelope).
+                        if len(json.dumps(merged)) <= MAX_REPLY_BYTES - 1024:
+                            result = merged
                 except Exception as e:
                     logger.error("pending block failed: %s", type(e).__name__)
             return _rpc_result(msg_id, result)

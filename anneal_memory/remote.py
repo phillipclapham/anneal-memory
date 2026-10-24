@@ -22,6 +22,13 @@ open the store at all. The operator's own process moves outbox lines into
 memory later, so the store keeps one writer. Without ``--outbox`` the tool is
 not listed and calling it answers "Unknown tool".
 
+Known edges of ``--outbox`` (the operator's own configuration reaches them;
+nothing a client sends does): a hardlink to the db placed outside the db's
+directory, or a db path whose last component is a symlink, is not detected as
+an alias; a FIFO at the outbox path blocks capture; a ``close()`` failing after
+a successful fsync reports an error for a line that was kept. On Windows there
+is no cross-process outbox lock.
+
 Authentication is a per-connector bearer token, accepted in either of two
 places, because claude.ai's "Request headers" field was a beta limited to some
 organizations when this was written (claude.com/docs/connectors/custom/remote-mcp,
@@ -359,12 +366,16 @@ class RemoteSession:
         # The thread lock serializes this process even where fcntl is missing; the
         # flock is the contract for a puller: rename the outbox only while holding
         # it. The append opens by path under the lock, so it lands wholly before or after.
-        with self._append_lock:
+        # One deadline for both locks, so requests queued behind a held outbox lock
+        # cannot convoy past it and keep every request slot (L3 r2, both seats).
+        deadline = time.monotonic() + OUTBOX_LOCK_WAIT_S
+        if not self._append_lock.acquire(timeout=OUTBOX_LOCK_WAIT_S):
+            raise _OutboxBusy()
+        try:
             lock_fd = os.open(self._outbox.with_name(self._outbox.name + ".lock"),
                               os.O_RDWR | os.O_CREAT, 0o600)
             try:
                 if fcntl is not None:
-                    deadline = time.monotonic() + OUTBOX_LOCK_WAIT_S
                     while True:
                         try:
                             fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -401,6 +412,8 @@ class RemoteSession:
                     _fsync_dir(self._outbox.parent)
             finally:
                 os.close(lock_fd)
+        finally:
+            self._append_lock.release()
         return True
 
     def _bind(self, server: Server, store: Store) -> dict[str, Callable[[dict[str, Any]], Any]]:

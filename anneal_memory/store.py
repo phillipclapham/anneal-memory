@@ -6418,7 +6418,7 @@ class Store:
             total = count_row[0]
 
             ranked = order == "relevance" and bool(keyword)
-            if ranked and total:
+            if ranked and total and keyword:
                 rank_sql, rank_params = _keyword_rank_sql(keyword)
                 # id last: equal score and timestamp still page in one fixed order.
                 rows = self._conn.execute(

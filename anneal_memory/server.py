@@ -18,7 +18,8 @@ import logging
 import os
 import sys
 from pathlib import Path
-from typing import Any, cast
+from collections.abc import Callable
+from typing import Any, TypeVar, cast
 
 from . import __version__
 from . import sessions
@@ -199,16 +200,25 @@ def _recall_default_limit(args: dict[str, Any]) -> int:
     return _RECALL_DEFAULT_LIMIT
 
 
-def _within_page_budget(episodes: list[Episode]) -> list[Episode]:
-    """The leading episodes whose content fits :data:`_RECALL_RANKED_PAGE_CHARS`,
-    at least one. Whole episodes only: the next page starts where this one stops."""
-    kept: list[Episode] = []
-    used = 0
-    for ep in episodes:
-        used += len(ep.content)
-        if kept and used > _RECALL_RANKED_PAGE_CHARS:
+_T = TypeVar("_T")
+
+
+def _within_page_budget(
+    items: list[_T],
+    key: Callable[[_T], int],
+    *,
+    used: int = 0,
+    at_least_one: bool = True,
+) -> list[_T]:
+    """The leading items whose content, after ``used`` characters already on the
+    page, fits :data:`_RECALL_RANKED_PAGE_CHARS`; with ``at_least_one``, the first
+    always. Whole items only: the next page starts where this one stops."""
+    kept: list[_T] = []
+    for item in items:
+        used += key(item)
+        if used > _RECALL_RANKED_PAGE_CHARS and (kept or not at_least_one):
             break
-        kept.append(ep)
+        kept.append(item)
     return kept
 
 
@@ -546,7 +556,9 @@ class Server:
                         f"Error: {name} must be an integer", is_error=True
                     )
                 args[name] = max(0, value)
-        if "order" in args and args["order"] not in RECALL_ORDERS:
+        if args.get("order") is None:
+            args.pop("order", None)  # a client that sends null for unset fields
+        elif args["order"] not in RECALL_ORDERS:
             return _tool_result(
                 f"Error: order must be one of: {', '.join(RECALL_ORDERS)}", is_error=True
             )
@@ -677,7 +689,7 @@ class Server:
         ranked = result.query_params.get("order") == "relevance"
         episodes = result.episodes
         if ranked and "limit" not in args:
-            episodes = _within_page_budget(episodes)
+            episodes = _within_page_budget(episodes, key=lambda ep: len(ep.content))
         lines = [
             f"Found {result.total_matching} episodes"
             f" (showing {len(episodes)}):"
@@ -693,7 +705,11 @@ class Server:
                 f"- ({ep.id}) [{ep.type.value}] {ep.timestamp}"
                 f"{source_info}{replaced}{why}: {ep.content}"
             )))
-        lines.extend(self._label_relayed(rows))
+        labelled = self._label_relayed(rows)
+        if ranked and _RELAYED_LABEL in labelled:
+            lines[-1] += (" Episodes recorded from tools or outside readers are listed"
+                          " after the rest, under their own label.")
+        lines.extend(labelled)
 
         # A phrase that hit only a little, from a keyword with three or more words,
         # probably missed the episode that holds most of those words. Exact results stay
@@ -716,6 +732,12 @@ class Server:
                     m for m in self._word_matches(args, keyword)[0]
                     if m.episode.id not in shown
                 ][:max(0, room)]
+                if "limit" not in args:
+                    # The default page's budget covers these too; what is left of it.
+                    used = sum(len(ep.content) for ep in episodes)
+                    extra = _within_page_budget(
+                        extra, key=lambda m: len(m.episode.content), used=used,
+                        at_least_one=False)
                 if extra:
                     lines.append("")
                     lines.append("Also matching by words:")
@@ -773,14 +795,21 @@ class Server:
         matches, truncated = self._word_matches(args, keyword)
         if not matches:
             return None
+        newest = _recall_order(args) == "newest"
+        if newest:
+            matches = sorted(matches, key=lambda m: (m.episode.timestamp, m.episode.id),
+                             reverse=True)
         shown = matches[:cap]
+        if "limit" not in args:
+            shown = _within_page_budget(shown, key=lambda m: len(m.episode.content))
         # The candidate read per keyword has a ceiling; when a keyword had more matches
         # than were read, the count is a floor. (The search reports it from the counts it
         # already took; nothing is counted again here.)
         read_all = not truncated
         head = (
-            "No episode contains the exact phrase; ranked by matching words "
-            f"({', '.join(words)})."
+            "No episode contains the exact phrase; "
+            + ("matched by words" if newest else "ranked by matching words")
+            + f" ({', '.join(words)})" + (", newest first." if newest else ".")
         )
         if len(matches) > len(shown) or not read_all:
             count = f"{len(matches)}" if read_all else f"at least {len(matches)}"

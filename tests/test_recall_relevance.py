@@ -82,6 +82,25 @@ def test_a_ranked_page_is_bounded_and_states_the_total_and_next_offset(store):
     assert len(text) < server_mod._RECALL_RANKED_PAGE_CHARS + 2_000
     explicit = Server(store)._tool_recall({"keyword": "Acmeco", "limit": 15})
     assert len(_ids(explicit["content"][0]["text"])) == 15
+    # A multi-word keyword with no exact phrase falls back to words: same budget, and
+    # order="newest" is honoured there too. A null order reads as no order.
+    for i in range(8):
+        store.record(f"Zebra field notes {i}. " + "y" * 9_000 + " quokka.", "observation",
+                     timestamp=f"2026-12-{i + 1:02d}T12:00:00Z")
+    fb = Server(store)._tool_recall({"keyword": "zebra quokka"})["content"][0]["text"]
+    assert "ranked by matching words" in fb and 1 <= len(_ids(fb)) < 8
+    assert len(fb) < server_mod._RECALL_RANKED_PAGE_CHARS + 2_000
+    # The oldest holds all three words, so ranking by words lists it first; newest, last.
+    store.record("Zebra, quokka and okapi notes.", "observation",
+                 timestamp="2026-07-01T12:00:00Z")
+    q = "zebra quokka okapi"
+    rk = Server(store)._tool_recall({"keyword": q, "limit": 9})["content"][0]["text"]
+    assert re.findall(r"^- \([0-9a-f]+\) \[\w+\] (\S+)", rk, re.MULTILINE)[0].startswith("2026-07")
+    nf = Server(store)._tool_recall(
+        {"keyword": q, "order": "newest", "limit": 9})["content"][0]["text"]
+    stamps = re.findall(r"^- \([0-9a-f]+\) \[\w+\] (\S+)", nf, re.MULTILINE)
+    assert len(stamps) == 9 and stamps == sorted(stamps, reverse=True)
+    assert not Server(store)._tool_recall({"keyword": "Acmeco", "order": None}).get("isError")
     recall_tool = next(t for t in TOOLS if t["name"] == "recall")
     assert f"{server_mod._RECALL_RANKED_PAGE_CHARS:,} characters" in json.dumps(recall_tool)
 

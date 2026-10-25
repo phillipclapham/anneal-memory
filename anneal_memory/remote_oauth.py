@@ -31,16 +31,18 @@ keeps the URIs that pass and drops the rest, and is refused only when none pass
 has its redirects on the same hosts, so anyone's own app could be pointed here and
 its sign-in link sent to the operator. So the first sign-in that completes an
 exchange for a connector token pins its exact redirect URI to that connector's
-pin file (``<pin_path>.<connector name>``, created exclusively, mode 0600), and
+pin file (``<pin_path>.<connector name, lowercased>``, created exclusively, mode 0600), and
 from then on sign-in with that token accepts only that URI: after its first
 completed sign-in, each connector token is accepted only for the redirect URI it
 pinned. Nothing ties a token's
 name to a vendor. The pin follows the name, so a token revoked and re-added under
 the same name keeps its app. The sign-in page shows the full URI. Deleting a pin
 file re-opens the first use for its connector.
-A pin file at ``pin_path`` itself (the one pin servers wrote before 2026-10-25) still
+A pin file at ``pin_path`` itself (the one pin servers wrote before per-connector pins) still
 binds every connector, and registration must then include its URI; renaming it to
 ``<pin_path>.<connector name>`` makes it that connector's pin and frees the others.
+Known edges: two connector names that differ only by case share one pin; a name
+long enough to push the pin file name past the filesystem's limit can never pin.
 For claude.ai every user's app shares one callback URI, so a pin there separates
 vendors, not accounts: the operator typing the token only into a sign-in they
 started from their own connector is what separates accounts (whether claude.ai
@@ -265,12 +267,14 @@ class OAuth:
         assert self._pin_path is not None
         if not isinstance(connector, str) or not _CONNECTOR_RE.fullmatch(connector):
             return None
-        return self._pin_path.with_name(f"{self._pin_path.name}.{connector}")
+        # Lowercased so the file is the same one on a case-insensitive filesystem.
+        return self._pin_path.with_name(f"{self._pin_path.name}.{connector.lower()}")
 
     def pinned(self, connector: str | None = None) -> str | None:
         """The redirect URI a completed sign-in pinned, or None before one: the
         server-wide pin when that file exists, else ``connector``'s own (None when
-        no connector is named)."""
+        no connector is named). An unreadable pin, or a connector name that cannot
+        be a file suffix, gives ``_INVALID_PIN``, which matches no redirect."""
         if self._pin_path is None:
             return None
         legacy = self._read_pin(self._pin_path)

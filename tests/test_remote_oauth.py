@@ -249,6 +249,25 @@ def test_whole_app_hosts_pass_only_their_documented_callback_paths(uri, ok):
     assert remote_oauth.redirect_ok(uri) is ok
 
 
+def test_connector_pin_refusals_never_log_the_token_and_the_pin_file_is_lowercased(
+        oauth_server, caplog):
+    req, _gem, tokens = oauth_server
+    tok = remote.token_add(tokens, "Claude-AI")
+    verifier, challenge = _pkce()
+    q = {"response_type": "code", "client_id": "cid", "code_challenge": challenge,
+         "code_challenge_method": "S256", "state": "s"}
+    code = _sign_in_code(req, q, tok, CLAUDE)
+    assert _public_exchange(req, "cid", code, verifier, CLAUDE)[0] == 200
+    pin = tokens.with_name(tokens.name + ".oauth-redirect.claude-ai")
+    assert pin.read_text().strip() == CLAUDE
+    caplog.set_level("INFO", logger="anneal-memory.remote")
+    assert _sign_in(req, {**q, "redirect_uri": CHATGPT}, tok)[0] == 400  # pinned elsewhere
+    pin.write_bytes(b"\xff\n")
+    assert _sign_in(req, {**q, "redirect_uri": CLAUDE}, tok)[0] == 400  # unreadable pin
+    assert "pinned for Claude-AI" in caplog.text and "unreadable" in caplog.text
+    assert tok not in caplog.text
+
+
 def test_the_server_wide_pin_outranks_a_connector_pin_and_a_bad_connector_pin_says_so(oauth_server):
     req, gem, tokens = oauth_server
     claude_tok = remote.token_add(tokens, "claude-ai")

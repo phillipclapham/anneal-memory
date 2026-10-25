@@ -40,7 +40,8 @@ the same name keeps its app. The sign-in page shows the full URI. Deleting a pin
 file re-opens the first use for its connector.
 A pin file at ``pin_path`` itself (the one pin servers wrote before per-connector pins) still
 binds every connector, and registration must then include its URI; renaming it to
-``<pin_path>.<connector name>`` makes it that connector's pin and frees the others.
+``<pin_path>.<connector name, lowercased>`` makes it that connector's pin and frees
+the others.
 Known edges: two connector names that differ only by case share one pin; a name
 long enough to push the pin file name past the filesystem's limit can never pin.
 For claude.ai every user's app shares one callback URI, so a pin there separates
@@ -211,7 +212,10 @@ def redirect_ok(uri: Any) -> bool:
     except ValueError:
         return False
     path_rule = REDIRECT_PATHS.get(parts.hostname or "")
-    if path_rule is not None and (parts.query or not path_rule.fullmatch(parts.path)):
+    # A bare trailing "?" or "#" parses as an empty query or fragment, so the raw
+    # string is checked too.
+    if path_rule is not None and ("?" in uri or "#" in uri
+                                  or not path_rule.fullmatch(parts.path)):
         return False
     return (parts.scheme == "https" and parts.hostname in REDIRECT_HOSTS
             and port in (None, 443) and not parts.username and not parts.password
@@ -375,8 +379,8 @@ class OAuth:
         elif pinned is not None and pinned not in kept:
             refused = ("the pin file is unreadable" if pinned == _INVALID_PIN else
                        f"the pinned redirect {_uri_for_log(pinned)} is not among them; "
-                       "rename the server-wide pin file to <name>.<connector> to pin "
-                       "only that connector")
+                       "rename the server-wide pin file to <its name>.<connector name, "
+                       "lowercased> to pin only that connector")
         else:
             refused = ""
         shown = ", ".join(_uri_for_log(u) for u in dropped[:6]) + \

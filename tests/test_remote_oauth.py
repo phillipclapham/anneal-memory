@@ -243,6 +243,7 @@ def test_a_server_wide_pin_still_binds_every_connector(oauth_server):
     ("https://claude.ai/api/mcp/auth_callback?next=/x", False),
     ("https://chatgpt.com/share/abc", False), ("https://chatgpt.com/connector/oauth/a/b", False),
     ("https://chatgpt.com/connector/oauth/", False),
+    (CLAUDE + "?", False), (CLAUDE + "#", False), (CHATGPT + "?", False),
     (REDIRECT, True), (REDIRECT + "?q=1", True),  # the Google hosts keep their rule
 ])
 def test_whole_app_hosts_pass_only_their_documented_callback_paths(uri, ok):

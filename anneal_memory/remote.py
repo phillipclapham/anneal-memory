@@ -87,7 +87,8 @@ from . import __version__
 from ._fsdir import _fsync_dir
 from .origin import strip_hidden_controls
 from .server import _RELAYED_LABEL, Server, _tool_result
-from .remote_oauth import MAX_FORM_BYTES, MAX_REGISTER_BYTES, PAGE_HEADERS, UNAVAILABLE, OAuth
+from .remote_oauth import (MAX_FORM_BYTES, MAX_REGISTER_BYTES, PAGE_HEADERS, UNAVAILABLE, OAuth,
+                           path_for_log)
 from .store import Store
 from .types import EpisodeType
 
@@ -709,8 +710,9 @@ class _Handler(BaseHTTPRequestHandler):
         # as the next request (L1/L2 1024+9: request smuggling through the
         # proxy's connection pool), and no early return can forget this.
         self.close_connection = True
-        # One line per answered request, so a client that stops (the Gemini app
-        # after its token, 10-24) shows where it went; never a query or a token.
+        # One line for every response sent through here, so a client that stops (the
+        # Gemini app after its token, 10-24) shows where it went; never a query or a
+        # token. The stdlib's own parse errors (send_error) and silent closes bypass it.
         logger.info("%s %d %s %s host=%s ua=%s", "refused" if status >= 400 else "answered",
                     status, self.command, self._path_for_log(),
                     self._header_for_log("Host", 80), self._header_for_log("User-Agent", 120))
@@ -728,10 +730,7 @@ class _Handler(BaseHTTPRequestHandler):
             self.wfile.write(body)
 
     def _path_for_log(self) -> str:
-        path = self.path.split("?", 1)[0]  # a query may carry an OAuth code or state
-        if path.startswith("/mcp/"):
-            return "/mcp(token-in-path)"  # that segment IS the token
-        return ascii(path[:80])[1:-1]
+        return path_for_log(self.path)
 
     def _header_for_log(self, name: str, limit: int) -> str:
         headers = getattr(self, "headers", None)

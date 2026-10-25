@@ -106,6 +106,62 @@ def _uri_for_log(uri: Any) -> str:
     return ascii(f"{parts.scheme}://{host}{parts.path}"[:120])
 
 
+# The paths a journal line may name verbatim. Any other path is logged by its
+# length only, because a mistyped or prefixed token URL (/x/mcp/<token>) is
+# exactly what a half-configured client sends.
+_LOGGABLE_PATHS = frozenset({
+    "/", "/mcp", "/register", "/authorize", "/token", "/favicon.ico",
+    "/.well-known/oauth-protected-resource", "/.well-known/oauth-protected-resource/mcp",
+    "/.well-known/oauth-authorization-server", "/.well-known/oauth-authorization-server/mcp",
+    "/.well-known/openid-configuration", "/.well-known/openid-configuration/mcp",
+    "/mcp/.well-known/openid-configuration"})
+
+
+def path_for_log(path: str) -> str:
+    """A request path as a journal may hold it: never a query, never a token."""
+    path = path.split("?", 1)[0]
+    if path in _LOGGABLE_PATHS:
+        return path
+    if path.startswith("/mcp/"):
+        return "/mcp(token-in-path)"  # that segment IS the token
+    return f"(other path, {len(path)} chars)"
+
+
+def _url_for_log(url: str) -> str:
+    """scheme://host[:port] plus :func:`path_for_log` of a client-sent URL."""
+    try:
+        parts = urllib.parse.urlsplit(url)
+        netloc = parts.hostname or ""
+        if parts.port is not None:
+            netloc += f":{parts.port}"
+    except ValueError:
+        return "<unparseable>"
+    return ascii(f"{parts.scheme}://{netloc[:80]}")[1:-1] + path_for_log(parts.path or "/")
+
+
+# Token-request field names and grant types a journal line may name. Anything
+# else is counted, never echoed: a JSON body sent as a form parses into ONE field
+# whose name is the whole body, code and verifier included.
+_TOKEN_FIELDS = frozenset({"grant_type", "code", "code_verifier", "redirect_uri", "client_id",
+                           "client_secret", "resource", "refresh_token", "scope"})
+_GRANT_TYPES = frozenset({"authorization_code", "refresh_token", "client_credentials",
+                          "urn:ietf:params:oauth:grant-type:device_code"})
+
+
+def _grant_shape(q: dict[str, str], basic: bool) -> str:
+    """What a client sent to /token, by known name and shape only."""
+    auth = ("basic" if basic else "post" if "client_secret" in q else "none") + (
+        "+post" if basic and "client_secret" in q else "")
+    known = sorted(k for k in q if k in _TOKEN_FIELDS)
+    other = [k for k in q if k not in _TOKEN_FIELDS]
+    fields = (",".join(known) or "-") + (f" +{len(other)} other ({sum(map(len, other))} chars)"
+                                         if other else "")
+    grant = q.get("grant_type")
+    shown = "-" if grant is None else grant if grant in _GRANT_TYPES else \
+        f"(other, {len(grant)} chars)"
+    return f"client auth {auth}; fields {fields}; grant_type {shown}"
+
+
 def _log_authorize_refusal(step: str, problem: str | None, q: dict[str, str] | None) -> None:
     redirect = _uri_for_log(q.get("redirect_uri")) if q is not None else "-"
     logger.info("oauth authorize refused (%s): %s; redirect %s", step, problem, redirect)
@@ -405,11 +461,7 @@ class OAuth:
         if q is None:
             logger.info("oauth token refused: a field is repeated")
             return 400, {"error": "invalid_request"}
-        # What the client sent, by name and shape only: never a value that is a secret.
-        auth = "basic" if basic is not None else (
-            "post" if "client_secret" in q else "none")
-        sent = (f"client auth {auth}; fields {ascii(','.join(sorted(q))[:200])}; "
-                f"grant_type {ascii(q.get('grant_type', '-')[:40])}")
+        sent = _grant_shape(q, basic is not None)
         if q.get("grant_type") != "authorization_code":
             logger.info("oauth token refused: unsupported grant (%s)", sent)
             return 400, {"error": "unsupported_grant_type"}
@@ -453,7 +505,7 @@ class OAuth:
                 entry["resource"] is not None and resource is not None \
                 and resource.rstrip("/") != entry["resource"].rstrip("/"):  # both already exact
             logger.info("oauth token refused: resource %s is not this server's (%s)",
-                        ascii(resource[:120]), sent)
+                        _url_for_log(resource), sent)
             return 400, {"error": "invalid_target"}
         still = check_token(entry["token"])
         if still is UNAVAILABLE:

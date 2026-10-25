@@ -352,3 +352,48 @@ def test_a_json_body_to_token_is_counted_not_echoed(oauth_server, caplog):
     for secret in (code, verifier, reg["client_secret"], code[:16]):
         assert secret not in text
     assert _exchange(req, reg, code, verifier)[0] == 200
+
+
+def _raw(port: int, head: str, body: bytes = b"") -> int:
+    import socket
+    with socket.create_connection(("127.0.0.1", port), timeout=20) as s:
+        s.sendall(head.encode() + b"\r\n" + body)
+        data = b""
+        while b"\r\n" not in data:
+            got = s.recv(4096)
+            if not got:
+                break
+            data += got
+    return int(data.split(b" ", 2)[1])
+
+
+def test_a_chunked_tool_call_is_answered(tmp_path: Path):
+    """Funnel forwards an HTTP/2 request that carries no length as a chunked
+    HTTP/1.1 body; the Gemini app's tool calls arrived that way (10-24: 411)."""
+    db = tmp_path / "memory.db"
+    with Store(db) as s:
+        s.record("a fact the projection holds", "observation")
+    tokens = tmp_path / "tokens"
+    gem = remote.token_add(tokens, "gemini")
+    httpd = remote.make_server(db, tokens, port=0, oauth_issuer=ISS)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    port = httpd.server_address[1]
+    head = (f"POST /mcp HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer {gem}\r\n"
+            "Content-Type: application/json\r\nAccept: application/json, text/event-stream\r\n")
+    msg = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}).encode()
+    one, two = msg[:10], msg[10:]
+    chunked = (f"{len(one):x};ext=1\r\n".encode() + one + b"\r\n"
+               + f"{len(two):X}\r\n".encode() + two + b"\r\n0\r\nX-Trailer: y\r\n\r\n")
+    try:
+        assert _raw(port, head + "Transfer-Encoding: chunked\r\n", chunked) == 200
+        big = b"%x\r\n" % (remote.MAX_BODY_BYTES + 1)
+        assert _raw(port, head + "Transfer-Encoding: chunked\r\n", big) == 413
+        assert _raw(port, head + "Transfer-Encoding: chunked\r\nContent-Length: 5\r\n",
+                    chunked) == 411
+        assert _raw(port, head + "Transfer-Encoding: gzip, chunked\r\n", chunked) == 411
+        assert _raw(port, head + "Transfer-Encoding: chunked\r\n", b"zz\r\n") == 400
+        assert _raw(port, head + "Transfer-Encoding: chunked\r\n", b"+5\r\nhello\r\n0\r\n\r\n") == 400
+        assert _raw(port, head) == 400  # no length at all: an empty body, not JSON
+    finally:
+        httpd.shutdown()
+        httpd.server_close()

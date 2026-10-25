@@ -122,6 +122,8 @@ class _OutboxBusy(Exception):
 # Origin outside this set is refused (Streamable HTTP: 403 on an invalid Origin).
 ALLOWED_ORIGINS = frozenset({"https://claude.ai", "https://claude.com"})
 REQUEST_TIMEOUT_S = 15
+MAX_CHUNK_LINE = 1024  # a chunk-size line or a trailer line
+MAX_TRAILER_LINES = 16
 # The methods a request can succeed with; GET and DELETE answer 405 (no SSE stream, no sessions).
 ALLOWED_METHODS = "POST, HEAD, OPTIONS"
 
@@ -842,19 +844,94 @@ class _Handler(BaseHTTPRequestHandler):
                 pass
 
     def _body(self, limit: int) -> bytes | None:
-        """The request body under ``limit`` bytes, or None after a refusal."""
-        if self.headers.get("Transfer-Encoding"):
-            self._send(411)
-            return None
+        """The request body under ``limit`` bytes, or None after a refusal.
+        RFC 9112 §6: a sized body, a chunked one (what Funnel forwards for an
+        HTTP/2 request that carries no length: the Gemini app's tool calls,
+        10-24), or, with neither header, no body."""
+        te = self.headers.get_all("Transfer-Encoding") or []
         values = self.headers.get_all("Content-Length") or []
+        if te:
+            # Exactly one "chunked" and no Content-Length beside it: anything
+            # else is the shape request smuggling is made of.
+            if len(te) != 1 or te[0].strip().lower() != "chunked" or values:
+                logger.info("body refused: transfer-encoding %s with %d content-length",
+                            ascii(",".join(te)[:40]), len(values))
+                self._send(411)
+                return None
+            return self._read_chunked(limit)
+        if not values:
+            return b""
         # Digits only, exactly one header: int() also takes "+5", " 5", "1_0".
         if len(values) != 1 or not (values[0].isascii() and values[0].isdigit()):
+            logger.info("body refused: %d content-length headers or not digits", len(values))
             self._send(411)
             return None
         if len(values[0]) > 8 or int(values[0]) > limit:
             self._send(413)
             return None
         return self._read_body(int(values[0]))
+
+    def _read_chunked(self, limit: int) -> bytes | None:
+        """A chunked body of at most ``limit`` bytes within one deadline for the
+        whole body, or None after a refusal. Chunk extensions and trailers are
+        read and dropped; every response closes the connection anyway."""
+        deadline = time.monotonic() + REQUEST_TIMEOUT_S
+        chunks: list[bytes] = []
+        got = 0
+
+        def line() -> bytes:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError
+            self.connection.settimeout(remaining)
+            raw = self.rfile.readline(MAX_CHUNK_LINE + 1)
+            if len(raw) > MAX_CHUNK_LINE or not raw.endswith(b"\n"):
+                raise ValueError("chunk line too long or cut")
+            return raw
+
+        try:
+            while True:
+                size_field = line().split(b";", 1)[0].strip()
+                if not 0 < len(size_field) <= 8 or \
+                        any(c not in b"0123456789abcdefABCDEF" for c in size_field):
+                    raise ValueError("bad chunk size")
+                size = int(size_field, 16)
+                if size == 0:
+                    break
+                if got + size > limit:
+                    self._send(413)
+                    return None
+                while size:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise TimeoutError
+                    self.connection.settimeout(remaining)
+                    chunk = self.rfile.read1(min(65536, size))
+                    if not chunk:
+                        raise ValueError("body cut inside a chunk")
+                    chunks.append(chunk)
+                    got += len(chunk)
+                    size -= len(chunk)
+                if line() not in (b"\r\n", b"\n"):
+                    raise ValueError("no line end after a chunk")
+            for _ in range(MAX_TRAILER_LINES):
+                if line() in (b"\r\n", b"\n"):
+                    break
+            else:
+                raise ValueError("too many trailer lines")
+        except ValueError as e:
+            logger.info("chunked body refused: %s", e)
+            self._send_json(400, _rpc_error(None, -32700, "Malformed chunked body"))
+            return None
+        except TimeoutError:
+            with contextlib.suppress(OSError):
+                self._send(408)
+            return None
+        except OSError:
+            self.close_connection = True
+            return None
+        self.connection.settimeout(REQUEST_TIMEOUT_S)
+        return b"".join(chunks)
 
     def _oauth_route(self) -> bool:
         """Answer an OAuth endpoint (only with ``--oauth-issuer``); False when the

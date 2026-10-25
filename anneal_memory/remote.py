@@ -34,6 +34,8 @@ twice.
 A db published by a pusher that writes ``replica.json`` beside it (see
 :func:`replica_age_line`) gets a one-line freshness note at the top of
 ``read_continuity``, so a reader can tell an aging copy from a current one.
+Its known edge: a replica whose manifest was deleted reads as a db that is not
+a replica (no line), since the server cannot tell the two apart.
 
 Known edges of ``--outbox`` (the operator's own configuration reaches them;
 nothing a client sends does): a hardlink to the db placed outside the db's
@@ -123,8 +125,12 @@ OUTBOX_LOCK_WAIT_S = 2.0
 # that published it: {"verified_at": "YYYY-MM-DDTHH:MM:SSZ", ...}.
 REPLICA_MANIFEST = "replica.json"
 MAX_MANIFEST_BYTES = 4096
-# Four missed 15-minute confirmations.
+# An hour: chosen as several missed confirmations at the pusher's planned
+# quarter-hour cadence (anneal-hosted, 2026-10-24).
 REPLICA_STALE_S = 3600
+# A stamp further ahead of this server's clock than this is clock skew, not
+# freshness, and is reported as such rather than as "0 min ago".
+REPLICA_SKEW_S = 300
 _ISO_Z = re.compile(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ")
 
 
@@ -423,20 +429,27 @@ def replica_age_line(db_path: str | Path, now: float | None = None) -> str | Non
     of taking it for current. Never raises: an unreadable manifest says so."""
     manifest = Path(db_path).parent.resolve() / REPLICA_MANIFEST
     try:
-        raw = manifest.read_bytes()
+        with manifest.open("rb") as f:
+            raw = f.read(MAX_MANIFEST_BYTES + 1)
     except FileNotFoundError:
         return None
     except OSError:
         return "[replica] Age unknown: the replica manifest could not be read."
     try:
-        doc = json.loads(raw[:MAX_MANIFEST_BYTES])
+        if len(raw) > MAX_MANIFEST_BYTES:
+            raise ValueError("manifest too large")
+        doc = json.loads(raw)
         stamp = doc["verified_at"]
         if not isinstance(stamp, str) or not _ISO_Z.fullmatch(stamp):
             raise ValueError(stamp)
         then = calendar.timegm(time.strptime(stamp, "%Y-%m-%dT%H:%M:%SZ"))
     except (ValueError, KeyError, TypeError, OverflowError):
         return "[replica] Age unknown: the replica manifest is malformed."
-    age = max(0, int((time.time() if now is None else now) - then))
+    age = int((time.time() if now is None else now) - then)
+    if age < -REPLICA_SKEW_S:
+        return ("[replica] Age unknown: the replica's stamp is ahead of this server's "
+                "clock (clock skew).")
+    age = max(0, age)
     if age < 3600:
         ago = f"{age // 60} min ago"
     elif age < 172800:
@@ -625,10 +638,13 @@ class RemoteSession:
             self._pending_cache[str(path)] = (key, recs)
         return recs
 
-    def _bind(self, server: Server, store: Store) -> dict[str, Callable[[dict[str, Any]], Any]]:
+    def _bind(self, server: Server, store: Store,
+              db: Path) -> dict[str, Callable[[dict[str, Any]], Any]]:
         def read_continuity(_args: dict[str, Any]) -> dict[str, Any]:
             text = store.load_continuity() or "(No continuity file yet.)"
-            age = replica_age_line(self._db_path)
+            # ``db`` is the request's resolved path, so the stamp comes from the
+            # same generation as the text.
+            age = replica_age_line(db)
             return _tool_result(f"{age}\n\n{text}" if age else text)
 
         return {
@@ -715,7 +731,7 @@ class RemoteSession:
                 db = self._db_path.parent.resolve() / self._db_path.name
                 with Store(db, read_only=True, audit=False) as store:
                     server = Server(store)
-                    result = self._bind(server, store)[name](arguments)
+                    result = self._bind(server, store, db)[name](arguments)
             except Exception as e:  # a tool error is a result, not a transport error
                 # Class only: the message can carry paths or query text.
                 logger.error("tool %s failed: %s", name, type(e).__name__)

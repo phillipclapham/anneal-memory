@@ -225,6 +225,20 @@ def test_a_code_for_a_second_app_is_refused_once_its_connector_pins(oauth_server
     assert _public_exchange(req, "cid", code, verifier, REDIRECT)[0] == 200
 
 
+def test_a_pin_refusal_on_submit_never_logs_the_bearer_token(oauth_server, caplog):
+    req, gem, tokens = oauth_server
+    caplog.set_level("INFO", logger="anneal-memory.remote")
+    claude_tok = remote.token_add(tokens, "claude-ai")
+    tokens.with_name(tokens.name + ".oauth-redirect.claude-ai").write_text(REDIRECT + "\n")
+    _open(req)
+    _v, challenge = _pkce()
+    q = {**_q(challenge), "redirect_uri": CLAUDE}
+    st, _page_ = _sign_in(req, q, claude_tok, window=False)
+    assert st == 400
+    assert "redirect is not the one pinned" in caplog.text
+    assert claude_tok not in caplog.text and gem not in caplog.text
+
+
 def test_a_server_wide_pin_still_binds_every_connector(oauth_server):
     """A pin file written before per-connector pins (the Gemini unit's) keeps its
     meaning: registration must include it and no connector signs in elsewhere."""
@@ -790,15 +804,70 @@ def test_the_window_command_run_as_root_hands_the_file_to_the_token_owner(tmp_pa
     tokens = tmp_path / "tokens"
     remote.token_add(tokens, "gemini")
     chowned = []
-    monkeypatch.setattr(remote.os, "geteuid", lambda: 0)
-    monkeypatch.setattr(remote.os, "fchown", lambda fd, uid, gid: chowned.append((uid, gid)))
+    monkeypatch.setattr(remote.os, "geteuid", lambda: 0, raising=False)
+    monkeypatch.setattr(remote.os, "fchown", lambda fd, uid, gid: chowned.append((uid, gid)),
+                        raising=False)
     assert remote.main(["oauth-window", "--token-file", str(tokens)]) == 0
     st = tokens.stat()
     assert chowned == [(st.st_uid, st.st_gid)]
     chowned.clear()
-    monkeypatch.setattr(remote.os, "geteuid", lambda: 1000)
+    monkeypatch.setattr(remote.os, "geteuid", lambda: 1000, raising=False)
     assert remote.main(["oauth-window", "--token-file", str(tokens)]) == 0
     assert chowned == []  # not root: no chown
+
+
+def test_the_window_command_without_geteuid_or_fchown_still_opens(tmp_path: Path, monkeypatch):
+    tokens = tmp_path / "tokens"
+    remote.token_add(tokens, "gemini")
+    monkeypatch.delattr(remote.os, "geteuid", raising=False)
+    monkeypatch.delattr(remote.os, "fchown", raising=False)
+    assert remote.main(["oauth-window", "--token-file", str(tokens)]) == 0
+    assert _window(tokens).exists()
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX modes")
+@pytest.mark.parametrize("token_mode,want", [(0o600, 0o600), (0o640, 0o640), (0o666, 0o640)])
+def test_a_root_run_window_takes_the_token_files_mode_capped_at_group_read(
+        tmp_path: Path, monkeypatch, token_mode, want):
+    tokens = tmp_path / "tokens"
+    remote.token_add(tokens, "gemini")
+    tokens.chmod(token_mode)
+    monkeypatch.setattr(remote.os, "geteuid", lambda: 0, raising=False)
+    monkeypatch.setattr(remote.os, "fchown", lambda fd, uid, gid: None, raising=False)
+    remote.oauth_window_open(tokens)
+    assert _window(tokens).stat().st_mode & 0o777 == want
+
+
+def test_a_failed_directory_sync_after_the_replace_still_reports_the_open_window(
+        tmp_path: Path, monkeypatch, capsys):
+    tokens = tmp_path / "tokens"
+    remote.token_add(tokens, "gemini")
+
+    def boom(_p):
+        raise OSError("sync failed")
+    monkeypatch.setattr(remote, "_fsync_dir", boom)
+    expiry = remote.oauth_window_open(tokens)
+    assert _window(tokens).read_text().strip() == str(expiry)
+    assert "durability is unconfirmed" in capsys.readouterr().err
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="no FIFOs")
+def test_a_fifo_or_symlink_window_is_closed_not_blocking(oauth_server):
+    req, _gem, tokens = oauth_server
+    w = _window(tokens)
+    os.mkfifo(w)
+    assert req.oauth.window_closed() == "the sign-in window file is garbled"
+    w.unlink()
+    real = tokens.with_name("elsewhere")
+    real.write_text("9999999999\n")
+    w.symlink_to(real)
+    assert req.oauth.window_closed() == "the sign-in window file is unreadable"
+
+
+def test_the_window_close_refuses_a_missing_token_file(tmp_path: Path):
+    with pytest.raises(ValueError, match="no token file"):
+        remote.oauth_window_close(tmp_path / "nope")
+    assert remote.main(["oauth-window", "--token-file", str(tmp_path / "nope"), "--close"]) != 0
 
 
 def test_close_and_minutes_together_is_an_argument_error(tmp_path: Path):

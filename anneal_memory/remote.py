@@ -433,22 +433,32 @@ def oauth_window_open(token_file: str | Path, minutes: int = 10) -> int:
         with os.fdopen(fd, "w", encoding="ascii") as f:
             f.write(f"{expiry}\n")
             f.flush()
-            if os.geteuid() == 0:
+            if hasattr(os, "geteuid") and hasattr(os, "fchown") and os.geteuid() == 0:
                 # Run as root, the window would be root's 0600 file and the server
-                # user could not read it: hand it to the token file's owner.
+                # user could not read it: hand it to the token file's owner, with
+                # the token file's own mode capped at owner rw + group r (a
+                # group-readable token file gives a group-readable window).
                 st = os.stat(token_file)
                 os.fchown(f.fileno(), st.st_uid, st.st_gid)
+                os.fchmod(f.fileno(), (st.st_mode & 0o640) | 0o600)
             os.fsync(f.fileno())
         os.replace(tmp, path)
     except BaseException:
         Path(tmp).unlink(missing_ok=True)
         raise
-    _fsync_dir(path.parent)
+    # The window is already open: a failed directory sync must not report failure.
+    try:
+        _fsync_dir(path.parent)
+    except OSError as e:
+        print(f"warning: window is open but its durability is unconfirmed ({type(e).__name__})",
+              file=sys.stderr)
     return expiry
 
 
 def oauth_window_close(token_file: str | Path) -> bool:
     """Close OAuth sign-in; True when a window file was there."""
+    if not Path(token_file).is_file():
+        raise ValueError(f"no token file at {token_file}")
     path = oauth_window_path(token_file)
     try:
         path.unlink()

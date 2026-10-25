@@ -76,6 +76,7 @@ import logging
 import os
 import re
 import secrets
+import stat
 import threading
 import time
 import urllib.parse
@@ -283,13 +284,22 @@ class OAuth:
         is one of a few fixed phrases, safe for the journal."""
         if self._window_path is None:
             return "no sign-in window is configured"
+        # Never block on a FIFO or follow a symlink: only a regular file counts.
+        flags = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOFOLLOW", 0)
         try:
-            with open(self._window_path, "rb") as f:
-                raw = f.read(65)
+            fd = os.open(self._window_path, flags)
         except FileNotFoundError:
             return "the sign-in window is not open"
         except OSError:
             return "the sign-in window file is unreadable"
+        try:
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                return "the sign-in window file is garbled"
+            raw = os.read(fd, 65)
+        except OSError:
+            return "the sign-in window file is unreadable"
+        finally:
+            os.close(fd)
         try:
             text = raw.decode("ascii").strip()
         except UnicodeDecodeError:
@@ -307,7 +317,7 @@ class OAuth:
         """Close the window for the sign-in about to get a code: None when this
         sign-in took it, else why not. Deleting is the claim, so of two sign-ins
         racing (threads or processes) only the one whose unlink succeeds proceeds.
-        Call under ``self._lock``."""
+        Call under ``self._lock``, then :meth:`_window_claimed` after releasing it."""
         closed = self.window_closed()
         if closed is not None:
             return closed
@@ -322,12 +332,17 @@ class OAuth:
             logger.warning("oauth sign-in window could not be closed (%s); sign-in refused",
                            type(e).__name__)
             return "the sign-in window file could not be deleted"
+        return None
+
+    def _window_claimed(self) -> None:
+        """After a successful :meth:`_use_window`, outside the lock: the unlink was
+        the claim; this only makes it durable and says so."""
+        assert self._window_path is not None
         # Best effort: a crash before this sync can bring the file back, and it
         # still expires by its own time.
         with contextlib.suppress(OSError):
             _fsync_dir_strict(self._window_path.parent)
         logger.info("oauth sign-in window used: closed until the operator opens it again")
-        return None
 
     # -- the redirect pin --
 
@@ -606,6 +621,7 @@ class OAuth:
                                  "challenge": q["code_challenge"], "token": token,
                                  "resource": q.get("resource"),
                                  "exp": now + CODE_TTL_S}
+        self._window_claimed()
         params = {"code": code}
         if "state" in q:
             params["state"] = q["state"]

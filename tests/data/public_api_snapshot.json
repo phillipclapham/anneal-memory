@@ -2703,6 +2703,23 @@
      },
      {
       "action": "_StoreAction",
+      "choices": [
+       "relevance",
+       "newest"
+      ],
+      "const": null,
+      "default": "relevance",
+      "dest": "order",
+      "flags": [
+       "--order"
+      ],
+      "metavar": null,
+      "nargs": null,
+      "required": false,
+      "type": null
+     },
+     {
+      "action": "_StoreAction",
       "choices": null,
       "const": null,
       "default": null,
@@ -3107,6 +3124,23 @@
       "nargs": null,
       "required": false,
       "type": "int"
+     },
+     {
+      "action": "_StoreAction",
+      "choices": [
+       "relevance",
+       "newest"
+      ],
+      "const": null,
+      "default": "relevance",
+      "dest": "order",
+      "flags": [
+       "--order"
+      ],
+      "metavar": null,
+      "nargs": null,
+      "required": false,
+      "type": null
      },
      {
       "action": "_StoreAction",
@@ -6351,7 +6385,7 @@
     },
     "recall": {
      "kind": "method",
-     "signature": "(self, since: 'str | None' = None, until: 'str | None' = None, episode_type: 'EpisodeType | str | None' = None, source: 'str | None' = None, keyword: 'str | None' = None, limit: 'int' = 100, offset: 'int' = 0, include_superseded: 'bool' = False) -> 'RecallResult'"
+     "signature": "(self, since: 'str | None' = None, until: 'str | None' = None, episode_type: 'EpisodeType | str | None' = None, source: 'str | None' = None, keyword: 'str | None' = None, limit: 'int' = 100, offset: 'int' = 0, include_superseded: 'bool' = False, order: 'str' = 'newest') -> 'RecallResult'"
     },
     "record": {
      "kind": "method",
@@ -6684,7 +6718,7 @@
      "name": "record"
     },
     {
-     "description": "Query episodes from memory with filters. Call this to find prior context before making decisions, to locate specific episodes for citation during graduation, or to review recent work. Returns matching episodes ordered by timestamp (newest first). Supports time range, type, source, and keyword filters. The keyword is matched as an exact phrase first; if no episode contains the whole phrase and it has two or more distinctive words, the call falls back to ranking episodes by how many of those words they contain (the reply says so and names the words each episode matched), so a multi-word query does not need to appear verbatim. A phrase of three or more distinctive words with only one or two exact hits is followed by a few word matches, listed under 'Also matching by words'. A durable fact whose cue words appear in the keyword (or two distinctive words of its text) is listed first, under 'Durable facts matching your words'. limit=0 returns nothing at all, facts included.",
+     "description": "Query episodes from memory with filters. Call this to find prior context before making decisions, to locate specific episodes for citation during graduation, or to review recent work. With a keyword, returns the episodes most relevant to it first, a page of 20 by default, with the total number of matches and the offset of the next page; without one, the newest first. Supports time range, type, source, and keyword filters. The keyword is matched as an exact phrase first; if no episode contains the whole phrase and it has two or more distinctive words, the call falls back to ranking episodes by how many of those words they contain (the reply says so and names the words each episode matched), so a multi-word query does not need to appear verbatim. A phrase of three or more distinctive words with only one or two exact hits is followed by a few word matches, listed under 'Also matching by words'. A durable fact whose cue words appear in the keyword (or two distinctive words of its text) is listed first, under 'Durable facts matching your words'. limit=0 returns nothing at all, facts included.",
      "inputSchema": {
       "properties": {
        "episode_type": {
@@ -6709,14 +6743,21 @@
         "type": "string"
        },
        "limit": {
-        "default": 100,
-        "description": "Maximum episodes to return. Default 100. When a multi-word keyword has no exact match and is ranked word by word, the default is 10 instead; pass a limit to see more.",
+        "description": "Maximum episodes to return. Default 20 for a keyword recall ranked by relevance and 100 otherwise. When a multi-word keyword has no exact match and is ranked word by word, the default is 10 instead; pass a limit to see more.",
         "type": "integer"
        },
        "offset": {
         "default": 0,
         "description": "Skip first N matching episodes. Default 0.",
         "type": "integer"
+       },
+       "order": {
+        "description": "relevance: episodes most about the keyword first (how often it occurs for the episode's length, and whether in its opening), newest first among equals; the default when a keyword is given. newest: by timestamp, newest first; the default without a keyword. Both list the same matches.",
+        "enum": [
+         "relevance",
+         "newest"
+        ],
+        "type": "string"
        },
        "since": {
         "description": "ISO 8601 timestamp — return episodes after this time.",
@@ -7893,14 +7934,21 @@
      "type": "string"
     },
     "limit": {
-     "default": 100,
-     "description": "Maximum episodes to return. Default 100. When a multi-word keyword has no exact match and is ranked word by word, the default is 10 instead; pass a limit to see more.",
+     "description": "Maximum episodes to return. Default 20 for a keyword recall ranked by relevance and 100 otherwise. When a multi-word keyword has no exact match and is ranked word by word, the default is 10 instead; pass a limit to see more.",
      "type": "integer"
     },
     "offset": {
      "default": 0,
      "description": "Skip first N matching episodes. Default 0.",
      "type": "integer"
+    },
+    "order": {
+     "description": "relevance: episodes most about the keyword first (how often it occurs for the episode's length, and whether in its opening), newest first among equals; the default when a keyword is given. newest: by timestamp, newest first; the default without a keyword. Both list the same matches.",
+     "enum": [
+      "relevance",
+      "newest"
+     ],
+     "type": "string"
     },
     "since": {
      "description": "ISO 8601 timestamp — return episodes after this time.",

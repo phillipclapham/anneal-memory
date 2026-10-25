@@ -55,6 +55,8 @@ from .retrieval import (
     search_episodes_counted,
 )
 from .store import (
+    RECALL_ORDERS,
+    _RANK_LEAD_CHARS,
     StorePathError,
     Store,
     StoreDatabaseError,
@@ -166,6 +168,45 @@ _ALSO_MATCHING_MAX = 5       # how many word matches are appended to such a resu
 _REPLACED_MAX = 5  # replacements listed by one keyword recall
 _REPLACED_OLDS_MAX = 5  # replaced matches named under each
 _RECALL_DEFAULT_LIMIT = 100  # MCP recall's ``limit`` when the caller passes none
+_RECALL_RANKED_DEFAULT_LIMIT = 20  # the same for a keyword recall ranked by relevance:
+# a page a model reads whole, with the total and the next offset stated under it
+
+
+def _recall_order(args: dict[str, Any]) -> str:
+    """The order an MCP recall lists episodes in: the caller's ``order``, else
+    relevance for a keyword recall and newest first for any other."""
+    order = args.get("order")
+    if isinstance(order, str):
+        return order
+    return "relevance" if isinstance(args.get("keyword"), str) else "newest"
+
+
+def _recall_default_limit(args: dict[str, Any]) -> int:
+    """MCP recall's ``limit`` when the caller passes none."""
+    if _recall_order(args) == "relevance" and isinstance(args.get("keyword"), str):
+        return _RECALL_RANKED_DEFAULT_LIMIT
+    return _RECALL_DEFAULT_LIMIT
+
+
+def _ranked_page_note(offset: int, shown: int, total: int) -> str:
+    """The line under a ranked recall's count: the order, which matches this page
+    holds, and how to read the rest when there is more."""
+    note = (f"Most relevant to the keyword first; this page is matches "
+            f"{offset + 1}-{offset + shown} of {total}.")
+    if offset + shown < total:
+        note += (f" {total - offset - shown} more: pass offset={offset + shown}"
+                 f" for the next page, or order=\"newest\" for the most recent first.")
+    return note
+
+
+def _why_matched(content: str, keyword: str) -> str:
+    """Why a ranked recall listed an episode, in a few words: how often the keyword
+    occurs in it, and whether in its opening (as the store ranks it)."""
+    text, kw = content.lower(), keyword.lower()
+    n = text.count(kw)
+    at = text.find(kw)
+    where = ", in its opening" if 0 <= at < _RANK_LEAD_CHARS else ""
+    return f"keyword {n}x{where}"
 
 
 def _as_int(value: object) -> int | None:
@@ -481,6 +522,10 @@ class Server:
                         f"Error: {name} must be an integer", is_error=True
                     )
                 args[name] = max(0, value)
+        if "order" in args and args["order"] not in RECALL_ORDERS:
+            return _tool_result(
+                f"Error: order must be one of: {', '.join(RECALL_ORDERS)}", is_error=True
+            )
         keyword = args.get("keyword")
         # One snapshot for the list and the replaced block (L3 r2 1009+22): read apart,
         # a link committed in between showed A live above and replaced below.
@@ -494,7 +539,7 @@ class Server:
                 result.get("isError")
                 or not isinstance(keyword, str)
                 or args.get("offset", 0) != 0
-                or args.get("limit", _RECALL_DEFAULT_LIMIT) <= 0
+                or args.get("limit", _recall_default_limit(args)) <= 0
                 or any(args.get(f) for f in ("since", "until", "source", "episode_type"))
             ):
                 return result
@@ -592,9 +637,10 @@ class Server:
             episode_type=args.get("episode_type"),
             source=args.get("source"),
             keyword=args.get("keyword"),
-            limit=max(0, args.get("limit", _RECALL_DEFAULT_LIMIT)),
+            limit=max(0, args.get("limit", _recall_default_limit(args))),
             offset=max(0, args.get("offset", 0)),
             include_superseded=args.get("include_superseded") is True,
+            order=_recall_order(args),
         )
 
         if not result.episodes:
@@ -603,17 +649,23 @@ class Server:
                 return fallback
             return _tool_result("No matching episodes found.")
 
+        offset = max(0, args.get("offset", 0))
+        ranked = result.query_params.get("order") == "relevance"
         lines = [
             f"Found {result.total_matching} episodes"
             f" (showing {len(result.episodes)}):"
         ]
+        if ranked:
+            lines.append(_ranked_page_note(
+                offset, len(result.episodes), result.total_matching))
         rows: list[tuple[str, str]] = []
         for ep in result.episodes:
             source_info = f" [{ep.source}]" if ep.source != "agent" else ""
             replaced = f" (superseded by {ep.superseded_by})" if ep.superseded_by else ""
+            why = f" ({_why_matched(ep.content, args['keyword'])})" if ranked else ""
             rows.append((ep.id, (
                 f"- ({ep.id}) [{ep.type.value}] {ep.timestamp}"
-                f"{source_info}{replaced}: {ep.content}"
+                f"{source_info}{replaced}{why}: {ep.content}"
             )))
         lines.extend(self._label_relayed(rows))
 
@@ -632,7 +684,7 @@ class Server:
             if len(words) >= 3:
                 shown = {ep.id for ep in result.episodes}
                 room = min(
-                    _ALSO_MATCHING_MAX, args.get("limit", _RECALL_DEFAULT_LIMIT) - len(shown)
+                    _ALSO_MATCHING_MAX, args.get("limit", _recall_default_limit(args)) - len(shown)
                 )
                 extra = [
                     m for m in self._word_matches(args, keyword)[0]

@@ -7,6 +7,7 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
 ### Experimental (not part of the frozen public surface)
 - `anneal_memory/remote.py` gains an optional one-user OAuth 2.1 front (`serve --oauth-issuer https://host`, module `anneal_memory/remote_oauth.py`) for MCP clients that accept only OAuth, such as the Gemini app's custom apps. It can hand out only a token the server's token file already holds; the first completed sign-in pins its redirect URI.
 - `remote.py` reads a chunked request body (exactly `Transfer-Encoding: chunked`, no `Content-Length` beside it), under the same size cap and deadline as a sized one; a proxy forwards an HTTP/2 request with no length that way.
+- `remote.py`'s `read_continuity` starts with a one-line replica age when a `replica.json` manifest sits beside the served db: when the operator's machine last confirmed the copy current (its `verified_at`), and `STALE` past an hour. A db with no manifest answers as before.
 - `remote.py` logs one line per response it sends (status, method, a known path or its length, Host, User-Agent), and `/token` logs the shape of the grant; no query, token, code, verifier or secret is logged.
 
 ## [1.0.2] — 2026-10-24

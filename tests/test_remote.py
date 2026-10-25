@@ -311,3 +311,27 @@ def test_capture_refusals_and_writes_stay_unreachable(served_outbox, monkeypatch
     # The outbox may not share the store's directory (it could alias the db).
     with pytest.raises(ValueError):
         remote.make_server(path / "memory.db", path / "tokens", port=0, outbox=path / "memory.db")
+
+
+def test_read_continuity_reports_a_pushed_replicas_age(served, monkeypatch):
+    call, a, _b, _tokens, tmp_path = served
+    # No manifest: not a pushed replica, so the answer is the continuity alone.
+    _s, r = call("/mcp", _tool("read_continuity"), f"Bearer {a}")
+    assert _text(r).startswith("# Agent")
+    manifest = tmp_path / remote.REPLICA_MANIFEST
+    now = 1_800_000_000
+    monkeypatch.setattr(remote.time, "time", lambda: now)
+    stamp = remote.time.strftime("%Y-%m-%dT%H:%M:%SZ", remote.time.gmtime(now - 37 * 60))
+    manifest.write_text(json.dumps({"verified_at": stamp}))
+    _s, r = call("/mcp", _tool("read_continuity"), f"Bearer {a}")
+    first, rest = _text(r).split("\n\n", 1)
+    assert stamp in first and "(37 min ago)" in first and "STALE" not in first
+    assert rest.startswith("# Agent")
+    stamp = remote.time.strftime("%Y-%m-%dT%H:%M:%SZ", remote.time.gmtime(now - 26 * 3600))
+    manifest.write_text(json.dumps({"verified_at": stamp}))
+    first = _text(call("/mcp", _tool("read_continuity"), f"Bearer {a}")[1]).split("\n\n", 1)[0]
+    assert "(26 h 0 min ago)" in first and "STALE" in first
+    for bad in ("{", json.dumps({"verified_at": "yesterday"}), json.dumps([1])):
+        manifest.write_text(bad)
+        first = _text(call("/mcp", _tool("read_continuity"), f"Bearer {a}")[1]).split("\n\n", 1)[0]
+        assert first == "[replica] Age unknown: the replica manifest is malformed."

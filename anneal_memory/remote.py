@@ -31,6 +31,10 @@ store is swapped means a capture is always in one of the three places; read in
 that order, a line moving on between reads is seen in the later one, at worst
 twice.
 
+A db published by a pusher that writes ``replica.json`` beside it (see
+:func:`replica_age_line`) gets a one-line freshness note at the top of
+``read_continuity``, so a reader can tell an aging copy from a current one.
+
 Known edges of ``--outbox`` (the operator's own configuration reaches them;
 nothing a client sends does): a hardlink to the db placed outside the db's
 directory, or a db path whose last component is a symlink, is not detected as
@@ -65,6 +69,7 @@ Bind to loopback and put a TLS-terminating proxy in front (Tailscale Funnel,
 from __future__ import annotations
 
 import argparse
+import calendar
 import contextlib
 import hashlib
 import hmac
@@ -113,6 +118,14 @@ MAX_PENDING_SHOWN = 10
 MAX_OUTBOX_BYTES = 8 * 1024 * 1024
 CAPTURES_PER_HOUR = 60
 OUTBOX_LOCK_WAIT_S = 2.0
+
+# A pushed replica's freshness record, written beside its db by the pusher
+# that published it: {"verified_at": "YYYY-MM-DDTHH:MM:SSZ", ...}.
+REPLICA_MANIFEST = "replica.json"
+MAX_MANIFEST_BYTES = 4096
+# Four missed 15-minute confirmations.
+REPLICA_STALE_S = 3600
+_ISO_Z = re.compile(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ")
 
 
 class _OutboxBusy(Exception):
@@ -398,6 +411,46 @@ def _rpc_error(msg_id: Any, code: int, message: str) -> dict[str, Any]:
     return {"jsonrpc": "2.0", "id": msg_id, "error": {"code": code, "message": message}}
 
 
+def replica_age_line(db_path: str | Path, now: float | None = None) -> str | None:
+    """One line saying how fresh a pushed replica is, or None when ``db_path`` is
+    not a pushed replica (no :data:`REPLICA_MANIFEST` beside it).
+
+    The pusher writes the manifest into the directory it publishes the db in and
+    rewrites ``verified_at`` each time it confirms the copy still matches its
+    store, even when it skips an unchanged upload; so the age is "since the
+    operator's machine last vouched for this copy", not "since the db changed".
+    A reader on a phone during an outage at home sees the replica's age instead
+    of taking it for current. Never raises: an unreadable manifest says so."""
+    manifest = Path(db_path).parent.resolve() / REPLICA_MANIFEST
+    try:
+        raw = manifest.read_bytes()
+    except FileNotFoundError:
+        return None
+    except OSError:
+        return "[replica] Age unknown: the replica manifest could not be read."
+    try:
+        doc = json.loads(raw[:MAX_MANIFEST_BYTES])
+        stamp = doc["verified_at"]
+        if not isinstance(stamp, str) or not _ISO_Z.fullmatch(stamp):
+            raise ValueError(stamp)
+        then = calendar.timegm(time.strptime(stamp, "%Y-%m-%dT%H:%M:%SZ"))
+    except (ValueError, KeyError, TypeError, OverflowError):
+        return "[replica] Age unknown: the replica manifest is malformed."
+    age = max(0, int((time.time() if now is None else now) - then))
+    if age < 3600:
+        ago = f"{age // 60} min ago"
+    elif age < 172800:
+        ago = f"{age // 3600} h {age % 3600 // 60} min ago"
+    else:
+        ago = f"{age // 86400} days ago"
+    line = (f"[replica] A copy of the operator's memory, last confirmed current by their "
+            f"machine at {stamp} ({ago}).")
+    if age > REPLICA_STALE_S:
+        line += (" STALE: their machine has not confirmed it since, so it may be off or "
+                 "offline and newer memory may exist there.")
+    return line
+
+
 class RemoteSession:
     """Answers one JSON-RPC message against a read-only open of ``db_path``.
 
@@ -574,8 +627,9 @@ class RemoteSession:
 
     def _bind(self, server: Server, store: Store) -> dict[str, Callable[[dict[str, Any]], Any]]:
         def read_continuity(_args: dict[str, Any]) -> dict[str, Any]:
-            text = store.load_continuity()
-            return _tool_result(text or "(No continuity file yet.)")
+            text = store.load_continuity() or "(No continuity file yet.)"
+            age = replica_age_line(self._db_path)
+            return _tool_result(f"{age}\n\n{text}" if age else text)
 
         return {
             "recall": server._tool_recall,

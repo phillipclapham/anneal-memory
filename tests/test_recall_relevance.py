@@ -100,6 +100,13 @@ def test_a_ranked_page_is_bounded_and_states_the_total_and_next_offset(store):
         {"keyword": q, "order": "newest", "limit": 9})["content"][0]["text"]
     stamps = re.findall(r"^- \([0-9a-f]+\) \[\w+\] (\S+)", nf, re.MULTILINE)
     assert len(stamps) == 9 and stamps == sorted(stamps, reverse=True)
+    # A newer capture from outside moves under its label, after older matches: the
+    # reply says so instead of claiming one newest-first list.
+    store.record("Okapi and zebra sighting, captured remotely.", "observation",
+                 timestamp="2027-01-01T12:00:00Z", trust="external")
+    ext = Server(store)._tool_recall(
+        {"keyword": "okapi zebra herd", "order": "newest", "limit": 3})["content"][0]["text"]
+    assert "listed after the rest, under their own label" in ext.splitlines()[0]
     assert not Server(store)._tool_recall({"keyword": "Acmeco", "order": None}).get("isError")
     recall_tool = next(t for t in TOOLS if t["name"] == "recall")
     assert f"{server_mod._RECALL_RANKED_PAGE_CHARS:,} characters" in json.dumps(recall_tool)

@@ -2,6 +2,13 @@
 
 All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project uses [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Experimental (not part of the frozen public surface)
+- `anneal_memory/remote.py` gains an optional one-user OAuth 2.1 front (`serve --oauth-issuer https://host`, module `anneal_memory/remote_oauth.py`) for MCP clients that accept only OAuth, such as the Gemini app's custom apps. It can hand out only a token the server's token file already holds; the first completed sign-in pins its redirect URI.
+- `remote.py` reads a chunked request body (exactly `Transfer-Encoding: chunked`, no `Content-Length` beside it), under the same size cap and deadline as a sized one; a proxy forwards an HTTP/2 request with no length that way.
+- `remote.py` logs one line per response it sends (status, method, a known path or its length, Host, User-Agent), and `/token` logs the shape of the grant; no query, token, code, verifier or secret is logged.
+
 ## [1.0.2] — 2026-10-24
 
 ### Changed

@@ -17,7 +17,7 @@ from pathlib import Path
 
 import pytest
 
-from anneal_memory import remote
+from anneal_memory import remote, remote_oauth
 from anneal_memory.store import Store
 
 ISS = "https://hub.example:8443"
@@ -296,6 +296,58 @@ def test_every_request_and_the_token_grant_are_logged_without_secrets(oauth_serv
     assert "ua=Google-Probe/1 \\xe9" in text  # escaped: the journal stays ASCII
     assert "answered 200 POST /token" in text and "answered 201 POST /register" in text
     assert ("oauth token issued (client auth basic; fields "
-            "'code,code_verifier,grant_type,redirect_uri'; grant_type 'authorization_code')") in text
+            "code,code_verifier,grant_type,redirect_uri; grant_type authorization_code)") in text
     for secret in (gem, code, verifier, reg["client_secret"], "SECRETSTATE"):
         assert secret not in text
+
+
+def test_a_token_in_an_unknown_path_or_resource_never_reaches_the_journal(oauth_server, caplog):
+    """Only known paths are named in the journal; a prefixed or doubled token URL,
+    the likeliest shape of a half-configured client, is logged by length."""
+    req, gem, _tokens = oauth_server
+    caplog.set_level("INFO", logger="anneal-memory.remote")
+    for path in (f"/gemini/mcp/{gem}", f"//mcp/{gem}", f"/mcp%2F{gem}", f"/mcp/{gem}?x=1",
+                 f"/.well-known/oauth-protected-resource/mcp/{gem}", f"/MCP/{gem}"):
+        assert req("POST", path, b"{}", {"Content-Type": "application/json"})[0] in (400, 401, 404)
+    reg = _register(req)
+    verifier, challenge = _pkce()
+    q = {"response_type": "code", "client_id": reg["client_id"], "redirect_uri": REDIRECT,
+         "code_challenge": challenge, "code_challenge_method": "S256", "state": "x"}
+    code = _code_from(_sign_in(req, q, gem)[1])["code"]
+    basic = base64.b64encode(f"{reg['client_id']}:{reg['client_secret']}".encode()).decode()
+    form = {"grant_type": "authorization_code", "code": code, "code_verifier": verifier,
+            "resource": f"{ISS}/mcp/{gem}"}
+    st, _h, _b = req("POST", "/token", urllib.parse.urlencode(form).encode(),
+                     {"Authorization": f"Basic {basic}",
+                      "Content-Type": "application/x-www-form-urlencoded"})
+    assert st == 400
+    text = caplog.text
+    assert gem not in text and "(other path, " in text
+    assert f"resource {ISS}/mcp(token-in-path) is not this server's" in text
+    assert remote_oauth.path_for_log("/.well-known/oauth-authorization-server") == \
+        "/.well-known/oauth-authorization-server"
+    assert remote_oauth.path_for_log("/a\nb") == "(other path, 4 chars)"
+
+
+
+def test_a_json_body_to_token_is_counted_not_echoed(oauth_server, caplog):
+    """A JSON body parsed as a form is one field named by the whole body (L2 1024+22):
+    the code and verifier in it never reach the journal, and the code stays usable."""
+    req, gem, _tokens = oauth_server
+    caplog.set_level("INFO", logger="anneal-memory.remote")
+    reg = _register(req)
+    verifier, challenge = _pkce()
+    q = {"response_type": "code", "client_id": reg["client_id"], "redirect_uri": REDIRECT,
+         "code_challenge": challenge, "code_challenge_method": "S256", "state": "x"}
+    code = _code_from(_sign_in(req, q, gem)[1])["code"]
+    body = json.dumps({"grant_type": "authorization_code", "code": code,
+                       "code_verifier": verifier, "client_secret": reg["client_secret"]})
+    assert req("POST", "/token", body.encode(), {"Content-Type": "application/json"})[0] == 400
+    smuggled = f"grant_type=authorization_code;code={code}"
+    assert req("POST", "/token", smuggled.encode())[0] == 400
+    text = caplog.text
+    assert "oauth token refused: unsupported grant (client auth none; fields - +1 other (" in text
+    assert "grant_type (other, " in text
+    for secret in (code, verifier, reg["client_secret"], code[:16]):
+        assert secret not in text
+    assert _exchange(req, reg, code, verifier)[0] == 200

@@ -335,7 +335,8 @@ def test_read_continuity_reports_a_pushed_replicas_age(served, monkeypatch):
     manifest.write_text(json.dumps({"verified_at": stamp}))
     first = _text(call("/mcp", _tool("read_continuity"), f"Bearer {a}")[1]).split("\n\n", 1)[0]
     assert "clock skew" in first and "min ago" not in first
-    for bad in ("{", json.dumps({"verified_at": "yesterday"}), json.dumps([1]), " " * 5000):
+    for bad in ("{", json.dumps({"verified_at": "yesterday"}), json.dumps([1]), " " * 5000,
+                "[" * 2000 + "]" * 2000):
         manifest.write_text(bad)
         first = _text(call("/mcp", _tool("read_continuity"), f"Bearer {a}")[1]).split("\n\n", 1)[0]
         assert first == "[replica] Age unknown: the replica manifest is malformed."

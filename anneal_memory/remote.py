@@ -131,7 +131,7 @@ REPLICA_STALE_S = 3600
 # A stamp further ahead of this server's clock than this is clock skew, not
 # freshness, and is reported as such rather than as "0 min ago".
 REPLICA_SKEW_S = 300
-_ISO_Z = re.compile(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ")
+_ISO_Z = re.compile(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ", re.ASCII)
 
 
 class _OutboxBusy(Exception):
@@ -426,14 +426,16 @@ def replica_age_line(db_path: str | Path, now: float | None = None) -> str | Non
     store, even when it skips an unchanged upload; so the age is "since the
     operator's machine last vouched for this copy", not "since the db changed".
     A reader on a phone during an outage at home sees the replica's age instead
-    of taking it for current. Never raises: an unreadable manifest says so."""
-    manifest = Path(db_path).parent.resolve() / REPLICA_MANIFEST
+    of taking it for current. Never raises: an unreadable manifest says so.
+    Known edge: a FIFO put in the manifest's place by the operator blocks the
+    open (only the operator's own pusher writes that directory)."""
     try:
+        manifest = Path(db_path).parent.resolve() / REPLICA_MANIFEST
         with manifest.open("rb") as f:
             raw = f.read(MAX_MANIFEST_BYTES + 1)
     except FileNotFoundError:
         return None
-    except OSError:
+    except (OSError, RuntimeError):
         return "[replica] Age unknown: the replica manifest could not be read."
     try:
         if len(raw) > MAX_MANIFEST_BYTES:
@@ -443,7 +445,8 @@ def replica_age_line(db_path: str | Path, now: float | None = None) -> str | Non
         if not isinstance(stamp, str) or not _ISO_Z.fullmatch(stamp):
             raise ValueError(stamp)
         then = calendar.timegm(time.strptime(stamp, "%Y-%m-%dT%H:%M:%SZ"))
-    except (ValueError, KeyError, TypeError, OverflowError):
+    # RecursionError: deep nesting under the size cap raises it on Python 3.10/3.11.
+    except (ValueError, KeyError, TypeError, OverflowError, RecursionError):
         return "[replica] Age unknown: the replica manifest is malformed."
     age = int((time.time() if now is None else now) - then)
     if age < -REPLICA_SKEW_S:

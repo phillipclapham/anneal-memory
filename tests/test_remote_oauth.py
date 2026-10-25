@@ -324,10 +324,11 @@ def test_a_token_in_an_unknown_path_or_resource_never_reaches_the_journal(oauth_
     text = caplog.text
     assert gem not in text and "(other path, " in text
     assert f"resource {ISS}/mcp(token-in-path) is not this server's" in text
+    other = f"https://{gem}.example/mcp"
+    assert remote_oauth._url_for_log(other, ISS) == f"(other origin, {len(other)} chars)"
     assert remote_oauth.path_for_log("/.well-known/oauth-authorization-server") == \
         "/.well-known/oauth-authorization-server"
     assert remote_oauth.path_for_log("/a\nb") == "(other path, 4 chars)"
-
 
 
 def test_a_json_body_to_token_is_counted_not_echoed(oauth_server, caplog):

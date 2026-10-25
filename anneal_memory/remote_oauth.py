@@ -127,16 +127,17 @@ def path_for_log(path: str) -> str:
     return f"(other path, {len(path)} chars)"
 
 
-def _url_for_log(url: str) -> str:
-    """scheme://host[:port] plus :func:`path_for_log` of a client-sent URL."""
+def _url_for_log(url: str, origin: str) -> str:
+    """A client-sent URL for the journal: :func:`path_for_log` of it when its origin
+    is ``origin``, else only its length (L3 1024+22: a host or scheme can carry a
+    secret too)."""
     try:
         parts = urllib.parse.urlsplit(url)
-        netloc = parts.hostname or ""
-        if parts.port is not None:
-            netloc += f":{parts.port}"
     except ValueError:
-        return "<unparseable>"
-    return ascii(f"{parts.scheme}://{netloc[:80]}")[1:-1] + path_for_log(parts.path or "/")
+        return f"(unparseable, {len(url)} chars)"
+    if f"{parts.scheme}://{parts.netloc}".lower() != origin.lower():
+        return f"(other origin, {len(url)} chars)"
+    return origin + path_for_log(parts.path or "/")
 
 
 # Token-request field names and grant types a journal line may name. Anything
@@ -505,7 +506,7 @@ class OAuth:
                 entry["resource"] is not None and resource is not None \
                 and resource.rstrip("/") != entry["resource"].rstrip("/"):  # both already exact
             logger.info("oauth token refused: resource %s is not this server's (%s)",
-                        _url_for_log(resource), sent)
+                        _url_for_log(resource, self.issuer), sent)
             return 400, {"error": "invalid_target"}
         still = check_token(entry["token"])
         if still is UNAVAILABLE:

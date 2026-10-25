@@ -21,6 +21,7 @@ Usage:
     anneal-memory init --schema partnership       # ...with the 6-section felt schema
     anneal-memory set-schema partnership          # Migrate an existing store's schema
     anneal-memory serve                           # Start MCP server
+    anneal-memory scope-project --src D --out R --policy P  # Reader-scoped projection
     anneal-memory export --format json -o out.json  # Export store data
     anneal-memory import out.json                 # Import from export
     anneal-memory audit --since 3d --event record # Read audit trail
@@ -3819,6 +3820,18 @@ def cmd_serve(args: argparse.Namespace) -> None:
     )
 
 
+def cmd_scope_project(args: argparse.Namespace) -> None:
+    """Build a reader-scoped projection (anneal_memory.scope). Exit 3 when refused."""
+    from .scope import ScopeError, project
+
+    try:
+        report = project(args.src, args.out, args.policy)
+    except ScopeError as e:
+        print(f"REFUSED (projection unpublished): {e}", file=sys.stderr)
+        sys.exit(3)
+    print(json.dumps(report, indent=2))
+
+
 # -- Helpers --
 
 def _now_utc_str() -> str:
@@ -5473,6 +5486,21 @@ def build_parser() -> argparse.ArgumentParser:
              "the server's wraps consolidate only after 'baton claim NAME'.",
     )
     sub.set_defaults(func=cmd_serve)
+
+    # -- scope-project --
+    sub = subparsers.add_parser(
+        "scope-project",
+        help="Build a reader-scoped projection of a store (filtered at build time)",
+        description="Build and publish ROOT/current: a copy of the store in SRC with every "
+                    "episode, crystal and continuity segment the policy denies removed, gated "
+                    "by a post-check. Prints the report JSON. Exit 3 = refused; the "
+                    "projection is then unpublished (ROOT/current removed).",
+    )
+    sub.add_argument("--src", required=True, type=Path,
+                     help="Directory holding the source store (memory.db and its sidecars)")
+    sub.add_argument("--out", required=True, type=Path, help="Projection root (serves ROOT/current)")
+    sub.add_argument("--policy", required=True, type=Path, help="Scope policy JSON file")
+    sub.set_defaults(func=cmd_scope_project)
 
     # -- export --
     sub = subparsers.add_parser("export", help="Export store data", parents=[json_parent])

@@ -3048,6 +3048,58 @@
     "subcommands": {},
     "subparsers": null
    },
+   "scope-project": {
+    "defaults": {
+     "func": "anneal_memory.cli.cmd_scope_project"
+    },
+    "exclusive_groups": [],
+    "options": [
+     {
+      "action": "_StoreAction",
+      "choices": null,
+      "const": null,
+      "default": null,
+      "dest": "out",
+      "flags": [
+       "--out"
+      ],
+      "metavar": null,
+      "nargs": null,
+      "required": true,
+      "type": "pathlib._local.Path"
+     },
+     {
+      "action": "_StoreAction",
+      "choices": null,
+      "const": null,
+      "default": null,
+      "dest": "policy",
+      "flags": [
+       "--policy"
+      ],
+      "metavar": null,
+      "nargs": null,
+      "required": true,
+      "type": "pathlib._local.Path"
+     },
+     {
+      "action": "_StoreAction",
+      "choices": null,
+      "const": null,
+      "default": null,
+      "dest": "src",
+      "flags": [
+       "--src"
+      ],
+      "metavar": null,
+      "nargs": null,
+      "required": true,
+      "type": "pathlib._local.Path"
+     }
+    ],
+    "subcommands": {},
+    "subparsers": null
+   },
    "search": {
     "defaults": {
      "func": "anneal_memory.cli.cmd_search"

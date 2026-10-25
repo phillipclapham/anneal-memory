@@ -94,8 +94,8 @@ from . import __version__
 from ._fsdir import _fsync_dir
 from .origin import strip_hidden_controls
 from .server import _RELAYED_LABEL, Server, _tool_result
-from .remote_oauth import (MAX_FORM_BYTES, MAX_REGISTER_BYTES, PAGE_HEADERS, UNAVAILABLE, OAuth,
-                           path_for_log)
+from .remote_oauth import (MAX_FORM_BYTES, MAX_REGISTER_BYTES, MAX_WINDOW_S, PAGE_HEADERS,
+                           UNAVAILABLE, OAuth, path_for_log)
 from .store import Store
 from .types import EpisodeType
 
@@ -404,6 +404,53 @@ def token_revoke(path: str | Path, name: str) -> None:
         if name not in tokens:
             raise ValueError(f"no token named {name!r}")
         del tokens[name]
+
+
+# -- the OAuth files beside the token file they guard (so neither can be left out) --
+
+def oauth_pin_path(token_file: str | Path) -> Path:
+    return Path(token_file).with_name(Path(token_file).name + ".oauth-redirect")
+
+
+def oauth_window_path(token_file: str | Path) -> Path:
+    return Path(token_file).with_name(Path(token_file).name + ".oauth-window")
+
+
+def oauth_window_open(token_file: str | Path, minutes: int = 10) -> int:
+    """Open OAuth sign-in for ``minutes`` (1-60): write the window file atomically
+    (mode 0600) and return its expiry, a UTC epoch. The first completed sign-in
+    closes it."""
+    if isinstance(minutes, bool) or not isinstance(minutes, int) or \
+            not 1 <= minutes <= MAX_WINDOW_S // 60:
+        raise ValueError(f"--minutes must be 1 to {MAX_WINDOW_S // 60}")
+    if not Path(token_file).is_file():
+        raise ValueError(f"no token file at {token_file}")
+    path = oauth_window_path(token_file)
+    expiry = int(time.time()) + minutes * 60
+    # mkstemp creates the file 0600, and os.replace keeps that mode.
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=path.name + ".", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="ascii") as f:
+            f.write(f"{expiry}\n")
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        Path(tmp).unlink(missing_ok=True)
+        raise
+    _fsync_dir(path.parent)
+    return expiry
+
+
+def oauth_window_close(token_file: str | Path) -> bool:
+    """Close OAuth sign-in; True when a window file was there."""
+    path = oauth_window_path(token_file)
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        return False
+    _fsync_dir(path.parent)
+    return True
 
 
 # -- JSON-RPC over one request --
@@ -1166,8 +1213,9 @@ def make_server(db_path: str | Path, tokens_path: str | Path,
     OAuth endpoints of :mod:`anneal_memory.remote_oauth` are served; they can only
     hand out tokens this ``tokens_path`` already holds."""
     load_tokens(tokens_path)
-    # The redirect pin lives beside the token file it guards, so it cannot be left out.
-    oauth = (OAuth(oauth_issuer, Path(tokens_path).with_name(Path(tokens_path).name + ".oauth-redirect"))
+    # The redirect pin and the sign-in window live beside the token file they
+    # guard, so neither can be left out, and each tenant has its own.
+    oauth = (OAuth(oauth_issuer, oauth_pin_path(tokens_path), oauth_window_path(tokens_path))
              if oauth_issuer is not None else None)
     if outbox is not None:
         # Anchored once, so a later chdir cannot move it off the checked directory.
@@ -1208,9 +1256,24 @@ def main(argv: list[str] | None = None) -> int:
         t = sub.add_parser(cmd)
         t.add_argument("name")
         t.add_argument("--token-file", required=True)
+    w = sub.add_parser("oauth-window",
+                       help="open OAuth sign-in for a few minutes (one sign-in), or --close it")
+    w.add_argument("--token-file", required=True)
+    w.add_argument("--minutes", type=int, default=10,
+                   help=f"how long sign-in stays open, 1 to {MAX_WINDOW_S // 60} (default 10)")
+    w.add_argument("--close", action="store_true", help="close sign-in now")
     args = parser.parse_args(argv)
 
     try:
+        if args.cmd == "oauth-window":
+            if args.close:
+                was = oauth_window_close(args.token_file)
+                print("sign-in closed" if was else "sign-in was not open")
+                return 0
+            expiry = oauth_window_open(args.token_file, args.minutes)
+            when = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(expiry))
+            print(f"sign-in open until {when} (one sign-in)")
+            return 0
         if args.cmd == "token-add":
             print(token_add(args.token_file, args.name))
             return 0
@@ -1218,6 +1281,9 @@ def main(argv: list[str] | None = None) -> int:
             token_revoke(args.token_file, args.name)
             return 0
     except ValueError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
+    except OSError as e:  # e.g. the window file's directory is not writable
         print(f"error: {e}", file=sys.stderr)
         return 2
 

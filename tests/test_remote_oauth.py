@@ -51,6 +51,7 @@ def oauth_server(tmp_path: Path):
         except urllib.error.HTTPError as e:
             return e.code, dict(e.headers), e.read().decode()
 
+    req.tokens = tokens  # type: ignore[attr-defined]  # for _open
     try:
         yield req, gem, tokens
     finally:
@@ -71,7 +72,16 @@ def _register(req) -> dict:
     return json.loads(body)
 
 
-def _sign_in(req, q: dict, token: str) -> tuple[int, str]:
+def _open(req) -> None:
+    """Open the sign-in window (one sign-in), as the operator does before signing in."""
+    remote.oauth_window_open(req.tokens)
+
+
+def _sign_in(req, q: dict, token: str, window: bool = True) -> tuple[int, str]:
+    """POST the sign-in form; with ``window`` the operator opens sign-in first, so
+    the tests of the other checks run with the window open."""
+    if window:
+        _open(req)
     st, _h, page = req("POST", "/authorize", urllib.parse.urlencode({**q, "token": token}).encode(),
                        {"Content-Type": "application/x-www-form-urlencoded"})
     return st, page
@@ -109,6 +119,7 @@ def test_discovery_to_bearer_ends_with_a_token_the_file_already_holds(oauth_serv
     state = "s" * 2000  # Gemini's state runs ~1,400-2,400 characters
     q = {"response_type": "code", "client_id": reg["client_id"], "redirect_uri": REDIRECT,
          "code_challenge": challenge, "code_challenge_method": "S256", "state": state}
+    _open(req)
     st, h, page = req("GET", "/authorize?" + urllib.parse.urlencode(q))
     assert st == 200 and "form-action 'self'" in h["Content-Security-Policy"]
     st, page = _sign_in(req, q, gem)
@@ -175,6 +186,7 @@ def test_claude_and_chatgpt_connectors_each_sign_in_and_pin_their_own_redirect(o
         q = {"response_type": "code", "client_id": reg["client_id"], "redirect_uri": redirect,
              "code_challenge": challenge, "code_challenge_method": "S256", "state": "s",
              "resource": resource, "scope": "openid"}
+        _open(req)
         assert req("GET", "/authorize?" + urllib.parse.urlencode(q))[0] == 200
         code = _sign_in_code(req, q, token, redirect)
         st, _h, body = _public_exchange(req, reg["client_id"], code, verifier, redirect,
@@ -227,8 +239,9 @@ def test_a_server_wide_pin_still_binds_every_connector(oauth_server):
          "code_challenge_method": "S256", "state": "s"}
     assert req("GET", "/authorize?" + urllib.parse.urlencode({**q, "redirect_uri": CLAUDE}))[0] == 400
     assert _sign_in(req, {**q, "redirect_uri": CLAUDE}, claude_tok)[0] == 400
-    page = req("GET", "/authorize?" + urllib.parse.urlencode({**q, "redirect_uri": REDIRECT}))[2]
-    assert "becomes the only" not in page
+    _open(req)
+    st, _h, page = req("GET", "/authorize?" + urllib.parse.urlencode({**q, "redirect_uri": REDIRECT}))
+    assert st == 200 and "becomes the only" not in page
     code = _sign_in_code(req, q, gem, REDIRECT)
     assert _public_exchange(req, "cid", code, verifier, REDIRECT)[0] == 200
     assert not tokens.with_name(tokens.name + ".oauth-redirect.gemini").exists()
@@ -512,6 +525,140 @@ def test_a_json_body_to_token_is_counted_not_echoed(oauth_server, caplog):
     for secret in (code, verifier, reg["client_secret"], code[:16]):
         assert secret not in text
     assert _exchange(req, reg, code, verifier)[0] == 200
+
+
+# -- the sign-in window (37a): a code is issued only while the operator has opened sign-in --
+
+def _window(tokens: Path) -> Path:
+    return tokens.with_name(tokens.name + ".oauth-window")
+
+
+def _q(challenge: str, client_id: str = "cid") -> dict:
+    return {"response_type": "code", "client_id": client_id, "redirect_uri": REDIRECT,
+            "code_challenge": challenge, "code_challenge_method": "S256", "state": "s"}
+
+
+def test_sign_in_is_refused_while_the_window_is_closed(oauth_server, caplog):
+    req, gem, tokens = oauth_server
+    caplog.set_level("INFO", logger="anneal-memory.remote")
+    assert not _window(tokens).exists()
+    _verifier, challenge = _pkce()
+    q = _q(challenge)
+    # The page does not ask for a token the submit would refuse.
+    st, _h, page = req("GET", "/authorize?" + urllib.parse.urlencode(q))
+    assert st == 403 and "ask the operator to open it" in page
+    assert 'type="password"' not in page
+    st, page = _sign_in(req, q, gem, window=False)
+    assert st == 403 and "ask the operator to open it" in page
+    assert "url=" not in page and "code=" not in page and gem not in page
+    assert "oauth authorize refused (page): the sign-in window is not open" in caplog.text
+    assert "oauth authorize refused (submit): the sign-in window is not open" in caplog.text
+    assert gem not in caplog.text
+    # Registration and metadata stay open: registering grants nothing.
+    assert _register(req)["client_id"]
+    assert req("GET", "/.well-known/oauth-authorization-server")[0] == 200
+
+
+def test_an_opened_window_allows_one_sign_in_and_its_code_exchanges_after(oauth_server, caplog):
+    req, gem, tokens = oauth_server
+    caplog.set_level("INFO", logger="anneal-memory.remote")
+    reg = _register(req)
+    verifier, challenge = _pkce()
+    q = _q(challenge, reg["client_id"])
+    _open(req)
+    assert req("GET", "/authorize?" + urllib.parse.urlencode(q))[0] == 200
+    # A refusal before the code (a wrong token) does not spend the window.
+    assert _sign_in(req, q, "not-a-token-here", window=False)[0] == 401
+    assert _window(tokens).exists()
+    st, page = _sign_in(req, q, gem, window=False)
+    assert st == 200
+    code = _code_from(page)["code"]
+    assert not _window(tokens).exists()  # the first completed sign-in closed it
+    # A second sign-in inside the same ten minutes is refused: one per opening.
+    st, page = _sign_in(req, q, gem, window=False)
+    assert st == 403 and "code=" not in page
+    # /token is not gated: the code issued inside the window still exchanges.
+    st, _h, body = _exchange(req, reg, code, verifier)
+    assert st == 200 and json.loads(body)["access_token"] == gem
+    assert "oauth sign-in window used" in caplog.text
+
+
+@pytest.mark.parametrize("content,why", [
+    ("expired", "has expired"),
+    ("far", "more than an hour ahead"),
+    (b"", "garbled"), (b"soon\n", "garbled"), (b"-5\n", "garbled"), (b"1e12\n", "garbled"),
+    (b"\xff\xfe\n", "garbled"), (b"1" * 80, "garbled"), (b"12 34\n", "garbled"),
+])
+def test_an_expired_far_future_or_garbled_window_is_closed(oauth_server, caplog, content, why):
+    import time as _time
+    req, gem, tokens = oauth_server
+    caplog.set_level("INFO", logger="anneal-memory.remote")
+    now = int(_time.time())
+    if content == "expired":
+        content = f"{now - 1}\n".encode()
+    elif content == "far":  # past the one-hour bound, never trusted
+        content = f"{now + 3600 + 120}\n".encode()
+    _window(tokens).write_bytes(content)
+    _verifier, challenge = _pkce()
+    q = _q(challenge)
+    assert req("GET", "/authorize?" + urllib.parse.urlencode(q))[0] == 403
+    st, page = _sign_in(req, q, gem, window=False)
+    assert st == 403 and "code=" not in page
+    assert "oauth authorize refused (submit): the sign-in window " in caplog.text
+    assert why in caplog.text
+    assert _window(tokens).exists()  # a closed window is left for the operator to see
+
+
+def test_without_a_window_path_sign_in_is_always_closed(tmp_path: Path):
+    oauth = remote_oauth.OAuth(ISS, tmp_path / "tokens.oauth-redirect")
+    assert oauth.window_closed() == "no sign-in window is configured"
+    with oauth._lock:
+        assert oauth._use_window() is not None
+
+
+def test_a_window_that_cannot_be_deleted_issues_no_code(oauth_server, monkeypatch, caplog):
+    req, gem, tokens = oauth_server
+    caplog.set_level("INFO", logger="anneal-memory.remote")
+    real_unlink = os.unlink
+
+    def refuse(path, *a, **k):  # type: ignore[no-untyped-def]
+        if str(path).endswith(".oauth-window"):
+            raise PermissionError("read-only")
+        return real_unlink(path, *a, **k)
+
+    monkeypatch.setattr(remote_oauth.os, "unlink", refuse)
+    _verifier, challenge = _pkce()
+    st, page = _sign_in(req, _q(challenge), gem)
+    assert st == 403 and "code=" not in page
+    assert "could not be closed (PermissionError)" in caplog.text
+    assert _window(tokens).exists()
+
+
+def test_the_oauth_window_command_opens_and_closes(tmp_path: Path, capsys):
+    import time as _time
+    tokens = tmp_path / "tokens"
+    remote.token_add(tokens, "gemini")
+    window = _window(tokens)
+    assert remote.main(["oauth-window", "--token-file", str(tokens)]) == 0
+    out = capsys.readouterr().out
+    expiry = int(window.read_text())
+    assert abs(expiry - (_time.time() + 600)) < 5
+    assert _time.strftime("%Y-%m-%dT%H:%M:%SZ", _time.gmtime(expiry)) in out
+    if os.name == "posix":
+        assert window.stat().st_mode & 0o777 == 0o600
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["tokens", "tokens.lock",
+                                                          "tokens.oauth-window"]
+    assert remote.main(["oauth-window", "--token-file", str(tokens), "--minutes", "60"]) == 0
+    assert remote_oauth.OAuth(ISS, None, window).window_closed() is None  # 60 is in bounds
+    for bad in ("0", "61", "-1"):
+        assert remote.main(["oauth-window", "--token-file", str(tokens), "--minutes", bad]) == 2
+    assert remote.main(["oauth-window", "--token-file", str(tokens), "--close"]) == 0
+    assert not window.exists() and "sign-in closed" in capsys.readouterr().out
+    assert remote.main(["oauth-window", "--token-file", str(tokens), "--close"]) == 0
+    assert "was not open" in capsys.readouterr().out
+    # A mistyped token file opens nothing.
+    assert remote.main(["oauth-window", "--token-file", str(tmp_path / "tokenz")]) == 2
+    assert not (tmp_path / "tokenz.oauth-window").exists()
 
 
 def _raw(port: int, head: str, body: bytes = b"") -> int:

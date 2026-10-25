@@ -49,6 +49,17 @@ vendors, not accounts: the operator typing the token only into a sign-in they
 started from their own connector is what separates accounts (whether claude.ai
 binds a sign-in's state to the browser session that started it is not documented).
 Codes live in memory; a restart between sign-in and exchange fails that sign-in only.
+
+The sign-in window: a code is issued only while the operator has opened sign-in,
+so a sign-in link sent to them (phishing) fails at any other time. The window file
+(``<token file>.oauth-window``, written by ``python -m anneal_memory.remote
+oauth-window``) holds one integer, the UTC expiry epoch. Sign-in is open while that
+file exists, parses, and its expiry is in the future and no more than
+:data:`MAX_WINDOW_S` ahead (a far-future value is refused, not trusted); a missing,
+unreadable or garbled file is closed. The first completed sign-in (a code issued)
+deletes the file, so one opening allows one sign-in. Only the step that issues a
+code is gated: registration, metadata and ``/token`` are not, so a code issued
+inside the window still exchanges after it closes.
 """
 
 from __future__ import annotations
@@ -86,6 +97,12 @@ def _fsync_dir_strict(path: Path) -> None:
 
 
 CODE_TTL_S = 120
+MAX_WINDOW_S = 3600  # a window further out than this is refused, never trusted
+_WINDOW_RE = re.compile(r"[0-9]{1,12}")
+_WINDOW_CLOSED_PAGE = ("<p>Sign-in is closed: ask the operator to open it.</p>"
+                       "<p>The operator opens sign-in on the server for a few minutes at a "
+                       "time. If you did not start this sign-in from your own app, stop "
+                       "here.</p>")
 MAX_PENDING_CODES = 32
 MAX_STATE_CHARS = 4096
 MAX_FORM_BYTES = 16 * 1024
@@ -230,7 +247,10 @@ def s256(verifier: str) -> str:
 class OAuth:
     """Endpoints for one issuer. Each handler returns ``(status, headers, body)``."""
 
-    def __init__(self, issuer: str, pin_path: str | os.PathLike[str] | None = None) -> None:
+    def __init__(self, issuer: str, pin_path: str | os.PathLike[str] | None = None,
+                 window_path: str | os.PathLike[str] | None = None) -> None:
+        """``window_path`` is the sign-in window file; without one sign-in is
+        always closed (an auth boundary fails closed)."""
         # It reaches metadata and a response header: only an exact https://host[:port].
         bad = ValueError("the OAuth issuer must be a bare https origin, https://host[:port]")
         if not issuer.isascii() or not issuer.isprintable() or any(c in issuer for c in ' "\\'):
@@ -252,6 +272,60 @@ class OAuth:
         self._codes: dict[str, dict[str, Any]] = {}
         self._lock = threading.Lock()
         self._pin_path = Path(pin_path) if pin_path is not None else None
+        self._window_path = Path(window_path) if window_path is not None else None
+
+    # -- the sign-in window --
+
+    def window_closed(self) -> str | None:
+        """Why sign-in is closed now, or None while the window is open. The reason
+        is one of a few fixed phrases, safe for the journal."""
+        if self._window_path is None:
+            return "no sign-in window is configured"
+        try:
+            with open(self._window_path, "rb") as f:
+                raw = f.read(65)
+        except FileNotFoundError:
+            return "the sign-in window is not open"
+        except OSError:
+            return "the sign-in window file is unreadable"
+        try:
+            text = raw.decode("ascii").strip()
+        except UnicodeDecodeError:
+            text = ""
+        if len(raw) > 64 or not _WINDOW_RE.fullmatch(text):
+            return "the sign-in window file is garbled"
+        expiry, now = int(text), time.time()
+        if expiry <= now:
+            return "the sign-in window has expired"
+        if expiry > now + MAX_WINDOW_S:
+            return "the sign-in window is more than an hour ahead (refused)"
+        return None
+
+    def _use_window(self) -> str | None:
+        """Close the window for the sign-in about to get a code: None when this
+        sign-in took it, else why not. Deleting is the claim, so of two sign-ins
+        racing (threads or processes) only the one whose unlink succeeds proceeds.
+        Call under ``self._lock``."""
+        closed = self.window_closed()
+        if closed is not None:
+            return closed
+        assert self._window_path is not None
+        try:
+            os.unlink(self._window_path)
+        except FileNotFoundError:
+            return "the sign-in window was used by another sign-in"
+        except OSError as e:
+            # A window that cannot be deleted would allow a second sign-in, so
+            # this one is refused too and the operator is told why.
+            logger.warning("oauth sign-in window could not be closed (%s); sign-in refused",
+                           type(e).__name__)
+            return "the sign-in window file could not be deleted"
+        # Best effort: a crash before this sync can bring the file back, and it
+        # still expires by its own time.
+        with contextlib.suppress(OSError):
+            _fsync_dir_strict(self._window_path.parent)
+        logger.info("oauth sign-in window used: closed until the operator opens it again")
+        return None
 
     # -- the redirect pin --
 
@@ -457,6 +531,10 @@ class OAuth:
         if problem or q is None:  # never redirect on a bad request (RFC 6749 §4.1.2.1)
             _log_authorize_refusal("page", problem, q)
             return 400, _page("Sign-in refused", f"<p>{html.escape(problem or '')}</p>")
+        closed = self.window_closed()
+        if closed is not None:  # never ask for a token the submit would refuse
+            _log_authorize_refusal("page", closed, q)
+            return 403, _page("Sign-in is closed", _WINDOW_CLOSED_PAGE)
         return 200, self._form(q, "")
 
     def _form(self, q: dict[str, str], error: str) -> str:
@@ -515,6 +593,13 @@ class OAuth:
                 del self._codes[c]
             if len(self._codes) >= MAX_PENDING_CODES:
                 return 503, _page("Busy", "<p>Too many sign-ins in progress; try again shortly.</p>")
+            # The window gates the code itself: checked and used (deleted) here,
+            # under the lock and after every other check, so a refusal above never
+            # spends it and no code is issued without taking it.
+            closed = self._use_window()
+            if closed is not None:
+                _log_authorize_refusal("submit", closed, q)
+                return 403, _page("Sign-in is closed", _WINDOW_CLOSED_PAGE)
             self._codes[code] = {"client_id": q["client_id"], "redirect_uri": q["redirect_uri"],
                                  "challenge": q["code_challenge"], "token": token,
                                  "resource": q.get("resource"),

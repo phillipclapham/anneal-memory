@@ -122,19 +122,129 @@ def test_discovery_to_bearer_ends_with_a_token_the_file_already_holds(oauth_serv
     assert st == 200 and "recall" in body
     # The same code is single use.
     assert _exchange(req, reg, back["code"], verifier)[0] == 400
-    # The completed sign-in pinned its redirect: another app on the same Google
-    # host (someone else's custom app) is refused from now on, the pinned one is not.
-    pin = _tokens.with_name(_tokens.name + ".oauth-redirect")
+    # The completed sign-in pinned its redirect for this connector: another app on
+    # the same Google host (someone else's custom app) is refused that token from
+    # now on, the pinned one is not.
+    pin = _tokens.with_name(_tokens.name + ".oauth-redirect.gemini")
     assert pin.read_text().strip() == REDIRECT
+    assert not _tokens.with_name(_tokens.name + ".oauth-redirect").exists()
     if os.name == "posix":  # Windows st_mode does not carry POSIX permissions
         assert pin.stat().st_mode & 0o777 == 0o600
     other = "https://oauth-redirect.googleusercontent.com/r/user_bound_custom-mcp-attacker"
-    st, _h, _ = req("POST", "/register", json.dumps({"redirect_uris": [other]}).encode())
+    st, page = _sign_in(req, {**q, "redirect_uri": other}, gem)
+    assert st == 400 and "already connected" in page
+    assert _code_from(_sign_in(req, q, gem)[1])["code"]
+
+
+def _sign_in_code(req, q: dict, token: str, redirect: str) -> str:
+    st, page = _sign_in(req, {**q, "redirect_uri": redirect}, token)
+    assert st == 200, page
+    target = re.search(r'content="0;url=([^"]+)"', page).group(1).replace("&amp;", "&")  # type: ignore[union-attr]
+    assert target.startswith(redirect + "?")
+    return urllib.parse.parse_qs(urllib.parse.urlsplit(target).query)["code"][0]
+
+
+def _public_exchange(req, client_id: str, code: str, verifier: str, redirect: str, **extra):
+    form = {"grant_type": "authorization_code", "code": code, "redirect_uri": redirect,
+            "code_verifier": verifier, "client_id": client_id, **extra}
+    return req("POST", "/token", urllib.parse.urlencode(form).encode(),
+               {"Content-Type": "application/x-www-form-urlencoded"})
+
+
+CLAUDE = "https://claude.ai/api/mcp/auth_callback"
+CHATGPT = "https://chatgpt.com/connector_platform_oauth_redirect"
+CHATGPT_CB = "https://chatgpt.com/connector/oauth/cb_abc123"
+
+
+def test_claude_and_chatgpt_connectors_each_sign_in_and_pin_their_own_redirect(oauth_server):
+    """The two documented callbacks register as public clients, sign in with their own
+    connector token, get that token back, list tools; each token stays with its app."""
+    req, _gem, tokens = oauth_server
+    claude_tok = remote.token_add(tokens, "claude-ai")
+    gpt_tok = remote.token_add(tokens, "chatgpt")
+    list_tools = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}).encode()
+    for token, name, redirect, resource in (
+            (claude_tok, "claude-ai", CLAUDE, ISS + "/mcp"),
+            (gpt_tok, "chatgpt", CHATGPT_CB, ISS)):  # ChatGPT may name the bare origin
+        st, _h, body = req("POST", "/register", json.dumps({
+            "redirect_uris": [redirect], "token_endpoint_auth_method": "none"}).encode())
+        assert st == 201, body
+        reg = json.loads(body)
+        assert "client_secret" not in reg and reg["redirect_uris"] == [redirect]
+        verifier, challenge = _pkce()
+        q = {"response_type": "code", "client_id": reg["client_id"], "redirect_uri": redirect,
+             "code_challenge": challenge, "code_challenge_method": "S256", "state": "s",
+             "resource": resource, "scope": "openid"}
+        assert req("GET", "/authorize?" + urllib.parse.urlencode(q))[0] == 200
+        code = _sign_in_code(req, q, token, redirect)
+        st, _h, body = _public_exchange(req, reg["client_id"], code, verifier, redirect,
+                                        resource=resource)
+        assert st == 200 and json.loads(body)["access_token"] == token
+        st, _h, body = req("POST", "/mcp", list_tools, {"Authorization": f"Bearer {token}"})
+        assert st == 200 and "recall" in body
+        assert tokens.with_name(f"{tokens.name}.oauth-redirect.{name}").read_text().strip() == redirect
+    # Each token is now bound to its own app: the claude-ai token is refused to ChatGPT
+    # and the chatgpt token to claude.ai, at the sign-in submit.
+    verifier, challenge = _pkce()
+    q = {"response_type": "code", "client_id": "cid", "code_challenge": challenge,
+         "code_challenge_method": "S256", "state": "s"}
+    for token, wrong in ((claude_tok, CHATGPT_CB), (gpt_tok, CLAUDE), (gpt_tok, CHATGPT)):
+        st, page = _sign_in(req, {**q, "redirect_uri": wrong}, token)
+        assert st == 400 and token not in page, wrong
+
+
+def test_a_code_for_a_second_app_is_refused_once_its_connector_pins(oauth_server):
+    """Two sign-ins with one token before anything is pinned (two apps): the first
+    exchange pins that connector, the second app's live code is refused; another
+    connector is untouched."""
+    req, gem, tokens = oauth_server
+    claude_tok = remote.token_add(tokens, "claude-ai")
+    verifier, challenge = _pkce()
+    q = {"response_type": "code", "client_id": "cid", "code_challenge": challenge,
+         "code_challenge_method": "S256", "state": "s"}
+    code_a = _sign_in_code(req, q, claude_tok, CLAUDE)
+    code_b = _sign_in_code(req, q, claude_tok, CHATGPT)
+    assert _public_exchange(req, "cid", code_a, verifier, CLAUDE)[0] == 200
+    st, _h, body = _public_exchange(req, "cid", code_b, verifier, CHATGPT)
+    assert st == 400 and claude_tok not in body
+    assert not tokens.with_name(tokens.name + ".oauth-redirect.gemini").exists()
+    code = _sign_in_code(req, q, gem, REDIRECT)
+    assert _public_exchange(req, "cid", code, verifier, REDIRECT)[0] == 200
+
+
+def test_a_server_wide_pin_still_binds_every_connector(oauth_server):
+    """A pin file written before per-connector pins (the Gemini unit's) keeps its
+    meaning: registration must include it and no connector signs in elsewhere."""
+    req, gem, tokens = oauth_server
+    claude_tok = remote.token_add(tokens, "claude-ai")
+    legacy = tokens.with_name(tokens.name + ".oauth-redirect")
+    legacy.write_text(REDIRECT + "\n")
+    st, _h, _ = req("POST", "/register", json.dumps({"redirect_uris": [CLAUDE]}).encode())
     assert st == 400
-    assert req("GET", "/authorize?" + urllib.parse.urlencode({**q, "redirect_uri": other}))[0] == 400
-    assert _sign_in(req, {**q, "redirect_uri": other}, gem)[0] == 400
     assert _register(req)["redirect_uris"] == [REDIRECT]
-    assert req("GET", "/authorize?" + urllib.parse.urlencode(q))[0] == 200
+    verifier, challenge = _pkce()
+    q = {"response_type": "code", "client_id": "cid", "code_challenge": challenge,
+         "code_challenge_method": "S256", "state": "s"}
+    assert req("GET", "/authorize?" + urllib.parse.urlencode({**q, "redirect_uri": CLAUDE}))[0] == 400
+    assert _sign_in(req, {**q, "redirect_uri": CLAUDE}, claude_tok)[0] == 400
+    page = req("GET", "/authorize?" + urllib.parse.urlencode({**q, "redirect_uri": REDIRECT}))[2]
+    assert "becomes the only" not in page
+    code = _sign_in_code(req, q, gem, REDIRECT)
+    assert _public_exchange(req, "cid", code, verifier, REDIRECT)[0] == 200
+    assert not tokens.with_name(tokens.name + ".oauth-redirect.gemini").exists()
+    # An unreadable server-wide pin refuses everything, as before.
+    legacy.write_bytes(b"\xff\n")
+    assert _sign_in(req, {**q, "redirect_uri": REDIRECT}, gem)[0] == 400
+
+
+def test_a_connector_name_that_cannot_be_a_file_suffix_never_pins(tmp_path: Path):
+    oauth = remote_oauth.OAuth(ISS, tmp_path / "tokens.oauth-redirect")
+    assert oauth.pinned("../x") == remote_oauth._INVALID_PIN
+    with oauth._lock:
+        assert oauth._ensure_pinned(CLAUDE, "../x") is False
+    assert sorted(p.name for p in tmp_path.iterdir()) == []
+    # The suffix rule is the rule token names are created under.
+    assert remote_oauth._CONNECTOR_RE.pattern == remote._TOKEN_NAME_RE.pattern.strip("^$")
 
 
 def test_gemini_registration_with_hosts_outside_the_set_keeps_the_allowed_ones(oauth_server):

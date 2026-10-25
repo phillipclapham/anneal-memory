@@ -1,7 +1,8 @@
 """A one-user OAuth 2.1 front for :mod:`anneal_memory.remote` (experimental; not
 part of the frozen public surface in docs/stability.md).
 
-Some MCP clients (the Gemini app's custom apps) refuse a server without OAuth.
+Some MCP clients (the Gemini app's custom apps) refuse a server without OAuth, and
+others (claude.ai and ChatGPT connectors) otherwise need the token in the URL.
 This adds exactly what such a client needs to end up holding one of the bearer
 tokens the server already accepts, and nothing that could mint any other:
 
@@ -26,13 +27,19 @@ no expiry beyond the token's own revocation (``token-revoke``).
 
 Redirect URIs must be https on a host in :data:`REDIRECT_HOSTS`; a registration
 keeps the URIs that pass and drops the rest, and is refused only when none pass
-(the Gemini app also registers hosts outside the set). Every Gemini app
-has its redirects on these same Google hosts, so anyone's own app could be pointed here and
+(the Gemini app also registers hosts outside the set). Every app of one vendor
+has its redirects on the same hosts, so anyone's own app could be pointed here and
 its sign-in link sent to the operator. So the first sign-in that completes an
-exchange pins its exact redirect URI to a file (created exclusively, mode 0600),
-and from then on a registration must include that URI and sign-in accepts only it; the
-sign-in page shows the full URI and, while nothing is pinned, says that the app
-allowed now becomes the only one. Deleting the pin file re-opens the first use.
+exchange for a connector token pins its exact redirect URI to that connector's
+pin file (``<pin_path>.<connector name>``, created exclusively, mode 0600), and
+from then on sign-in with that token accepts only that URI: each connector token
+reaches one app, and the claude-ai token never reaches ChatGPT. The sign-in page
+shows the full URI. Deleting a pin file re-opens the first use for its connector.
+A pin file at ``pin_path`` itself (the one pin servers wrote before 2026-10-25) still
+binds every connector, and registration must then include its URI.
+For claude.ai every user's app shares one callback URI, so a pin there separates
+vendors, not accounts: the operator typing the token on a page reached from their
+own connector is what separates accounts.
 Codes live in memory; a restart between sign-in and exchange fails that sign-in only.
 """
 
@@ -80,12 +87,23 @@ MAX_REGISTER_BYTES = 16 * 1024
 # (github.com/doobidoo/mcp-memory-service/issues/1553; discuss.ai.google.dev
 # t/186405). The app also registers oauth-redirect-test URIs in the same request
 # (github.com/BerriAI/litellm/issues/46640, 2026-10-15); those are dropped at
-# registration, never added here. Sign-in refuses any redirect outside this set.
+# registration, never added here. claude.ai, read 2026-10-25 from
+# claude.com/docs/connectors/building/authentication.md ("register exactly this
+# redirect URI: https://claude.ai/api/mcp/auth_callback"; Claude Code's http loopback
+# redirect is not served here). ChatGPT, read 2026-10-25 from
+# developers.openai.com/apps-sdk/build/auth (https://chatgpt.com/connector_platform_oauth_redirect,
+# or https://chatgpt.com/connector/oauth/{callback_id} when the server does not do
+# RFC 9207 issuer identification, which this one does not). Sign-in refuses any
+# redirect outside this set.
 REDIRECT_HOSTS = frozenset({"oauth-redirect.googleusercontent.com",
-                            "oauth-redirect-sandbox.googleusercontent.com"})
+                            "oauth-redirect-sandbox.googleusercontent.com",
+                            "claude.ai", "chatgpt.com"})
 _VERIFIER_RE = re.compile(r"^[A-Za-z0-9._~-]{43,128}$")
 _CHALLENGE_RE = re.compile(r"^[A-Za-z0-9_-]{43}$")  # base64url(sha256), unpadded
 _CLIENT_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
+# A connector name as a pin file suffix, so never a "/"; a test holds it equal to
+# the rule token names are created under.
+_CONNECTOR_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}")
 AUTH_METHODS = ("client_secret_basic", "client_secret_post", "none")
 # What a ``check_token`` callback returns when the token file cannot be read,
 # so a broken server is never reported to the operator as a wrong token.
@@ -214,31 +232,49 @@ class OAuth:
 
     # -- the redirect pin --
 
-    def pinned(self) -> str | None:
-        """The redirect URI the first completed sign-in pinned, or None before one."""
-        if self._pin_path is None:
-            return None
+    @staticmethod
+    def _read_pin(path: Path) -> str | None:
         try:
-            text = self._pin_path.read_text(encoding="ascii").strip()
+            text = path.read_text(encoding="ascii").strip()
         except FileNotFoundError:
             return None
         except (OSError, ValueError):  # unreadable or not ASCII: refuse every redirect
             return _INVALID_PIN
         return text if redirect_ok(text) else _INVALID_PIN
 
-    def _redirect_allowed(self, uri: Any) -> bool:
-        pin = self.pinned()
+    def _connector_pin_path(self, connector: str) -> Path | None:
+        """Where ``connector``'s pin lives, or None when its name cannot be a file
+        name suffix (then nothing can pin, and :meth:`pinned` refuses every redirect)."""
+        assert self._pin_path is not None
+        if not isinstance(connector, str) or not _CONNECTOR_RE.fullmatch(connector):
+            return None
+        return self._pin_path.with_name(f"{self._pin_path.name}.{connector}")
+
+    def pinned(self, connector: str | None = None) -> str | None:
+        """The redirect URI a completed sign-in pinned, or None before one: the
+        server-wide pin when that file exists, else ``connector``'s own (None when
+        no connector is named)."""
+        if self._pin_path is None:
+            return None
+        legacy = self._read_pin(self._pin_path)
+        if legacy is not None or connector is None:
+            return legacy
+        path = self._connector_pin_path(connector)
+        return _INVALID_PIN if path is None else self._read_pin(path)
+
+    def _redirect_allowed(self, uri: Any, connector: str | None = None) -> bool:
+        pin = self.pinned(connector)
         return redirect_ok(uri) and (pin is None or uri == pin)
 
-    def _ensure_pinned(self, uri: str) -> bool:
-        """True when ``uri`` is the pinned redirect, pinning it if nothing is yet.
-        The pin is written whole to a temporary file and linked into place, so it
-        appears complete or not at all and the first link wins across processes;
-        the directory is synced before a token is released. Raises OSError when it
-        cannot be written. Call under ``self._lock``."""
+    def _ensure_pinned(self, uri: str, connector: str) -> bool:
+        """True when ``uri`` is ``connector``'s pinned redirect, pinning it if nothing
+        is yet. The pin is written whole to a temporary file and linked into place,
+        so it appears complete or not at all and the first link wins across
+        processes; the directory is synced before a token is released. Raises
+        OSError when it cannot be written. Call under ``self._lock``."""
         if self._pin_path is None:
             return True
-        current = self.pinned()
+        current = self.pinned(connector)
         if current is not None:
             if current != uri:
                 return False
@@ -246,7 +282,10 @@ class OAuth:
             # attempt whose directory sync failed is visible but maybe not durable.
             _fsync_dir_strict(self._pin_path.parent)
             return True
-        tmp = self._pin_path.with_name(f"{self._pin_path.name}.{secrets.token_hex(8)}.tmp")
+        path = self._connector_pin_path(connector)
+        if path is None:
+            return False
+        tmp = path.with_name(f"{path.name}.{secrets.token_hex(8)}.tmp")
         fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         try:
             with os.fdopen(fd, "w", encoding="ascii") as f:
@@ -254,14 +293,14 @@ class OAuth:
                 f.flush()
                 os.fsync(f.fileno())
             try:
-                os.link(tmp, self._pin_path)
+                os.link(tmp, path)
             except FileExistsError:
                 pass  # another process pinned first; compare below
         finally:
             with contextlib.suppress(OSError):
                 os.unlink(tmp)
         _fsync_dir_strict(self._pin_path.parent)
-        return self.pinned() == uri
+        return self.pinned(connector) == uri
 
     # -- discovery --
 
@@ -369,7 +408,9 @@ class OAuth:
         return None
 
     def _resource_ok(self, value: str) -> bool:
-        return value in (self.resource, self.resource + "/")
+        # The bare origin names this same server; OpenAI's auth guide shows ChatGPT
+        # sending resource=https://your-mcp.example.com (read 2026-10-25).
+        return value in (self.resource, self.resource + "/", self.issuer, self.issuer + "/")
 
     @staticmethod
     def _fields(raw: dict[str, list[str]]) -> dict[str, str] | None:
@@ -399,8 +440,8 @@ class OAuth:
         err = f'<p class="err">{html.escape(error)}</p>' if error else ""
         where = html.escape(q["redirect_uri"], quote=True)
         first = ("" if self.pinned() is not None else
-                 "<p><b>No app is connected yet: the one you allow now becomes the only "
-                 "one this server accepts.</b> Only continue if you started this from "
+                 "<p><b>The first app a connector token is allowed for becomes the only "
+                 "app that token can connect.</b> Only continue if you started this from "
                  "your own app.</p>")
         return _page("Connect to anneal memory", (
             f"<p>An app is asking for read access to this memory. It returns to "
@@ -429,6 +470,11 @@ class OAuth:
             return 503, _page("Unavailable", "<p>The server cannot read its token file.</p>")
         if checked is None:  # tokens are 32 random bytes: no delay buys anything
             return 401, self._form(q, "That token is not valid here.")
+        if not self._redirect_allowed(q["redirect_uri"], checked):
+            _log_authorize_refusal("submit", f"redirect is not the one pinned for {checked}", q)
+            return 400, _page("Sign-in refused", (
+                f"<p>The {html.escape(checked)} connector token is already connected to "
+                "another app. Delete its pin file on the server to connect a new one.</p>"))
         code = secrets.token_urlsafe(32)
         now = time.monotonic()
         with self._lock:
@@ -514,18 +560,20 @@ class OAuth:
         if still is None:  # revoked since the sign-in
             logger.info("oauth token refused: the token was revoked after sign-in")
             return 400, {"error": "invalid_grant"}
-        # The pin binds codes issued before it existed too: a second app's code,
-        # signed in while nothing was pinned, is refused once the first one pinned.
+        # The pin binds codes issued before it existed too: a second app's code for
+        # the same connector, signed in while nothing was pinned, is refused once the
+        # first one pinned.
         try:
             with self._lock:
-                pinned_here = self._ensure_pinned(entry["redirect_uri"])
+                pinned_here = self._ensure_pinned(entry["redirect_uri"], still)
         except OSError:
             return 503, {"error": "server_error"}
         if not pinned_here:
-            logger.info("oauth token refused: redirect %s is not the pinned one",
-                        _uri_for_log(entry["redirect_uri"]))
+            logger.info("oauth token refused: redirect %s is not the one pinned for %s",
+                        _uri_for_log(entry["redirect_uri"]), still)
             return 400, {"error": "invalid_grant"}
         logger.info("oauth token issued (%s)", sent)
+        logger.info("oauth sign-in completed for %s (connector %s)", entry["redirect_uri"], still)
         return 200, {"access_token": entry["token"], "token_type": "Bearer"}
 
 

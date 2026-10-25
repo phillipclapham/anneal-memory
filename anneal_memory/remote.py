@@ -1059,8 +1059,6 @@ class _Handler(BaseHTTPRequestHandler):
             extra = {"Pragma": "no-cache"}
             if status == 401:  # RFC 6749 §5.2
                 extra["WWW-Authenticate"] = 'Basic realm="anneal-memory"'
-            if status == 200:
-                logger.info("oauth sign-in completed for %s", oauth.pinned() or "?")
             self._send(status, json.dumps(obj).encode("utf-8"), "application/json", extra)
         return True
 

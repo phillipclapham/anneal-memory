@@ -355,9 +355,11 @@ def test_a_json_body_to_token_is_counted_not_echoed(oauth_server, caplog):
 
 
 def _raw(port: int, head: str, body: bytes = b"") -> int:
+    import contextlib
     import socket
     with socket.create_connection(("127.0.0.1", port), timeout=20) as s:
-        s.sendall(head.encode() + b"\r\n" + body)
+        with contextlib.suppress(ConnectionError):  # a refusal may come before the body is read
+            s.sendall(head.encode() + b"\r\n" + body)
         data = b""
         while b"\r\n" not in data:
             got = s.recv(4096)
@@ -394,6 +396,48 @@ def test_a_chunked_tool_call_is_answered(tmp_path: Path):
         assert _raw(port, head + "Transfer-Encoding: chunked\r\n", b"zz\r\n") == 400
         assert _raw(port, head + "Transfer-Encoding: chunked\r\n", b"+5\r\nhello\r\n0\r\n\r\n") == 400
         assert _raw(port, head) == 400  # no length at all: an empty body, not JSON
+        sixteen = b"".join(b"X-T%d: v\r\n" % i for i in range(16))
+        assert _raw(port, head + "Transfer-Encoding: chunked\r\n",
+                    chunked.replace(b"X-Trailer: y\r\n", sixteen)) == 200
+        seventeen = sixteen + b"X-T16: v\r\n"
+        assert _raw(port, head + "Transfer-Encoding: chunked\r\n",
+                    chunked.replace(b"X-Trailer: y\r\n", seventeen)) == 400
+        tiny = b"".join(b"1\r\n" + bytes([c]) + b"\r\n" for c in msg) + b"0\r\n\r\n"
+        assert _raw(port, head + "Transfer-Encoding: chunked\r\n", tiny) == 200
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+
+
+def test_a_trickled_chunked_body_meets_one_deadline(tmp_path: Path, monkeypatch):
+    """One byte at a time must not hold the thread past the whole-body deadline
+    (L3 1024+22: a per-line socket timeout let a trickle last for hours; the
+    OAuth routes read their bodies before any auth)."""
+    import socket
+    import time as _time
+    monkeypatch.setattr(remote, "REQUEST_TIMEOUT_S", 1)
+    tokens = tmp_path / "tokens"
+    remote.token_add(tokens, "gemini")
+    db = tmp_path / "memory.db"
+    Store(db).close()
+    httpd = remote.make_server(db, tokens, port=0, oauth_issuer=ISS)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    try:
+        with socket.create_connection(("127.0.0.1", httpd.server_address[1]), timeout=10) as s:
+            s.sendall(b"POST /register HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n")
+            start = _time.monotonic()
+            answer = b""
+            s.settimeout(0.25)
+            while _time.monotonic() - start < 6 and not answer:
+                try:
+                    s.sendall(b"0")  # a size line that never ends
+                    answer = s.recv(64)
+                except socket.timeout:
+                    continue
+                except ConnectionError:
+                    break
+            elapsed = _time.monotonic() - start
+        assert answer.startswith(b"HTTP/1.1 408") and elapsed < 3, (answer, elapsed)
     finally:
         httpd.shutdown()
         httpd.server_close()

@@ -873,21 +873,38 @@ class _Handler(BaseHTTPRequestHandler):
 
     def _read_chunked(self, limit: int) -> bytes | None:
         """A chunked body of at most ``limit`` bytes within one deadline for the
-        whole body, or None after a refusal. Chunk extensions and trailers are
-        read and dropped; every response closes the connection anyway."""
+        whole body, or None after a refusal. Every receive re-arms the socket
+        timeout to what is left of that deadline, so neither a slow line nor a
+        slow chunk outlives it (L3 1024+22: a per-line timeout let a 1-byte
+        trickle hold a thread for hours, before any auth on the OAuth routes).
+        Chunk extensions and trailers are read and dropped; bytes after the
+        body are never read as another request, since every response closes."""
         deadline = time.monotonic() + REQUEST_TIMEOUT_S
-        chunks: list[bytes] = []
-        got = 0
+        buf = bytearray()
+        body = bytearray()
 
-        def line() -> bytes:
+        def fill() -> None:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 raise TimeoutError
             self.connection.settimeout(remaining)
-            raw = self.rfile.readline(MAX_CHUNK_LINE + 1)
-            if len(raw) > MAX_CHUNK_LINE or not raw.endswith(b"\n"):
-                raise ValueError("chunk line too long or cut")
-            return raw
+            got = self.rfile.read1(65536)
+            if not got:
+                raise ValueError("body cut short")
+            buf.extend(got)
+
+        def line() -> bytes:
+            while True:
+                end = buf.find(b"\n")
+                if end >= 0:
+                    if end >= MAX_CHUNK_LINE:
+                        raise ValueError("chunk line too long")
+                    out = bytes(buf[:end + 1])
+                    del buf[:end + 1]
+                    return out
+                if len(buf) >= MAX_CHUNK_LINE:
+                    raise ValueError("chunk line too long")
+                fill()
 
         try:
             while True:
@@ -898,27 +915,23 @@ class _Handler(BaseHTTPRequestHandler):
                 size = int(size_field, 16)
                 if size == 0:
                     break
-                if got + size > limit:
+                if len(body) + size > limit:
                     self._send(413)
                     return None
                 while size:
-                    remaining = deadline - time.monotonic()
-                    if remaining <= 0:
-                        raise TimeoutError
-                    self.connection.settimeout(remaining)
-                    chunk = self.rfile.read1(min(65536, size))
-                    if not chunk:
-                        raise ValueError("body cut inside a chunk")
-                    chunks.append(chunk)
-                    got += len(chunk)
-                    size -= len(chunk)
+                    if not buf:
+                        fill()
+                    take = min(size, len(buf))
+                    body += buf[:take]
+                    del buf[:take]
+                    size -= take
                 if line() not in (b"\r\n", b"\n"):
                     raise ValueError("no line end after a chunk")
-            for _ in range(MAX_TRAILER_LINES):
-                if line() in (b"\r\n", b"\n"):
-                    break
-            else:
-                raise ValueError("too many trailer lines")
+            fields = 0
+            while line() not in (b"\r\n", b"\n"):
+                fields += 1
+                if fields > MAX_TRAILER_LINES:
+                    raise ValueError("too many trailer lines")
         except ValueError as e:
             logger.info("chunked body refused: %s", e)
             self._send_json(400, _rpc_error(None, -32700, "Malformed chunked body"))
@@ -931,7 +944,7 @@ class _Handler(BaseHTTPRequestHandler):
             self.close_connection = True
             return None
         self.connection.settimeout(REQUEST_TIMEOUT_S)
-        return b"".join(chunks)
+        return bytes(body)
 
     def _oauth_route(self) -> bool:
         """Answer an OAuth endpoint (only with ``--oauth-issuer``); False when the

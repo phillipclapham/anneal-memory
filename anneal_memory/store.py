@@ -2300,20 +2300,24 @@ def _keyword_like_pattern(keyword: str) -> str:
 # BM25-shaped score computed in SQL, so ranking reorders the match set and never changes
 # it (FTS5 was not used for that reason: its tokenized MATCH selects a different set than
 # a substring LIKE, and it needs an index the store would have to migrate). The score is
-# term-frequency saturation (k1) with partial length normalisation (b) against the
-# store's mean episode length, plus a flat boost when the keyword appears in the
+# term-frequency saturation (k1) with partial length normalisation (b) against a fixed
+# reference length, plus a flat boost when the keyword appears in the
 # episode's opening, where episodes name their subject. Newest first breaks ties.
 # b sits below BM25's usual 0.75 because a long episode ABOUT the subject (a call
 # outcome) must not lose to a short one that mentions it (2026-10-25, a judged set of
 # real queries on a long-running store: at 0.75 such an episode fell out of the top 8).
+# The reference length is a constant, not the store's mean, so an episode's score
+# depends on that episode alone and a write that does not match cannot reorder the
+# matches between two pages (BM25's own reference is the collection mean).
 RECALL_ORDERS = ("newest", "relevance")
 _RANK_K1 = 1.2
 _RANK_B = 0.3
+_RANK_REF_LEN = 1000
 _RANK_LEAD_CHARS = 200
 _RANK_LEAD_BOOST = 1.5
 
 
-def _keyword_rank_sql(keyword: str, mean_len: float) -> tuple[str, list[Any]]:
+def _keyword_rank_sql(keyword: str) -> tuple[str, list[Any]]:
     """The relevance score of :meth:`Store.recall` as an SQL expression over
     ``content``, with its parameters, for a keyword already matched by
     :data:`_KEYWORD_LIKE_SQL` (so it occurs at least once). The keyword is compared
@@ -2321,11 +2325,11 @@ def _keyword_rank_sql(keyword: str, mean_len: float) -> tuple[str, list[Any]]:
     ``INSTR`` take it literally."""
     kw = keyword.lower()
     tf = "((LENGTH(LOWER(content)) - LENGTH(REPLACE(LOWER(content), ?, ''))) * 1.0 / ?)"
-    norm = f"({_RANK_K1} * (1 - {_RANK_B} + {_RANK_B} * LENGTH(content) / ?))"
+    norm = f"({_RANK_K1} * (1 - {_RANK_B} + {_RANK_B} * LENGTH(content) / {_RANK_REF_LEN}.0))"
     sql = (f"({tf} * {_RANK_K1 + 1} / ({tf} + {norm})"
            f" + CASE WHEN INSTR(LOWER(content), ?) BETWEEN 1 AND {_RANK_LEAD_CHARS}"
            f" THEN {_RANK_LEAD_BOOST} ELSE 0 END)")
-    return sql, [kw, len(kw), kw, len(kw), max(mean_len, 1.0), kw]
+    return sql, [kw, len(kw), kw, len(kw), kw]
 
 
 def _team_entry_id_of(metadata: Any) -> str | None:
@@ -6383,7 +6387,9 @@ class Store:
                 keyword (how often it occurs, relative to the episode's length, and
                 whether it is in the opening), newest first among equals. Ranking
                 only reorders: ``total_matching`` and the set paged through with
-                ``offset`` are the same under both. Without a keyword there is
+                ``offset`` are the same under both, and a score depends only on its
+                own episode, so a write that does not match moves no match (a new
+                match shifts later pages under either order). Without a keyword there is
                 nothing to rank by, and the order is newest first.
 
         Returns:
@@ -6413,9 +6419,7 @@ class Store:
 
             ranked = order == "relevance" and bool(keyword)
             if ranked and total:
-                mean_len = self._conn.execute(
-                    "SELECT AVG(LENGTH(content)) FROM episodes").fetchone()[0] or 1.0
-                rank_sql, rank_params = _keyword_rank_sql(keyword, mean_len)
+                rank_sql, rank_params = _keyword_rank_sql(keyword)
                 # id last: equal score and timestamp still page in one fixed order.
                 rows = self._conn.execute(
                     f"""SELECT * FROM episodes WHERE {where}

@@ -5,14 +5,17 @@ was done for a client and got 64 matches newest first, the episodes about the cl
 buried under newer desk records that mention it once, and it invented the rest.
 """
 
+import json
 import re
 
 import pytest
 
+from anneal_memory import server as server_mod
+from anneal_memory.integrity import TOOLS
 from anneal_memory.server import Server
 from anneal_memory.store import Store
 
-FILLER = "Desk record for the day: seats rotated, reviews ran, releases waited. " * 12
+FILLER = "Desk record for the day: seats rotated, reviews ran, releases waited. " * 5
 
 
 @pytest.fixture
@@ -68,10 +71,30 @@ def test_a_ranked_page_is_bounded_and_states_the_total_and_next_offset(store):
     assert "Most relevant" not in plain
     bad = Server(store)._tool_recall({"keyword": "Acmeco", "order": "best"})
     assert bad.get("isError")
+    # Long matches: the default page stops at the character budget, whole episodes,
+    # and says where the next page starts; an explicit limit is honoured as given.
+    for i in range(10):
+        store.record(f"Acmeco notes {i}. " + "x" * 9_000, "observation",
+                     timestamp=f"2026-11-{i + 1:02d}T12:00:00Z")
+    text = Server(store)._tool_recall({"keyword": "Acmeco"})["content"][0]["text"]
+    shown = len(_ids(text))
+    assert 1 <= shown < 20 and f"pass offset={shown}" in text
+    assert len(text) < server_mod._RECALL_RANKED_PAGE_CHARS + 2_000
+    explicit = Server(store)._tool_recall({"keyword": "Acmeco", "limit": 15})
+    assert len(_ids(explicit["content"][0]["text"])) == 15
+    recall_tool = next(t for t in TOOLS if t["name"] == "recall")
+    assert f"{server_mod._RECALL_RANKED_PAGE_CHARS:,} characters" in json.dumps(recall_tool)
 
 
 def test_ranking_only_reorders_every_match_is_reachable_by_paging(store):
     about, passing = _seed(store)
+    # Twins: equal score and equal timestamp, so only the id orders them across pages.
+    twins = [store.record(f"Acmeco twin note, variant {c}.", "observation",
+                          timestamp="2026-08-01T12:00:00Z") for c in "abcdefghi"]
+    passing += twins
+    # An empty keyword is no keyword: newest first, the plain default page.
+    plain = Server(store)._tool_recall({"keyword": ""})["content"][0]["text"]
+    assert "Most relevant" not in plain and len(_ids(plain)) == 45
     srv = Server(store)
     seen, offset = [], 0
     while True:
@@ -82,7 +105,7 @@ def test_ranking_only_reorders_every_match_is_reachable_by_paging(store):
             break
         seen += page
         offset += len(page)
-    assert len(seen) == len(set(seen)) == 31
+    assert len(seen) == len(set(seen)) == 40
     assert set(seen) == {about.id, *(p.id for p in passing)}
     newest = store.recall(keyword="Acmeco", limit=1000)
     assert {e.id for e in newest.episodes} == set(seen)

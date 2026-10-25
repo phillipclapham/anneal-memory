@@ -6718,7 +6718,7 @@
      "name": "record"
     },
     {
-     "description": "Query episodes from memory with filters. Call this to find prior context before making decisions, to locate specific episodes for citation during graduation, or to review recent work. With a keyword, returns the episodes most relevant to it first, a page of 20 by default, with the total number of matches and the offset of the next page; without one, the newest first. Supports time range, type, source, and keyword filters. The keyword is matched as an exact phrase first; if no episode contains the whole phrase and it has two or more distinctive words, the call falls back to ranking episodes by how many of those words they contain (the reply says so and names the words each episode matched), so a multi-word query does not need to appear verbatim. A phrase of three or more distinctive words with only one or two exact hits is followed by a few word matches, listed under 'Also matching by words'. A durable fact whose cue words appear in the keyword (or two distinctive words of its text) is listed first, under 'Durable facts matching your words'. limit=0 returns nothing at all, facts included.",
+     "description": "Query episodes from memory with filters. Call this to find prior context before making decisions, to locate specific episodes for citation during graduation, or to review recent work. With a keyword, returns the episodes most relevant to it first, a page of up to 20 (fewer when they are long) by default, with the total number of matches and the offset of the next page; without one, the newest first. For the latest on a subject, pass order=\"newest\" with the keyword. Supports time range, type, source, and keyword filters. The keyword is matched as an exact phrase first; if no episode contains the whole phrase and it has two or more distinctive words, the call falls back to ranking episodes by how many of those words they contain (the reply says so and names the words each episode matched), so a multi-word query does not need to appear verbatim. A phrase of three or more distinctive words with only one or two exact hits is followed by a few word matches, listed under 'Also matching by words'. A durable fact whose cue words appear in the keyword (or two distinctive words of its text) is listed first, under 'Durable facts matching your words'. limit=0 returns nothing at all, facts included.",
      "inputSchema": {
       "properties": {
        "episode_type": {
@@ -6743,7 +6743,7 @@
         "type": "string"
        },
        "limit": {
-        "description": "Maximum episodes to return. Default 20 for a keyword recall ranked by relevance and 100 otherwise. When a multi-word keyword has no exact match and is ranked word by word, the default is 10 instead; pass a limit to see more.",
+        "description": "Maximum episodes to return. Default for a keyword recall ranked by relevance: up to 20, stopping before about 24,000 characters; 100 otherwise. When a multi-word keyword has no exact match and is ranked word by word, the default is 10 instead; pass a limit to see more.",
         "type": "integer"
        },
        "offset": {
@@ -7934,7 +7934,7 @@
      "type": "string"
     },
     "limit": {
-     "description": "Maximum episodes to return. Default 20 for a keyword recall ranked by relevance and 100 otherwise. When a multi-word keyword has no exact match and is ranked word by word, the default is 10 instead; pass a limit to see more.",
+     "description": "Maximum episodes to return. Default for a keyword recall ranked by relevance: up to 20, stopping before about 24,000 characters; 100 otherwise. When a multi-word keyword has no exact match and is ranked word by word, the default is 10 instead; pass a limit to see more.",
      "type": "integer"
     },
     "offset": {

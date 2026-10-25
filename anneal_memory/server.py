@@ -70,6 +70,7 @@ from .store import (
 )
 from .types import (
     DEFAULT_TRUST,
+    Episode,
     EpisodeType,
     RelevantFact,
     RelevantPattern,
@@ -167,9 +168,13 @@ _EXACT_RESULTS_ENOUGH = 3    # an exact result this small is topped up with word
 _ALSO_MATCHING_MAX = 5       # how many word matches are appended to such a result
 _REPLACED_MAX = 5  # replacements listed by one keyword recall
 _REPLACED_OLDS_MAX = 5  # replaced matches named under each
-_RECALL_DEFAULT_LIMIT = 100  # MCP recall's ``limit`` when the caller passes none
+_RECALL_DEFAULT_LIMIT = 100  # MCP recall's ``limit`` when the caller passes none and
+# the recall is not ranked by relevance
 _RECALL_RANKED_DEFAULT_LIMIT = 20  # the same for a keyword recall ranked by relevance:
 # a page a model reads whole, with the total and the next offset stated under it
+_RECALL_RANKED_PAGE_CHARS = 24_000  # and that default page stops before the episode that
+# would take its content past this many characters (the first episode always shows):
+# ranking favours episodes that repeat a common keyword, which are often long
 
 
 def _recall_order(args: dict[str, Any]) -> str:
@@ -178,14 +183,33 @@ def _recall_order(args: dict[str, Any]) -> str:
     order = args.get("order")
     if isinstance(order, str):
         return order
-    return "relevance" if isinstance(args.get("keyword"), str) else "newest"
+    return "relevance" if _has_keyword(args) else "newest"
+
+
+def _has_keyword(args: dict[str, Any]) -> bool:
+    """Whether a recall searches by keyword: a non-empty string, as the store reads it."""
+    keyword = args.get("keyword")
+    return isinstance(keyword, str) and bool(keyword)
 
 
 def _recall_default_limit(args: dict[str, Any]) -> int:
     """MCP recall's ``limit`` when the caller passes none."""
-    if _recall_order(args) == "relevance" and isinstance(args.get("keyword"), str):
+    if _recall_order(args) == "relevance" and _has_keyword(args):
         return _RECALL_RANKED_DEFAULT_LIMIT
     return _RECALL_DEFAULT_LIMIT
+
+
+def _within_page_budget(episodes: list[Episode]) -> list[Episode]:
+    """The leading episodes whose content fits :data:`_RECALL_RANKED_PAGE_CHARS`,
+    at least one. Whole episodes only: the next page starts where this one stops."""
+    kept: list[Episode] = []
+    used = 0
+    for ep in episodes:
+        used += len(ep.content)
+        if kept and used > _RECALL_RANKED_PAGE_CHARS:
+            break
+        kept.append(ep)
+    return kept
 
 
 def _ranked_page_note(offset: int, shown: int, total: int) -> str:
@@ -651,15 +675,17 @@ class Server:
 
         offset = max(0, args.get("offset", 0))
         ranked = result.query_params.get("order") == "relevance"
+        episodes = result.episodes
+        if ranked and "limit" not in args:
+            episodes = _within_page_budget(episodes)
         lines = [
             f"Found {result.total_matching} episodes"
-            f" (showing {len(result.episodes)}):"
+            f" (showing {len(episodes)}):"
         ]
         if ranked:
-            lines.append(_ranked_page_note(
-                offset, len(result.episodes), result.total_matching))
+            lines.append(_ranked_page_note(offset, len(episodes), result.total_matching))
         rows: list[tuple[str, str]] = []
-        for ep in result.episodes:
+        for ep in episodes:
             source_info = f" [{ep.source}]" if ep.source != "agent" else ""
             replaced = f" (superseded by {ep.superseded_by})" if ep.superseded_by else ""
             why = f" ({_why_matched(ep.content, args['keyword'])})" if ranked else ""
@@ -678,11 +704,11 @@ class Server:
             isinstance(keyword, str)
             and args.get("offset", 0) == 0
             and result.total_matching < _EXACT_RESULTS_ENOUGH
-            and len(result.episodes) == result.total_matching
+            and len(episodes) == result.total_matching
         ):
             words = extract_keywords(keyword, mode="query")
             if len(words) >= 3:
-                shown = {ep.id for ep in result.episodes}
+                shown = {ep.id for ep in episodes}
                 room = min(
                     _ALSO_MATCHING_MAX, args.get("limit", _recall_default_limit(args)) - len(shown)
                 )

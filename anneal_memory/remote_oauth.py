@@ -29,11 +29,11 @@ Redirect URIs must be https on a host in :data:`REDIRECT_HOSTS`; a registration
 keeps the URIs that pass and drops the rest, and is refused only when none pass
 (the Gemini app also registers hosts outside the set). Every app of one vendor
 has its redirects on the same hosts, so anyone's own app could be pointed here and
-its sign-in link sent to the operator. So the first sign-in that completes an
-exchange for a connector token pins its exact redirect URI to that connector's
+its sign-in link sent to the operator. So the first exchanged code
+for a connector token pins its exact redirect URI to that connector's
 pin file (``<pin_path>.<connector name, lowercased>``, created exclusively, mode 0600), and
 from then on sign-in with that token accepts only that URI: after its first
-completed sign-in, each connector token is accepted only for the redirect URI it
+exchanged code, each connector token is accepted only for the redirect URI it
 pinned. Nothing ties a token's
 name to a vendor. The pin follows the name, so a token revoked and re-added under
 the same name keeps its app. The sign-in page shows the full URI. Deleting a pin
@@ -48,7 +48,9 @@ For claude.ai every user's app shares one callback URI, so a pin there separates
 vendors, not accounts: the operator typing the token only into a sign-in they
 started from their own connector is what separates accounts (whether claude.ai
 binds a sign-in's state to the browser session that started it is not documented).
-Codes live in memory; a restart between sign-in and exchange fails that sign-in only.
+Codes live in memory; a restart between sign-in and exchange fails that sign-in only
+and also spends that opening (the window file is already deleted): the operator opens
+the window again.
 
 The sign-in window: a code is issued only while the operator has opened sign-in,
 so a sign-in link sent to them (phishing) fails at any other time. The window file
@@ -349,7 +351,7 @@ class OAuth:
         return self._pin_path.with_name(f"{self._pin_path.name}.{connector.lower()}")
 
     def pinned(self, connector: str | None = None) -> str | None:
-        """The redirect URI a completed sign-in pinned, or None before one: the
+        """The redirect URI the first exchanged code pinned, or None before one: the
         server-wide pin when that file exists, else ``connector``'s own (None when
         no connector is named). An unreadable pin, or a connector name that cannot
         be a file suffix, gives ``_INVALID_PIN``, which matches no redirect."""

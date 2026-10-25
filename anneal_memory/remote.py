@@ -433,6 +433,11 @@ def oauth_window_open(token_file: str | Path, minutes: int = 10) -> int:
         with os.fdopen(fd, "w", encoding="ascii") as f:
             f.write(f"{expiry}\n")
             f.flush()
+            if os.geteuid() == 0:
+                # Run as root, the window would be root's 0600 file and the server
+                # user could not read it: hand it to the token file's owner.
+                st = os.stat(token_file)
+                os.fchown(f.fileno(), st.st_uid, st.st_gid)
             os.fsync(f.fileno())
         os.replace(tmp, path)
     except BaseException:
@@ -1259,9 +1264,10 @@ def main(argv: list[str] | None = None) -> int:
     w = sub.add_parser("oauth-window",
                        help="open OAuth sign-in for a few minutes (one sign-in), or --close it")
     w.add_argument("--token-file", required=True)
-    w.add_argument("--minutes", type=int, default=10,
-                   help=f"how long sign-in stays open, 1 to {MAX_WINDOW_S // 60} (default 10)")
-    w.add_argument("--close", action="store_true", help="close sign-in now")
+    wg = w.add_mutually_exclusive_group()
+    wg.add_argument("--minutes", type=int, default=10,
+                    help=f"how long sign-in stays open, 1 to {MAX_WINDOW_S // 60} (default 10)")
+    wg.add_argument("--close", action="store_true", help="close sign-in now")
     args = parser.parse_args(argv)
 
     try:

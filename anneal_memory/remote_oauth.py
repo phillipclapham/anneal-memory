@@ -32,14 +32,19 @@ has its redirects on the same hosts, so anyone's own app could be pointed here a
 its sign-in link sent to the operator. So the first sign-in that completes an
 exchange for a connector token pins its exact redirect URI to that connector's
 pin file (``<pin_path>.<connector name>``, created exclusively, mode 0600), and
-from then on sign-in with that token accepts only that URI: each connector token
-reaches one app, and the claude-ai token never reaches ChatGPT. The sign-in page
-shows the full URI. Deleting a pin file re-opens the first use for its connector.
+from then on sign-in with that token accepts only that URI: after its first
+completed sign-in, each connector token is accepted only for the redirect URI it
+pinned. Nothing ties a token's
+name to a vendor. The pin follows the name, so a token revoked and re-added under
+the same name keeps its app. The sign-in page shows the full URI. Deleting a pin
+file re-opens the first use for its connector.
 A pin file at ``pin_path`` itself (the one pin servers wrote before 2026-10-25) still
-binds every connector, and registration must then include its URI.
+binds every connector, and registration must then include its URI; renaming it to
+``<pin_path>.<connector name>`` makes it that connector's pin and frees the others.
 For claude.ai every user's app shares one callback URI, so a pin there separates
-vendors, not accounts: the operator typing the token on a page reached from their
-own connector is what separates accounts.
+vendors, not accounts: the operator typing the token only into a sign-in they
+started from their own connector is what separates accounts (whether claude.ai
+binds a sign-in's state to the browser session that started it is not documented).
 Codes live in memory; a restart between sign-in and exchange fails that sign-in only.
 """
 
@@ -98,6 +103,15 @@ MAX_REGISTER_BYTES = 16 * 1024
 REDIRECT_HOSTS = frozenset({"oauth-redirect.googleusercontent.com",
                             "oauth-redirect-sandbox.googleusercontent.com",
                             "claude.ai", "chatgpt.com"})
+# claude.ai and chatgpt.com serve whole apps, not only redirects, so on them only
+# the documented callback paths pass (the Google hosts above are redirect-only).
+# A ChatGPT callback_id may differ when the connector is re-added; the OpenAI
+# guide does not say. Then sign-in is refused until that connector's pin file is
+# deleted.
+REDIRECT_PATHS = {
+    "claude.ai": re.compile(r"/api/mcp/auth_callback"),
+    "chatgpt.com": re.compile(r"/connector_platform_oauth_redirect|/connector/oauth/[A-Za-z0-9_-]{1,128}"),
+}
 _VERIFIER_RE = re.compile(r"^[A-Za-z0-9._~-]{43,128}$")
 _CHALLENGE_RE = re.compile(r"^[A-Za-z0-9_-]{43}$")  # base64url(sha256), unpadded
 _CLIENT_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
@@ -193,6 +207,9 @@ def redirect_ok(uri: Any) -> bool:
         parts = urllib.parse.urlsplit(uri)
         port = parts.port
     except ValueError:
+        return False
+    path_rule = REDIRECT_PATHS.get(parts.hostname or "")
+    if path_rule is not None and (parts.query or not path_rule.fullmatch(parts.path)):
         return False
     return (parts.scheme == "https" and parts.hostname in REDIRECT_HOSTS
             and port in (None, 443) and not parts.username and not parts.password
@@ -354,7 +371,8 @@ class OAuth:
         elif pinned is not None and pinned not in kept:
             refused = ("the pin file is unreadable" if pinned == _INVALID_PIN else
                        f"the pinned redirect {_uri_for_log(pinned)} is not among them; "
-                       "delete the pin file to connect a new app")
+                       "rename the server-wide pin file to <name>.<connector> to pin "
+                       "only that connector")
         else:
             refused = ""
         shown = ", ".join(_uri_for_log(u) for u in dropped[:6]) + \
@@ -396,7 +414,8 @@ class OAuth:
         if not _CLIENT_ID_RE.fullmatch(q.get("client_id", "")):
             return "missing or malformed client_id"
         if not self._redirect_allowed(q.get("redirect_uri")):
-            return "redirect_uri is not allowed (not the app this server was first connected to)"
+            return ("redirect_uri is not allowed (not https on an allowed callback, or not "
+                    "the server-wide pinned one)")
         if q.get("code_challenge_method") != "S256" or \
                 not _CHALLENGE_RE.fullmatch(q.get("code_challenge", "")):
             return "PKCE with S256 is required"
@@ -408,8 +427,9 @@ class OAuth:
         return None
 
     def _resource_ok(self, value: str) -> bool:
-        # The bare origin names this same server; OpenAI's auth guide shows ChatGPT
-        # sending resource=https://your-mcp.example.com (read 2026-10-25).
+        # The bare origin names this same server. OpenAI's auth guide (read
+        # 2026-10-25) gives a bare-origin resource as its example; whether ChatGPT
+        # keeps an entered /mcp path is not stated there, so both are accepted.
         return value in (self.resource, self.resource + "/", self.issuer, self.issuer + "/")
 
     @staticmethod
@@ -440,9 +460,9 @@ class OAuth:
         err = f'<p class="err">{html.escape(error)}</p>' if error else ""
         where = html.escape(q["redirect_uri"], quote=True)
         first = ("" if self.pinned() is not None else
-                 "<p><b>The first app a connector token is allowed for becomes the only "
-                 "app that token can connect.</b> Only continue if you started this from "
-                 "your own app.</p>")
+                 "<p><b>The first app a connector token signs in to becomes the only "
+                 "app that token can connect.</b> Apps of one vendor can share a return "
+                 "address, so only continue if you started this from your own app.</p>")
         return _page("Connect to anneal memory", (
             f"<p>An app is asking for read access to this memory. It returns to "
             f"<code>{where}</code>.</p>{first}{err}"
@@ -471,6 +491,11 @@ class OAuth:
         if checked is None:  # tokens are 32 random bytes: no delay buys anything
             return 401, self._form(q, "That token is not valid here.")
         if not self._redirect_allowed(q["redirect_uri"], checked):
+            if self.pinned(checked) == _INVALID_PIN:
+                _log_authorize_refusal("submit", f"the pin file for {checked} is unreadable", q)
+                return 400, _page("Sign-in refused", (
+                    f"<p>The pin file for the {html.escape(checked)} connector cannot be "
+                    "read. Fix or delete it on the server.</p>"))
             _log_authorize_refusal("submit", f"redirect is not the one pinned for {checked}", q)
             return 400, _page("Sign-in refused", (
                 f"<p>The {html.escape(checked)} connector token is already connected to "
@@ -573,7 +598,8 @@ class OAuth:
                         _uri_for_log(entry["redirect_uri"]), still)
             return 400, {"error": "invalid_grant"}
         logger.info("oauth token issued (%s)", sent)
-        logger.info("oauth sign-in completed for %s (connector %s)", entry["redirect_uri"], still)
+        logger.info("oauth sign-in completed for %s (connector %s)",
+                    _uri_for_log(entry["redirect_uri"]), still)
         return 200, {"access_token": entry["token"], "token_type": "Bearer"}
 
 

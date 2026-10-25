@@ -237,6 +237,36 @@ def test_a_server_wide_pin_still_binds_every_connector(oauth_server):
     assert _sign_in(req, {**q, "redirect_uri": REDIRECT}, gem)[0] == 400
 
 
+@pytest.mark.parametrize("uri,ok", [
+    (CLAUDE, True), (CHATGPT, True), (CHATGPT_CB, True),
+    ("https://claude.ai/", False), ("https://claude.ai/api/mcp/auth_callback/x", False),
+    ("https://claude.ai/api/mcp/auth_callback?next=/x", False),
+    ("https://chatgpt.com/share/abc", False), ("https://chatgpt.com/connector/oauth/a/b", False),
+    ("https://chatgpt.com/connector/oauth/", False),
+    (REDIRECT, True), (REDIRECT + "?q=1", True),  # the Google hosts keep their rule
+])
+def test_whole_app_hosts_pass_only_their_documented_callback_paths(uri, ok):
+    assert remote_oauth.redirect_ok(uri) is ok
+
+
+def test_the_server_wide_pin_outranks_a_connector_pin_and_a_bad_connector_pin_says_so(oauth_server):
+    req, gem, tokens = oauth_server
+    claude_tok = remote.token_add(tokens, "claude-ai")
+    connector_pin = tokens.with_name(tokens.name + ".oauth-redirect.claude-ai")
+    connector_pin.write_text(CLAUDE + "\n")
+    legacy = tokens.with_name(tokens.name + ".oauth-redirect")
+    legacy.write_text(REDIRECT + "\n")
+    verifier, challenge = _pkce()
+    q = {"response_type": "code", "client_id": "cid", "code_challenge": challenge,
+         "code_challenge_method": "S256", "state": "s"}
+    assert _sign_in(req, {**q, "redirect_uri": CLAUDE}, claude_tok)[0] == 400
+    legacy.unlink()
+    assert _sign_in(req, {**q, "redirect_uri": CLAUDE}, claude_tok)[0] == 200
+    connector_pin.write_bytes(b"\xff\n")
+    st, page = _sign_in(req, {**q, "redirect_uri": CLAUDE}, claude_tok)
+    assert st == 400 and "cannot be read" in page and claude_tok not in page
+
+
 def test_a_connector_name_that_cannot_be_a_file_suffix_never_pins(tmp_path: Path):
     oauth = remote_oauth.OAuth(ISS, tmp_path / "tokens.oauth-redirect")
     assert oauth.pinned("../x") == remote_oauth._INVALID_PIN

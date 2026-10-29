@@ -2174,6 +2174,9 @@ def _sink_that_fails(store, exc):
     def boom(*args, **kwargs):
         raise exc
     store._audit.log = boom
+    # A boxed event reaches the trail through the outbox flush (_append_once),
+    # not through log(): the sink has two doors, and a failing one fails both.
+    store._audit._append_once = boom
 
 
 def _committed_op_cases(tmp_path_factory=None):
@@ -3096,12 +3099,14 @@ class TestCodexL3TwentySixOhNineOhFour:
                 with store._batch():
                     store.record("committed work", episode_type="observation")
                     store._audit.log = interrupt
+                    store._audit._append_once = interrupt
             # Reaching here at all is the property: the batch exited normally,
             # so a caller's ``db_committed = True`` runs and its cleanup does
             # not fire.
             assert store.status().total_episodes == 1
         finally:
             store._audit.log = None
+            store._audit._append_once = None
             store.close()
 
         reopened = Store(db)
@@ -3266,8 +3271,18 @@ class TestCodexL3TwentySixOhNineOhFour:
                     raise KeyboardInterrupt("Ctrl+C during the audit replay")
                 return real_log(*args, **kwargs)
 
+            real_append_once = store._audit._append_once
+
+            def interrupt_once_append(*args, **kwargs):
+                # The same one-shot counter on the boxed door (the outbox flush).
+                calls["n"] += 1
+                if calls["n"] == 1:
+                    raise KeyboardInterrupt("Ctrl+C during the audit replay")
+                return real_append_once(*args, **kwargs)
+
             escaped: BaseException | None = None
             store._audit.log = interrupt_once
+            store._audit._append_once = interrupt_once_append
             try:
                 with warnings.catch_warnings():
                     warnings.simplefilter("ignore")
@@ -3282,6 +3297,7 @@ class TestCodexL3TwentySixOhNineOhFour:
                 escaped = exc
             finally:
                 store._audit.log = real_log
+                store._audit._append_once = real_append_once
 
             assert calls["n"] >= 1, (
                 "the interrupt never fired — the post-commit replay no longer "
@@ -3557,6 +3573,14 @@ class TestCodexL3TwentySixOhNineOhFour:
                 raise KeyboardInterrupt("Ctrl+C on the first replayed event")
             return real_log(*args, **kwargs)
 
+        real_append_once = store._audit._append_once
+
+        def interrupt_the_first_append(*args, **kwargs):
+            attempts["n"] += 1
+            if attempts["n"] == 1:
+                raise KeyboardInterrupt("Ctrl+C on the first replayed event")
+            return real_append_once(*args, **kwargs)
+
         try:
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore")
@@ -3564,7 +3588,9 @@ class TestCodexL3TwentySixOhNineOhFour:
                     for i in range(4):
                         store.record(f"episode {i}", episode_type="observation")
                     store._audit.log = interrupt_the_first_emit
+                    store._audit._append_once = interrupt_the_first_append
             store._audit.log = real_log
+            store._audit._append_once = real_append_once
 
             assert store.status().total_episodes == 4, (
                 "the committed episodes did not survive"
@@ -3582,13 +3608,17 @@ class TestCodexL3TwentySixOhNineOhFour:
                 "a caller polling for degraded audit health sees a clean trail "
                 "over a real hole"
             )
-            # The marker rides into the next entry THIS trail appends (it is
-            # pending in memory): the next flush from this handle.
+            # The interrupted row is back in the outbox with a retry backoff
+            # (its failed attempt is counted); once that lapses the next flush
+            # delivers all four, in emit order.
+            store._conn.execute("UPDATE audit_outbox SET not_before = NULL")
+            store._conn.commit()
             store._flush_audit_outbox()
             assert store._conn.execute(
                 "SELECT COUNT(*) FROM audit_outbox").fetchone()[0] == 0
         finally:
             store._audit.log = real_log
+            store._audit._append_once = real_append_once
             store.close()
 
         entries = [
@@ -3601,14 +3631,14 @@ class TestCodexL3TwentySixOhNineOhFour:
         assert entries, "the tail was never written"
         assert [e["event"] for e in entries].count("record") == 4, (
             "the kept rows were not appended by the next flush")
-        assert any(e.get("dropped_before") for e in entries), (
-            "no dropped_before marker rode into the chain — the ONLY channel "
-            "that outlives the process is the hash-chained one, and without it "
-            "verify() walks the gap and reports a clean trail"
-        )
+        # Nothing was dropped (the interrupted row was retried and delivered),
+        # so the chain claims no drop; a dead row is marked by an outbox_gap
+        # entry instead (TestOutboxPoisonBound, tests/test_outbox_claim_ack.py).
+        assert not any(e.get("dropped_before") for e in entries)
 
-        # Review r1 F6: one unreadable outbox row neither blocks the tail nor
-        # re-appends the events before it at every open; it is dropped, counted.
+        # Review r1 F6, restated for claim/ack: an unreadable outbox row goes
+        # dead (retained, never retried), an outbox_gap entry in the chain names
+        # it, the readable rows around it are delivered, and it is counted once.
         store = Store(db)
         good = json.dumps({"event": "outbox_good", "payload": {}, "kwargs": {},
                            "method": "t", "committed": "t"})
@@ -3623,49 +3653,61 @@ class TestCodexL3TwentySixOhNineOhFour:
                 Store(db).close()
         store = Store(db)
         try:
-            assert store._conn.execute("SELECT COUNT(*) FROM audit_outbox").fetchone()[0] == 0
+            assert [tuple(r) for r in store._conn.execute(
+                "SELECT state, gap_logged FROM audit_outbox")] == [("dead", 1)]
             assert store.status().audit_write_failures == failures + 1
-            # L3 r1 R6: an append that escapes without counting a failure
-            # (an exception, or an interrupt the batched replay contains) never
-            # deletes its row.
+            # L3 r1 R6, restated: an append that escapes (an exception, or an
+            # interrupt the batched replay contains) never deletes its row.
             store._conn.execute("INSERT INTO audit_outbox (event_json, created_at) "
                                 "VALUES (?, 'x')", (good.replace("outbox_good", "outbox_kept"),))
             store._conn.commit()
+            real_append = store._audit._append_once
             for escaped in (RuntimeError("uncounted"), KeyboardInterrupt()):
                 def escaping(*args, _exc=escaped, **kwargs):
                     raise _exc
-                store._audit_log_after_commit = escaping
-                store._flush_audit_outbox(contain_terminal=True)
-                del store._audit_log_after_commit
+                store._audit._append_once = escaping
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore")
+                    store._flush_audit_outbox(contain_terminal=True)
+                store._audit._append_once = real_append
+                store._conn.execute("UPDATE audit_outbox SET not_before = NULL")
+                store._conn.commit()
                 assert store._conn.execute(
-                    "SELECT COUNT(*) FROM audit_outbox").fetchone()[0] == 1, escaped
-            # L3 r2 S1: a row whose append raises every time is kept and
-            # counted, and never blocks the healthy row behind it.
+                    "SELECT COUNT(*) FROM audit_outbox WHERE state != 'dead'"
+                ).fetchone()[0] == 1, escaped
+            # A row whose append fails every time HOLDS the queue behind it
+            # (order is the emit order) until it is dead after MAX claims; then
+            # an outbox_gap entry marks it and the healthy row is delivered.
             store._conn.execute("INSERT INTO audit_outbox (event_json, created_at) "
                                 "VALUES (?, 'x')", (good.replace("outbox_good", "outbox_after"),))
             store._conn.commit()
-            real_append = store._audit_log_after_commit
 
             def poisoned(event, *args, **kwargs):
                 if event == "outbox_kept":
                     raise RuntimeError("this row, every time")
                 return real_append(event, *args, **kwargs)
-            store._audit_log_after_commit = poisoned
-            failures = store.status().audit_write_failures
+            store._audit._append_once = poisoned
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore")
-                store._flush_audit_outbox()
-            del store._audit_log_after_commit
-            assert [json.loads(r[0])["event"] for r in store._conn.execute(
-                "SELECT event_json FROM audit_outbox")] == ["outbox_kept"]
-            assert store.status().audit_write_failures == failures + 1
-            store._flush_audit_outbox()
+                for _ in range(8):
+                    store._conn.execute(
+                        "UPDATE audit_outbox SET not_before = NULL, "
+                        "claim_expires_at = NULL WHERE state != 'dead'")
+                    store._conn.commit()
+                    store._flush_audit_outbox()
+            store._audit._append_once = real_append
+            assert [(json.loads(r[0])["event"], r[1]) for r in store._conn.execute(
+                "SELECT event_json, state FROM audit_outbox WHERE state != 'dead'"
+                " OR event_json LIKE '%outbox_kept%'")] == [("outbox_kept", "dead")]
         finally:
             store.close()
-        logged = [json.loads(line)["event"] for line in (tmp_path / "tail.audit.jsonl")
-                  .read_text(encoding="utf-8").splitlines()]
+        lines = [json.loads(line) for line in (tmp_path / "tail.audit.jsonl")
+                 .read_text(encoding="utf-8").splitlines()]
+        logged = [e["event"] for e in lines]
         assert logged.count("outbox_good") == 1
-        assert logged.count("outbox_after") == 1 and logged.count("outbox_kept") == 1
+        assert logged.count("outbox_after") == 1 and logged.count("outbox_kept") == 0
+        assert logged.count("outbox_gap") == 2  # the unreadable row and the poisoned one
+        assert logged.index("outbox_gap", logged.index("outbox_gap") + 1) < logged.index("outbox_after")
 
     # -- #4h3: WHERE a terminal exception is suppressed is a policy (09-06) --
 
@@ -3744,6 +3786,14 @@ class TestCodexL3TwentySixOhNineOhFour:
                 raise SystemExit(0)
             return real_log(*args, **kwargs)
 
+        real_append_once = store._audit._append_once
+
+        def exit_on_the_first_append(*args, **kwargs):
+            attempts["n"] += 1
+            if attempts["n"] == 1:
+                raise SystemExit(0)
+            return real_append_once(*args, **kwargs)
+
         try:
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore")
@@ -3751,19 +3801,25 @@ class TestCodexL3TwentySixOhNineOhFour:
                     for i in range(4):
                         store.record(f"episode {i}", episode_type="observation")
                     store._audit.log = exit_on_the_first_emit
+                    store._audit._append_once = exit_on_the_first_append
             store._audit.log = real_log
+            store._audit._append_once = real_append_once
             # L3 r1 (bound): the flush stops at the failed append and keeps
-            # it and the tail for the next flush, which appends them.
+            # it and the tail for the next flush (the failed row after its
+            # retry backoff), which appends them.
             assert attempts["n"] == 1
             assert store.status().total_episodes == 4
             assert store.status().audit_write_failures == 1
             assert store._conn.execute(
                 "SELECT COUNT(*) FROM audit_outbox").fetchone()[0] == 4
+            store._conn.execute("UPDATE audit_outbox SET not_before = NULL")
+            store._conn.commit()
             store._flush_audit_outbox()
             assert store._conn.execute(
                 "SELECT COUNT(*) FROM audit_outbox").fetchone()[0] == 0
         finally:
             store._audit.log = real_log
+            store._audit._append_once = real_append_once
             store.close()
 
     # -- #4i: the ordering key must be a TIME, not a 20-char string (09-06) --

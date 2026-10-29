@@ -3568,20 +3568,31 @@ class TestL3Fixes:
 
         # Integration L3 I3: a keyed record killed after its commit, before its
         # audit append. Every retry replays, so only the outbox row it committed
-        # with the episode can log it: once, at the next open.
+        # with the episode can log it: once, at the next open. The flush that
+        # dies holds the row under a 60 s claim, so the reopen below starts
+        # after that lease has lapsed.
         child = (
             "import os, sys\n"
             "from anneal_memory import Store\n"
-            "real = Store._audit_log_after_commit\n"
+            "from anneal_memory.audit import AuditTrail\n"
+            "real = AuditTrail._append_once\n"
             "def dying(self, event, *a, **k):\n"
             "    if event == 'record':\n"
             "        os._exit(18)\n"
             "    return real(self, event, *a, **k)\n"
-            "Store._audit_log_after_commit = dying\n"
+            "AuditTrail._append_once = dying\n"
             "Store(sys.argv[1], project_name='Kill').record(\n"
             "    'keyed, killed before its audit', 'observation', idempotency_key='k-kill')\n"
         )
         assert subprocess.run([sys.executable, "-c", child, str(db)]).returncode == 18
+        conn = sqlite3.connect(str(db))
+        conn.create_function("anneal_writer_schema", 0, lambda: 3)
+        try:
+            conn.execute("UPDATE audit_outbox SET claim_expires_at = "
+                         "'2000-01-01T00:00:00.000000Z'")
+            conn.commit()
+        finally:
+            conn.close()
         store = Store(str(db), project_name="Kill")
         try:
             retried = store.record("keyed, killed before its audit", "observation",

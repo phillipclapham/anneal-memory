@@ -341,3 +341,199 @@ class TestAppendOnce:
         with pytest.raises(ValueError):
             store._audit._append_once("e", {"outbox_ref": "mine"}, "agent",
                                      ref="1:a", since_seq=None)
+
+
+# --------------------------------------------------------------------------
+# S3: the flush on claim/ack (T3, T4, T6 and T1 through the real flush)
+# --------------------------------------------------------------------------
+
+import warnings
+
+
+def _events(db_path) -> list[str]:
+    return [e["event"] for e in _entries(db_path)]
+
+
+def _failing(store: Store, fail_event: str, hits: list[str] | None = None):
+    """Make the audit sink raise for ``fail_event`` only."""
+    real = store._audit._append_once
+
+    def sink(event, *args, **kwargs):
+        if event == fail_event:
+            if hits is not None:
+                hits.append(event)
+            raise OSError(28, "No space left on device")
+        return real(event, *args, **kwargs)
+
+    store._audit._append_once = sink
+    return real
+
+
+def _lapse(store: Store) -> None:
+    """Let every backoff and lease run out."""
+    store._conn.execute(
+        "UPDATE audit_outbox SET not_before = NULL, "
+        "claim_expires_at = '2000-01-01T00:00:00.000000Z' "
+        "WHERE state != 'dead' OR gap_logged = 0")
+    store._conn.commit()
+
+
+class TestOutboxFlush:
+    def test_a_delivered_event_carries_its_ref_and_leaves_the_outbox(
+            self, store, tmp_path):
+        (row_id,) = _insert(store, "delivered")
+        store._flush_audit_outbox()
+        (entry,) = [e for e in _entries(tmp_path / "ob.db")
+                    if e["event"] == "delivered"]
+        assert entry["data"]["outbox_ref"].startswith(f"{row_id}:")
+        assert store._conn.execute(
+            "SELECT COUNT(*) FROM audit_outbox").fetchone()[0] == 0
+
+    def test_a_poison_row_holds_the_queue_then_dies_with_a_gap_in_the_chain(
+            self, store, tmp_path):
+        """T3 + T6: row 2 of 3 never lets row 3 log before row 2's gap marker;
+        after MAX attempts row 2 is dead and retained, its outbox_gap is in the
+        chain, and row 3 is delivered. Before, row 2 was retried and counted on
+        every flush forever."""
+        _insert(store, "first", "poison", "third")
+        hits: list[str] = []
+        _failing(store, "poison", hits)
+        db = tmp_path / "ob.db"
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            for n in range(1, store_mod._OUTBOX_MAX_ATTEMPTS + 1):
+                store._flush_audit_outbox()
+                assert _events(db).count("third") == 0, "row 3 passed a failing row 2"
+                assert len(hits) == n
+                _lapse(store)
+            store._flush_audit_outbox()   # the claim that finds it exhausted
+        assert len(hits) == store_mod._OUTBOX_MAX_ATTEMPTS  # never retried again
+        events = _events(db)
+        assert events.index("first") < events.index("outbox_gap") < events.index("third")
+        gap = next(e for e in _entries(db) if e["event"] == "outbox_gap")
+        assert gap["data"]["outbox_ref"] == "gap:2"
+        assert gap["data"]["attempts"] == store_mod._OUTBOX_MAX_ATTEMPTS
+        assert "attempts exhausted" in gap["data"]["reason"]
+        rows = [tuple(r) for r in store._conn.execute(
+            "SELECT id, state, gap_logged FROM audit_outbox")]
+        assert rows == [(2, "dead", 1)]
+        assert AuditTrail.verify(db).valid
+        # a dead, marked row costs nothing on later flushes
+        store._flush_audit_outbox()
+        assert _events(db).count("outbox_gap") == 1
+
+    def test_a_marker_that_could_not_be_written_is_written_before_any_later_row(
+            self, store, tmp_path):
+        """C8: the gap marker's own append fails; the next flush writes it
+        before the row behind the dead one."""
+        _insert(store, "dead_one", "behind")
+        store._conn.execute("UPDATE audit_outbox SET attempts = ? WHERE id = 1",
+                            (store_mod._OUTBOX_MAX_ATTEMPTS,))
+        store._conn.commit()
+        real = _failing(store, "outbox_gap")
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            store._flush_audit_outbox()
+        db = tmp_path / "ob.db"
+        assert "behind" not in _events(db) and "outbox_gap" not in _events(db)
+        store._audit._append_once = real
+        _lapse(store)
+        store._flush_audit_outbox()
+        events = _events(db)
+        assert events.index("outbox_gap") < events.index("behind")
+
+    def test_an_unreadable_row_goes_dead_with_a_gap_and_the_rest_is_delivered(
+            self, store, tmp_path):
+        store._conn.execute(
+            "INSERT INTO audit_outbox (event_json, created_at) VALUES ('not json', 'x')")
+        _insert(store, "after")
+        store._conn.commit()
+        failures = store.status().audit_write_failures
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            store._flush_audit_outbox()
+        db = tmp_path / "ob.db"
+        events = _events(db)
+        assert events.index("outbox_gap") < events.index("after")
+        assert store.status().audit_write_failures == failures + 1
+        assert [tuple(r) for r in store._conn.execute(
+            "SELECT state, gap_logged FROM audit_outbox")] == [("dead", 1)]
+
+    def test_a_callback_that_writes_the_store_succeeds(self, tmp_path):
+        """T4 (design R4, reproduced on 7cdcf46: the second connection's write
+        waited out its 5.2 s busy timeout and failed "database is locked").
+        The callback ran inside the flush's write transaction; it now runs after
+        the ack, outside every transaction, so a write through another
+        connection succeeds at once."""
+        seen: list[str] = []
+        holder: dict[str, Store] = {}
+
+        def callback(entry):
+            seen.append(entry["event"])
+            if entry["event"] == "record" and len(seen) == 1:
+                holder["other"].record("written from the callback", "observation")
+
+        db = tmp_path / "t4.db"
+        s = Store(db, on_audit_event=callback)
+        holder["other"] = Store(db)
+        try:
+            with s._batch():
+                s.record("batched", "observation")
+            assert s.status().total_episodes == 2
+            s._flush_audit_outbox()
+            assert s._conn.execute(
+                "SELECT COUNT(*) FROM audit_outbox").fetchone()[0] == 0
+            assert seen.count("record") == 1  # this Store's callback, once
+        finally:
+            holder["other"].close()
+            s.close()
+        assert _events(db).count("record") == 2
+
+    def test_a_callback_fires_once_per_newly_appended_entry(self, tmp_path):
+        seen: list[str] = []
+        s = Store(tmp_path / "cb1.db", on_audit_event=lambda e: seen.append(e["event"]))
+        try:
+            with s._batch():
+                s.record("one", "observation")
+            s._flush_audit_outbox()
+            assert seen.count("record") == 1
+        finally:
+            s.close()
+
+    def test_a_killed_flush_is_recovered_once_through_the_real_flush(self, tmp_path):
+        """T1 through the flush (design R1, C3): a process killed after its
+        append and before its ack; the reopen's flush acks without a second
+        append."""
+        db = tmp_path / "t1b.db"
+        script = tmp_path / "killed_flush.py"
+        script.write_text(textwrap.dedent('''
+            import os, sys
+            from anneal_memory.store import Store
+            from anneal_memory.audit import AuditTrail
+            store = Store(sys.argv[1])
+            real = AuditTrail._append_once
+            def append_then_die(self, *a, **k):
+                real(self, *a, **k)
+                os._exit(0)
+            store._conn.execute(
+                "INSERT INTO audit_outbox (event_json, created_at) VALUES (?, 'x')",
+                ('{"event": "crash_event", "payload": {}, "kwargs": {}, '
+                 '"method": "t", "committed": "t"}',))
+            store._conn.commit()
+            AuditTrail._append_once = append_then_die
+            store._flush_audit_outbox()
+        '''))
+        env = {**os.environ, "PYTHONPATH": _REPO_ROOT}
+        subprocess.run([sys.executable, str(script), str(db)], check=True, env=env)
+        assert _events(db).count("crash_event") == 1
+        conn = Store(db)  # the open's flush: the lease is live, so nothing yet
+        conn._conn.execute(
+            "UPDATE audit_outbox SET claim_expires_at = '2000-01-01T00:00:00.000000Z'")
+        conn._conn.commit()
+        try:
+            conn._flush_audit_outbox()
+            assert conn._conn.execute(
+                "SELECT COUNT(*) FROM audit_outbox").fetchone()[0] == 0
+        finally:
+            conn.close()
+        assert _events(db).count("crash_event") == 1

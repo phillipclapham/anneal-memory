@@ -13760,7 +13760,7 @@ class Store:
                 "ORDER BY id LIMIT ?", (limit,)).fetchall()
             for (row_id, event_json, state, attempts, claim_expires,
                  not_before, row_tail, last_error, _gap) in rows:
-                if state == "claimed" and claim_expires is not None \
+                if state in ("claimed", "dead") and claim_expires is not None \
                         and claim_expires > now:
                     break
                 if state == "pending" and not_before is not None \
@@ -13903,157 +13903,202 @@ class Store:
         return claim._replace(kind="gap", reason=reason)
 
     def _flush_audit_outbox(self, *, contain_terminal: bool = False) -> None:
-        """Append every ``audit_outbox`` event to the audit log, oldest first,
-        deleting each row once its append succeeded, all under one write
-        transaction: two processes flushing (an open and a batch's replay)
-        are serialized by it, so an event is logged once. A row is deleted
-        only when its append returned normally and counted no failure. The
-        first append that counts a failure (a sink failure or an audit-lock
-        timeout) ends the flush: its row and the rest stay for the next flush,
-        so the write lock is held across at most one audit-lock timeout (L3
-        r1). An append that raises an ``Exception`` without counting one is
-        that row's own failure: the row is kept and counted, and the flush
-        goes on to the next (L3 r2 S1). A row that does
-        not parse is deleted in this transaction and counted as an audit
-        write failure, never retried. Never raises an ``Exception``: it runs
-        after a commit and at open. A ``SystemExit`` from an append propagates
-        once the rows already appended are committed, as on every unbatched
-        post-commit path; ``contain_terminal=True`` is the batched replay's
-        mode, which stops there without raising and owns the suppression
+        """Append every deliverable ``audit_outbox`` event to the audit log in
+        id order: CLAIM a batch in one short transaction, append each event
+        with :meth:`AuditTrail._append_once` outside any transaction, ACK it by a
+        token-checked delete, and only then hand a newly appended entry to the
+        ``on_audit_event`` callback. Nothing here holds the store's write lock
+        across file I/O or a callback, so a callback may write the store.
+
+        Order is the emit order: the first failed row ends the flush (the rows
+        behind it are released uncounted), and a later row is never claimed past
+        an earlier unfinished one. A failed append is a counted failure, the
+        row goes back to ``pending`` with a backoff, and after
+        ``_OUTBOX_MAX_ATTEMPTS`` claims it is ``dead``: retained, never
+        retried, with an ``outbox_gap`` entry in the chain naming its ref. A row
+        that does not parse goes straight to dead the same way. A flusher that
+        dies between an append and its ack leaves the row claimed; the reclaim
+        finds the entry by its ``outbox_ref`` and acks without appending again.
+
+        Never raises an ``Exception``: it runs after a commit and at open. A
+        ``SystemExit`` or ``KeyboardInterrupt`` from an append or the callback
+        propagates once the claim's rows are settled, as on every unbatched
+        post-commit path; ``contain_terminal=True`` is the batched replay's mode,
+        which stops there without raising and owns the suppression
         (``_replay_deferred_audits``).
 
-        Known edges: delivery is at-least-once (a crash after an append and
-        before this commit logs that event again; never a loss); boxed events
-        are logged before the unboxed ones of the same batch, so the chain
-        order can differ from the emit order; payloads round-trip JSON (tuples
-        become lists); a kept row's failed append records a ``dropped_before``
-        gap, and a later flush delivers it, so the chain can name a gap that
-        was later filled. Known edge (integration L3, carried to 1.1 as the
-        claim-then-acknowledge outbox): the flush holds ``BEGIN IMMEDIATE``
-        across each append and its ``on_audit_event`` callback, so an
-        ``on_audit_event`` callback must not write to the store (a crystal
-        change, ``replace_section``, ``save_meta``, or this ``Store``): a write
-        through another connection times out, and one through this ``Store``
-        commits the flush early."""
+        Known edges: no heartbeat (a holder that outlives its 60 s lease is
+        handled by the ref check at append and the token check at ack); the
+        callback is at-most-once per newly appended entry; payloads round-trip
+        JSON (tuples become lists); a duplicate across a weekly audit-file
+        rotation keeps its ref (:meth:`AuditTrail._append_once`)."""
         if self._audit is None or self._read_only or self._closed:
             return
         try:
             if self._conn.in_transaction or self._conn.execute(
-                    "SELECT 1 FROM audit_outbox LIMIT 1").fetchone() is None:
+                    "SELECT 1 FROM audit_outbox WHERE state != 'dead' "
+                    "OR gap_logged = 0 LIMIT 1").fetchone() is None:
                 return
-            self._conn.execute("BEGIN IMMEDIATE")
         except sqlite3.Error:
             # Busy or absent: the rows stay for the next batch or open; a
             # long-lived process that never batches again delays them.
             return
+        terminal: BaseException | None = None
         try:
-            rows = self._conn.execute(
-                "SELECT id, event_json FROM audit_outbox ORDER BY id").fetchall()
-            for row in rows:
+            try:
+                tail: int | None = self._audit._tail_seq()
+            except Exception:
+                tail = None  # the append refuses and counts it; the claim waits
+            claims = self._outbox_claim(tail_seq=tail)
+            for position, claim in enumerate(claims):
                 try:
-                    entry = json.loads(row[1])
-                    event, payload = entry["event"], entry["payload"]
-                    method, committed = entry["method"], entry["committed"]
-                    kwargs = dict(entry["kwargs"])
-                except (ValueError, TypeError, KeyError, AttributeError) as exc:
-                    self._conn.execute("DELETE FROM audit_outbox WHERE id = ?", (row[0],))
-                    self._note_unreadable_outbox_row(row[0], exc)
-                    continue
-                failures = self._audit_write_failures
-                # An on_audit_event callback that opens a second writer waits
-                # its busy timeout here, per event: this transaction holds the
-                # write lock. Known edge: a callback that writes through THIS
-                # Store commits the flush transaction early (its commit is not
-                # deferred), so the deletes after it run outside one.
-                try:
-                    self._audit_log_after_commit(
-                        event, payload, method=method, committed=committed,
-                        stacklevel=1, batch_aware=False, **kwargs,
-                    )
-                except Exception as exc:
-                    if self._audit_write_failures == failures:
-                        # Raised without counting (L3 r2 S1): this row's own
-                        # failure, not the sink's. Kept and counted; the flush
-                        # goes on, so one poison row never blocks the queue.
-                        # Known edge: it is retried, and counted, every flush.
-                        self._note_failed_outbox_row(row[0], exc)
-                        continue
+                    if not self._deliver_outbox_claim(claim):
+                        self._release_outbox_claims(claims[position + 1:])
+                        break
+                except BaseException as exc:
+                    # An interrupt or exit: settle the rest, then re-raise (or
+                    # stop quietly in the batched replay).
+                    self._release_outbox_claims(claims[position + 1:])
+                    terminal = exc
                     break
-                except BaseException:
-                    if not contain_terminal:
-                        raise
-                    break
-                if self._audit_write_failures != failures:
-                    # A counted sink failure or audit-lock timeout ends the
-                    # flush: the row and the rest stay for the next one, so
-                    # this write transaction spends at most one audit-lock
-                    # timeout. Known edge: a sink that always fails keeps its
-                    # rows and counts one failure on every flush.
-                    break
-                self._conn.execute("DELETE FROM audit_outbox WHERE id = ?", (row[0],))
-            self._conn.commit()
         except Exception:
-            self._rollback_quietly()
             try:
                 _LOG.warning("audit outbox flush failed; its rows stay for the "
                              "next flush", exc_info=True)
             except Exception:
                 pass
-        except BaseException:
-            try:  # keep the appends that landed, so they are not logged twice
-                self._conn.commit()
-            except Exception:
-                self._rollback_quietly()
-            raise
         finally:
             try:
                 self._persist_audit_health()
             except Exception:
                 pass
+        if terminal is not None and not contain_terminal:
+            raise terminal
 
-    def _note_unreadable_outbox_row(self, row_id: int, exc: BaseException) -> None:
-        """An ``audit_outbox`` row that does not parse: its event is lost, so
-        it is counted and reported like a failed append (the chained
-        ``dropped_before`` marker, the counter ``status()`` reads, the logger,
-        a warning). The flush deletes the row; it is never retried."""
-        self._note_outbox_row_failure(row_id, exc, kept=False)
+    def _release_outbox_claims(self, claims: list[_OutboxClaim]) -> None:
+        """Give back claimed rows this flush never reached, attempts uncounted."""
+        for claim in claims:
+            try:
+                self._outbox_release(claim)
+            except Exception:
+                pass
 
-    def _note_failed_outbox_row(self, row_id: int, exc: BaseException) -> None:
-        """An ``audit_outbox`` row whose append raised without counting a
-        failure: counted and reported on the same channels; the flush keeps
-        the row for the next one (L3 r2 S1)."""
-        self._note_outbox_row_failure(row_id, exc, kept=True)
+    @staticmethod
+    def _outbox_ref(row_id: int, event_json: str) -> str:
+        """The stable name an audit entry carries for its outbox row: the id and
+        the first 16 hex of the event's sha256, so a restored database that
+        re-emits a low id with a different event does not match (design D4)."""
+        return f"{row_id}:{hashlib.sha256(event_json.encode('utf-8')).hexdigest()[:16]}"
+
+    def _deliver_outbox_claim(self, claim: _OutboxClaim) -> bool:
+        """Append one claimed row (or its gap marker), ack it, then run the
+        callback for a newly appended entry. ``True`` when the flush may go on
+        to the next row, ``False`` when this row failed and ends it. A terminal
+        exception propagates to :meth:`_flush_audit_outbox` after the row is
+        released."""
+        assert self._audit is not None
+        if claim.kind == "event":
+            try:
+                entry = json.loads(claim.event_json)
+                event, payload = entry["event"], entry["payload"]
+                method, committed = entry["method"], entry["committed"]
+                kwargs = dict(entry["kwargs"])
+                actor = kwargs.pop("actor", "agent")
+                if kwargs or not isinstance(event, str):
+                    raise ValueError(f"unexpected audit fields {sorted(kwargs)}")
+                if payload is not None and not isinstance(payload, dict):
+                    raise TypeError("payload is not an object")
+            except (ValueError, TypeError, KeyError, AttributeError) as exc:
+                gap = self._outbox_mark_dead(claim, f"unreadable event: {exc!r}")
+                if gap is None:
+                    return True  # the claim was lost; the holder settles the row
+                return self._deliver_outbox_claim(gap)
+            ref = self._outbox_ref(claim.id, claim.event_json)
+            try:
+                logged, appended = self._audit._append_once(
+                    event, payload if payload is not None else {}, actor,
+                    ref=ref, since_seq=claim.tail_seq)
+            except BaseException as exc:
+                self._outbox_nack(claim, exc)
+                self._note_outbox_row_failure(
+                    claim.id, exc, kept=True, method=method, committed=committed)
+                if not isinstance(exc, Exception):
+                    raise
+                return False
+        else:
+            ref = f"gap:{claim.id}"
+            reason = claim.reason or "undeliverable"
+            try:
+                logged, appended = self._audit._append_once(
+                    "outbox_gap",
+                    {"dead_ref": self._outbox_ref(claim.id, claim.event_json),
+                     "attempts": claim.attempts, "reason": reason[:500]},
+                    "agent", ref=ref, since_seq=claim.tail_seq)
+            except BaseException as exc:
+                # The row stays dead with its marker owed: its lease lapses
+                # and a later flush writes the marker before any row behind it.
+                self._note_outbox_row_failure(
+                    claim.id, exc, kept=True, method="outbox_gap",
+                    committed="a dead outbox row")
+                if not isinstance(exc, Exception):
+                    raise
+                return False
+            if appended:
+                self._note_outbox_row_failure(
+                    claim.id, RuntimeError(reason), kept=False,
+                    method="outbox_gap", committed="a dead outbox row")
+        if not self._outbox_ack(claim):
+            try:
+                _LOG.warning("audit outbox row %s: the claim was lost before its "
+                             "acknowledge (another flusher took it); entry %s",
+                             claim.id, "kept" if not appended else "appended")
+            except Exception:
+                pass
+        if appended:
+            self._audit._notify(logged)
+        return True
 
     def _note_outbox_row_failure(
         self, row_id: int, exc: BaseException, *, kept: bool,
+        method: str = "audit outbox", committed: str = "an audit event",
     ) -> None:
-        what = "failed to append" if kept else "unreadable"
-        fate = "kept for the next flush" if kept else "dropped"
-        missing_seq: int | None = None
-        try:
-            if self._audit is not None:
-                missing_seq = self._audit.note_write_failure()
-        except Exception:
-            pass
-        where = (f" [dropped before audit seq {missing_seq}]"
-                 if missing_seq is not None else "")
+        """Report an ``audit_outbox`` row that did not reach the chain: counted
+        in ``audit_write_failures``, kept in ``last failure``, logged and
+        warned, the same four channels as every post-commit append failure.
+        ``kept=True`` is a failed attempt (the row is retried, nothing is lost
+        yet); ``kept=False`` is a row that went dead, whose loss the chain
+        records as an ``outbox_gap`` entry, so no ``dropped_before`` count is
+        added for either."""
+        what = "failed to append" if kept else "is dead and was not delivered"
+        fate = "retried after a backoff" if kept else "retained as dead, gap logged"
         when = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
         self._audit_write_failures += 1
         self._audit_failures_unpersisted += 1
         self._audit_last_failure = (
-            f"audit_outbox row {row_id}: {what} ({exc!r}){where} at {when}")
+            f"audit_outbox row {row_id}: {what} ({exc!r}) at {when}")
         try:
             _LOG.warning("audit outbox row %s: %s (%r); %s", row_id, what, exc, fate)
         except Exception:
             pass
         try:
-            warnings.warn(
-                f"anneal-memory: audit_outbox row {row_id}: {what} ({exc!r}); it "
-                f"was {fate} and counted as an audit write failure. The audit "
-                "trail is missing that event"
-                + (" until a flush appends it." if kept else "."),
-                UserWarning, stacklevel=4,
-            )
+            if kept:
+                # The wording every failed post-commit append has used (the
+                # tests and operators match on COMMITTED), plus the retry.
+                text = (
+                    f"{method}: {committed} COMMITTED, but its audit event "
+                    f"could not be written ({exc!r}). The store state is "
+                    "correct; the audit trail is missing this event until a "
+                    f"flush appends it (audit_outbox row {row_id}, {fate}). "
+                    "Investigate the audit sink before relying on the trail "
+                    "for this window."
+                )
+            else:
+                text = (
+                    f"anneal-memory: audit_outbox row {row_id}: {what} "
+                    f"({exc!r}); {fate}. The audit trail is missing that "
+                    "event (an outbox_gap entry marks where)."
+                )
+            warnings.warn(text, UserWarning, stacklevel=4)
         except Exception:
             pass
 

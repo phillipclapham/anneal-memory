@@ -2451,11 +2451,27 @@ CREATE TABLE IF NOT EXISTS crystal_document (
 );
 
 -- Generation 3: audit events of a batched write, inserted in its transaction
--- and deleted once appended to the audit log (Store._flush_audit_outbox).
+-- and deleted once appended to the audit log (Store._flush_audit_outbox). A
+-- flusher CLAIMS rows (state, claim_token, claim_expires_at, attempts bumped at
+-- the claim), appends outside any transaction, and ACKS by a token-checked
+-- delete. AUTOINCREMENT: an id is never reused once the table empties, because
+-- the audit entry names its row by id (outbox_claim_ack_design_1028.md, sec. 3).
+-- claim_tail_seq is the audit tail seq at the FIRST claim, kept across reclaims.
+-- A 'dead' row is retained; gap_logged says its gap marker reached the chain.
 CREATE TABLE IF NOT EXISTS audit_outbox (
-    id INTEGER PRIMARY KEY,
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
     event_json TEXT NOT NULL,
-    created_at TEXT NOT NULL
+    created_at TEXT NOT NULL,
+    state TEXT NOT NULL DEFAULT 'pending'
+        CHECK (state IN ('pending', 'claimed', 'dead')),
+    attempts INTEGER NOT NULL DEFAULT 0,
+    claim_token TEXT,
+    claim_expires_at TEXT,
+    claim_tail_seq INTEGER,
+    not_before TEXT,
+    last_error TEXT,
+    dead_at TEXT,
+    gap_logged INTEGER NOT NULL DEFAULT 0
 );
 
 -- Generation 3: one row per idempotency key, inserted in the same transaction
@@ -2641,6 +2657,34 @@ _DEFAULT_METADATA = {
 def _now_utc() -> str:
     """Current time as ISO 8601 UTC string with microsecond precision."""
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+
+
+# Generation 3 outbox claim/ack (outbox_claim_ack_design_1028.md, D3). All three
+# are constants, tunable without a schema change.
+_OUTBOX_MAX_ATTEMPTS = 5
+_OUTBOX_CLAIM_TTL_SECONDS = 60
+_OUTBOX_BACKOFF_CAP_SECONDS = 300
+_OUTBOX_CLAIM_BATCH = 32
+
+
+def _utc_after(seconds: float) -> str:
+    """:func:`_now_utc` plus ``seconds``, in the same sortable form."""
+    return (datetime.now(timezone.utc) + timedelta(seconds=seconds)).strftime(
+        "%Y-%m-%dT%H:%M:%S.%fZ")
+
+
+class _OutboxClaim(NamedTuple):
+    """One ``audit_outbox`` row held by a claim. ``kind`` is ``"event"`` for a
+    row whose event still has to be appended, ``"gap"`` for a dead row whose
+    gap marker has not reached the chain yet (``reason`` says why it died)."""
+
+    id: int
+    token: str
+    event_json: str
+    attempts: int
+    tail_seq: int | None
+    kind: Literal["event", "gap"]
+    reason: str | None
 
 
 # Generation 3: the principal scope idempotency keys are bound under. '' until a
@@ -13675,6 +13719,188 @@ class Store:
             (event_json, _now_utc()),
         )
         return True
+
+    def _outbox_claim(
+        self, *, tail_seq: int | None = None, limit: int = _OUTBOX_CLAIM_BATCH,
+    ) -> list[_OutboxClaim]:
+        """Claim up to ``limit`` ``audit_outbox`` rows for one flusher, oldest
+        first, in ONE short ``BEGIN IMMEDIATE`` transaction; the caller does its
+        file I/O after this returns, outside any transaction.
+
+        Strict order, the head blocks: the claim walks ids upward and stops at
+        the first row it cannot take (a ``claimed`` row whose lease has not
+        expired, a ``pending`` row inside its backoff), so a later row is never
+        handed out ahead of an unfinished earlier one. A ``dead`` row whose gap
+        marker is not logged yet is returned as ``kind="gap"`` and counts as the
+        head too; a dead row already marked is skipped. ``attempts`` is bumped
+        AT the claim, so a flusher that crashes still counts. A row whose
+        ``attempts`` has already reached :data:`_OUTBOX_MAX_ATTEMPTS` becomes
+        ``dead`` here (retained, never retried) and comes back as a gap row.
+        ``tail_seq`` (the audit tail seq the caller read) is stored only on a
+        row's first claim and kept across reclaims. Returns ``[]`` when nothing
+        is claimable, in a transaction the caller owns, or on a busy store
+        (the rows stay for the next flush)."""
+        if self._read_only or self._closed:
+            return []
+        try:
+            if self._conn.in_transaction:
+                return []
+            self._conn.execute("BEGIN IMMEDIATE")
+        except sqlite3.Error:
+            return []
+        token = uuid.uuid4().hex
+        claims: list[_OutboxClaim] = []
+        try:
+            now = _now_utc()
+            expires = _utc_after(_OUTBOX_CLAIM_TTL_SECONDS)
+            rows = self._conn.execute(
+                "SELECT id, event_json, state, attempts, claim_expires_at, "
+                "not_before, claim_tail_seq, last_error, gap_logged "
+                "FROM audit_outbox WHERE state != 'dead' OR gap_logged = 0 "
+                "ORDER BY id LIMIT ?", (limit,)).fetchall()
+            for (row_id, event_json, state, attempts, claim_expires,
+                 not_before, row_tail, last_error, _gap) in rows:
+                if state == "claimed" and claim_expires is not None \
+                        and claim_expires > now:
+                    break
+                if state == "pending" and not_before is not None \
+                        and not_before > now:
+                    break
+                if state == "dead":
+                    # Its marker is owed; hold it so a second flusher does not
+                    # race the same marker (the append is idempotent anyway).
+                    self._conn.execute(
+                        "UPDATE audit_outbox SET claim_token = ?, "
+                        "claim_expires_at = ? WHERE id = ?",
+                        (token, expires, row_id))
+                    claims.append(_OutboxClaim(
+                        row_id, token, event_json, attempts, row_tail,
+                        "gap", last_error))
+                    continue
+                if attempts >= _OUTBOX_MAX_ATTEMPTS:
+                    reason = (f"attempts exhausted ({attempts})"
+                              + (f": {last_error}" if last_error else ""))
+                    self._conn.execute(
+                        "UPDATE audit_outbox SET state = 'dead', dead_at = ?, "
+                        "claim_token = ?, claim_expires_at = ?, last_error = ? "
+                        "WHERE id = ?", (now, token, expires, reason, row_id))
+                    claims.append(_OutboxClaim(
+                        row_id, token, event_json, attempts, row_tail,
+                        "gap", reason))
+                    continue
+                self._conn.execute(
+                    "UPDATE audit_outbox SET state = 'claimed', "
+                    "attempts = attempts + 1, claim_token = ?, "
+                    "claim_expires_at = ?, not_before = NULL, "
+                    "claim_tail_seq = COALESCE(claim_tail_seq, ?) WHERE id = ?",
+                    (token, expires, tail_seq, row_id))
+                claims.append(_OutboxClaim(
+                    row_id, token, event_json, attempts + 1,
+                    row_tail if row_tail is not None else tail_seq,
+                    "event", None))
+            self._conn.commit()
+        except Exception:
+            self._rollback_quietly()
+            try:
+                _LOG.warning("audit outbox claim failed; its rows stay for the "
+                             "next flush", exc_info=True)
+            except Exception:
+                pass
+            return []
+        except BaseException:
+            self._rollback_quietly()
+            raise
+        return claims
+
+    def _outbox_ack(self, claim: _OutboxClaim) -> bool:
+        """Acknowledge a claimed row once its event is in the audit log: a
+        token-checked delete (a gap row is marked ``gap_logged`` and kept).
+        ``True`` when this claim still held the row; ``False`` means the claim
+        was lost (it expired and another flusher took or finished the row), a
+        no-op the caller reports and does not repeat. Commits its own short
+        transaction. A busy or failing store counts as a lost claim: the event
+        is in the log, and the reclaim finds it by its ref."""
+        try:
+            if self._conn.in_transaction:
+                return False
+            if claim.kind == "gap":
+                cur = self._conn.execute(
+                    "UPDATE audit_outbox SET gap_logged = 1, "
+                    "claim_token = NULL, claim_expires_at = NULL "
+                    "WHERE id = ? AND claim_token = ? AND state = 'dead'",
+                    (claim.id, claim.token))
+            else:
+                cur = self._conn.execute(
+                    "DELETE FROM audit_outbox "
+                    "WHERE id = ? AND claim_token = ? AND state = 'claimed'",
+                    (claim.id, claim.token))
+            self._conn.commit()
+            return cur.rowcount == 1
+        except sqlite3.Error:
+            self._rollback_quietly()
+            return False
+
+    def _outbox_nack(self, claim: _OutboxClaim, error: BaseException | str) -> bool:
+        """Release a claimed row back to ``pending`` after a failed append,
+        with the error kept and a retry backoff of ``2**attempts`` seconds
+        (capped at :data:`_OUTBOX_BACKOFF_CAP_SECONDS`). ``attempts`` was
+        already counted at the claim. Token-checked like :meth:`_outbox_ack`;
+        ``False`` when the claim was lost."""
+        try:
+            if self._conn.in_transaction:
+                return False
+            delay = min(_OUTBOX_BACKOFF_CAP_SECONDS, 2 ** max(claim.attempts, 0))
+            cur = self._conn.execute(
+                "UPDATE audit_outbox SET state = 'pending', claim_token = NULL, "
+                "claim_expires_at = NULL, not_before = ?, last_error = ? "
+                "WHERE id = ? AND claim_token = ? AND state = 'claimed'",
+                (_utc_after(delay), repr(error)[:500], claim.id, claim.token))
+            self._conn.commit()
+            return cur.rowcount == 1
+        except sqlite3.Error:
+            self._rollback_quietly()
+            return False
+
+    def _outbox_release(self, claim: _OutboxClaim) -> bool:
+        """Give back a claimed row the flusher never attempted (it stopped at an
+        earlier row that failed): ``pending`` again with the claim's attempt
+        UNcounted, so a row behind a poison head is not aged toward ``dead`` by
+        claims that never tried it. Token-checked; ``False`` when the claim was
+        lost. A ``gap`` claim is released by letting its lease expire."""
+        try:
+            if self._conn.in_transaction or claim.kind != "event":
+                return False
+            cur = self._conn.execute(
+                "UPDATE audit_outbox SET state = 'pending', "
+                "attempts = MAX(attempts - 1, 0), claim_token = NULL, "
+                "claim_expires_at = NULL WHERE id = ? AND claim_token = ? "
+                "AND state = 'claimed'", (claim.id, claim.token))
+            self._conn.commit()
+            return cur.rowcount == 1
+        except sqlite3.Error:
+            self._rollback_quietly()
+            return False
+
+    def _outbox_mark_dead(self, claim: _OutboxClaim, reason: str) -> _OutboxClaim | None:
+        """Retire a claimed row that can never be delivered (its ``event_json``
+        does not parse): ``dead``, retained, never retried. Returns the claim as
+        a ``kind="gap"`` row for the caller to log the gap marker with, or
+        ``None`` when the claim was lost."""
+        try:
+            if self._conn.in_transaction:
+                return None
+            cur = self._conn.execute(
+                "UPDATE audit_outbox SET state = 'dead', dead_at = ?, "
+                "last_error = ? WHERE id = ? AND claim_token = ? "
+                "AND state = 'claimed'",
+                (_now_utc(), reason[:500], claim.id, claim.token))
+            self._conn.commit()
+            if cur.rowcount != 1:
+                return None
+        except sqlite3.Error:
+            self._rollback_quietly()
+            return None
+        return claim._replace(kind="gap", reason=reason)
 
     def _flush_audit_outbox(self, *, contain_terminal: bool = False) -> None:
         """Append every ``audit_outbox`` event to the audit log, oldest first,

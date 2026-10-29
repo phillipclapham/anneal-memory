@@ -491,8 +491,9 @@ _EPISODE_VERSION_EXCLUDED: dict[str, str] = {
     "associations": "Hebbian strengths every wrap changes; recall weights, not content",
     "tombstones": "rows about episodes already deleted",
     "retired_origin_keys": "keys of episodes already deleted",
-    "episode_origin": "a provenance fact written once with its episode and never "
-                      "changed, so no later write can race an operator's read of it",
+    "episode_origin": "a provenance fact written once (with its episode, or by "
+                      "the generation-3 migration's backfill) and never changed, "
+                      "so no later write can race an operator's read of it",
 }
 _ORIGIN_TRIGGERS: dict[str, str] = {
     # "AND origin_key IS NULL": a second mint trigger left by another build updates
@@ -1302,6 +1303,13 @@ def _reconstruct_wrap_cancel_bound_error(session_id: str | None) -> "WrapCancelB
 # either is a new name, not an edit of the old one.
 TRUST_RULE_CORROBORATIVE = "trust-corroborative-v1"
 ORIGIN_RULE_CONSERVATIVE = "origin-conservative-v1"
+# The same rule, applied once per store (at its first open by a build with the
+# backfill) to an episode that predates origin storage. Named apart because the
+# inputs differ: it was
+# computed from the trust and sources as they stood at the migration, with no
+# runtime context (none existed when the episode was written), so a reader can
+# tell it from an origin fixed at write time.
+ORIGIN_RULE_BACKFILL = "origin-conservative-v1-backfill"
 
 
 def _corroborative_trust(own: str, source_levels: Iterable[str]) -> str:
@@ -1882,6 +1890,9 @@ _FIRST_GUARDED_GENERATION = 2
 # Present in ``metadata`` once the one-shot drop of off-list guards has run on
 # a store (see :func:`_install_generation_guards`).
 _HOST_GUARD_CLEANUP_KEY = "host_guard_cleanup_done"
+# Present in ``metadata`` once the episodes a store held when it first opened
+# under origin storage have their origin rows (B4, Store._backfill_episode_origin).
+_ORIGIN_BACKFILL_KEY = "origin_backfill_done"
 # The tables the guards cover: anneal's own physical tables, by name. A host's
 # table in the same file (an FTS5 index and its shadow tables, say) is the
 # host's: SQLite refuses a trigger on a virtual table, which failed every
@@ -2466,10 +2477,13 @@ CREATE TABLE IF NOT EXISTS idempotency_keys (
 -- recorded (a provenance fact, not a salience). origin is the lowest class among
 -- the declared trust, the sources' origins, and any runtime context active at
 -- the write; rule names the version of that computation, so a later rule is a
--- new value, never a silent redefinition. An episode with no row predates this
--- table and reads its origin by the same rule over today's rows
--- (Store.origin_map). Authority (trust_ceiling), origin (this) and
--- corroboration (the graduation gate) are three separate axes.
+-- new value, never a silent redefinition. The first open of an existing store
+-- by a build with the backfill writes a row for every episode it holds (rule
+-- origin-conservative-v1-backfill, Store._backfill_episode_origin); an episode
+-- with no row was written into the file by an older build afterwards and reads
+-- its origin by the same rule over today's rows (Store.origin_map).
+-- Authority (trust_ceiling), origin (this) and corroboration (the graduation
+-- gate) are three separate axes.
 CREATE TABLE IF NOT EXISTS episode_origin (
     episode_id TEXT PRIMARY KEY,
     origin TEXT NOT NULL CHECK (origin IN ('external', 'tool', 'agent', 'operator')),
@@ -3722,6 +3736,16 @@ class Store:
         self._migrate_episode_origin_key(commit=False)
         if pre_existing and not had_identity_table:
             self._seed_identity_from_files()
+        # B4: origin rows for the episodes already here, once per store. Keyed on
+        # a marker rather than on the table's absence (the identity seed's probe
+        # above): the first build that stored origin created the table without
+        # a backfill, and a store it opened must still get one.
+        if self._conn.execute("SELECT 1 FROM metadata WHERE key = ?",
+                              (_ORIGIN_BACKFILL_KEY,)).fetchone() is None:
+            if pre_existing:
+                self._backfill_episode_origin()
+            self._conn.execute("INSERT OR IGNORE INTO metadata (key, value) VALUES (?, '1')",
+                               (_ORIGIN_BACKFILL_KEY,))
         if seed_crystals:
             # Seeds only while there is no row: at the migration, and for a new
             # store created beside a legacy crystal file; only under the crystal
@@ -5737,6 +5761,7 @@ class Store:
                     (ep_id, rec["timestamp"], rec["type"], rec["content"],
                      rec["source"], session_id, meta_json),
                 )
+                self._store_team_origin(ep_id, new_row=True)
                 return ep_id
             except sqlite3.IntegrityError:
                 if nonce == 63:
@@ -5788,6 +5813,7 @@ class Store:
             return self._insert_team_row(rec, session_id), False
         self._conn.execute("UPDATE episodes SET metadata = ? WHERE id = ?",
                            (json.dumps(rec["metadata"]), kept))
+        self._store_team_origin(kept, new_row=False)
         return kept, True
 
     def _retired_copy(self, rec: dict[str, Any]) -> str | None:
@@ -6573,7 +6599,16 @@ class Store:
             trust_rank(floor)
         if isinstance(tainted_by, (str, bytes)):
             raise TypeError("tainted_by must be an iterable of episode ids, not a string")
-        ids = tuple(sorted({str(i).strip().lower() for i in tainted_by}))
+        wanted: set[str] = set()
+        for i in tainted_by:
+            # Refused, not coerced: str() of an Episode or a bytes id is a string
+            # no episode has, which would fail closed silently to external and
+            # hide the host's bug (L1 r1).
+            if not isinstance(i, str):
+                raise TypeError(
+                    f"tainted_by must hold episode id strings, not {type(i).__name__}")
+            wanted.add(i.strip().lower())
+        ids = tuple(sorted(wanted))
         frame = (floor, ids)
         self._runtime_contexts.append(frame)
         try:
@@ -6613,14 +6648,59 @@ class Store:
         assert lowest is not None
         return lowest
 
+    def _store_team_origin(self, ep_id: str, *, new_row: bool) -> None:
+        """The origin row of a team-imported episode, in the import's write
+        transaction. Team content is another principal's: ``external``, capped by
+        any active runtime context (which cannot go lower, but is applied so the
+        cap holds by construction rather than by that fact). ``new_row``: the
+        import inserted the episode just now (written as ``record`` writes it);
+        otherwise it revived a row it left earlier, which keeps the row it has,
+        since origin is written once and ``external`` is already the floor."""
+        cap = self._origin_cap_in_force()
+        origin = _lowest_class(["external", *([cap] if cap is not None else [])])
+        self._conn.execute(
+            f"INSERT OR {'REPLACE' if new_row else 'IGNORE'} INTO episode_origin "
+            "(episode_id, origin, rule) VALUES (?, ?, ?)",
+            (ep_id, origin, ORIGIN_RULE_CONSERVATIVE),
+        )
+
+    def _backfill_episode_origin(self) -> None:
+        """Generation-3 migration (B4): give every existing episode its origin row,
+        computed once, now, by the conservative rule (:meth:`origin_map`), so a
+        later ``set_trust`` cannot raise what an episode recorded before origin
+        was stored reads. Runs in the open's schema transaction, once per store
+        (the caller sets ``_ORIGIN_BACKFILL_KEY`` in that transaction), only for
+        episodes with no row, and ``INSERT OR IGNORE``, so it is idempotent;
+        never commits."""
+        ids = [r[0] for r in self._conn.execute(
+            "SELECT e.id FROM episodes e LEFT JOIN episode_origin o "
+            "ON o.episode_id = e.id WHERE o.episode_id IS NULL")]
+        if not ids:
+            return
+        origins = self._origin_map_locked(ids)
+        self._conn.executemany(
+            "INSERT OR IGNORE INTO episode_origin (episode_id, origin, rule) "
+            "VALUES (?, ?, ?)",
+            [(ep_id, origin, ORIGIN_RULE_BACKFILL) for ep_id, origin in origins.items()],
+        )
+
     def origin_map(self, episode_ids: Iterable[str]) -> dict[str, str]:
         """``{id: origin}`` for each listed episode that exists, every class
-        listed, ``agent`` included. An episode recorded by a build that stores
-        origin reads what was stored (a provenance fact: later trust changes do
-        not move it). An older one has no row and reads
-        ``origin-conservative-v1`` computed now: the lowest class among its own
-        trust and every declared source, through every level (an edge to a
-        removed source reads its marker, or ``external`` with none)."""
+        listed, ``agent`` included. Every episode has a stored row once its store
+        has been opened by a build with the backfill: written with the episode,
+        or, for an episode that predates origin storage, by that open's backfill
+        (:meth:`_backfill_episode_origin`). That row is a provenance fact: later
+        trust changes do not move it.
+
+        An episode with no row reads ``origin-conservative-v1`` computed now:
+        the lowest class among its own trust and every declared source, through
+        every level (an edge to a removed source reads its marker, or
+        ``external`` with none), and a team-imported row (``team:`` source)
+        counts as ``external``. After the migration this is only for a
+        straggler: an episode an older build wrote into the same file, which
+        has no row. Computed from today's trust, so a later ``set_trust`` can
+        still move a straggler's reading; the backfill exists so that no
+        episode the migration saw is in that position."""
         with self._db_boundary("origin_map"), self._read_snapshot():
             return self._origin_map_locked(episode_ids)
 
@@ -6655,7 +6735,7 @@ class Store:
         for part, marks in chunks(wanted):
             live.update(r[0] for r in conn.execute(
                 f"SELECT id FROM episodes WHERE id IN ({marks})", part))
-        out = {i: o for i, o in stored_of(sorted(live)).items()}
+        out = stored_of(sorted(live))
         pending = sorted(live - set(out))
         if not pending:
             return out
@@ -6685,28 +6765,41 @@ class Store:
             leaf.update(stored_of(sorted(found)))
             walked |= found
             frontier = sorted(found - set(leaf))
-        own = self.trust_map(walked - set(leaf))
-        for ep in pending:
-            levels: list[str] = []
-            seen: set[str] = set()
-            stack = [ep]
-            while stack:
-                node = stack.pop()
-                if node in seen:
-                    continue
-                seen.add(node)
-                if node in leaf:
-                    levels.append(leaf[node])
-                    continue
-                levels.append(own.get(node, DEFAULT_TRUST))
-                for src, fixed in edges.get(node, ()):
-                    if src is not None:
-                        stack.append(src)
-                    else:
-                        levels.append(fixed or "external")
+        inner = sorted(walked - set(leaf))
+        own = self.trust_map(inner)
+        # A team-imported row is another principal's content: external, as the
+        # import path stores it (_store_team_origin). Matched by the source
+        # namespace, which only lowers: a row that merely claims it reads lower.
+        for part, marks in chunks(inner):
+            own.update((r[0], "external") for r in conn.execute(
+                f"SELECT id FROM episodes WHERE id IN ({marks}) "
+                f"AND source >= 'team:' AND source < 'team;'", part))
+        # The lowest class reachable from each node, by propagating lows along the
+        # edges to a fixed point: each value only falls, through four classes, so
+        # the work is linear in the edges. (A walk per episode was quadratic on a
+        # long derivation chain, and the migration's backfill runs this over
+        # every episode in the store.)
+        val: dict[str, str] = dict(leaf)
+        dependents: dict[str, list[str]] = {}
+        for node in inner:
+            levels = [own.get(node, DEFAULT_TRUST)]
+            for src, fixed in edges.get(node, ()):
+                if src is None:
+                    levels.append(fixed or "external")
+                else:
+                    dependents.setdefault(src, []).append(node)
             lowest = _lowest_class(levels)
             assert lowest is not None
-            out[ep] = lowest
+            val[node] = lowest
+        work = deque(val)
+        while work:
+            node = work.popleft()
+            for child in dependents.get(node, ()):
+                if trust_rank(val[node]) < trust_rank(val[child]):
+                    val[child] = val[node]
+                    work.append(child)
+        for ep in pending:
+            out[ep] = val[ep]
         return out
 
     def origin_counts(self) -> dict[str, int]:

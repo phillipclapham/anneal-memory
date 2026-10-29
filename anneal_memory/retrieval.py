@@ -91,6 +91,7 @@ from .types import (
     REPLACED_CONTENT_MAX,
     ReplacedEpisode,
     ScoredEpisode,
+    trust_rank,
 )
 
 RetrievalMode = Literal["prompt", "query"]
@@ -1046,8 +1047,16 @@ def retrieve_relevant(
             # can render relayed content as data. Read in the same snapshot, after
             # the redirect, so a replacing episode carries its own class, and each
             # replaced episode it carries (whose text it shows) carries its own.
-            episode_trust = store.effective_trust_map(
-                [ep.id for ep in episodes] + [r.id for ep in episodes for r in ep.replaces])
+            shown = [ep.id for ep in episodes] + [r.id for ep in episodes for r in ep.replaces]
+            episode_trust = store.effective_trust_map(shown)
+            # B4: the label is the lower of that corroborative class and the
+            # episode's origin, so content that came in from a tool or an outside
+            # source reads as relayed even when an operator source corroborates
+            # it (an agent summary of a page that also cites an operator note).
+            # Graduation does not read this label.
+            for ep_id, origin in store.origin_map(shown).items():
+                if trust_rank(origin) < trust_rank(episode_trust.get(ep_id, DEFAULT_TRUST)):
+                    episode_trust[ep_id] = origin
             episodes = [
                 dataclasses.replace(
                     ep, trust=episode_trust.get(ep.id, DEFAULT_TRUST),

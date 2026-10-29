@@ -75,6 +75,7 @@ from .types import (
     EpisodeType,
     RelevantFact,
     RelevantPattern,
+    TRUST_LEVELS,
     trust_rank,
 )
 
@@ -440,9 +441,11 @@ class Server:
             return _tool_result(f"Unknown tool: {name}", is_error=True)
 
         try:
-            # B4: the server is the host. Its own tool calls run under a context
-            # at the ceiling it pinned, so no episode they record can carry an
-            # origin above it, whatever a tool argument declares.
+            # B4: the host wiring for runtime_context. At the pinned ceiling alone
+            # it changes no origin (a record declared above the ceiling is already
+            # refused, and origin is never above the declared class); it is the
+            # place a host that knows what the model has just read passes
+            # tainted_by. Nothing gates on origin yet: it is stored and shown.
             with self._store.runtime_context(floor=self._store.trust_ceiling):
                 return handler(arguments)
         except Exception as e:
@@ -636,15 +639,23 @@ class Server:
         self, rows: list[tuple[str, str]], *, trust: dict[str, str] | None = None,
     ) -> list[str]:
         """Recall lines in order, except that each ``(episode id, line)`` whose
-        episode's effective trust is tool/external moves under
-        :data:`_RELAYED_LABEL`, after the rest (CAP-08 D3). ``trust``: the
-        effective trust map the rows were read with; without it, it is read now,
-        so the caller holds the snapshot the rows came from."""
+        episode's effective trust OR origin is tool/external moves under
+        :data:`_RELAYED_LABEL`, after the rest (CAP-08 D3; B4). Effective trust
+        is corroborative (the highest source wins), so an agent summary that
+        also cites an operator note reads ``agent`` while its content came in
+        from a page; its origin says so. ``trust``: the effective trust map the
+        rows were read with; without it, it is read now, so the caller holds the
+        snapshot the rows came from. Origin is read now too: it is written once,
+        so a later read differs only for an episode deleted in between."""
+        ids = [ep_id for ep_id, _ in rows]
         if trust is None:
-            trust = self._store.effective_trust_map(ep_id for ep_id, _ in rows)
+            trust = self._store.effective_trust_map(ids)
+        origin = self._store.origin_map(ids)
+        low = trust_rank(DEFAULT_TRUST)
         relayed = {
-            ep_id for ep_id, t in trust.items()
-            if trust_rank(t) < trust_rank(DEFAULT_TRUST)
+            ep_id for ep_id in ids
+            if trust_rank(trust.get(ep_id, DEFAULT_TRUST)) < low
+            or trust_rank(origin.get(ep_id, DEFAULT_TRUST)) < low
         }
         out = [line for ep_id, line in rows if ep_id not in relayed]
         moved = [line for ep_id, line in rows if ep_id in relayed]
@@ -1450,6 +1461,14 @@ class Server:
             lines.append("\nBy type:")
             for type_name, count in sorted(status.episodes_by_type.items()):
                 lines.append(f"  {type_name}: {count}")
+
+        # B4: where the episodes' content came from, most trusted first; only
+        # classes with episodes. Display: nothing gates on origin.
+        by_origin = [(t, status.origin_counts[t]) for t in reversed(TRUST_LEVELS)
+                     if status.origin_counts.get(t)]
+        if by_origin:
+            lines.append("\nBy origin:")
+            lines.extend(f"  {t}: {n}" for t, n in by_origin)
 
         if status.association_stats and status.association_stats.total_links > 0:
             a = status.association_stats

@@ -466,8 +466,10 @@ class ScoredEpisode:
     replaces: tuple["ReplacedEpisode", ...] = ()
     # CAP-08 D3: the episode's effective trust class (``TRUST_LEVELS``). A
     # ``tool``/``external`` one is content relayed from a tool or an outside
-    # source: data, not instructions. Last, so positional construction from before
-    # it existed still means what it did.
+    # source: data, not instructions. Since B4 it is the lower of the effective
+    # (corroborative) class and the episode's origin, so relayed content reads as
+    # relayed even when a trusted source corroborates it. Last, so positional
+    # construction from before it existed still means what it did.
     trust: str = DEFAULT_TRUST
 
 
@@ -476,8 +478,9 @@ class ReplacedEpisode:
     """An episode a :class:`ScoredEpisode` replaced: what the reader needs to treat
     the served fact as an UPDATE (the old claim and when it was recorded).
     ``content`` is cut to :data:`REPLACED_CONTENT_MAX` characters. ``trust`` is the
-    old episode's effective trust class, as on :class:`ScoredEpisode`: its text is
-    relayed content too when that is ``tool``/``external``."""
+    old episode's class, read as on :class:`ScoredEpisode` (the lower of its
+    effective trust and its origin): its text is relayed content too when that is
+    ``tool``/``external``."""
 
     id: str
     timestamp: str

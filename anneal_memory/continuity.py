@@ -30,6 +30,7 @@ import sqlite3
 import uuid
 import logging
 import warnings
+from collections.abc import Mapping
 from dataclasses import asdict
 from datetime import date, datetime
 from typing import TYPE_CHECKING, Any, cast, overload
@@ -691,7 +692,9 @@ def _check_hard_max(
     raise ContinuityValidationError(message, chars=chars, bound=bound, target=target)
 
 
-def format_episodes_for_wrap(episodes: list[Episode]) -> str:
+def format_episodes_for_wrap(
+    episodes: list[Episode], *, origins: Mapping[str, str] | None = None,
+) -> str:
     """Format episodes into a readable summary for the compression prompt.
 
     Groups episodes by type for clearer presentation.
@@ -699,6 +702,10 @@ def format_episodes_for_wrap(episodes: list[Episode]) -> str:
 
     Args:
         episodes: List of episodes to format.
+        origins: ``{episode id: origin}`` (B4, :meth:`Store.origin_map`). An
+            episode whose origin is not the default ``agent`` is tagged
+            ``[origin: <class>]``, so the composer sees where its content came
+            from. Display only: graduation's gate reads corroborative trust.
 
     Returns:
         Formatted string suitable for inclusion in the wrap package.
@@ -716,11 +723,13 @@ def format_episodes_for_wrap(episodes: list[Episode]) -> str:
         lines.append(f"\n### {type_name.title()}s ({len(type_eps)})")
         for ep in type_eps:
             source_info = f" [{ep.source}]" if ep.source != "agent" else ""
+            origin = (origins or {}).get(ep.id, DEFAULT_TRUST)
+            origin_info = f" [origin: {origin}]" if origin != DEFAULT_TRUST else ""
             replaced = (
                 f" [superseded by {ep.superseded_by}: do not cite as current]"
                 if ep.superseded_by else ""
             )
-            lines.append(f"- ({ep.id}) {ep.content}{source_info}{replaced}")
+            lines.append(f"- ({ep.id}) {ep.content}{source_info}{origin_info}{replaced}")
 
     return "\n".join(lines)
 
@@ -808,6 +817,7 @@ def _build_wrap_package(
     staleness_days: int = 7,
     schema: list[SectionSpec] | None = None,
     crystal_store: CrystalStore | None = None,
+    origins: Mapping[str, str] | None = None,
 ) -> WrapPackageDict:
     """Pure helper — build an agent-facing compression package from pre-fetched inputs.
 
@@ -852,7 +862,7 @@ def _build_wrap_package(
         max_chars = default_max_chars(schema)
 
     # Format episodes for the agent
-    formatted_episodes = format_episodes_for_wrap(episodes)
+    formatted_episodes = format_episodes_for_wrap(episodes, origins=origins)
 
     # Detect stale patterns in existing continuity
     stale_patterns: list[StalePatternDict] = []
@@ -1780,6 +1790,9 @@ def _compose_wrap_package(
         today=today,
         schema=schema,
         crystal_store=crystal_store,
+        # B4: the composer sees each episode's origin when it is not agent.
+        # Written once per episode, so a keyed prepare's replay renders the same.
+        origins=store.origin_map([ep.id for ep in episodes]),
     )
     # spore-1233: the composer sees each State line with the flag a re-derive
     # run gives it now, so it can rewrite what no longer holds. Measured

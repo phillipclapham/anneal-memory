@@ -609,6 +609,13 @@ def cmd_set_schema(args: argparse.Namespace) -> None:
         )
 
 
+def _origin_counts_str(counts: dict[str, int]) -> str:
+    """``operator: 1, agent: 4, external: 2``: the classes with episodes, most
+    trusted first (B4, :attr:`StoreStatus.origin_counts`); empty with none."""
+    return ", ".join(f"{t}: {counts[t]}" for t in reversed(TRUST_LEVELS)
+                     if counts.get(t))
+
+
 def cmd_status(args: argparse.Namespace) -> None:
     """Show store status."""
     with _open_store(args) as store:
@@ -632,6 +639,8 @@ def cmd_status(args: argparse.Namespace) -> None:
                 "tombstone_count": status.tombstone_count,
                 "continuity_chars": status.continuity_chars,
                 "episodes_by_type": status.episodes_by_type,
+                # B4: live episodes by origin, every class listed (display only).
+                "origin_counts": status.origin_counts,
                 "schema": schema_name,
                 "sections": section_headings,
                 "association_stats": _assoc_stats_dict(status.association_stats),
@@ -675,6 +684,9 @@ def cmd_status(args: argparse.Namespace) -> None:
                 f"{t}: {c}" for t, c in sorted(status.episodes_by_type.items())
             )
             print(f"  By type:  {types_str}")
+        origin_str = _origin_counts_str(status.origin_counts)
+        if origin_str:
+            print(f"  By origin: {origin_str}")
         print(f"Wraps:      {status.total_wraps} total, last {_format_timestamp(status.last_wrap_at)}")
         if status.wrap_in_progress:
             print(f"  !! Wrap in progress")
@@ -2532,9 +2544,17 @@ def cmd_export(args: argparse.Namespace) -> None:
         # not read them (a file cannot vouch, and a merged edge could; L3 r5).
         export_trust = store.effective_trust_map(ep["id"] for ep in episodes)
         export_edges = store.derived_edges(ep["id"] for ep in episodes)
+        # B4: origin rides along for every episode. The effective trust above is
+        # corroborative (the highest source wins), so on its own it re-records
+        # an episode a runtime context capped at the class it was declared with;
+        # import takes the lower of the two, so a file can lower origin, never
+        # raise it.
+        export_origin = store.origin_map(ep["id"] for ep in episodes)
         for ep in episodes:
             if ep["id"] in export_trust:
                 ep["trust"] = export_trust[ep["id"]]
+            if ep["id"] in export_origin:
+                ep["origin"] = export_origin[ep["id"]]
             if ep["id"] in export_edges:
                 ep["derived_from"] = [
                     {"id": src, **({"gone_trust": gone} if gone is not None else {})}
@@ -2765,15 +2785,24 @@ def cmd_import(args: argparse.Namespace) -> None:
                     skipped += 1
                     continue
 
-                recorded = store._import_record(
-                    ep_data.get("id"),
-                    content=ep_data["content"],
-                    episode_type=ep_data["type"],
-                    source=ep_data.get("source", "import"),
-                    metadata=ep_data.get("metadata"),
-                    timestamp=ep_data.get("timestamp"),
-                    trust=ep_trust,
-                )
+                # B4: the file's origin, when it has one, is a floor on the origin
+                # the record computes from the declared class: the lower wins, so
+                # an edited file can lower origin and never raise it. An export
+                # from before origin was written has no field and imports as it
+                # always did. A value that is not a class is refused like an
+                # unknown trust (runtime_context raises ValueError).
+                file_origin = ep_data.get("origin")
+                with (store.runtime_context(floor=file_origin)
+                      if file_origin is not None else contextlib.nullcontext()):
+                    recorded = store._import_record(
+                        ep_data.get("id"),
+                        content=ep_data["content"],
+                        episode_type=ep_data["type"],
+                        source=ep_data.get("source", "import"),
+                        metadata=ep_data.get("metadata"),
+                        timestamp=ep_data.get("timestamp"),
+                        trust=ep_trust,
+                    )
                 imported += 1
                 capped += was_capped
             except Exception as e:

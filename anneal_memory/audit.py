@@ -785,6 +785,9 @@ class AuditTrail:
                      pattern_associations_seeded, pattern_co_surface_drained,
                      pattern_associations_gc, pattern_association_renamed,
                      pattern_concept_severed
+                   Outbox delivery:
+                     outbox_gap (a queued event that could not be delivered;
+                     its data names the dead row's ref, the attempts and why)
             data: Event-specific payload.
             actor: Identity of the actor triggering this event.
                    EU AI Act Article 12(2) requires actor identity on

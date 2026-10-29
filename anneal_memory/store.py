@@ -13927,8 +13927,8 @@ class Store:
         which stops there without raising and owns the suppression
         (``_replay_deferred_audits``).
 
-        Known edges: no heartbeat (a holder that outlives its 60 s lease is
-        handled by the ref check at append and the token check at ack); the
+        Known edges: no heartbeat (a holder that outlives its lease,
+        ``_OUTBOX_CLAIM_TTL_SECONDS``, is handled by the ref check at append and the token check at ack); the
         callback is at-most-once per newly appended entry; payloads round-trip
         JSON (tuples become lists); a duplicate across a weekly audit-file
         rotation keeps its ref (:meth:`AuditTrail._append_once`)."""

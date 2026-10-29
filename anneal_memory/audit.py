@@ -856,14 +856,18 @@ class AuditTrail:
         concurrent append can only make it smaller than the true tail, which
         widens that scan and never narrows it."""
         try:
-            with _open_regular(self._active_path) as f:
-                line = _last_valid_entry_in(f, 0)[0]
+            f_cm = _open_regular(self._active_path)
         except FileNotFoundError:
             return 0
-        if not line:
-            return 0
-        seq = json.loads(line).get("seq")
-        return seq + 1 if isinstance(seq, int) and not isinstance(seq, bool) else 0
+        with f_cm as f:
+            for raw in _lines_backward(f):
+                try:
+                    seq = json.loads(raw).get("seq") if raw.strip() else None
+                except (ValueError, AttributeError):
+                    continue
+                if isinstance(seq, int) and not isinstance(seq, bool):
+                    return seq + 1
+        return 0
 
     def _append_once(
         self,
@@ -938,8 +942,10 @@ class AuditTrail:
                     entry = json.loads(raw)
                 except ValueError:
                     continue  # a torn or foreign line: not an entry
-                if not isinstance(entry, dict):
-                    continue
+                try:
+                    _require_entry_dict(entry)  # the readers' own validity test
+                except Exception:
+                    continue  # not an entry: it cannot stand for one
                 seq = entry.get("seq")
                 if (since_seq is not None and isinstance(seq, int)
                         and not isinstance(seq, bool) and seq < since_seq):

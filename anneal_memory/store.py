@@ -2685,6 +2685,7 @@ class _OutboxClaim(NamedTuple):
     tail_seq: int | None
     kind: Literal["event", "gap"]
     reason: str | None
+    bumped: bool = False  # this claim counted an attempt (only a batch's head does)
 
 
 # Generation 3: the principal scope idempotency keys are bound under. '' until a
@@ -13732,8 +13733,8 @@ class Store:
         expired, a ``pending`` row inside its backoff), so a later row is never
         handed out ahead of an unfinished earlier one. A ``dead`` row whose gap
         marker is not logged yet is returned as ``kind="gap"`` and counts as the
-        head too; a dead row already marked is skipped. ``attempts`` is bumped
-        AT the claim, so a flusher that crashes still counts. A row whose
+        head too; a dead row already marked is skipped. the batch's head has ``attempts`` bumped
+        AT the claim, so a flusher that crashes on it still counts. A row whose
         ``attempts`` has already reached :data:`_OUTBOX_MAX_ATTEMPTS` becomes
         ``dead`` here (retained, never retried) and comes back as a gap row.
         ``tail_seq`` (the audit tail seq the caller read) is stored only on a
@@ -13788,16 +13789,21 @@ class Store:
                         row_id, token, event_json, attempts, row_tail,
                         "gap", reason))
                     continue
+                # Only the batch's head is charged an attempt: the rows behind
+                # it have not been tried, and a flusher that dies on the head
+                # must not age them toward dead. A row behind it that then
+                # fails is charged by its nack.
+                bump = 0 if any(c.kind == "event" for c in claims) else 1
                 self._conn.execute(
                     "UPDATE audit_outbox SET state = 'claimed', "
-                    "attempts = attempts + 1, claim_token = ?, "
+                    "attempts = attempts + ?, claim_token = ?, "
                     "claim_expires_at = ?, not_before = NULL, "
                     "claim_tail_seq = COALESCE(claim_tail_seq, ?) WHERE id = ?",
-                    (token, expires, tail_seq, row_id))
+                    (bump, token, expires, tail_seq, row_id))
                 claims.append(_OutboxClaim(
-                    row_id, token, event_json, attempts + 1,
+                    row_id, token, event_json, attempts + bump,
                     row_tail if row_tail is not None else tail_seq,
-                    "event", None))
+                    "event", None, bool(bump)))
             self._conn.commit()
         except Exception:
             self._rollback_quietly()
@@ -13840,21 +13846,29 @@ class Store:
             self._rollback_quietly()
             return False
 
-    def _outbox_nack(self, claim: _OutboxClaim, error: BaseException | str) -> bool:
+    def _outbox_nack(
+        self, claim: _OutboxClaim, error: BaseException | str, *, counted: bool = True,
+    ) -> bool:
         """Release a claimed row back to ``pending`` after a failed append,
         with the error kept and a retry backoff of ``2**attempts`` seconds
         (capped at :data:`_OUTBOX_BACKOFF_CAP_SECONDS`). ``attempts`` was
-        already counted at the claim. Token-checked like :meth:`_outbox_ack`;
-        ``False`` when the claim was lost."""
+        counted at the claim when the row headed its batch, else here;
+        ``counted=False`` takes any claim-time attempt back (the failure was
+        the sink's or an interrupt, not the row's), and the backoff then stays
+        at its first step. Token-checked like
+        :meth:`_outbox_ack`; ``False`` when the claim was lost."""
         try:
             if self._conn.in_transaction:
                 return False
-            delay = min(_OUTBOX_BACKOFF_CAP_SECONDS, 2 ** max(claim.attempts, 0))
+            net = (1 if counted else 0) - (1 if claim.bumped else 0)
+            step = max(claim.attempts + net, 1) if counted else 1
+            delay = min(_OUTBOX_BACKOFF_CAP_SECONDS, 2 ** step)
             cur = self._conn.execute(
                 "UPDATE audit_outbox SET state = 'pending', claim_token = NULL, "
-                "claim_expires_at = NULL, not_before = ?, last_error = ? "
+                "claim_expires_at = NULL, not_before = ?, last_error = ?, "
+                "attempts = MAX(attempts + ?, 0) "
                 "WHERE id = ? AND claim_token = ? AND state = 'claimed'",
-                (_utc_after(delay), repr(error)[:500], claim.id, claim.token))
+                (_utc_after(delay), repr(error)[:500], net, claim.id, claim.token))
             self._conn.commit()
             return cur.rowcount == 1
         except sqlite3.Error:
@@ -13872,9 +13886,10 @@ class Store:
                 return False
             cur = self._conn.execute(
                 "UPDATE audit_outbox SET state = 'pending', "
-                "attempts = MAX(attempts - 1, 0), claim_token = NULL, "
+                "attempts = MAX(attempts - ?, 0), claim_token = NULL, "
                 "claim_expires_at = NULL WHERE id = ? AND claim_token = ? "
-                "AND state = 'claimed'", (claim.id, claim.token))
+                "AND state = 'claimed'",
+                (1 if claim.bumped else 0, claim.id, claim.token))
             self._conn.commit()
             return cur.rowcount == 1
         except sqlite3.Error:
@@ -13910,11 +13925,15 @@ class Store:
         ``on_audit_event`` callback. Nothing here holds the store's write lock
         across file I/O or a callback, so a callback may write the store.
 
-        Order is the emit order: the first failed row ends the flush (the rows
-        behind it are released uncounted), and a later row is never claimed past
-        an earlier unfinished one. A failed append is a counted failure, the
-        row goes back to ``pending`` with a backoff, and after
-        ``_OUTBOX_MAX_ATTEMPTS`` claims it is ``dead``: retained, never
+        Order among QUEUED events is the emit order: the first failed row ends
+        the flush (the rows behind it are released uncounted), and a later row
+        is never claimed past an earlier unfinished one. Events that never enter
+        the outbox (``_box_audit_event`` lists the boxed sites) and a write a
+        callback makes after its own row's ack are appended directly, so they
+        can land ahead of rows still queued. A failed append is a counted failure and the
+        row goes back to ``pending`` with a backoff; a row the append itself
+        refuses is ``dead`` after ``_OUTBOX_MAX_ATTEMPTS`` claims, while a sink
+        failure (``OSError``) or an interrupt is retried without counting: retained, never
         retried, with an ``outbox_gap`` entry in the chain naming its ref. A row
         that does not parse goes straight to dead the same way. A flusher that
         dies between an append and its ack leaves the row claimed; the reclaim
@@ -13939,28 +13958,53 @@ class Store:
                     "SELECT 1 FROM audit_outbox WHERE state != 'dead' "
                     "OR gap_logged = 0 LIMIT 1").fetchone() is None:
                 return
-        except sqlite3.Error:
+        except sqlite3.Error as exc:
             # Busy or absent: the rows stay for the next batch or open; a
-            # long-lived process that never batches again delays them.
+            # long-lived process that never batches again delays them. A table
+            # of an earlier shape (a groundwork dev copy) never flushes, so that
+            # one is counted and warned, not left looking healthy.
+            if "no such column" in str(exc):
+                self._note_outbox_row_failure(
+                    0, exc, kept=True, method="audit outbox",
+                    committed="a queued audit event")
             return
         terminal: BaseException | None = None
         try:
-            try:
-                tail: int | None = self._audit._tail_seq()
-            except Exception:
-                tail = None  # the append refuses and counts it; the claim waits
-            claims = self._outbox_claim(tail_seq=tail)
-            for position, claim in enumerate(claims):
+            progressed = True
+            while progressed and terminal is None:
+                progressed = False
                 try:
-                    if not self._deliver_outbox_claim(claim):
+                    tail: int | None = self._audit._tail_seq()
+                except Exception:
+                    tail = None  # the append refuses and counts it; the claim waits
+                claims = self._outbox_claim(tail_seq=tail)
+                for position, claim in enumerate(claims):
+                    try:
+                        delivered = self._deliver_outbox_claim(claim)
+                    except Exception:
+                        # Not a sink failure (those are settled inside): a bug.
+                        # Log it, give the rest back, end the flush; the row's
+                        # lease lapses and its attempt is already counted.
+                        try:
+                            _LOG.warning("audit outbox row %s: delivery failed",
+                                         claim.id, exc_info=True)
+                        except Exception:
+                            pass
                         self._release_outbox_claims(claims[position + 1:])
                         break
-                except BaseException as exc:
-                    # An interrupt or exit: settle the rest, then re-raise (or
-                    # stop quietly in the batched replay).
-                    self._release_outbox_claims(claims[position + 1:])
-                    terminal = exc
-                    break
+                    except BaseException as exc:
+                        # An interrupt or exit: settle the rest, then re-raise
+                        # (or stop quietly in the batched replay).
+                        self._release_outbox_claims(claims[position + 1:])
+                        terminal = exc
+                        break
+                    if not delivered:
+                        self._release_outbox_claims(claims[position + 1:])
+                        break
+                    progressed = True
+                else:
+                    continue  # the whole batch delivered: claim the next one
+                break
         except Exception:
             try:
                 _LOG.warning("audit outbox flush failed; its rows stay for the "
@@ -13968,6 +14012,13 @@ class Store:
             except Exception:
                 pass
         finally:
+            try:
+                # An interrupt between a statement and its commit leaves a
+                # transaction open; nothing here may hold one past the flush.
+                if self._conn.in_transaction:
+                    self._rollback_quietly()
+            except Exception:
+                pass
             try:
                 self._persist_audit_health()
             except Exception:
@@ -14019,7 +14070,14 @@ class Store:
                     event, payload if payload is not None else {}, actor,
                     ref=ref, since_seq=claim.tail_seq)
             except BaseException as exc:
-                self._outbox_nack(claim, exc)
+                # A sink failure (disk full, a lock timeout, a quarantined
+                # manifest are all OSError) or an interrupt is not this row's
+                # fault: the retry is not counted toward dead, so an outage
+                # cannot kill the queue. A row the append refuses itself
+                # (a payload it will not take) is counted.
+                self._outbox_nack(
+                    claim, exc,
+                    counted=isinstance(exc, Exception) and not isinstance(exc, OSError))
                 self._note_outbox_row_failure(
                     claim.id, exc, kept=True, method=method, committed=committed)
                 if not isinstance(exc, Exception):

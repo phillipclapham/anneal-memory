@@ -71,7 +71,7 @@ class TestOutboxClaimAck:
         claims = store._outbox_claim(tail_seq=7)
         assert [c.id for c in claims] == ids
         assert {c.kind for c in claims} == {"event"}
-        assert [c.attempts for c in claims] == [1, 1]
+        assert [c.attempts for c in claims] == [1, 0]  # only the head is charged
         assert {_row(store, i)[0] for i in ids} == {"claimed"}
         assert all(c.tail_seq == 7 for c in claims)
         assert store._outbox_ack(claims[0]) is True
@@ -162,7 +162,7 @@ class TestOutboxPoisonBound:
         assert store._outbox_ack(gap) is True
         assert _row(store, poison)[0] == "dead"       # retained
         assert _row(store, poison)[7] == 1            # gap marker logged
-        assert claims[1].attempts == 1  # never aged by the poison head's claims
+        assert claims[1].attempts == 1  # its first real try; the poison head's claims never aged it
         assert store._outbox_ack(claims[1]) is True
         # a dead, marked row is never claimed again
         assert store._outbox_claim() == []
@@ -354,15 +354,17 @@ def _events(db_path) -> list[str]:
     return [e["event"] for e in _entries(db_path)]
 
 
-def _failing(store: Store, fail_event: str, hits: list[str] | None = None):
-    """Make the audit sink raise for ``fail_event`` only."""
+def _failing(store: Store, fail_event: str, hits: list[str] | None = None,
+             exc: Exception | None = None):
+    """Make the audit sink raise for ``fail_event`` only. The default is a
+    refusal of the row itself; pass an OSError for a failing sink."""
     real = store._audit._append_once
 
     def sink(event, *args, **kwargs):
         if event == fail_event:
             if hits is not None:
                 hits.append(event)
-            raise OSError(28, "No space left on device")
+            raise exc if exc is not None else RuntimeError("this row, every time")
         return real(event, *args, **kwargs)
 
     store._audit._append_once = sink
@@ -537,3 +539,68 @@ class TestOutboxFlush:
         finally:
             conn.close()
         assert _events(db).count("crash_event") == 1
+
+    def test_a_sink_outage_never_kills_a_row_and_the_queue_resumes(
+            self, store, tmp_path):
+        """A full disk or a locked trail is the sink's failure, not the row's:
+        many failed flushes later the row is still pending with no attempt
+        counted, and when the sink heals it is delivered once, in order."""
+        _insert(store, "first", "second")
+        real = _failing(store, "first", exc=OSError(28, "No space left on device"))
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            for _ in range(store_mod._OUTBOX_MAX_ATTEMPTS * 3):
+                store._flush_audit_outbox()
+                _lapse(store)
+        assert [tuple(r) for r in store._conn.execute(
+            "SELECT id, state, attempts FROM audit_outbox ORDER BY id")] == [
+                (1, "pending", 0), (2, "pending", 0)]
+        store._audit._append_once = real
+        store._flush_audit_outbox()
+        events = _events(tmp_path / "ob.db")
+        assert events.count("first") == 1 and events.count("second") == 1
+        assert events.index("first") < events.index("second")
+
+    def test_one_flush_drains_more_rows_than_one_claim_batch(self, store, tmp_path):
+        total = store_mod._OUTBOX_CLAIM_BATCH * 2 + 5
+        _insert(store, *[f"n{i}" for i in range(total)])
+        store._flush_audit_outbox()
+        assert store._conn.execute(
+            "SELECT COUNT(*) FROM audit_outbox").fetchone()[0] == 0
+        got = [e for e in _events(tmp_path / "ob.db") if e.startswith("n")]
+        assert got == [f"n{i}" for i in range(total)]
+
+    def test_a_crash_loop_on_the_head_does_not_age_the_rows_behind_it(self, store):
+        """L2 finding: five unsettled claims of one batch used to take all three
+        rows to dead, though only the head was ever tried."""
+        ids = _insert(store, "a", "b", "c")
+        for _ in range(store_mod._OUTBOX_MAX_ATTEMPTS):
+            assert [c.id for c in store._outbox_claim()] == ids
+            for i in ids:
+                _expire(store, i)
+        attempts = {r[0]: r[1] for r in store._conn.execute(
+            "SELECT id, attempts FROM audit_outbox")}
+        assert attempts == {ids[0]: store_mod._OUTBOX_MAX_ATTEMPTS, ids[1]: 0, ids[2]: 0}
+
+    def test_a_row_behind_the_head_that_fails_is_charged_by_its_nack(self, store):
+        first, second = _insert(store, "a", "b")
+        c1, c2 = store._outbox_claim()
+        assert store._outbox_ack(c1) is True
+        assert store._outbox_nack(c2, RuntimeError("its own")) is True
+        assert _row(store, second)[1] == 1   # charged once, not twice
+
+    def test_a_table_of_an_earlier_shape_is_loud(self, tmp_path):
+        s = Store(tmp_path / "old.db")
+        try:
+            s._conn.execute("DROP TABLE audit_outbox")
+            s._conn.execute("CREATE TABLE audit_outbox (id INTEGER PRIMARY KEY, "
+                            "event_json TEXT NOT NULL, created_at TEXT NOT NULL)")
+            s._conn.commit()
+            failures = s.status().audit_write_failures
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter("always")
+                s._flush_audit_outbox()
+            assert s.status().audit_write_failures == failures + 1
+            assert any("COMMITTED" in str(w.message) for w in caught)
+        finally:
+            s.close()

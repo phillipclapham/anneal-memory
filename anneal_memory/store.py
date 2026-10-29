@@ -13740,7 +13740,7 @@ class Store:
         expired, a ``pending`` row inside its backoff), so a later row is never
         handed out ahead of an unfinished earlier one. A ``dead`` row whose gap
         marker is not logged yet is returned as ``kind="gap"`` and counts as the
-        head too; a dead row already marked is skipped. the batch's head has ``attempts`` bumped
+        head too; a dead row already marked is skipped. the batch's first claim has ``attempts`` bumped
         AT the claim, so a flusher that crashes on it still counts. A row whose
         ``attempts`` has already reached :data:`_OUTBOX_MAX_ATTEMPTS` becomes
         ``dead`` here (retained, never retried) and comes back as a gap row.
@@ -13949,11 +13949,12 @@ class Store:
         the outbox (``_box_audit_event`` lists the boxed sites) and a write a
         callback makes after its own row's ack are appended directly, so they
         can land ahead of rows still queued. A failed append is a counted failure and the
-        row goes back to ``pending`` with a backoff; a row the append itself
-        refuses is ``dead`` after ``_OUTBOX_MAX_ATTEMPTS`` claims, while a sink
-        failure (``OSError``) or an interrupt is retried without counting: retained, never
-        retried, with an ``outbox_gap`` entry in the chain naming its ref. A row
-        that does not parse goes straight to dead the same way. A flusher that
+        row goes back to ``pending`` with a backoff. A sink failure (``OSError``)
+        or an interrupt is retried without counting toward dead; a row the
+        append itself refuses is ``dead`` after ``_OUTBOX_MAX_ATTEMPTS`` claims:
+        retained, never retried, with an ``outbox_gap`` entry in the chain
+        naming its ref. A row that does not parse goes straight to dead the
+        same way. A flusher that
         dies between an append and its ack leaves the row claimed; the reclaim
         finds the entry by its ``outbox_ref`` and acks without appending again.
 

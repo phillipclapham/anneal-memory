@@ -2665,6 +2665,11 @@ _OUTBOX_MAX_ATTEMPTS = 5
 _OUTBOX_CLAIM_TTL_SECONDS = 60
 _OUTBOX_BACKOFF_CAP_SECONDS = 300
 _OUTBOX_CLAIM_BATCH = 32
+#: The reason a claim gives a row that used up its attempts; the flush looks for
+#: its entry in the log before it writes a gap marker for it.
+_OUTBOX_EXHAUSTED = "attempts exhausted"
+#: Earlier-shape outbox tables already reported in this process, by database.
+_OUTBOX_SHAPE_REPORTED: set[str] = set()
 
 
 def _utc_after(seconds: float) -> str:
@@ -3384,8 +3389,6 @@ class Store:
         # (a caller's open transaction, a full disk) keeps the count alive for
         # the next attempt instead of losing it. See _persist_audit_health.
         self._audit_failures_unpersisted: int = 0
-        # The earlier-shape outbox table is reported once per process.
-        self._outbox_shape_reported: bool = False
         # Post-commit auto-prune health (Diogenes 2026-09-17). THIS
         # ``Store`` INSTANCE local only, unlike ``_audit_write_failures``
         # above — a prune failure has no metadata-table flush point, so this
@@ -13726,6 +13729,7 @@ class Store:
 
     def _outbox_claim(
         self, *, tail_seq: int | None = None, limit: int = _OUTBOX_CLAIM_BATCH,
+        max_id: int | None = None,
     ) -> list[_OutboxClaim]:
         """Claim up to ``limit`` ``audit_outbox`` rows for one flusher, oldest
         first, in ONE short ``BEGIN IMMEDIATE`` transaction; the caller does its
@@ -13741,7 +13745,8 @@ class Store:
         ``attempts`` has already reached :data:`_OUTBOX_MAX_ATTEMPTS` becomes
         ``dead`` here (retained, never retried) and comes back as a gap row.
         ``tail_seq`` (the audit tail seq the caller read) is stored only on a
-        row's first claim and kept across reclaims. Returns ``[]`` when nothing
+        row's first claim and kept across reclaims; ``max_id`` leaves rows
+        queued after the caller began for its next flush. Returns ``[]`` when nothing
         is claimable, in a transaction the caller owns, or on a busy store
         (the rows stay for the next flush)."""
         if self._read_only or self._closed:
@@ -13760,8 +13765,9 @@ class Store:
             rows = self._conn.execute(
                 "SELECT id, event_json, state, attempts, claim_expires_at, "
                 "not_before, claim_tail_seq, last_error, gap_logged, created_at "
-                "FROM audit_outbox WHERE state != 'dead' OR gap_logged = 0 "
-                "ORDER BY id LIMIT ?", (limit,)).fetchall()
+                "FROM audit_outbox WHERE (state != 'dead' OR gap_logged = 0) "
+                "AND id <= ? ORDER BY id LIMIT ?",
+                (max_id if max_id is not None else 1 << 62, limit)).fetchall()
             for (row_id, event_json, state, attempts, claim_expires,
                  not_before, row_tail, last_error, _gap, created) in rows:
                 if state in ("claimed", "dead") and claim_expires is not None \
@@ -13782,7 +13788,7 @@ class Store:
                         "gap", last_error, False, created))
                     continue
                 if attempts >= _OUTBOX_MAX_ATTEMPTS:
-                    reason = (f"attempts exhausted ({attempts})"
+                    reason = (f"{_OUTBOX_EXHAUSTED} ({attempts})"
                               + (f": {last_error}" if last_error else ""))
                     self._conn.execute(
                         "UPDATE audit_outbox SET state = 'dead', dead_at = ?, "
@@ -13821,9 +13827,10 @@ class Store:
             raise
         return claims
 
-    def _outbox_ack(self, claim: _OutboxClaim) -> bool:
+    def _outbox_ack(self, claim: _OutboxClaim, *, delivered: bool = False) -> bool:
         """Acknowledge a claimed row once its event is in the audit log: a
-        token-checked delete (a gap row is marked ``gap_logged`` and kept).
+        token-checked delete (a gap row is marked ``gap_logged`` and kept,
+        unless ``delivered``: its event was found in the log after all).
         ``True`` when this claim still held the row; ``False`` means the claim
         was lost (it expired and another flusher took or finished the row), a
         no-op the caller reports and does not repeat. Commits its own short
@@ -13832,7 +13839,14 @@ class Store:
         try:
             if self._conn.in_transaction:
                 return False
-            if claim.kind == "gap":
+            if claim.kind == "gap" and delivered:
+                # An exhausted row whose entry turned out to be in the log: it
+                # was delivered, so there is no gap to keep.
+                cur = self._conn.execute(
+                    "DELETE FROM audit_outbox "
+                    "WHERE id = ? AND claim_token = ? AND state = 'dead'",
+                    (claim.id, claim.token))
+            elif claim.kind == "gap":
                 cur = self._conn.execute(
                     "UPDATE audit_outbox SET gap_logged = 1, "
                     "claim_token = NULL, claim_expires_at = NULL "
@@ -13961,23 +13975,34 @@ class Store:
         if self._audit is None or self._read_only or self._closed:
             return
         try:
-            now = _now_utc()
-            if self._conn.in_transaction or self._conn.execute(
-                    "SELECT 1 FROM audit_outbox WHERE "
-                    "(state = 'pending' AND (not_before IS NULL OR not_before <= ?)) "
-                    "OR (state = 'claimed' AND (claim_expires_at IS NULL "
-                    "OR claim_expires_at <= ?)) "
-                    "OR (state = 'dead' AND gap_logged = 0 AND (claim_expires_at "
-                    "IS NULL OR claim_expires_at <= ?)) LIMIT 1",
-                    (now, now, now)).fetchone() is None:
+            if self._conn.in_transaction:
                 return
+            # The head decides: a claim never passes an unfinished earlier row,
+            # so when the oldest unfinished row is in backoff or under a live
+            # lease no claim can succeed and none takes the write lock.
+            head = self._conn.execute(
+                "SELECT state, not_before, claim_expires_at FROM audit_outbox "
+                "WHERE state != 'dead' OR gap_logged = 0 ORDER BY id LIMIT 1"
+            ).fetchone()
+            if head is None:
+                return
+            now = _now_utc()
+            state, not_before, lease = head
+            if state == "pending":
+                if not_before is not None and not_before > now:
+                    return
+            elif lease is not None and lease > now:
+                return
+            last_id = self._conn.execute(
+                "SELECT MAX(id) FROM audit_outbox").fetchone()[0]
         except sqlite3.Error as exc:
             # Busy or absent: the rows stay for the next batch or open; a
             # long-lived process that never batches again delays them. A table
             # of an earlier shape (a groundwork dev copy) never flushes, so that
             # one is counted and warned, not left looking healthy.
-            if "no such column" in str(exc) and not self._outbox_shape_reported:
-                self._outbox_shape_reported = True
+            if ("no such column" in str(exc)
+                    and str(self._path) not in _OUTBOX_SHAPE_REPORTED):
+                _OUTBOX_SHAPE_REPORTED.add(str(self._path))
                 self._note_outbox_row_failure(
                     0, exc, kept=True, method="audit outbox",
                     committed="a queued audit event")
@@ -13991,7 +14016,7 @@ class Store:
                     tail: int | None = self._audit._tail_seq()
                 except Exception:
                     tail = None  # the append refuses and counts it; the claim waits
-                claims = self._outbox_claim(tail_seq=tail)
+                claims = self._outbox_claim(tail_seq=tail, max_id=last_id)
                 for position, claim in enumerate(claims):
                     try:
                         delivered = self._deliver_outbox_claim(claim)
@@ -14100,6 +14125,18 @@ class Store:
         else:
             dead_ref = self._outbox_ref(claim.id, claim.event_json)
             reason = claim.reason or "undeliverable"
+            if reason.startswith(_OUTBOX_EXHAUSTED):
+                # Its last attempt may have appended and then lost its ack: look
+                # for the entry before calling the event undelivered.
+                try:
+                    name = json.loads(claim.event_json)["event"]
+                    found = self._audit._contains_ref(
+                        name, dead_ref, claim.tail_seq, claim.created_at)
+                except Exception:
+                    found = None
+                if found is not None:
+                    self._outbox_ack(claim, delivered=True)
+                    return True
             try:
                 logged, appended = self._audit._append_once(
                     "outbox_gap",

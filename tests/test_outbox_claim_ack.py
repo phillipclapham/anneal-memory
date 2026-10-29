@@ -639,3 +639,52 @@ class TestOutboxFlush:
         store._outbox_claim = lambda **k: (calls.append(1), real(**k))[1]
         store._flush_audit_outbox()
         assert calls == []
+
+    def test_a_blocked_head_means_no_claim_even_when_a_later_row_is_due(self, store):
+        first, second = _insert(store, "a", "b")
+        (c1, c2) = store._outbox_claim()
+        store._outbox_nack(c1, RuntimeError("x"))     # head: backoff
+        store._outbox_release(c2)                     # follower: due
+        calls = []
+        real = store._outbox_claim
+        store._outbox_claim = lambda **k: (calls.append(1), real(**k))[1]
+        store._flush_audit_outbox()
+        assert calls == []
+
+    def test_one_flush_leaves_rows_queued_after_it_began(self, store, tmp_path):
+        """A callback that queues a boxed event for each one it sees cannot keep
+        a single flush running: rows past the start-of-flush id wait."""
+        _insert(store, "a")
+        real_notify = store._audit._notify
+        def notify_then_queue(entry):
+            real_notify(entry)
+            if entry["event"] == "a":
+                _insert(store, "queued_by_callback")
+        store._audit._notify = notify_then_queue
+        store._flush_audit_outbox()
+        assert "queued_by_callback" not in _events(tmp_path / "ob.db")
+        assert store._conn.execute(
+            "SELECT COUNT(*) FROM audit_outbox").fetchone()[0] == 1
+        store._audit._notify = real_notify
+        store._flush_audit_outbox()
+        assert "queued_by_callback" in _events(tmp_path / "ob.db")
+
+    def test_an_exhausted_row_whose_entry_is_already_logged_is_delivered_not_gapped(
+            self, store, tmp_path):
+        """Its last attempt appended and lost the ack: the reclaim must not call
+        the event undelivered (L3 r2, two lineages)."""
+        (row_id,) = _insert(store, "landed")
+        row = store._conn.execute(
+            "SELECT event_json FROM audit_outbox").fetchone()[0]
+        ref = store._outbox_ref(row_id, row)
+        store._audit._append_once("landed", {}, "agent", ref=ref, since_seq=None)
+        store._conn.execute("UPDATE audit_outbox SET attempts = ?",
+                            (store_mod._OUTBOX_MAX_ATTEMPTS,))
+        store._conn.commit()
+        failures = store.status().audit_write_failures
+        store._flush_audit_outbox()
+        events = _events(tmp_path / "ob.db")
+        assert events.count("landed") == 1 and "outbox_gap" not in events
+        assert store._conn.execute(
+            "SELECT COUNT(*) FROM audit_outbox").fetchone()[0] == 0
+        assert store.status().audit_write_failures == failures

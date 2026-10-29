@@ -926,6 +926,25 @@ class AuditTrail:
         finally:
             self._append_threads.discard(me)
 
+    def _contains_ref(
+        self, event: str, ref: str, since_seq: int | None,
+        since_ts: str | None = None,
+    ) -> dict[str, Any] | None:
+        """:meth:`_find_outbox_ref` under the append lock, for a caller that
+        only needs to know whether an entry is already in the log."""
+        me = threading.get_ident()
+        if me in self._span_threads or me in self._append_threads:
+            raise RuntimeError(
+                "an audit operation is already in progress on this thread; "
+                "the trail is not reentrant (e.g. from a logging handler)"
+            )
+        try:
+            self._append_threads.add(me)
+            with self._append_lock():
+                return self._find_outbox_ref(event, ref, since_seq, since_ts)
+        finally:
+            self._append_threads.discard(me)
+
     def _find_outbox_ref(
         self, event: str, ref: str, since_seq: int | None,
         since_ts: str | None = None,

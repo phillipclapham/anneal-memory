@@ -1069,6 +1069,7 @@ def cmd_search(args: argparse.Namespace) -> None:
             source=args.source,
             limit=args.limit,
             include_superseded=getattr(args, "include_superseded", False),
+            order=getattr(args, "order", "relevance"),
         )
 
         if args.json:
@@ -1082,7 +1083,10 @@ def cmd_search(args: argparse.Namespace) -> None:
             print(f"No episodes matching '{args.query}'.")
             return
 
-        print(f"Found {result.total_matching} episodes matching '{args.query}':")
+        first = ("most relevant" if result.query_params.get("order") == "relevance"
+                 else "newest")
+        print(f"Found {result.total_matching} episodes matching '{args.query}'"
+              f" (showing {len(result.episodes)}, {first} first):")
         print()
         for ep in result.episodes:
             age = _format_timestamp(ep.timestamp)
@@ -5228,6 +5232,9 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_argument("--limit", type=int, default=20, help="Max results (default: 20)")
     sub.add_argument("--include-superseded", action="store_true",
                      help="Also show episodes a newer episode replaced (hidden by default)")
+    sub.add_argument("--order", choices=["relevance", "newest"], default="relevance",
+                     help="relevance (default): episodes most about the query first; "
+                          "newest: by time. Both list the same matches")
     sub.set_defaults(func=cmd_search)
 
     # -- associations --

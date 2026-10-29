@@ -433,6 +433,33 @@ MIGRATION_MANIFEST: list[MigrationEntry] = [
         ),
         "files": list(CORE_FILES),
     },
+    {
+        "version": "1.0.2",
+        "feature": "AM-FORMATION-OFF",
+        "summary": (
+            "anneal-memory 1.0.2 stops forming association links. A save forms "
+            "and decays no link in either the episode graph or the pattern graph, "
+            "and the affect input no longer weights anything: recall never read "
+            "the episode links, and the pattern graph was shadow-only. The first "
+            "1.0.2 save records this on the store (`Store.association_formation()`). "
+            "Links formed earlier stay readable through 1.x. `prepare_wrap` no "
+            "longer returns association context (`assoc_context` is always "
+            "`None`), and the `affective_state` argument, the MCP "
+            "`affective_state` property and the CLI `--affect-tag` / "
+            "`--affect-intensity` flags are accepted and ignored until 2.0. "
+            "AM-WARN Signal B is retired. The 0.9.26 entry's line that "
+            "co-citation still forms Hebbian links no longer holds."
+        ),
+        "suggested_edit": (
+            "Remove any instruction to pass an affective state or affect tag at "
+            "the wrap, any step that reads an \"Association Context\" from "
+            "`prepare_wrap`, and any statement that co-citing episodes forms or "
+            "strengthens links. Keep instructions to cite every episode that "
+            "genuinely supports a pattern: the immune system's citation checks "
+            "are unchanged."
+        ),
+        "files": list(CORE_FILES),
+    },
 ]
 
 

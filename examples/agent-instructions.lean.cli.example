@@ -3,7 +3,7 @@
 # Paste the section below into your harness's agent-instructions file
 # (CLAUDE.md / AGENTS.md / GEMINI.md). This is the always-loaded MINIMUM —
 # the workflow an agent needs to act correctly. For the full reference
-# (immune-system internals, affective-state shape, operator commands),
+# (immune-system internals, operator commands),
 # install the anneal-memory SKILL (skill/anneal-memory/SKILL.md), which
 # loads on-demand, or see examples/agent-instructions.full.cli.example.
 #
@@ -12,8 +12,8 @@
 ## Memory (anneal-memory CLI)
 
 This project uses anneal-memory for persistent memory across sessions —
-four retrospective layers (episodes compress into continuity; Hebbian
-links + a limbic tag form automatically) plus a **spore** store for
+retrospective memory (episodes compress into continuity, and an immune
+system decides what graduates) plus a **spore** store for
 prospective open loops (`task`/`question`/`thought`, planted then
 resolved) and an on-demand **crystallized** tier that holds proven, stable
 patterns *out* of always-loaded context and surfaces them on cue (opt-in +

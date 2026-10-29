@@ -4,6 +4,45 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
 
 ## [Unreleased]
 
+### Added
+- **Keyword recall ranks by relevance.** `Store.recall(order="relevance")` (default `"newest"`, unchanged) lists the same keyword matches ranked by how much each is about the keyword: a BM25-shaped score in SQL (occurrences, saturated and normalised by the episode's length against the store's mean) plus a boost when the keyword is in the episode's opening, newest first among equals. The length reference is a fixed 1,000 characters, so a score depends on its own episode only and a non-matching write never reorders the matches between pages. It only reorders: `total_matching` and the set paged with `offset` are the same under both orders. Without a keyword the order stays newest first. No index, no schema change, no dependency.
+- MCP `recall` gains `order` (`"relevance"` | `"newest"`). With a (non-empty) keyword it now defaults to relevance and a page of up to 20 episodes that stops before about 24,000 characters of content (whole episodes, at least one; 100 otherwise, as before; an explicit `limit` is honoured as given); the reply says which matches the page holds of how many and the `offset` of the next page, and each episode carries a short reason it matched (`keyword 3x, in its opening`). The `limit` schema no longer advertises `"default": 100`, which a client that fills defaults would send and so skip the page bound. Reason: on 2026-10-25 a recall of a client's name returned 64 whole episodes (92K characters) newest first, the episodes about the client under newer records that named it once, and the model reading it invented the rest.
+- The same character budget bounds the word-by-word fallback (a multi-word keyword with no exact phrase) and the "Also matching by words" entries when no `limit` is passed; the fallback honours `order="newest"`. A ranked page with episodes recorded from tools or outside readers says they are listed after the rest, under their label. `order: null` reads as no order.
+- CLI `search` gains `--order {relevance,newest}`, default relevance.
+
+### Experimental (not part of the frozen public surface)
+- `anneal_memory/remote.py` gains an optional one-user OAuth 2.1 front (`serve --oauth-issuer https://host`, module `anneal_memory/remote_oauth.py`) for MCP clients that accept only OAuth, such as the Gemini app's custom apps. It can hand out only a token the server's token file already holds; the first exchanged code pins its redirect URI.
+- The OAuth front also accepts the claude.ai and ChatGPT connector callbacks (only their documented paths on `claude.ai` and `chatgpt.com`), so those connectors can use a URL with no token in it. The redirect pin is now per connector token (`<token file>.oauth-redirect.<name in lowercase>`): after its first exchanged code a token is accepted only for the redirect it pinned. A server-wide `<token file>.oauth-redirect` pin written earlier still binds every connector; rename it to `<token file>.oauth-redirect.<name in lowercase>` (for a connector named `Gemini`: `tokens.oauth-redirect.gemini`) to make it that connector's pin only. A `resource` naming the server's bare origin is accepted beside its `/mcp` URL.
+- The OAuth front issues a sign-in code only while the operator has opened sign-in: `python -m anneal_memory.remote oauth-window --token-file F [--minutes N]` (1 to 60, default 10) writes `<token file>.oauth-window`, and `--close` removes it. The first completed sign-in deletes the file, so one opening allows one sign-in; a missing, expired, garbled or more-than-an-hour-ahead window is closed, and the sign-in page then says so instead of asking for a token. Registration, metadata and `/token` are not gated. **A server upgraded to this refuses every sign-in until the operator opens a window.**
+- `remote.py` reads a chunked request body (exactly `Transfer-Encoding: chunked`, no `Content-Length` beside it), under the same size cap and deadline as a sized one; a proxy forwards an HTTP/2 request with no length that way.
+- `remote.py`'s `read_continuity` starts with a one-line replica age when a `replica.json` manifest sits beside the served db: when the operator's machine last confirmed the copy current (its `verified_at`), and `STALE` past an hour. A db with no manifest answers as before.
+- `remote.py` logs one line per response it sends (status, method, a known path or its length, Host, User-Agent), and `/token` logs the shape of the grant; no query, token, code, verifier or secret is logged.
+
+## [1.0.2] — 2026-10-24
+
+### Changed
+- **A save no longer forms or decays association links.** Neither the episode↔episode graph nor the pattern↔pattern graph forms new links, and the affect input no longer weights anything. Months of measurement on a long-running store showed recall never read the episode links (0 of 788 pattern exposures came through them), and the pattern graph was shadow-only. The first 1.0.2 save records this on the store (`Store.association_formation()`: `mode`, `off_at_wrap`, `off_by_version`); existing links stay readable, and an episode delete still cascades its links.
+- `prepare_wrap` no longer gives the composer association context: `assoc_context` is always `None`. Its wrap instructions no longer describe link formation or affect.
+- The composer guidance on `[decided]` lines keeps the evidence status beside each decision: say when a decision rests on the user's judgment rather than evidence, and keep contrary evidence cited beside it. *(ec58dd4)*
+
+### Added
+- `validated_save_continuity` returns `wrap_id`, the wraps-table id of the save (also `WrapResult.wrap_id`, and a `Wrap id:` line from the CLI and the MCP tool), so a caller can key that wrap's `wrap_graduations` rows.
+- `Store.association_formation()` and `AssociationFormationOffError`.
+
+### Deprecated (removed in 2.0)
+- `Store.record_associations`, `decay_associations` and `seed_pattern_co_graduation` raise `AssociationFormationOffError` on a store whose formation is off. `drain_co_surface_events` parses its events and discards them: `events_applied` and the pair counts are 0, and `events_seen` and `discarded` count the distinct events dropped.
+- The `affective_state` argument (library), the `affective_state` MCP property and the CLI `--affect-tag` / `--affect-intensity` flags are accepted and ignored. The library, the MCP tool and the CLI's `--affect-tag` print a one-line notice; `--affect-intensity` alone is ignored silently.
+- The `associations_formed` / `_strengthened` / `_decayed` result keys are always 0.
+
+### Removed
+- AM-WARN Signal B (pairs offered, no link formed): it would have fired on every save. Signal A (citations that resolve to no episode in this store) stays.
+
+### Known edges
+- A 1.0.1 process writing the same store ignores the capability and keeps forming links. Upgrade every writer together.
+
+### Experimental (not part of the frozen public surface)
+- This release ships `anneal_memory/remote.py`: a read-only MCP server over Streamable HTTP with per-connector bearer tokens, started with `python -m anneal_memory.remote serve` (tokens with `token-add` / `token-revoke`), and an optional append-only capture tool behind `serve --outbox`. It is experimental and outside the surface `docs/stability.md` freezes: it can change or be removed in any release without a deprecation. No other module in the package imports it, so `anneal-memory serve` (stdio) does not use it.
+
 ## [1.0.1] — 2026-10-18
 
 ### Fixed

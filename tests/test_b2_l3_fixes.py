@@ -126,4 +126,4 @@ class TestRecallLimitDescription:
     def test_the_limit_property_names_the_fallback_default(self):
         recall = next(t for t in TOOLS if t["name"] == "recall")
         d = recall["inputSchema"]["properties"]["limit"]["description"]
-        assert "Default 100" in d and "default is 10" in d
+        assert "100 otherwise" in d and "up to 20" in d and "default is 10" in d

@@ -65,7 +65,7 @@ This is the most important part. Wrapping is how raw episodes compress into work
 > raises `ValueError("No wrap in progress…")`.
 >
 > The lower-level primitive `store.save_continuity()` is a raw file write (test
-> use only) — it bypasses graduation, associations, decay, and wrap metadata.
+> use only) — it bypasses graduation and wrap metadata.
 > Advanced users driving their own wrap lifecycle should call
 > `store.wrap_started(token=..., episode_ids=[...])` to create the snapshot
 > before `validated_save_continuity`. The deprecated public wrapper
@@ -78,8 +78,8 @@ store = Store("./memory.db", project_name="MyAgent")
 
 # 1. Get the compression package.
 #    prepare_wrap fetches episodes, loads the current continuity, detects stale
-#    patterns, builds the compression package, attaches Hebbian association
-#    context, and marks the wrap as in progress.
+#    patterns, builds the compression package, and marks the wrap as in
+#    progress.
 wrap = prepare_wrap(store)
 
 # The returned dict has:
@@ -87,12 +87,9 @@ wrap = prepare_wrap(store)
 #   wrap["message"]        — human-readable status summary
 #   wrap["episode_count"]  — number of episodes in the wrap window
 #   wrap["package"]        — the compression package (dict, or None if empty)
-#   wrap["assoc_context"]  — Hebbian association context (str or None). Usually None:
-#                            a wrap forms links among its own episodes at save, and those
-#                            episodes are outside the next wrap's window. It is non-empty
-#                            only when your code itself linked a current-window episode
-#                            (Store.record_associations) at strength >= 0.5.
-#                            Unreinforced links decay x0.9 per wrap; at most 20 are shown.
+#   wrap["assoc_context"]  — always None since 1.0.2 (a save forms no association
+#                            link, so there is no association context to offer). The key
+#                            stays so existing callers do not break.
 
 if wrap["status"] == "ready":
     package = wrap["package"]
@@ -108,7 +105,7 @@ if wrap["status"] == "ready":
     # 2. Agent compresses (this is YOUR agent's job — the cognitive act).
     # Feed the package to your LLM and ask it to compress episodes into
     # an updated continuity file following the instructions.
-    compressed = my_llm_compress(package, wrap["assoc_context"])  # your compression logic
+    compressed = my_llm_compress(package)  # your compression logic
 
     # 3. Save with the full validation pipeline.
     result = validated_save_continuity(store, compressed)
@@ -118,42 +115,19 @@ if wrap["status"] == "ready":
 #   - Validates 4-section structure (State, Patterns, Decisions, Context)
 #   - Checks citation evidence on graduations (2x, 3x patterns)
 #   - Demotes ungrounded patterns (the explanation-grounding check)
-#   - Records Hebbian associations between co-cited episodes
-#   - Applies decay (0.9x) to unreinforced associations
 #   - Updates metadata and records wrap completion
 #   - Logs everything in the audit trail (best-effort on the write side: an
 #     audit-sink failure never fails the operation that already committed —
 #     see Store.status().audit_write_failures)
 #
 # Returns: dict with episodes_compressed, graduations_validated,
-#          graduations_demoted, associations_formed, etc.
+#          graduations_demoted, wrap_id, etc. (the associations_formed /
+#          _strengthened / _decayed keys are still present and always 0)
 
 store.close()
 ```
 
-**Why `prepare_wrap(store)` is the canonical entry point.** The store-aware version marks the wrap as in progress, mints the session-handshake token, and freezes the episode-ID snapshot — all signals the immune system relies on to enforce the cognitive loop. As of **v0.3.1** that snapshot is mandatory: `validated_save_continuity` raises `ValueError` when no wrap is in progress, so `prepare_wrap` is not optional — it is the first half of the operation. Advanced users driving their own wrap lifecycle must call `store.wrap_started(token=..., episode_ids=[...])` to create the snapshot before saving; the private `_build_wrap_package()` helper builds a compression package but does NOT create a snapshot, so it cannot stand in for `prepare_wrap`. `store.save_continuity(text)` is a separate low-level file-write primitive — it bypasses graduation, associations, decay, and wrap metadata. Don't reach for either of those.
-
-## Affective State
-
-Record functional state during compression to track what the agent found engaging, uncertain, or surprising. Pass an `AffectiveState` directly to `validated_save_continuity`:
-
-```python
-from anneal_memory import (
-    Store, EpisodeType, AffectiveState,
-    prepare_wrap, validated_save_continuity,
-)
-
-wrap = prepare_wrap(store)
-if wrap["status"] == "ready":
-    compressed = my_llm_compress(wrap["package"], wrap["assoc_context"])
-    result = validated_save_continuity(
-        store,
-        compressed,
-        affective_state=AffectiveState(tag="engaged", intensity=0.8),
-    )
-```
-
-The affective state is recorded on the Hebbian associations formed during this wrap — the intensity modulates association strength (up to 1.5x), and the tag is stored on each link for later retrieval. The tag is free-text (normalized to lowercase); intensity is clamped to `[0.0, 1.0]`. Transformers don't natively maintain persistent emotional state between sessions — this layer provides infrastructure for it.
+**Why `prepare_wrap(store)` is the canonical entry point.** The store-aware version marks the wrap as in progress, mints the session-handshake token, and freezes the episode-ID snapshot — all signals the immune system relies on to enforce the cognitive loop. As of **v0.3.1** that snapshot is mandatory: `validated_save_continuity` raises `ValueError` when no wrap is in progress, so `prepare_wrap` is not optional — it is the first half of the operation. Advanced users driving their own wrap lifecycle must call `store.wrap_started(token=..., episode_ids=[...])` to create the snapshot before saving; the private `_build_wrap_package()` helper builds a compression package but does NOT create a snapshot, so it cannot stand in for `prepare_wrap`. `store.save_continuity(text)` is a separate low-level file-write primitive — it bypasses graduation and wrap metadata. Don't reach for either of those.
 
 ## Loading Continuity at Session Start
 
@@ -169,16 +143,14 @@ else:
     print("First session — no prior memory")
 ```
 
-## Associations
+## Associations (read-only since 1.0.2)
 
-After wraps, episodes that were cited together form lateral associations.
+A save forms and decays no association link since 1.0.2, and the affect input (`affective_state`) is accepted and ignored until 2.0. Links formed by earlier versions stay readable through 1.x, and `Store.association_formation()` reports whether formation is off on a store (`mode`, `off_at_wrap`, `off_by_version`).
 
 ```python
-# Get association statistics
+# Statistics for links formed before 1.0.2
 stats = store.association_stats()
 print(f"Total links: {stats.total_links}")
-print(f"Avg strength: {stats.avg_strength:.2f}")
-print(f"Density: {stats.density:.4f}")
 
 # Find associations for specific episodes
 assocs = store.get_associations(episode_ids=["abc123"], min_strength=0.5)

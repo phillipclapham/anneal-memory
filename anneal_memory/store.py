@@ -2748,6 +2748,42 @@ def _keyword_like_pattern(keyword: str) -> str:
     return f"%{escaped}%"
 
 
+# Store.recall(order="relevance"): the episodes the keyword's LIKE matched, ranked by a
+# BM25-shaped score computed in SQL, so ranking reorders the match set and never changes
+# it (FTS5 was not used for that reason: its tokenized MATCH selects a different set than
+# a substring LIKE, and it needs an index the store would have to migrate). The score is
+# term-frequency saturation (k1) with partial length normalisation (b) against a fixed
+# reference length, plus a flat boost when the keyword appears in the
+# episode's opening, where episodes name their subject. Newest first breaks ties.
+# b sits below BM25's usual 0.75 because a long episode ABOUT the subject (a call
+# outcome) must not lose to a short one that mentions it (2026-10-25, a judged set of
+# real queries on a long-running store: at 0.75 such an episode fell out of the top 8).
+# The reference length is a constant, not the store's mean, so an episode's score
+# depends on that episode alone and a write that does not match cannot reorder the
+# matches between two pages (BM25's own reference is the collection mean).
+RECALL_ORDERS = ("newest", "relevance")
+_RANK_K1 = 1.2
+_RANK_B = 0.3
+_RANK_REF_LEN = 1000
+_RANK_LEAD_CHARS = 200
+_RANK_LEAD_BOOST = 1.5
+
+
+def _keyword_rank_sql(keyword: str) -> tuple[str, list[Any]]:
+    """The relevance score of :meth:`Store.recall` as an SQL expression over
+    ``content``, with its parameters, for a keyword already matched by
+    :data:`_KEYWORD_LIKE_SQL` (so it occurs at least once). The keyword is compared
+    as :func:`_keyword_like_pattern` lowers it, without wildcards: ``REPLACE`` and
+    ``INSTR`` take it literally."""
+    kw = keyword.lower()
+    tf = "((LENGTH(LOWER(content)) - LENGTH(REPLACE(LOWER(content), ?, ''))) * 1.0 / ?)"
+    norm = f"({_RANK_K1} * (1 - {_RANK_B} + {_RANK_B} * LENGTH(content) / {_RANK_REF_LEN}.0))"
+    sql = (f"({tf} * {_RANK_K1 + 1} / ({tf} + {norm})"
+           f" + CASE WHEN INSTR(LOWER(content), ?) BETWEEN 1 AND {_RANK_LEAD_CHARS}"
+           f" THEN {_RANK_LEAD_BOOST} ELSE 0 END)")
+    return sql, [kw, len(kw), kw, len(kw), kw]
+
+
 def _team_entry_id_of(metadata: Any) -> str | None:
     """The ledger entry id an episode's metadata carries, as the importer wrote it,
     or None (unparseable metadata, no ``team`` object, or a non-string id)."""
@@ -6949,6 +6985,7 @@ class Store:
         limit: int = 100,
         offset: int = 0,
         include_superseded: bool = False,
+        order: str = "newest",
     ) -> RecallResult:
         """Query episodes with filters.
 
@@ -6963,10 +7000,21 @@ class Store:
             include_superseded: Also return episodes a newer episode was
                 recorded as replacing, each with ``superseded_by`` set. By
                 default they are left out (and out of ``total_matching``).
+            order: ``"newest"`` (timestamp, newest first) or ``"relevance"``: with a
+                ``keyword``, the same matches ranked by how much each is about the
+                keyword (how often it occurs, relative to the episode's length, and
+                whether it is in the opening), newest first among equals. Ranking
+                only reorders: ``total_matching`` and the set paged through with
+                ``offset`` are the same under both, and a score depends only on its
+                own episode, so a write that does not match moves no match (a new
+                match shifts later pages under either order). Without a keyword there is
+                nothing to rank by, and the order is newest first.
 
         Returns:
             RecallResult with matching episodes and total count.
         """
+        if order not in RECALL_ORDERS:
+            raise ValueError(f"order must be one of {RECALL_ORDERS}, not {order!r}")
         if episode_type is not None and isinstance(episode_type, str):
             episode_type = EpisodeType(episode_type)
 
@@ -6987,11 +7035,21 @@ class Store:
             ).fetchone()
             total = count_row[0]
 
-            rows = self._conn.execute(
-                f"""SELECT * FROM episodes WHERE {where}
-                    ORDER BY timestamp DESC LIMIT ? OFFSET ?""",
-                [*params, limit, offset],
-            ).fetchall()
+            ranked = order == "relevance" and bool(keyword)
+            if ranked and total and keyword:
+                rank_sql, rank_params = _keyword_rank_sql(keyword)
+                # id last: equal score and timestamp still page in one fixed order.
+                rows = self._conn.execute(
+                    f"""SELECT * FROM episodes WHERE {where}
+                        ORDER BY {rank_sql} DESC, timestamp DESC, id LIMIT ? OFFSET ?""",
+                    [*params, *rank_params, limit, offset],
+                ).fetchall()
+            else:
+                rows = self._conn.execute(
+                    f"""SELECT * FROM episodes WHERE {where}
+                        ORDER BY timestamp DESC LIMIT ? OFFSET ?""",
+                    [*params, limit, offset],
+                ).fetchall()
 
             replaced_by: dict[str, str] = {}
             if has_links and include_superseded and rows:
@@ -7021,6 +7079,7 @@ class Store:
                     "limit": limit,
                     "offset": offset,
                     "include_superseded": include_superseded or None,
+                    "order": "relevance" if order == "relevance" and keyword else None,
                 }.items()
                 if v is not None
             },

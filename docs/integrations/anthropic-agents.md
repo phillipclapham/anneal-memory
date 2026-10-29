@@ -30,7 +30,7 @@ The snippet teaches the agent:
 - When to record episodes (during work, at meaningful moments)
 - When to recall (before decisions that might have prior context)
 - The full wrap sequence (prepare → compress → save) at session end
-- How the immune system works (graduation, citations, decay)
+- How the immune system works (graduation, citations, demotion)
 - How to handle errors (missing sections, demoted patterns)
 
 **Why this works:** The snippet teaches the cognitive WORKFLOW, not just tool descriptions. Tool descriptions tell agents WHAT each tool does. The snippet teaches WHEN and HOW to orchestrate them. This is the "skills paradigm" — instructions that make agents proactive, not just reactive.

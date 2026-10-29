@@ -1,6 +1,6 @@
 """anneal-memory: Living memory for AI agents. Episodes compress into identity."""
 
-__version__ = "1.0.2.dev0"
+__version__ = "1.0.3.dev0"
 
 from .store import (
     AnnealMemoryError,

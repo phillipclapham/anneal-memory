@@ -718,7 +718,7 @@ class PrepareWrapResult(TypedDict):
     message: str  # Short human-readable status summary
     episode_count: int
     package: WrapPackageDict | None  # None when status == "empty"
-    assoc_context: str | None  # Hebbian association context, or None
+    assoc_context: str | None  # Always None since 1.0.2 (association formation is off)
     wrap_token: str | None  # Session-handshake token, None when status == "empty"
     # Move #4 library layer (v0.3.2): list of existing Proven (2x+)
     # pattern names already in the continuity. Methodology-layer

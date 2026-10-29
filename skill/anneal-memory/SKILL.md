@@ -1,6 +1,6 @@
 ---
 name: anneal-memory
-description: Persistent four-layer agent memory (episodic + continuity + Hebbian + affective) plus a prospective spore layer and an on-demand crystallized-pattern tier, via anneal-memory. Use in any project wired for anneal-memory — an `ANNEAL_MEMORY_DB` env var, an `anneal://continuity` MCP resource, or memory instructions referencing `recall`/`prepare_wrap`/`save_continuity`. Use it before any architectural decision or rule change (recall prior patterns first), while recording decisions/observations/tensions/outcomes during work, and when the user signals the session is ending ("wrap up", "save memory", "we're done") to run the prepare_wrap → compress → save_continuity wrap sequence. It also carries the start-of-session continuity load.
+description: Persistent agent memory (episodic log + versioned continuity + an immune system that gates graduation) plus a prospective spore layer and an on-demand crystallized-pattern tier, via anneal-memory. Use in any project wired for anneal-memory — an `ANNEAL_MEMORY_DB` env var, an `anneal://continuity` MCP resource, or memory instructions referencing `recall`/`prepare_wrap`/`save_continuity`. Use it before any architectural decision or rule change (recall prior patterns first), while recording decisions/observations/tensions/outcomes during work, and when the user signals the session is ending ("wrap up", "save memory", "we're done") to run the prepare_wrap → compress → save_continuity wrap sequence. It also carries the start-of-session continuity load.
 license: MIT
 ---
 
@@ -10,18 +10,17 @@ This project uses **anneal-memory** for persistent memory across sessions. Work 
 
 > **Transport.** anneal-memory has two interfaces with the same cognitive loop: an **MCP server** (tool calls like `recall`, `prepare_wrap`) and a **CLI** (`anneal-memory recall …`, `anneal-memory prepare-wrap`). This skill is written transport-agnostically; the [Commands](#commands) table at the bottom pairs the CLI and MCP forms. Use whichever your harness has wired. If both are available, prefer MCP for the in-session loop (record/recall/wrap) and the CLI for operator inspection (status/stats/graph/audit).
 
-## The four layers
+## The working core
 
 - **Episodic** — raw observations you record during work. Cheap, plentiful.
 - **Continuity** — the compressed working memory episodes graduate into at wrap time. This is where identity lives.
-- **Hebbian associations** — links that form automatically between episodes you cite together in your patterns; a link gains strength when the same pair is cited together again and decays at every wrap it is not. Recall does not read them (since 0.9.26); they feed `status`, `associations`, the `graph` export and the association-health warnings.
-- **Affective** (the *limbic* layer in the CLS lineage this borrows from) — an optional affective tag on a wrap that modulates how strongly its associations form.
+- **Immune system** — runs at the wrap: it checks that your graduation citations resolve to real episodes and are grounded in them, demotes the ungrounded, and flags reuse.
 
-You touch episodic (record) and continuity (wrap) directly. Hebbian and affective are byproducts of citing honestly and reflecting on your state — no extra bookkeeping.
+You touch episodic (record) and continuity (wrap) directly. The immune system is a byproduct of citing honestly — no extra bookkeeping. Since 1.0.2 a save forms no association links, and the old affect input is accepted and ignored.
 
-## Spores — your prospective layer (a parallel store, not a fifth memory layer)
+## Spores — your prospective layer (a parallel store, not part of memory)
 
-The four layers above are all *retrospective* — they hold what happened and who you're becoming, and they **never complete**. anneal-memory also ships a separate **spore store** for *prospective* open loops: things you intend to do or resolve. Plant one the moment a loop opens — a `task` (open doing), a `question` (open not-knowing), or a `thought` (open idea) — and resolve every one: **descend** (composted — done/dropped) or **ascend** (the loop *closes* by graduating its content into an episode, pattern, or project — the spore still ends; its content carries forward).
+Memory (episodes and continuity) is *retrospective* — they hold what happened and who you're becoming, and they **never complete**. anneal-memory also ships a separate **spore store** for *prospective* open loops: things you intend to do or resolve. Plant one the moment a loop opens — a `task` (open doing), a `question` (open not-knowing), or a `thought` (open idea) — and resolve every one: **descend** (composted — done/dropped) or **ascend** (the loop *closes* by graduating its content into an episode, pattern, or project — the spore still ends; its content carries forward).
 
 Two cuts keep this from colliding with what you already do:
 
@@ -63,14 +62,14 @@ This is the load-bearing rule. Skipping it produces the **dead-store failure mod
 ### End of session
 When the user signals the end — "wrap up", "save memory", "we're done", "that's it for now", or any natural equivalent — run the **full wrap sequence**. Don't just acknowledge the request; do the work:
 
-1. **`prepare_wrap`** → your compression package: recent episodes, current continuity, stale-pattern warnings, association context, and the compression instructions. Read it carefully — it's your raw material, and it emits the exact marker/format/pattern-line contract for this store. Follow what it emits.
+1. **`prepare_wrap`** → your compression package: recent episodes, current continuity, stale-pattern warnings, and the compression instructions. Read it carefully — it's your raw material, and it emits the exact marker/format/pattern-line contract for this store. Follow what it emits.
 2. **Pre-compose pattern recall.** Before composing new patterns, scan existing Proven/Developing entries for this session's surface areas: *Are we about to write a pattern already in Proven under different framing? Are there 1x/2x entries this session's evidence advances? Two entries describing the same pattern under different names?* This is distinct from the per-decision recall above — that fires at individual decisions; this fires across the whole session's set, catching graduation and categorization moves no single decision point reveals.
 3. **Compress.** Follow the `prepare_wrap` instructions. This step **is** the thinking — patterns emerge during compression that weren't visible in the raw episodes. Principles over facts: "we keep hitting X because Y" > "X happened." One insightful line beats three vague ones. If removing something wouldn't change your next decision, cut it.
-4. **`save_continuity`** with the result. The library validates structure + graduation citations + gaming, may demote ungrounded patterns, forms Hebbian associations between co-cited episodes, and decays unreinforced links.
+4. **`save_continuity`** with the result. The library validates structure + graduation citations + gaming, and may demote ungrounded patterns.
 
 The sequence is **prepare → compress → save**, all three, every time. If `prepare_wrap` reports no episodes, there's nothing to compress — skip the wrap. If it **downgrades to capture-only** (the store requires the consolidate baton, the default for a new store), nothing is lost: tell your human what the message says, which is how many episodes are waiting and the one command that lets this session consolidate (`anneal-memory baton claim NAME`; the CLI wraps with `--session-id NAME`, an MCP server is started with it). Consolidating is the operator's act, so never claim the baton yourself. An explicit wrap produces better continuity than stopping without one; always encourage wrapping before ending.
 
-**Wrap once.** Run the sequence exactly once per session. `save_continuity` may report demoted graduations — that is the citation-validation pipeline working, not an error. Don't re-run `save_continuity` to chase a clean report; re-saving compresses nothing, and a second save with no fresh `prepare_wrap` is refused. If a pattern is ungrounded, fix it in your *next* wrap with fresh evidence. Every save also reports `citation_spread`, the number of distinct episodes from this session that today's graduation lines cited, including lines later demoted, so it is not a count of grounded evidence. It is a gauge, not a target: cite every episode that genuinely supports a pattern, and never pad a citation to raise the number. A padded episode still forms an association link, so padding writes a false connection into memory.
+**Wrap once.** Run the sequence exactly once per session. `save_continuity` may report demoted graduations — that is the citation-validation pipeline working, not an error. Don't re-run `save_continuity` to chase a clean report; re-saving compresses nothing, and a second save with no fresh `prepare_wrap` is refused. If a pattern is ungrounded, fix it in your *next* wrap with fresh evidence. Every save also reports `citation_spread`, the number of distinct episodes from this session that today's graduation lines cited, including lines later demoted, so it is not a count of grounded evidence. It is a gauge, not a target: cite every episode that genuinely supports a pattern, and never pad a citation to raise the number. A padded citation still counts toward the spread, so padding makes the gauge lie.
 
 ## What to record (and what not to)
 
@@ -78,7 +77,7 @@ The sequence is **prepare → compress → save**, all three, every time. If `pr
 
 **Don't record:** routine code changes (git tracks those) · transient debugging steps · anything already in docs · every tiny observation. Record what would change a decision.
 
-**Correcting vs deleting:** for a factual correction, record a *new* episode — compression resolves contradictions, and that's preferred. For content that should not exist (PII, sensitive data, fundamentally wrong recordings), delete the episode by ID — deletion cascades to its associations and is audit-logged. Irreversible.
+**Correcting vs deleting:** for a factual correction, record a *new* episode — compression resolves contradictions, and that's preferred. For content that should not exist (PII, sensitive data, fundamentally wrong recordings), delete the episode by ID — deletion cascades to any association links an earlier version formed and is audit-logged. Irreversible.
 
 ## The immune system (why honest recording matters)
 
@@ -94,10 +93,6 @@ Report findings naturally — "from prior sessions there was a tension between X
 
 A store is one entity's memory: there is no tenant scoping inside it, so if you need multiple agents, give each its own store path. One `Store` object is **not** thread-safe, task-safe, or reentrant; use one per thread. Several processes of the same entity (a CLI beside an MCP server) may record into one store: SQLite serializes the episodes and the audit trail serializes its appends with a cross-process lock, provided every writer runs a version that takes that lock (an older anneal-memory writing alongside breaks the hash chain). Windows has no such lock, so keep to one writer at a time there.
 
-## Affective layer (optional)
-
-When you save, you can include an affective state — a free-text functional tag (`engaged`, `curious`, `uncertain`, `focused`, `concerned`…) and an intensity (0.0–1.0). High intensity (>0.5) amplifies the associations formed in that wrap. Be honest: uniform "engaged 0.8" on every wrap is confabulation, not signal — the value is in genuine variation.
-
 ## Commands
 
 CLI and MCP forms of the same loop. Set `ANNEAL_MEMORY_DB` (or pass `--db`) for the CLI; for MCP, the server is configured in your harness's MCP settings.
@@ -112,7 +107,6 @@ CLI and MCP forms of the same loop. Set `ANNEAL_MEMORY_DB` (or pass `--db`) for 
 | Record multi-line | `echo "…" \| anneal-memory record - --type observation` | `record` |
 | Prepare a wrap | `anneal-memory prepare-wrap` | `prepare_wrap` |
 | Save the wrap | `anneal-memory save-continuity continuity.md` | `save_continuity` |
-| Save with affect | `anneal-memory save-continuity continuity.md --affect-tag engaged --affect-intensity 0.8` | `save_continuity` (`affective_state`) |
 | Plant a spore | `anneal-memory spore add --type task --text "…"` | `spore_add` |
 | List / surface spores | `anneal-memory spore list` · `spore surface` | `spore_list` · `spore_surface` |
 | Resolve a spore | `anneal-memory spore descend …` · `spore ascend …` | `spore_descend` · `spore_ascend` |
@@ -136,4 +130,4 @@ After you (or your operator) upgrade the `anneal-memory` package, run `anneal-me
 
 ---
 
-*This Skill is **depth-on-demand, not a replacement for the always-loaded lean snippet.** A model-invoked skill won't reliably fire at a bare session start, so keep `examples/agent-instructions.lean.example` (MCP) / `.lean.cli.example` (CLI) in your `CLAUDE.md`/`AGENTS.md` — it carries the baseline (start-of-session load, record, recall-before-decisions, wrap) even when this Skill isn't loaded; the Skill adds the depth on top. For the full immune-system internals, the affective-state JSON shape, the complete operator-command catalog, and framework-specific integration points, see the project README and `examples/agent-instructions.full.example` (MCP) / `.full.cli.example` (CLI).*
+*This Skill is **depth-on-demand, not a replacement for the always-loaded lean snippet.** A model-invoked skill won't reliably fire at a bare session start, so keep `examples/agent-instructions.lean.example` (MCP) / `.lean.cli.example` (CLI) in your `CLAUDE.md`/`AGENTS.md` — it carries the baseline (start-of-session load, record, recall-before-decisions, wrap) even when this Skill isn't loaded; the Skill adds the depth on top. For the full immune-system internals, the complete operator-command catalog, and framework-specific integration points, see the project README and `examples/agent-instructions.full.example` (MCP) / `.full.cli.example` (CLI).*

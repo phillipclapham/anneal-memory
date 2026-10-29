@@ -123,8 +123,12 @@ TOOLS: list[dict[str, Any]] = [
         "description": (
             "Query episodes from memory with filters. Call this to find prior "
             "context before making decisions, to locate specific episodes for "
-            "citation during graduation, or to review recent work. Returns "
-            "matching episodes ordered by timestamp (newest first). Supports "
+            "citation during graduation, or to review recent work. With a "
+            "keyword, returns the episodes most relevant to it first, a page of "
+            "up to 20 (fewer when they are long) by default, with the total "
+            "number of matches and the offset of the next page; without one, "
+            "the newest first. For the latest on a subject, pass "
+            "order=\"newest\" with the keyword. Supports "
             "time range, type, source, and keyword filters. The keyword is "
             "matched as an exact phrase first; if no episode contains the whole "
             "phrase and it has two or more distinctive words, the call falls "
@@ -176,11 +180,23 @@ TOOLS: list[dict[str, Any]] = [
                 "limit": {
                     "type": "integer",
                     "description": (
-                        "Maximum episodes to return. Default 100. When a multi-word "
+                        "Maximum episodes to return. Default for a keyword recall "
+                        "ranked by relevance: up to 20, stopping before about 24,000 "
+                        "characters; 100 otherwise. When a multi-word "
                         "keyword has no exact match and is ranked word by word, the "
                         "default is 10 instead; pass a limit to see more."
                     ),
-                    "default": 100,
+                },
+                "order": {
+                    "type": "string",
+                    "enum": ["relevance", "newest"],
+                    "description": (
+                        "relevance: episodes most about the keyword first (how often "
+                        "it occurs for the episode's length, and whether in its "
+                        "opening), newest first among equals; the default when a "
+                        "keyword is given. newest: by timestamp, newest first; the "
+                        "default without a keyword. Both list the same matches."
+                    ),
                 },
                 "offset": {
                     "type": "integer",

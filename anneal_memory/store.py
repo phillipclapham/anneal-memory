@@ -6650,18 +6650,19 @@ class Store:
 
     def _store_team_origin(self, ep_id: str, *, new_row: bool) -> None:
         """The origin row of a team-imported episode, in the import's write
-        transaction. Team content is another principal's: ``external``, capped by
-        any active runtime context (which cannot go lower, but is applied so the
-        cap holds by construction rather than by that fact). ``new_row``: the
-        import inserted the episode just now (written as ``record`` writes it);
-        otherwise it revived a row it left earlier, which keeps the row it has,
-        since origin is written once and ``external`` is already the floor."""
-        cap = self._origin_cap_in_force()
-        origin = _lowest_class(["external", *([cap] if cap is not None else [])])
+        transaction. Team content is another principal's: ``external`` by
+        construction. ``new_row``: the import inserted the episode just now
+        (written as ``record`` writes it); otherwise it revived a row it left
+        earlier, which keeps the row it has, since origin is written once and
+        ``external`` is already the floor."""
+        # No runtime-context cap is read here (L3 r1): ``external`` is the bottom
+        # class, so the lowest of it and any cap is always ``external``, and the
+        # cap read cost a tainted-id query per team insert. A class added below
+        # ``external`` would need this revisited, to apply the cap again.
         self._conn.execute(
             f"INSERT OR {'REPLACE' if new_row else 'IGNORE'} INTO episode_origin "
             "(episode_id, origin, rule) VALUES (?, ?, ?)",
-            (ep_id, origin, ORIGIN_RULE_CONSERVATIVE),
+            (ep_id, "external", ORIGIN_RULE_CONSERVATIVE),
         )
 
     def _backfill_episode_origin(self) -> None:
@@ -6701,6 +6702,17 @@ class Store:
         has no row. Computed from today's trust, so a later ``set_trust`` can
         still move a straggler's reading; the backfill exists so that no
         episode the migration saw is in that position."""
+        # Known edges, reviewed against the reachability line at L3 r1 and
+        # closed without a build:
+        # (a) A hand-edited JSON export with ``origin`` deleted or null imports
+        #     as a record from before origin was exported: its trust was already
+        #     capped to agent on import, and the file is operator-supplied.
+        # (b) A rowless straggler that an older build wrote into a gen-3 file
+        #     reads origin through its edges; once its source is pruned, the
+        #     edge's gone_trust marker stands in for that source.
+        # (d) An id re-minted between two separate reads can pair one read's
+        #     episode with another's origin; L3 r1 gave the JSON export one
+        #     snapshot across its reads and left other callers as they were.
         with self._db_boundary("origin_map"), self._read_snapshot():
             return self._origin_map_locked(episode_ids)
 
@@ -6721,9 +6733,12 @@ class Store:
                 part = items[start:start + 500]
                 yield part, ",".join("?" * len(part))
 
+        # Probed once: stored_of runs once per walk level (L3 r1).
+        has_origin = has("episode_origin")
+
         def stored_of(items: list[str]) -> dict[str, str]:
             got: dict[str, str] = {}
-            if has("episode_origin"):
+            if has_origin:
                 for part, marks in chunks(items):
                     got.update(
                         (r[0], r[1]) for r in conn.execute(

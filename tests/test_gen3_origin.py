@@ -535,3 +535,71 @@ def test_tainted_by_refuses_a_non_string_element(store):
             with store.runtime_context(tainted_by=bad):
                 pass
     assert store._origin_cap_in_force() is None
+
+
+def test_a_delete_between_the_export_reads_cannot_strip_origin(tmp_path, monkeypatch, capsys):
+    # L3 r1: recall, trust and origin were separate snapshots, so a capped
+    # episode deleted between them exported with content and no origin, and
+    # import recorded it at its declared class.
+    from anneal_memory.cli import main
+
+    db, out = tmp_path / "a.db", tmp_path / "x.json"
+    with Store(db, project_name="T", trust_ceiling="operator") as s:
+        with s.runtime_context(floor="external"):
+            capped = s.record("declared operator, read from a page", OBS, trust="operator")
+        s.record("an agent note", OBS)
+
+    real = Store.origin_map
+
+    def delete_first(self, episode_ids):
+        with Store(db, project_name="T", trust_ceiling="operator") as peer:
+            assert peer.delete(capped.id)
+        return real(self, episode_ids)
+
+    monkeypatch.setattr(Store, "origin_map", delete_first)
+    monkeypatch.setattr(sys, "argv", ["anneal-memory", "--db", str(db), "export",
+                                      "--output", str(out)])
+    main()
+    exported = {e["id"]: e for e in json.loads(out.read_text())["episodes"]}
+    # Either the export is the state before the delete, whole, or the episode
+    # is absent whole; never content without its origin.
+    if capped.id in exported:
+        assert exported[capped.id].get("origin") == "external"
+    assert all("origin" in e for e in exported.values())
+    with Store(db) as s:
+        assert s.get(capped.id) is None  # the delete did land
+
+
+def test_a_non_string_origin_in_an_import_file_is_an_unknown_origin(tmp_path):
+    # L3 r1: a hand-edited non-string origin reached runtime_context and was
+    # reported as an unknown TRUST; it is refused by name as an unknown origin,
+    # counted like an unknown trust.
+    src, dst, out = tmp_path / "a.db", tmp_path / "b.db", tmp_path / "x.json"
+    with Store(src, project_name="T") as s:
+        ids = [s.record(f"note {n}", OBS).id for n in range(4)]
+    assert _cli(src, "export", "--output", str(out)).returncode == 0
+    data = json.loads(out.read_text())
+    bad = {ids[0]: ["agent"], ids[1]: {"x": 1}, ids[2]: 3}
+    for ep in data["episodes"]:
+        if ep["id"] in bad:
+            ep["origin"] = bad[ep["id"]]
+    out.write_text(json.dumps(data))
+    Store(dst).close()
+    r = _cli(dst, "--json", "import", str(out))
+    assert r.returncode == 0, r.stderr
+    report = json.loads(r.stdout)
+    assert (report["imported"], report["errors"]) == (1, 3)
+    r = _cli(dst, "import", str(out))
+    assert "unknown origin" in r.stderr and "TypeError" not in r.stderr
+    with Store(dst) as d:
+        assert d.get(ids[3]) is not None
+        assert all(d.get(i) is None for i in bad)
+
+
+def test_team_origin_skips_the_cap_because_external_is_the_bottom_class():
+    # L3 r1: _store_team_origin writes external without reading the runtime
+    # cap, sound only while external is the lowest class. A class added below
+    # it fails here, so the cap is applied again.
+    from anneal_memory.types import TRUST_LEVELS
+
+    assert TRUST_LEVELS[0] == "external"

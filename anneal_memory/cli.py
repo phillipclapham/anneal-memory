@@ -2532,60 +2532,66 @@ def cmd_export(args: argparse.Namespace) -> None:
         return
 
     with _open_store(args) as store:
-        # Gather all data. Superseded episodes are kept (invalidate, never
-        # delete), so an export carries them, marked, plus the links.
-        result = store.recall(limit=100000, include_superseded=True)
-        episodes = [_episode_dict(ep) for ep in result.episodes]
-        # CAP-08: the trust class rides along when it is not the default, so a
-        # JSON round trip does not turn an external episode into an agent one.
-        # It is the EFFECTIVE class (an agent summary of an external page exports
-        # as external), so a round trip never raises an episode's trust (codex r3
-        # #3). The derivation edges are written for the record only: import does
-        # not read them (a file cannot vouch, and a merged edge could; L3 r5).
-        export_trust = store.effective_trust_map(ep["id"] for ep in episodes)
-        export_edges = store.derived_edges(ep["id"] for ep in episodes)
-        # B4: origin rides along for every episode. The effective trust above is
-        # corroborative (the highest source wins), so on its own it re-records
-        # an episode a runtime context capped at the class it was declared with;
-        # import takes the lower of the two, so a file can lower origin, never
-        # raise it.
-        export_origin = store.origin_map(ep["id"] for ep in episodes)
-        for ep in episodes:
-            if ep["id"] in export_trust:
-                ep["trust"] = export_trust[ep["id"]]
-            if ep["id"] in export_origin:
-                ep["origin"] = export_origin[ep["id"]]
-            if ep["id"] in export_edges:
-                ep["derived_from"] = [
-                    {"id": src, **({"gone_trust": gone} if gone is not None else {})}
-                    for src, gone in export_edges[ep["id"]]
+        # One read snapshot over every database read below (L3 r1): the episodes,
+        # their trust, edges and origin were read in separate snapshots, so a
+        # delete between them left an exported episode with content and no
+        # origin, which import then recorded at its declared class.
+        with store._db_boundary("recall"), store._read_snapshot():
+            # Gather all data. Superseded episodes are kept (invalidate, never
+            # delete), so an export carries them, marked, plus the links.
+            result = store.recall(limit=100000, include_superseded=True)
+            episodes = [_episode_dict(ep) for ep in result.episodes]
+            # CAP-08: the trust class rides along when it is not the default, so a
+            # JSON round trip does not turn an external episode into an agent one.
+            # It is the EFFECTIVE class (an agent summary of an external page exports
+            # as external), so a round trip never raises an episode's trust (codex r3
+            # #3). The derivation edges are written for the record only: import does
+            # not read them (a file cannot vouch, and a merged edge could; L3 r5).
+            export_trust = store.effective_trust_map(ep["id"] for ep in episodes)
+            export_edges = store.derived_edges(ep["id"] for ep in episodes)
+            # B4: origin rides along for every episode. The effective trust above is
+            # corroborative (the highest source wins), so on its own it re-records
+            # an episode a runtime context capped at the class it was declared with;
+            # import takes the lower of the two, so a file can lower origin, never
+            # raise it.
+            export_origin = store.origin_map(ep["id"] for ep in episodes)
+            for ep in episodes:
+                if ep["id"] in export_trust:
+                    ep["trust"] = export_trust[ep["id"]]
+                if ep["id"] in export_origin:
+                    ep["origin"] = export_origin[ep["id"]]
+                if ep["id"] in export_edges:
+                    ep["derived_from"] = [
+                        {"id": src, **({"gone_trust": gone} if gone is not None else {})}
+                        for src, gone in export_edges[ep["id"]]
+                    ]
+            supersessions = store.supersession_links()
+            continuity = store.load_continuity()
+            meta = _load_meta_or_exit(store)
+            assoc_stats = store.association_stats()
+
+            # Get all associations
+            all_ep_ids = [ep["id"] for ep in episodes]
+            associations = []
+            if all_ep_ids:
+                pairs = store.get_associations(all_ep_ids, limit=100000)
+                associations = [
+                    {
+                        "episode_a": p.episode_a,
+                        "episode_b": p.episode_b,
+                        "strength": p.strength,
+                        "co_citations": p.co_citations,
+                        "first_linked": p.first_linked,
+                        "last_strengthened": p.last_strengthened,
+                        "affective_tag": p.affective_tag,
+                        "affective_intensity": p.affective_intensity,
+                    }
+                    for p in pairs
                 ]
-        supersessions = store.supersession_links()
-        continuity = store.load_continuity()
-        meta = _load_meta_or_exit(store)
-        assoc_stats = store.association_stats()
 
-        # Get all associations
-        all_ep_ids = [ep["id"] for ep in episodes]
-        associations = []
-        if all_ep_ids:
-            pairs = store.get_associations(all_ep_ids, limit=100000)
-            associations = [
-                {
-                    "episode_a": p.episode_a,
-                    "episode_b": p.episode_b,
-                    "strength": p.strength,
-                    "co_citations": p.co_citations,
-                    "first_linked": p.first_linked,
-                    "last_strengthened": p.last_strengthened,
-                    "affective_tag": p.affective_tag,
-                    "affective_intensity": p.affective_intensity,
-                }
-                for p in pairs
-            ]
-
-        # Get wrap history (serialize as dicts for JSON export compatibility)
-        wraps = [asdict(w) for w in store.get_wrap_history()]
+            # Get wrap history (serialize as dicts for JSON export compatibility)
+            wraps = [asdict(w) for w in store.get_wrap_history()]
+            requires_baton = store.consolidate_requires_baton()
 
         if fmt == "json":
             export_data = {
@@ -2603,7 +2609,7 @@ def cmd_export(args: argparse.Namespace) -> None:
                 "meta": meta,
                 # Informational, like supersessions: import never sets a policy on
                 # the target store; it warns when the source had one (spore-1170).
-                "consolidate_requires_baton": store.consolidate_requires_baton(),
+                "consolidate_requires_baton": requires_baton,
             }
             if args.output:
                 out = Path(args.output)
@@ -2792,6 +2798,13 @@ def cmd_import(args: argparse.Namespace) -> None:
                 # always did. A value that is not a class is refused like an
                 # unknown trust (runtime_context raises ValueError).
                 file_origin = ep_data.get("origin")
+                # A hand-edited non-string (a list, an object, a number) is
+                # refused here by name; it reached runtime_context and was
+                # reported as an unknown trust (L3 r1).
+                if file_origin is not None and not isinstance(file_origin, str):
+                    raise ValueError(
+                        f"unknown origin {file_origin!r}; expected one of "
+                        f"{', '.join(TRUST_LEVELS)}")
                 with (store.runtime_context(floor=file_origin)
                       if file_origin is not None else contextlib.nullcontext()):
                     recorded = store._import_record(

@@ -877,6 +877,7 @@ class AuditTrail:
         *,
         ref: str,
         since_seq: int | None,
+        since_ts: str | None = None,
     ) -> tuple[dict[str, Any], bool]:
         """:meth:`log` that appends at most one entry per ``ref``: under the
         append lock, scan the active file backwards for an entry whose
@@ -884,20 +885,19 @@ class AuditTrail:
         with ``False`` and append nothing; otherwise append ``event`` with
         ``outbox_ref`` added to ``data`` and return it with ``True``. The
         scan stops at the first entry whose ``seq`` is below ``since_seq``
-        (the :meth:`_tail_seq` read before the row's first claim), so it costs
-        what was appended since, and at the start of the file. ``since_seq=None``
-        scans the whole active file.
+        (the :meth:`_tail_seq` read before the row's first claim) and whose
+        ``ts`` is older than ``since_ts`` (when the row was queued), so it
+        costs what was appended since, and at the start of the file.
+        ``since_seq=None`` scans the whole active file.
 
         ``on_event`` is NOT fired here: the outbox flush calls :meth:`_notify`
         after its acknowledge, outside every lock and transaction, and only
         for an entry this call newly appended (``True``).
 
         Known edges (outbox_claim_ack_design_1028.md, sec. 5): the scan reads
-        the ACTIVE file only, and ``seq`` restarts at 0 in each weekly file, so
-        a duplicate whose first copy was sealed into an earlier week, or whose
-        claim window spans a weekly rotation, is appended again with the same
-        ``ref``; two entries with one ref are visible to any reader, never
-        silent. A malformed line (a torn final write) is skipped."""
+        the ACTIVE file only, so a duplicate whose first copy was sealed into
+        an earlier week is appended again with the same ``ref``; two entries
+        with one ref are visible to any reader, never silent. A malformed line (a torn final write) is skipped."""
         if "outbox_ref" in data:
             raise ValueError("data already carries 'outbox_ref'; append_once owns that key")
         stamped = {**data, "outbox_ref": ref}
@@ -919,17 +919,25 @@ class AuditTrail:
                 self._refuse_while_quarantined()
                 self._finish_first_entry()
                 self._resync_with_disk()
-                found = self._find_outbox_ref(ref, since_seq)
+                found = self._find_outbox_ref(event, ref, since_seq, since_ts)
                 if found is not None:
                     return found, False
                 return self._log_locked(event, stamped, actor), True
         finally:
             self._append_threads.discard(me)
 
-    def _find_outbox_ref(self, ref: str, since_seq: int | None) -> dict[str, Any] | None:
-        """The newest entry of the active file carrying ``data.outbox_ref ==
-        ref`` at or after ``since_seq``, or ``None``. Caller holds the append
-        lock, so the file does not grow under the scan."""
+    def _find_outbox_ref(
+        self, event: str, ref: str, since_seq: int | None,
+        since_ts: str | None = None,
+    ) -> dict[str, Any] | None:
+        """The newest entry of the active file of ``event`` carrying
+        ``data.outbox_ref == ref`` at or after ``since_seq``, or ``None``. The
+        scan stops at the first entry below ``since_seq`` that is also older
+        than ``since_ts`` (the row's own queue time, when given): ``seq``
+        restarts at 0 in each weekly file, and an entry newer than the row can
+        never lie before its window, so a rotation inside the window widens the
+        scan instead of ending it. Caller holds the append lock, so the file
+        does not grow under the scan."""
         try:
             f_cm = _open_regular(self._active_path)
         except FileNotFoundError:
@@ -947,12 +955,14 @@ class AuditTrail:
                 except Exception:
                     continue  # not an entry: it cannot stand for one
                 seq = entry.get("seq")
-                if (since_seq is not None and isinstance(seq, int)
-                        and not isinstance(seq, bool) and seq < since_seq):
-                    return None
                 body = entry.get("data")
-                if isinstance(body, dict) and body.get("outbox_ref") == ref:
+                if (entry.get("event") == event and isinstance(body, dict)
+                        and body.get("outbox_ref") == ref):
                     return entry
+                if (since_seq is not None and isinstance(seq, int)
+                        and not isinstance(seq, bool) and seq < since_seq
+                        and (since_ts is None or str(entry.get("ts", "")) < since_ts)):
+                    return None
         return None
 
     def _log_locked(

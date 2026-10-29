@@ -413,7 +413,8 @@ class TestOutboxFlush:
         events = _events(db)
         assert events.index("first") < events.index("outbox_gap") < events.index("third")
         gap = next(e for e in _entries(db) if e["event"] == "outbox_gap")
-        assert gap["data"]["outbox_ref"] == "gap:2"
+        assert gap["data"]["outbox_ref"] == f"gap:{gap['data']['dead_ref']}"
+        assert gap["data"]["dead_ref"].startswith("2:")
         assert gap["data"]["attempts"] == store_mod._OUTBOX_MAX_ATTEMPTS
         assert "attempts exhausted" in gap["data"]["reason"]
         rows = [tuple(r) for r in store._conn.execute(
@@ -604,3 +605,37 @@ class TestOutboxFlush:
             assert any("COMMITTED" in str(w.message) for w in caught)
         finally:
             s.close()
+
+    def test_a_rotation_inside_the_window_does_not_end_the_scan(self, store, tmp_path):
+        """seq restarts at 0 in each weekly file. A first copy that sits in the
+        new file with a seq below the stale since_seq is still found when the
+        row's own queue time bounds the window."""
+        trail = store._audit
+        first, _ = trail._append_once("e", {}, "agent", ref="7:r", since_seq=None)
+        trail.log("filler", {})
+        row_queued = "2000-01-01T00:00:00.000000Z"   # before every entry
+        stale_tail = 1000                            # a week-N tail, now > every seq
+        again, appended = trail._append_once(
+            "e", {}, "agent", ref="7:r", since_seq=stale_tail, since_ts=row_queued)
+        assert appended is False and again["seq"] == first["seq"]
+        # with no queue time the stale tail ends the scan at the first entry
+        dup, appended = trail._append_once("e", {}, "agent", ref="7:r",
+                                           since_seq=stale_tail)
+        assert appended is True
+
+    def test_a_planted_ref_under_another_event_does_not_suppress_delivery(self, store):
+        trail = store._audit
+        trail.log("something_else", {"outbox_ref": "5:planted"})
+        entry, appended = trail._append_once("real", {}, "agent", ref="5:planted",
+                                             since_seq=None)
+        assert appended is True and entry["event"] == "real"
+
+    def test_a_flush_does_not_open_a_write_lock_for_rows_in_backoff(self, store):
+        (row_id,) = _insert(store, "a")
+        (claim,) = store._outbox_claim()
+        store._outbox_nack(claim, RuntimeError("x"))
+        calls = []
+        real = store._outbox_claim
+        store._outbox_claim = lambda **k: (calls.append(1), real(**k))[1]
+        store._flush_audit_outbox()
+        assert calls == []

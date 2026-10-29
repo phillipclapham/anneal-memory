@@ -2686,6 +2686,7 @@ class _OutboxClaim(NamedTuple):
     kind: Literal["event", "gap"]
     reason: str | None
     bumped: bool = False  # this claim counted an attempt (only a batch's head does)
+    created_at: str | None = None  # when the row was queued: no entry of it is older
 
 
 # Generation 3: the principal scope idempotency keys are bound under. '' until a
@@ -3383,6 +3384,8 @@ class Store:
         # (a caller's open transaction, a full disk) keeps the count alive for
         # the next attempt instead of losing it. See _persist_audit_health.
         self._audit_failures_unpersisted: int = 0
+        # The earlier-shape outbox table is reported once per process.
+        self._outbox_shape_reported: bool = False
         # Post-commit auto-prune health (Diogenes 2026-09-17). THIS
         # ``Store`` INSTANCE local only, unlike ``_audit_write_failures``
         # above — a prune failure has no metadata-table flush point, so this
@@ -13756,11 +13759,11 @@ class Store:
             expires = _utc_after(_OUTBOX_CLAIM_TTL_SECONDS)
             rows = self._conn.execute(
                 "SELECT id, event_json, state, attempts, claim_expires_at, "
-                "not_before, claim_tail_seq, last_error, gap_logged "
+                "not_before, claim_tail_seq, last_error, gap_logged, created_at "
                 "FROM audit_outbox WHERE state != 'dead' OR gap_logged = 0 "
                 "ORDER BY id LIMIT ?", (limit,)).fetchall()
             for (row_id, event_json, state, attempts, claim_expires,
-                 not_before, row_tail, last_error, _gap) in rows:
+                 not_before, row_tail, last_error, _gap, created) in rows:
                 if state in ("claimed", "dead") and claim_expires is not None \
                         and claim_expires > now:
                     break
@@ -13776,7 +13779,7 @@ class Store:
                         (token, expires, row_id))
                     claims.append(_OutboxClaim(
                         row_id, token, event_json, attempts, row_tail,
-                        "gap", last_error))
+                        "gap", last_error, False, created))
                     continue
                 if attempts >= _OUTBOX_MAX_ATTEMPTS:
                     reason = (f"attempts exhausted ({attempts})"
@@ -13787,7 +13790,7 @@ class Store:
                         "WHERE id = ?", (now, token, expires, reason, row_id))
                     claims.append(_OutboxClaim(
                         row_id, token, event_json, attempts, row_tail,
-                        "gap", reason))
+                        "gap", reason, False, created))
                     continue
                 # Only the batch's head is charged an attempt: the rows behind
                 # it have not been tried, and a flusher that dies on the head
@@ -13803,7 +13806,7 @@ class Store:
                 claims.append(_OutboxClaim(
                     row_id, token, event_json, attempts + bump,
                     row_tail if row_tail is not None else tail_seq,
-                    "event", None, bool(bump)))
+                    "event", None, bool(bump), created))
             self._conn.commit()
         except Exception:
             self._rollback_quietly()
@@ -13946,6 +13949,10 @@ class Store:
         which stops there without raising and owns the suppression
         (``_replay_deferred_audits``).
 
+        A callback that writes a boxed event for every entry it receives
+        re-enters this flush for each one and does not end; it must write
+        conditionally.
+
         Known edges: no heartbeat (a holder that outlives its lease,
         ``_OUTBOX_CLAIM_TTL_SECONDS``, is handled by the ref check at append and the token check at ack); the
         callback is at-most-once per newly appended entry; payloads round-trip
@@ -13954,16 +13961,23 @@ class Store:
         if self._audit is None or self._read_only or self._closed:
             return
         try:
+            now = _now_utc()
             if self._conn.in_transaction or self._conn.execute(
-                    "SELECT 1 FROM audit_outbox WHERE state != 'dead' "
-                    "OR gap_logged = 0 LIMIT 1").fetchone() is None:
+                    "SELECT 1 FROM audit_outbox WHERE "
+                    "(state = 'pending' AND (not_before IS NULL OR not_before <= ?)) "
+                    "OR (state = 'claimed' AND (claim_expires_at IS NULL "
+                    "OR claim_expires_at <= ?)) "
+                    "OR (state = 'dead' AND gap_logged = 0 AND (claim_expires_at "
+                    "IS NULL OR claim_expires_at <= ?)) LIMIT 1",
+                    (now, now, now)).fetchone() is None:
                 return
         except sqlite3.Error as exc:
             # Busy or absent: the rows stay for the next batch or open; a
             # long-lived process that never batches again delays them. A table
             # of an earlier shape (a groundwork dev copy) never flushes, so that
             # one is counted and warned, not left looking healthy.
-            if "no such column" in str(exc):
+            if "no such column" in str(exc) and not self._outbox_shape_reported:
+                self._outbox_shape_reported = True
                 self._note_outbox_row_failure(
                     0, exc, kept=True, method="audit outbox",
                     committed="a queued audit event")
@@ -14068,7 +14082,7 @@ class Store:
             try:
                 logged, appended = self._audit._append_once(
                     event, payload if payload is not None else {}, actor,
-                    ref=ref, since_seq=claim.tail_seq)
+                    ref=ref, since_seq=claim.tail_seq, since_ts=claim.created_at)
             except BaseException as exc:
                 # A sink failure (disk full, a lock timeout, a quarantined
                 # manifest are all OSError) or an interrupt is not this row's
@@ -14084,14 +14098,15 @@ class Store:
                     raise
                 return False
         else:
-            ref = f"gap:{claim.id}"
+            dead_ref = self._outbox_ref(claim.id, claim.event_json)
             reason = claim.reason or "undeliverable"
             try:
                 logged, appended = self._audit._append_once(
                     "outbox_gap",
-                    {"dead_ref": self._outbox_ref(claim.id, claim.event_json),
-                     "attempts": claim.attempts, "reason": reason[:500]},
-                    "agent", ref=ref, since_seq=claim.tail_seq)
+                    {"dead_ref": dead_ref, "attempts": claim.attempts,
+                     "reason": reason[:500]},
+                    "agent", ref=f"gap:{dead_ref}", since_seq=claim.tail_seq,
+                    since_ts=claim.created_at)
             except BaseException as exc:
                 # The row stays dead with its marker owed: its lease lapses
                 # and a later flush writes the marker before any row behind it.

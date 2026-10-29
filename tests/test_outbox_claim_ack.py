@@ -162,7 +162,7 @@ class TestOutboxPoisonBound:
         assert store._outbox_ack(gap) is True
         assert _row(store, poison)[0] == "dead"       # retained
         assert _row(store, poison)[7] == 1            # gap marker logged
-        assert claims[1].attempts == 1  # its first real try; the poison head's claims never aged it
+        assert claims[1].attempts == 0  # behind the gap row: not tried, not charged, never aged by the poison head's claims
         assert store._outbox_ack(claims[1]) is True
         # a dead, marked row is never claimed again
         assert store._outbox_claim() == []
@@ -688,3 +688,28 @@ class TestOutboxFlush:
         assert store._conn.execute(
             "SELECT COUNT(*) FROM audit_outbox").fetchone()[0] == 0
         assert store.status().audit_write_failures == failures
+
+    def test_a_follower_behind_a_gap_row_is_not_charged_an_attempt(self, store):
+        dead, follower = _insert(store, "dead", "follower")
+        store._conn.execute("UPDATE audit_outbox SET state = 'dead', gap_logged = 0, "
+                            "attempts = ? WHERE id = ?",
+                            (store_mod._OUTBOX_MAX_ATTEMPTS, dead))
+        store._conn.commit()
+        claims = store._outbox_claim()
+        assert [(c.id, c.kind) for c in claims] == [(dead, "gap"), (follower, "event")]
+        assert claims[1].attempts == 0 and _row(store, follower)[1] == 0
+
+    def test_an_unreadable_log_probe_leaves_an_exhausted_row_owed(self, store, tmp_path):
+        (row_id,) = _insert(store, "maybe_landed")
+        store._conn.execute("UPDATE audit_outbox SET attempts = ?",
+                            (store_mod._OUTBOX_MAX_ATTEMPTS,))
+        store._conn.commit()
+
+        def unreadable(*a, **k):
+            raise OSError(5, "Input/output error")
+        store._audit._contains_ref = unreadable
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            store._flush_audit_outbox()
+        assert "outbox_gap" not in _events(tmp_path / "ob.db")
+        assert _row(store, row_id)[0] == "dead" and _row(store, row_id)[7] == 0

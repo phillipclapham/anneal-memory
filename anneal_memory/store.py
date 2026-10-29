@@ -13798,11 +13798,12 @@ class Store:
                         row_id, token, event_json, attempts, row_tail,
                         "gap", reason, False, created))
                     continue
-                # Only the batch's head is charged an attempt: the rows behind
-                # it have not been tried, and a flusher that dies on the head
+                # Only the batch's head is charged an attempt (a gap row ahead
+                # of it makes it a follower too): the rows behind it have not
+                # been tried, and a flusher that dies on the head
                 # must not age them toward dead. A row behind it that then
                 # fails is charged by its nack.
-                bump = 0 if any(c.kind == "event" for c in claims) else 1
+                bump = 0 if claims else 1
                 self._conn.execute(
                     "UPDATE audit_outbox SET state = 'claimed', "
                     "attempts = attempts + ?, claim_token = ?, "
@@ -13995,6 +13996,8 @@ class Store:
                 return
             last_id = self._conn.execute(
                 "SELECT MAX(id) FROM audit_outbox").fetchone()[0]
+            if last_id is None:
+                return  # another flusher emptied the table since the head read
         except sqlite3.Error as exc:
             # Busy or absent: the rows stay for the next batch or open; a
             # long-lived process that never batches again delays them. A table
@@ -14132,8 +14135,13 @@ class Store:
                     name = json.loads(claim.event_json)["event"]
                     found = self._audit._contains_ref(
                         name, dead_ref, claim.tail_seq, claim.created_at)
-                except Exception:
-                    found = None
+                except Exception as exc:
+                    # Cannot tell whether it landed: the row stays dead and
+                    # owed, its lease lapses, and a later flush looks again.
+                    self._note_outbox_row_failure(
+                        claim.id, exc, kept=True, method="outbox_gap",
+                        committed="a dead outbox row")
+                    return False
                 if found is not None:
                     self._outbox_ack(claim, delivered=True)
                     return True

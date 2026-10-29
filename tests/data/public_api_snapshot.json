@@ -6416,9 +6416,17 @@
      "kind": "property",
      "settable": false
     },
+    "origin_counts": {
+     "kind": "method",
+     "signature": "(self) -> 'dict[str, int]'"
+    },
     "origin_key_status": {
      "kind": "method",
      "signature": "(self, origin_key: 'str') -> 'OriginKeyStatus'"
+    },
+    "origin_map": {
+     "kind": "method",
+     "signature": "(self, episode_ids: 'Iterable[str]') -> 'dict[str, str]'"
     },
     "path": {
      "kind": "property",
@@ -6487,6 +6495,10 @@
     "retire_drift_probe": {
      "kind": "method",
      "signature": "(self, probe_id: 'int') -> 'bool'"
+    },
+    "runtime_context": {
+     "kind": "method",
+     "signature": "(self, *, tainted_by: 'Iterable[str]' = (), floor: 'str | None' = None) -> 'Iterator[None]'"
     },
     "save_continuity": {
      "kind": "method",
@@ -6660,11 +6672,11 @@
   "StoreOperation": {
    "kind": "value",
    "type": "_LiteralGenericAlias",
-   "value": "typing.Literal['get_by_origin_key', 'read_episode_versioned', 'origin_key_status', 'delete_by_origin_key', 'replace_section', 'save_continuity', 'save_meta', 'load_meta', 'load_continuity', 'load_wrap_snapshot', 'wrap_completed', 'prepare_continuity_write', 'prepare_meta_write', 'record', 'get', 'delete', 'recall', 'keyword_candidates', 'redirectable_ids', 'wrap_status_snapshot', 'supersede', 'unsupersede', 'import_team_entries', 'import_team_snapshot', 'drift_probes', 'supersession_exists', 'superseded_by_map', 'trust_map', 'trust_counts', 'set_trust', 'derived_edges', 'supersession_problem', 'supersession_links', 'set_state_key', 'clear_state_key', 'state_key_report', 'episodes_since_wrap', 'store_id', 'row_to_episode', 'status', 'wrap_started', 'wrap_cancelled', 'get_wrap_started_at', 'last_wrap_id', 'count_episodes_since_wrap', 'consolidate_requires_baton', 'wrap_gated_session', 'wrap_derive_roots', 'wrap_bound_token', 'wrap_today', 'set_consolidate_requires_baton', 'get_wrap_history', 'record_associations', 'decay_associations', 'get_associations', 'get_association_context', 'association_stats', 'association_formation', 'seed_pattern_co_graduation', 'drain_co_surface_events', 'get_pattern_associations', 'pattern_association_stats', 'gc_pattern_associations', 'rename_pattern_association', 'sever_pattern_concept', 'pattern_graph_projection_meta', 'section_schema', 'set_section_schema', 'get_pattern_history', 'upsert_pattern_history', 'seed_pattern_max_level', 'saved_pattern_levels', 'pattern_grounding', 'lease_acquire', 'lease_renew', 'lease_release', 'prune', 'schema_init', 'batch_begin', 'batch_commit', 'supersession_repair', 'close']"
+   "value": "typing.Literal['get_by_origin_key', 'read_episode_versioned', 'origin_key_status', 'delete_by_origin_key', 'replace_section', 'save_continuity', 'save_meta', 'load_meta', 'load_continuity', 'load_wrap_snapshot', 'wrap_completed', 'prepare_continuity_write', 'prepare_meta_write', 'record', 'get', 'delete', 'recall', 'keyword_candidates', 'redirectable_ids', 'wrap_status_snapshot', 'supersede', 'unsupersede', 'import_team_entries', 'import_team_snapshot', 'drift_probes', 'supersession_exists', 'superseded_by_map', 'trust_map', 'trust_counts', 'origin_map', 'origin_counts', 'set_trust', 'derived_edges', 'supersession_problem', 'supersession_links', 'set_state_key', 'clear_state_key', 'state_key_report', 'episodes_since_wrap', 'store_id', 'row_to_episode', 'status', 'wrap_started', 'wrap_cancelled', 'get_wrap_started_at', 'last_wrap_id', 'count_episodes_since_wrap', 'consolidate_requires_baton', 'wrap_gated_session', 'wrap_derive_roots', 'wrap_bound_token', 'wrap_today', 'set_consolidate_requires_baton', 'get_wrap_history', 'record_associations', 'decay_associations', 'get_associations', 'get_association_context', 'association_stats', 'association_formation', 'seed_pattern_co_graduation', 'drain_co_surface_events', 'get_pattern_associations', 'pattern_association_stats', 'gc_pattern_associations', 'rename_pattern_association', 'sever_pattern_concept', 'pattern_graph_projection_meta', 'section_schema', 'set_section_schema', 'get_pattern_history', 'upsert_pattern_history', 'seed_pattern_max_level', 'saved_pattern_levels', 'pattern_grounding', 'lease_acquire', 'lease_renew', 'lease_release', 'prune', 'schema_init', 'batch_begin', 'batch_commit', 'supersession_repair', 'close']"
   },
   "StoreStatus": {
    "bases": [],
-   "init": "(total_episodes: 'int', episodes_since_wrap: 'int', total_wraps: 'int', last_wrap_at: 'str | None', wrap_in_progress: 'bool', tombstone_count: 'int', continuity_chars: 'int | None', episodes_by_type: 'dict[str, int]' = <factory>, association_stats: 'AssociationStats | None' = None, audit_enabled: 'bool' = False, audit_log_path: 'str | None' = None, audit_entry_count: 'int | None' = None, audit_retention_days: 'int | None' = None, audit_write_failures: 'int' = 0, audit_last_failure: 'str | None' = None, prune_failures: 'int' = 0, prune_last_failure: 'str | None' = None, prune_behind: 'bool' = False, consolidate_requires_baton: 'bool' = False) -> None",
+   "init": "(total_episodes: 'int', episodes_since_wrap: 'int', total_wraps: 'int', last_wrap_at: 'str | None', wrap_in_progress: 'bool', tombstone_count: 'int', continuity_chars: 'int | None', episodes_by_type: 'dict[str, int]' = <factory>, association_stats: 'AssociationStats | None' = None, audit_enabled: 'bool' = False, audit_log_path: 'str | None' = None, audit_entry_count: 'int | None' = None, audit_retention_days: 'int | None' = None, audit_write_failures: 'int' = 0, audit_last_failure: 'str | None' = None, prune_failures: 'int' = 0, prune_last_failure: 'str | None' = None, prune_behind: 'bool' = False, consolidate_requires_baton: 'bool' = False, origin_counts: 'dict[str, int]' = <factory>) -> None",
    "kind": "class",
    "members": {
     "association_stats": {

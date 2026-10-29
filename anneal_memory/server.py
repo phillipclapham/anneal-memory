@@ -440,7 +440,11 @@ class Server:
             return _tool_result(f"Unknown tool: {name}", is_error=True)
 
         try:
-            return handler(arguments)
+            # B4: the server is the host. Its own tool calls run under a context
+            # at the ceiling it pinned, so no episode they record can carry an
+            # origin above it, whatever a tool argument declares.
+            with self._store.runtime_context(floor=self._store.trust_ceiling):
+                return handler(arguments)
         except Exception as e:
             logger.exception("Tool error for %s", name)
             return _tool_result(f"Error: {e}", is_error=True)

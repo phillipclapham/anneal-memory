@@ -388,6 +388,8 @@ StoreOperation = Literal[
     # CAP-08 provenance trust
     "trust_map",
     "trust_counts",
+    "origin_map",
+    "origin_counts",
     "set_trust",
     "derived_edges",
     "supersession_problem",
@@ -489,6 +491,8 @@ _EPISODE_VERSION_EXCLUDED: dict[str, str] = {
     "associations": "Hebbian strengths every wrap changes; recall weights, not content",
     "tombstones": "rows about episodes already deleted",
     "retired_origin_keys": "keys of episodes already deleted",
+    "episode_origin": "a provenance fact written once with its episode and never "
+                      "changed, so no later write can race an operator's read of it",
 }
 _ORIGIN_TRIGGERS: dict[str, str] = {
     # "AND origin_key IS NULL": a second mint trigger left by another build updates
@@ -1293,15 +1297,34 @@ def _reconstruct_wrap_cancel_bound_error(session_id: str | None) -> "WrapCancelB
     return WrapCancelBoundError(session_id=session_id)
 
 
-def _derived_trust(own: str, source_levels: Iterable[str]) -> str:
-    """CAP-08 D3's one rule: an episode's class is the lower of its own and the
-    highest class among its sources (no sources: its own).
-    :meth:`Store.effective_trust_map` applies it to a fixed point; ``record``
-    applies it to an episode not yet inserted."""
+# Version names of the rules that read an episode's class. Graduation's gate
+# stays on the corroborative rule; origin is the conservative one. Changing
+# either is a new name, not an edit of the old one.
+TRUST_RULE_CORROBORATIVE = "trust-corroborative-v1"
+ORIGIN_RULE_CONSERVATIVE = "origin-conservative-v1"
+
+
+def _corroborative_trust(own: str, source_levels: Iterable[str]) -> str:
+    """CAP-08 D3's one rule (``trust-corroborative-v1``): an episode's class is
+    the lower of its own and the highest class among its sources (no sources: its
+    own): how well it is supported, not where it came from (that is origin,
+    :data:`ORIGIN_RULE_CONSERVATIVE`). :meth:`Store.effective_trust_map` applies
+    it to a fixed point; ``record`` applies it to an episode not yet inserted."""
     levels = list(source_levels)
     if not levels:
         return own
     return min(own, max(levels, key=trust_rank), key=trust_rank)
+
+
+# The name this rule had before the three axes were named apart; kept for callers
+# that imported it, until 2.0.
+_derived_trust = _corroborative_trust
+
+
+def _lowest_class(levels: Iterable[str]) -> str | None:
+    """The lowest trust class among ``levels``, or None when there are none."""
+    got = list(levels)
+    return min(got, key=trust_rank) if got else None
 
 
 class ReplacedMatches(NamedTuple):
@@ -1868,7 +1891,8 @@ _HOST_GUARD_CLEANUP_KEY = "host_guard_cleanup_done"
 # fails until it is.
 _ANNEAL_TABLES = frozenset({
     "associations", "audit_outbox", "consolidation_lease", "crystal_document",
-    "drift_probes", "drift_results", "episode_derived", "episode_trust", "episodes",
+    "drift_probes", "drift_results", "episode_derived", "episode_origin",
+    "episode_trust", "episodes",
     "identity_versions", "idempotency_keys", "metadata", "pattern_aliases",
     "pattern_associations", "pattern_graph_projection_meta", "pattern_grounding",
     "pattern_history", "pattern_levels", "processed_co_surface_events",
@@ -2437,6 +2461,28 @@ CREATE TABLE IF NOT EXISTS idempotency_keys (
     created_at TEXT NOT NULL,
     PRIMARY KEY (principal_scope, key)
 );
+
+-- Generation 3 (B4): where an episode's content came from, fixed when it was
+-- recorded (a provenance fact, not a salience). origin is the lowest class among
+-- the declared trust, the sources' origins, and any runtime context active at
+-- the write; rule names the version of that computation, so a later rule is a
+-- new value, never a silent redefinition. An episode with no row predates this
+-- table and reads its origin by the same rule over today's rows
+-- (Store.origin_map). Authority (trust_ceiling), origin (this) and
+-- corroboration (the graduation gate) are three separate axes.
+CREATE TABLE IF NOT EXISTS episode_origin (
+    episode_id TEXT PRIMARY KEY,
+    origin TEXT NOT NULL CHECK (origin IN ('external', 'tool', 'agent', 'operator')),
+    rule TEXT NOT NULL
+);
+
+-- As episode_trust_follows_delete: episode ids are short, and a stale row would
+-- label the next episode that happened to get the same id.
+CREATE TRIGGER IF NOT EXISTS episode_origin_follows_delete
+AFTER DELETE ON episodes
+BEGIN
+    DELETE FROM episode_origin WHERE episode_id = OLD.id;
+END;
 
 -- Generation 3: the service consolidation lease (one row). Every acquire mints a
 -- fencing token (only its sha256 is stored) and moves the epoch; a release moves
@@ -3172,6 +3218,11 @@ class Store:
         # label would read as the one the caller asked for.
         trust_rank(trust_ceiling)
         self._trust_ceiling: str = trust_ceiling
+        # B4: the host's runtime contexts, innermost last (``runtime_context``).
+        # Plain per-instance state: a Store is single-threaded (its connection
+        # is opened ``check_same_thread=True``), so no lock guards it, and a
+        # second Store on the same file never sees it.
+        self._runtime_contexts: list[tuple[str | None, tuple[str, ...]]] = []
         # Read-only mode (per-turn recall consumers): the connection rejects writes and
         # the DB-setup branch below skips ALL init writes, so a per-prompt open can't
         # contend with a concurrent single-writer wrap. See the schema_init block.
@@ -4232,6 +4283,15 @@ class Store:
                         "INSERT OR REPLACE INTO episode_trust (episode_id, trust) VALUES (?, ?)",
                         (ep_id, trust),
                     )
+                # Origin is a fact about this write, fixed in its transaction: the
+                # declared class, the sources' origins and the host's runtime
+                # context, lowest wins. The caller's own ``trust`` never raises it.
+                self._conn.execute(
+                    "INSERT OR REPLACE INTO episode_origin (episode_id, origin, rule) "
+                    "VALUES (?, ?, ?)",
+                    (ep_id, self._record_origin(trust, source_ids),
+                     ORIGIN_RULE_CONSERVATIVE),
+                )
                 for old_id in old_ids:
                     self._conn.execute(
                         "INSERT INTO supersessions (old_id, new_id, source) VALUES (?, ?, ?)",
@@ -6369,7 +6429,7 @@ class Store:
         while work:
             node = work.popleft()
             queued.discard(node)
-            new = _derived_trust(
+            new = _corroborative_trust(
                 val[node],
                 [val[src] if src is not None else (fixed or "external")
                  for src, fixed in sources[node]],
@@ -6390,12 +6450,12 @@ class Store:
 
     def _proposed_trust(self, trust: str, source_ids: Iterable[str]) -> str:
         """The effective class an episode not yet inserted will have, given its own
-        ``trust`` and its ``derived_from`` sources: :func:`_derived_trust` over the
+        ``trust`` and its ``derived_from`` sources: :func:`_corroborative_trust` over the
         sources' effective classes, as :meth:`effective_trust_map` will compute it
         once the edges exist."""
         ids = list(source_ids)
         eff = self.effective_trust_map(ids)
-        return _derived_trust(trust, [eff.get(i, DEFAULT_TRUST) for i in ids])
+        return _corroborative_trust(trust, [eff.get(i, DEFAULT_TRUST) for i in ids])
 
     def _derivation_descendants(self, episode_ids: Iterable[str]) -> set[str]:
         """The listed episodes plus every live episode derived from them, at any
@@ -6481,6 +6541,202 @@ class Store:
                 n for t, n in counts.items() if t != DEFAULT_TRUST
             )
             return counts
+
+    @contextmanager
+    def runtime_context(
+        self, *, tainted_by: Iterable[str] = (), floor: str | None = None,
+    ) -> Iterator[None]:
+        """Bind a ceiling on the ORIGIN of every episode recorded through this
+        Store while the block is active. For the HOST: the runtime that mediates
+        tool results, which knows what the model has just read; the model's own
+        declaration (``record(trust=)``) cannot know that, and cannot undo it.
+
+        An episode recorded inside gets an origin no higher than the lowest
+        class among ``floor`` and the origins of the ``tainted_by`` episodes,
+        whatever ``trust`` the caller declares. A ``derived_from`` the caller
+        declares can only lower it further. Contexts nest by taking the lower
+        origin, so an inner block never raises what an outer one set. State is
+        per Store instance and restored on exit, even by an exception.
+
+        Origin is a separate axis from authority (``trust_ceiling``: what a
+        principal may assert, refused above) and from corroboration (the
+        graduation gate, ``trust-corroborative-v1``). This changes only the
+        origin that is stored and read (:meth:`origin_map`); nothing gates on it.
+
+        ``floor`` unknown to ``types.TRUST_LEVELS`` raises ``ValueError``, as every
+        other trust check does. A ``tainted_by`` id that names no episode counts
+        as ``external``: the same reading a deleted ground gets when trust judges
+        grounding, so a taint the store cannot find fails closed rather than
+        lifting the cap. The ids are resolved when an episode is recorded, not
+        when the block is entered."""
+        if floor is not None:
+            trust_rank(floor)
+        if isinstance(tainted_by, (str, bytes)):
+            raise TypeError("tainted_by must be an iterable of episode ids, not a string")
+        ids = tuple(sorted({str(i).strip().lower() for i in tainted_by}))
+        frame = (floor, ids)
+        self._runtime_contexts.append(frame)
+        try:
+            yield
+        finally:
+            # By identity, so an exit out of order still removes its own frame.
+            for pos in range(len(self._runtime_contexts) - 1, -1, -1):
+                if self._runtime_contexts[pos] is frame:
+                    del self._runtime_contexts[pos]
+                    break
+
+    def _origin_cap_in_force(self) -> str | None:
+        """The lowest class the active runtime contexts allow, or None with none
+        active. Reads the tainted episodes in the caller's transaction or snapshot."""
+        if not self._runtime_contexts:
+            return None
+        levels = [f for f, _ in self._runtime_contexts if f is not None]
+        tainted = sorted({i for _, ids in self._runtime_contexts for i in ids})
+        if tainted:
+            known = self._origin_map_locked(tainted)
+            levels.extend(known.get(i, "external") for i in tainted)
+        return _lowest_class(levels)
+
+    def _record_origin(self, trust: str, source_ids: Iterable[str]) -> str:
+        """The origin a new episode gets: lowest of its declared ``trust``, the
+        origins of its declared sources, and the runtime-context cap. Runs in
+        ``record``'s write transaction."""
+        ids = list(source_ids)
+        levels = [trust]
+        if ids:
+            known = self._origin_map_locked(ids)
+            levels.extend(known.get(i, "external") for i in ids)
+        cap = self._origin_cap_in_force()
+        if cap is not None:
+            levels.append(cap)
+        lowest = _lowest_class(levels)
+        assert lowest is not None
+        return lowest
+
+    def origin_map(self, episode_ids: Iterable[str]) -> dict[str, str]:
+        """``{id: origin}`` for each listed episode that exists, every class
+        listed, ``agent`` included. An episode recorded by a build that stores
+        origin reads what was stored (a provenance fact: later trust changes do
+        not move it). An older one has no row and reads
+        ``origin-conservative-v1`` computed now: the lowest class among its own
+        trust and every declared source, through every level (an edge to a
+        removed source reads its marker, or ``external`` with none)."""
+        with self._db_boundary("origin_map"), self._read_snapshot():
+            return self._origin_map_locked(episode_ids)
+
+    def _origin_map_locked(self, episode_ids: Iterable[str]) -> dict[str, str]:
+        """:meth:`origin_map` in the caller's transaction or snapshot."""
+        wanted = sorted({str(i).strip().lower() for i in episode_ids})
+        if not wanted:
+            return {}
+        conn = self._conn
+
+        def has(table: str) -> bool:
+            return conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+                (table,)).fetchone() is not None
+
+        def chunks(items: list[str]) -> Iterator[tuple[list[str], str]]:
+            for start in range(0, len(items), 500):
+                part = items[start:start + 500]
+                yield part, ",".join("?" * len(part))
+
+        def stored_of(items: list[str]) -> dict[str, str]:
+            got: dict[str, str] = {}
+            if has("episode_origin"):
+                for part, marks in chunks(items):
+                    got.update(
+                        (r[0], r[1]) for r in conn.execute(
+                            f"SELECT episode_id, origin FROM episode_origin "
+                            f"WHERE episode_id IN ({marks})", part))
+            return got
+
+        live: set[str] = set()
+        for part, marks in chunks(wanted):
+            live.update(r[0] for r in conn.execute(
+                f"SELECT id FROM episodes WHERE id IN ({marks})", part))
+        out = {i: o for i, o in stored_of(sorted(live)).items()}
+        pending = sorted(live - set(out))
+        if not pending:
+            return out
+
+        # No row: walk the declared sources. A source that has a row is a leaf
+        # carrying its stored origin (that already folded its own sources in).
+        edges: dict[str, list[tuple[str | None, str | None]]] = {}
+        leaf: dict[str, str] = {}
+        walked: set[str] = set(pending)
+        frontier = list(pending)
+        has_derived = has("episode_derived")
+        while frontier and has_derived:
+            found: set[str] = set()
+            for part, marks in chunks(frontier):
+                for ep_id, src, gone, src_live in conn.execute(
+                    f"SELECT d.episode_id, d.source_id, d.gone_trust, e.id IS NOT NULL "
+                    f"FROM episode_derived d LEFT JOIN episodes e ON e.id = d.source_id "
+                    f"WHERE d.episode_id IN ({marks})", part):
+                    if gone is not None:
+                        edges.setdefault(ep_id, []).append((None, gone))
+                    elif src_live:
+                        edges.setdefault(ep_id, []).append((src, None))
+                        found.add(src)
+                    else:
+                        edges.setdefault(ep_id, []).append((None, "external"))
+            found -= walked
+            leaf.update(stored_of(sorted(found)))
+            walked |= found
+            frontier = sorted(found - set(leaf))
+        own = self.trust_map(walked - set(leaf))
+        for ep in pending:
+            levels: list[str] = []
+            seen: set[str] = set()
+            stack = [ep]
+            while stack:
+                node = stack.pop()
+                if node in seen:
+                    continue
+                seen.add(node)
+                if node in leaf:
+                    levels.append(leaf[node])
+                    continue
+                levels.append(own.get(node, DEFAULT_TRUST))
+                for src, fixed in edges.get(node, ()):
+                    if src is not None:
+                        stack.append(src)
+                    else:
+                        levels.append(fixed or "external")
+            lowest = _lowest_class(levels)
+            assert lowest is not None
+            out[ep] = lowest
+        return out
+
+    def origin_counts(self) -> dict[str, int]:
+        """Number of live episodes at each origin, every class listed. One read
+        snapshot; an episode with no stored origin counts by the conservative
+        read-time rule (:meth:`origin_map`)."""
+        with self._db_boundary("origin_counts"), self._read_snapshot():
+            return self._origin_counts_locked()
+
+    def _origin_counts_locked(self) -> dict[str, int]:
+        """:meth:`origin_counts` in the caller's transaction or snapshot."""
+        counts = {t: 0 for t in reversed(TRUST_LEVELS)}
+        has_table = self._conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' "
+            "AND name = 'episode_origin'").fetchone() is not None
+        if has_table:
+            for origin, n in self._conn.execute(
+                """SELECT o.origin, COUNT(*) FROM episode_origin o
+                   JOIN episodes e ON e.id = o.episode_id GROUP BY o.origin"""
+            ):
+                counts[origin] += n
+            rows = self._conn.execute(
+                """SELECT e.id FROM episodes e
+                   LEFT JOIN episode_origin o ON o.episode_id = e.id
+                   WHERE o.episode_id IS NULL""").fetchall()
+        else:
+            rows = self._conn.execute("SELECT id FROM episodes").fetchall()
+        for origin in self._origin_map_locked(r[0] for r in rows).values():
+            counts[origin] += 1
+        return counts
 
     @property
     def trust_ceiling(self) -> str:
@@ -7425,6 +7681,7 @@ class Store:
             audit_failures = self._current_audit_failures()
             audit_last_failure = self._current_audit_last_failure()
             requires_baton = self.consolidate_requires_baton()
+            origin_counts = self._origin_counts_locked()
 
         # Continuity file size — file read, outside the DB boundary.
         # AM-STATUS-HARDEN (spore-084): guard the read. A corrupt / non-UTF8
@@ -7506,6 +7763,7 @@ class Store:
             prune_last_failure=self._prune_last_failure,
             prune_behind=self._prune_behind,
             consolidate_requires_baton=requires_baton,
+            origin_counts=origin_counts,
         )
 
     # -- Wrap lifecycle --

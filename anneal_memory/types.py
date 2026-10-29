@@ -270,6 +270,10 @@ class StoreStatus:
     # store's metadata table, so every transport can show why a wrap
     # downgrades on a protected store. See Store.consolidate_requires_baton.
     consolidate_requires_baton: bool = False
+    # B4: live episodes by ORIGIN (``TRUST_LEVELS``, every class listed), beside
+    # authority (the store's ``trust_ceiling``) and corroboration (graduation's
+    # gate). Nothing gates on it. See Store.origin_map.
+    origin_counts: dict[str, int] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)

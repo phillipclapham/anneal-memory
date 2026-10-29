@@ -185,3 +185,159 @@ class TestOutboxPoisonBound:
         store._outbox_claim()
         assert store._outbox_mark_dead(stale, "late") is None
         assert _row(store, row_id)[0] == "claimed"
+
+
+# --------------------------------------------------------------------------
+# S2: AuditTrail.append_once (design sec. 5, crash cases C3 and C5)
+# --------------------------------------------------------------------------
+
+import os
+import subprocess
+import sys
+import textwrap
+from pathlib import Path
+
+from anneal_memory.audit import AuditTrail
+
+_REPO_ROOT = str(Path(__file__).resolve().parent.parent)
+
+
+def _entries(db_path) -> list[dict]:
+    path = db_path.parent / f"{db_path.stem}.audit.jsonl"
+    if not path.exists():
+        return []
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()
+            if line.strip()]
+
+
+def _with_ref(db_path, ref: str) -> list[dict]:
+    return [e for e in _entries(db_path)
+            if (e.get("data") or {}).get("outbox_ref") == ref]
+
+
+class TestAppendOnce:
+    def test_a_killed_process_between_append_and_ack_logs_the_event_once(
+            self, tmp_path, monkeypatch):
+        """T1 (design R1, C3): a subprocess is killed with os._exit after its
+        append and before its ack. Before append_once the reclaim appended the
+        event a second time (the log held 2 entries for it). Written at S2 on
+        the claim/append_once primitives with the old open-time flush stubbed
+        out in both processes; S3 reruns it through the real flush."""
+        db = tmp_path / "t1.db"
+        script = tmp_path / "killed_after_append.py"
+        script.write_text(textwrap.dedent('''
+            import os, sys
+            from anneal_memory.store import Store
+            Store._flush_audit_outbox = lambda self, **kw: None
+            store = Store(sys.argv[1])
+            store._conn.execute(
+                "INSERT INTO audit_outbox (event_json, created_at) VALUES (?, 'x')",
+                ('{"event": "crash_event"}',))
+            store._conn.commit()
+            (claim,) = store._outbox_claim(tail_seq=store._audit._tail_seq())
+            store._audit._append_once("crash_event", {}, "agent",
+                                     ref=f"{claim.id}:abc", since_seq=claim.tail_seq)
+            os._exit(0)   # killed between the append and the ack
+        '''))
+        # the tree under test, not an installed copy of another generation
+        env = {**os.environ, "PYTHONPATH": _REPO_ROOT}
+        subprocess.run([sys.executable, str(script), str(db)], check=True, env=env)
+        row_id = 1
+        assert len(_with_ref(db, f"{row_id}:abc")) == 1
+
+        monkeypatch.setattr(Store, "_flush_audit_outbox", lambda self, **kw: None)
+        s = Store(db)
+        try:
+            _expire(s, row_id)
+            (claim,) = s._outbox_claim(tail_seq=s._audit._tail_seq())
+            assert claim.attempts == 2
+            entry, appended = s._audit._append_once(
+                "crash_event", {}, "agent", ref=f"{row_id}:abc",
+                since_seq=claim.tail_seq)
+            assert appended is False and entry["event"] == "crash_event"
+            assert s._outbox_ack(claim) is True
+        finally:
+            s.close()
+        assert len(_with_ref(db, f"{row_id}:abc")) == 1
+        assert _entries(db)[-1]["event"] == "crash_event"
+
+    def test_a_stalled_second_claimant_logs_the_event_once(self, store, tmp_path):
+        """T5 (C5): P stalls past its lease, Q reclaims, appends and acks; P
+        resumes, appends: the log still holds one entry, and P's ack is a no-op."""
+        (row_id,) = _insert(store, "stall_event")
+        (p,) = store._outbox_claim(tail_seq=store._audit._tail_seq())
+        _expire(store, row_id)
+        (q,) = store._outbox_claim(tail_seq=store._audit._tail_seq())
+        ref = f"{row_id}:h"
+        e_q, new_q = store._audit._append_once(
+            "stall_event", {}, "agent", ref=ref, since_seq=q.tail_seq)
+        assert store._outbox_ack(q) is True
+        e_p, new_p = store._audit._append_once(
+            "stall_event", {}, "agent", ref=ref, since_seq=p.tail_seq)
+        assert (new_q, new_p) == (True, False)
+        assert e_p["seq"] == e_q["seq"]
+        assert store._outbox_ack(p) is False
+        assert len(_with_ref(tmp_path / "ob.db", ref)) == 1
+
+    def test_the_scan_stops_at_since_seq_and_other_refs_do_not_match(self, store):
+        trail = store._audit
+        first, _ = trail._append_once("e", {}, "agent", ref="1:a", since_seq=None)
+        trail.log("filler", {})
+        window = trail._tail_seq()
+        # the first copy lies before the window: not seen, so it appends again
+        again, appended = trail._append_once("e", {}, "agent", ref="1:a",
+                                            since_seq=window)
+        assert appended is True and again["seq"] > first["seq"]
+        # inside the window the same ref is found
+        same, appended = trail._append_once("e", {}, "agent", ref="1:a",
+                                           since_seq=window)
+        assert appended is False and same["seq"] == again["seq"]
+        # a different hash on the same id is a different event
+        other, appended = trail._append_once("e", {}, "agent", ref="1:b",
+                                            since_seq=window)
+        assert appended is True and other["seq"] > again["seq"]
+
+    def test_the_chain_stays_valid_and_a_skipped_duplicate_leaves_it_untouched(
+            self, store, tmp_path):
+        trail = store._audit
+        trail._append_once("e", {"k": 1}, "agent", ref="9:z", since_seq=None)
+        before = _entries(tmp_path / "ob.db")
+        trail._append_once("e", {"k": 1}, "agent", ref="9:z", since_seq=None)
+        assert _entries(tmp_path / "ob.db") == before
+        assert AuditTrail.verify(tmp_path / "ob.db").valid
+
+    def test_append_once_does_not_fire_the_callback_and_notify_does(self, tmp_path):
+        seen: list[str] = []
+        s = Store(tmp_path / "cb.db", on_audit_event=lambda e: seen.append(e["event"]))
+        try:
+            entry, appended = s._audit._append_once(
+                "cb_event", {}, "agent", ref="1:c", since_seq=None)
+            assert appended is True and "cb_event" not in seen
+            s._audit._notify(entry)
+            assert seen.count("cb_event") == 1
+        finally:
+            s.close()
+
+    def test_a_torn_final_line_is_skipped_by_the_scan(self, store, tmp_path):
+        trail = store._audit
+        trail._append_once("e", {}, "agent", ref="2:t", since_seq=None)
+        active = tmp_path / "ob.audit.jsonl"
+        with open(active, "ab") as f:
+            f.write(b'{"v":1,"seq":')   # a kill mid-write
+        entry, appended = trail._append_once("e", {}, "agent", ref="2:t",
+                                            since_seq=None)
+        assert appended is False and entry["data"]["outbox_ref"] == "2:t"
+
+    def test_a_line_longer_than_one_read_chunk_is_joined(self, store):
+        trail = store._audit
+        trail._append_once("big", {"pad": "x" * 200_000}, "agent", ref="3:b",
+                          since_seq=None)
+        trail.log("tail", {})
+        entry, appended = trail._append_once("big", {"pad": "x" * 200_000}, "agent",
+                                            ref="3:b", since_seq=None)
+        assert appended is False and entry["data"]["outbox_ref"] == "3:b"
+
+    def test_the_data_key_is_owned_by_append_once(self, store):
+        with pytest.raises(ValueError):
+            store._audit._append_once("e", {"outbox_ref": "mine"}, "agent",
+                                     ref="1:a", since_seq=None)

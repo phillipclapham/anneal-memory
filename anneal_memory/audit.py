@@ -830,13 +830,121 @@ class AuditTrail:
 
         # Fire callback after successful write, outside every lock (the
         # ``_manifest_lock`` invariant: no user callback inside a locked span).
+        self._notify(entry)
+
+        return entry
+
+    def _notify(self, entry: dict[str, Any]) -> None:
+        """Hand ``entry`` to the ``on_event`` callback, if there is one. A
+        failure of the callback is logged and swallowed, never raised. The
+        caller must hold no lock and no store transaction: :meth:`log` calls it
+        after its append lock is released, and the outbox flush calls it after
+        the acknowledge for an entry :meth:`_append_once` newly appended."""
         if self._on_event is not None:
             try:
                 self._on_event(entry)
             except Exception:
                 _log(logging.WARNING, "on_event callback failed for seq %d", entry["seq"], exc_info=True)
 
-        return entry
+    def _tail_seq(self) -> int:
+        """The seq the next entry of the active file will take, read from disk
+        (0 for no active file or no valid entry). An outbox claim stores it as
+        ``since_seq`` for :meth:`_append_once`; read without the append lock, a
+        concurrent append can only make it smaller than the true tail, which
+        widens that scan and never narrows it."""
+        try:
+            with _open_regular(self._active_path) as f:
+                line = _last_valid_entry_in(f, 0)[0]
+        except FileNotFoundError:
+            return 0
+        if not line:
+            return 0
+        seq = json.loads(line).get("seq")
+        return seq + 1 if isinstance(seq, int) and not isinstance(seq, bool) else 0
+
+    def _append_once(
+        self,
+        event: str,
+        data: dict[str, Any],
+        actor: str,
+        *,
+        ref: str,
+        since_seq: int | None,
+    ) -> tuple[dict[str, Any], bool]:
+        """:meth:`log` that appends at most one entry per ``ref``: under the
+        append lock, scan the active file backwards for an entry whose
+        ``data["outbox_ref"]`` equals ``ref`` and, if there is one, return it
+        with ``False`` and append nothing; otherwise append ``event`` with
+        ``outbox_ref`` added to ``data`` and return it with ``True``. The
+        scan stops at the first entry whose ``seq`` is below ``since_seq``
+        (the :meth:`_tail_seq` read before the row's first claim), so it costs
+        what was appended since, and at the start of the file. ``since_seq=None``
+        scans the whole active file.
+
+        ``on_event`` is NOT fired here: the outbox flush calls :meth:`_notify`
+        after its acknowledge, outside every lock and transaction, and only
+        for an entry this call newly appended (``True``).
+
+        Known edges (outbox_claim_ack_design_1028.md, sec. 5): the scan reads
+        the ACTIVE file only, and ``seq`` restarts at 0 in each weekly file, so
+        a duplicate whose first copy was sealed into an earlier week, or whose
+        claim window spans a weekly rotation, is appended again with the same
+        ``ref``; two entries with one ref are visible to any reader, never
+        silent. A malformed line (a torn final write) is skipped."""
+        if "outbox_ref" in data:
+            raise ValueError("data already carries 'outbox_ref'; append_once owns that key")
+        stamped = {**data, "outbox_ref": ref}
+        probe: dict[str, Any] = {"event": event, "data": stamped}
+        _require_entry_dict(probe)
+
+        me = threading.get_ident()
+        if me in self._span_threads or me in self._append_threads:
+            raise RuntimeError(
+                "an audit operation is already in progress on this thread; "
+                "the trail is not reentrant (e.g. from a logging handler)"
+            )
+        try:
+            self._append_threads.add(me)
+            with self._append_lock():
+                # The same preamble _log_locked opens with, so the scan reads
+                # the file this instance is about to append to. All three are
+                # idempotent: _log_locked runs them again.
+                self._refuse_while_quarantined()
+                self._finish_first_entry()
+                self._resync_with_disk()
+                found = self._find_outbox_ref(ref, since_seq)
+                if found is not None:
+                    return found, False
+                return self._log_locked(event, stamped, actor), True
+        finally:
+            self._append_threads.discard(me)
+
+    def _find_outbox_ref(self, ref: str, since_seq: int | None) -> dict[str, Any] | None:
+        """The newest entry of the active file carrying ``data.outbox_ref ==
+        ref`` at or after ``since_seq``, or ``None``. Caller holds the append
+        lock, so the file does not grow under the scan."""
+        try:
+            f_cm = _open_regular(self._active_path)
+        except FileNotFoundError:
+            return None
+        with f_cm as f:
+            for raw in _lines_backward(f):
+                if not raw.strip():
+                    continue
+                try:
+                    entry = json.loads(raw)
+                except ValueError:
+                    continue  # a torn or foreign line: not an entry
+                if not isinstance(entry, dict):
+                    continue
+                seq = entry.get("seq")
+                if (since_seq is not None and isinstance(seq, int)
+                        and not isinstance(seq, bool) and seq < since_seq):
+                    return None
+                body = entry.get("data")
+                if isinstance(body, dict) and body.get("outbox_ref") == ref:
+                    return entry
+        return None
 
     def _log_locked(
         self,
@@ -4420,6 +4528,21 @@ def _iso_week_now() -> str:
     now = datetime.now(timezone.utc)
     iso = now.isocalendar()
     return f"{iso[0]}-W{iso[1]:02d}"
+
+
+def _lines_backward(f: Any, chunk: int = 65536) -> Iterator[bytes]:
+    """The lines of an open binary file, last first, read ``chunk`` bytes at a
+    time from the end. A line longer than a chunk is joined across reads."""
+    pos = f.seek(0, os.SEEK_END)
+    carry = b""
+    while pos > 0:
+        step = min(chunk, pos)
+        pos -= step
+        f.seek(pos)
+        lines = (f.read(step) + carry).split(b"\n")
+        carry = lines[0] if pos > 0 else b""
+        for line in reversed(lines[1:] if pos > 0 else lines):
+            yield line
 
 
 def _read_last_valid_entry(path: Path) -> str:

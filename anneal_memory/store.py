@@ -14024,8 +14024,8 @@ class Store:
                     committed="a queued audit event")
             return
         terminal: BaseException | None = None
-        self._outbox_flush_depth += 1
         try:
+            self._outbox_flush_depth += 1
             progressed = True
             while terminal is None:
                 if not progressed:
@@ -14080,7 +14080,7 @@ class Store:
             except Exception:
                 pass
         finally:
-            self._outbox_flush_depth -= 1
+            self._outbox_flush_depth = max(self._outbox_flush_depth - 1, 0)
             if not self._outbox_flush_depth:
                 self._outbox_reflush = False
             try:

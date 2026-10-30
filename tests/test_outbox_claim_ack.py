@@ -492,6 +492,40 @@ class TestOutboxFlush:
             s.close()
         assert _events(db).count("record") == 2
 
+    def test_a_boxed_write_from_a_callback_mid_batch_is_not_stranded(self, tmp_path):
+        """Reproduced on ed64efe (Diogenes 10-30): a callback's first call
+        writes a keyed record (a boxed event) while the outer flush still holds
+        claims on the batch's later rows. The nested flush is turned back by
+        those claims and the outer flush had snapshotted its last id, so the
+        row waited, plain pending, for the next boxed write or open, and an
+        unboxed event written meanwhile was logged ahead of it."""
+        calls: list[str] = []
+        holder: dict[str, Store] = {}
+
+        def callback(entry):
+            calls.append(entry["event"])
+            if len(calls) == 1:
+                holder["s"].record("C", "observation", idempotency_key="kc")
+
+        db = tmp_path / "strand.db"
+        s = Store(db, on_audit_event=callback)
+        holder["s"] = s
+        try:
+            with s._batch():
+                s.record("A", "observation")
+                s.record("B", "observation")
+            pending = s._conn.execute(
+                "SELECT COUNT(*) FROM audit_outbox").fetchone()[0]
+            assert pending == 0
+            s.record("D", "observation")
+        finally:
+            s.close()
+        refs = [(e.get("data") or {}).get("outbox_ref") for e in _entries(db)
+                if e["event"] == "record"]
+        assert len(refs) == 4
+        # D is the unboxed write: it carries no outbox ref and is logged last.
+        assert refs[-1] is None and None not in refs[:-1]
+
     def test_a_callback_fires_once_per_newly_appended_entry(self, tmp_path):
         seen: list[str] = []
         s = Store(tmp_path / "cb1.db", on_audit_event=lambda e: seen.append(e["event"]))
@@ -713,3 +747,19 @@ class TestOutboxFlush:
             store._flush_audit_outbox()
         assert "outbox_gap" not in _events(tmp_path / "ob.db")
         assert _row(store, row_id)[0] == "dead" and _row(store, row_id)[7] == 0
+
+
+class TestAuditScanDeepLine:
+    def test_a_deeply_nested_line_is_not_an_entry_for_the_tail_or_ref_scan(self, tmp_path):
+        """Reproduced on ed64efe (Diogenes second lineage, 10-30): the backward
+        scans caught only ValueError, so a deeply nested line in the active file
+        raised RecursionError out of both, where every other parse site treats
+        it as unparseable."""
+        from anneal_memory.audit import AuditTrail
+
+        trail = AuditTrail(tmp_path / "deep.db")
+        trail.log("record", {"n": 1})
+        with open(trail._active_path, "a", encoding="utf-8") as fh:
+            fh.write("[" * 200000 + "\n")
+        assert trail._tail_seq() == 1
+        assert trail._find_outbox_ref("record", "1:abc", None) is None

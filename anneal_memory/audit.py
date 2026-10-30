@@ -863,7 +863,7 @@ class AuditTrail:
             for raw in _lines_backward(f):
                 try:
                     seq = json.loads(raw).get("seq") if raw.strip() else None
-                except (ValueError, AttributeError):
+                except _UNPARSEABLE_JSON + (AttributeError,):
                     continue
                 if isinstance(seq, int) and not isinstance(seq, bool):
                     return seq + 1
@@ -967,7 +967,7 @@ class AuditTrail:
                     continue
                 try:
                     entry = json.loads(raw)
-                except ValueError:
+                except _UNPARSEABLE_JSON:
                     continue  # a torn or foreign line: not an entry
                 try:
                     _require_entry_dict(entry)  # the readers' own validity test
@@ -2979,7 +2979,9 @@ class AuditTrail:
     def _resync_with_disk(self) -> None:
         """Bring the cached chain tip up to date with the active file.
 
-        :meth:`log` calls it under :meth:`_append_lock`; nothing else does.
+        :meth:`_log_locked` (for :meth:`log`) and :meth:`_append_once` call it
+        under :meth:`_append_lock`; nothing else does (:meth:`_contains_ref`
+        scans the active file without it).
 
         With a tip in the active file (``self._tip``): if that file is still
         the same one AND the tip's bytes still hash to the hash recorded with

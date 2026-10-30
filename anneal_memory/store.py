@@ -3410,6 +3410,11 @@ class Store:
         # "failed once, retention has since caught up" (Diogenes 2026-09-18).
         self._prune_behind: bool = False
         self._audit: AuditTrail | None = None
+        # How many _flush_audit_outbox frames this Store is inside, and whether
+        # a nested one (an on_audit_event callback's own write) ran while the
+        # outer still held claims, so the outer re-reads the table's end.
+        self._outbox_flush_depth: int = 0
+        self._outbox_reflush: bool = False
         if audit and not read_only:
             self._audit = AuditTrail(
                 self._path,
@@ -13946,9 +13951,11 @@ class Store:
         Order among QUEUED events is the emit order: the first failed row ends
         the flush (the rows behind it are released uncounted), and a later row
         is never claimed past an earlier unfinished one. Events that never enter
-        the outbox (``_box_audit_event`` lists the boxed sites) and a write a
-        callback makes after its own row's ack are appended directly, so they
-        can land ahead of rows still queued. A failed append is a counted failure and the
+        the outbox (``_box_audit_event`` lists the boxed sites) are appended
+        directly, so they can land ahead of rows still queued. A boxed write a
+        callback makes while this flush still holds the batch's later claims is
+        turned back by them and delivered by this flush: it re-reads the
+        table's end before it returns. A failed append is a counted failure and the
         row goes back to ``pending`` with a backoff. A sink failure (``OSError``)
         or an interrupt is retried without counting toward dead; a row the
         append itself refuses is ``dead`` after ``_OUTBOX_MAX_ATTEMPTS`` claims:
@@ -13976,6 +13983,11 @@ class Store:
         rotation keeps its ref (:meth:`AuditTrail._append_once`)."""
         if self._audit is None or self._read_only or self._closed:
             return
+        if self._outbox_flush_depth:
+            # Nested in a callback's write: the outer flush may hold the claims
+            # this one was just turned back by, and it snapshotted its last id
+            # before this row existed. Ask it to look at the table's end again.
+            self._outbox_reflush = True
         try:
             if self._conn.in_transaction:
                 return
@@ -14012,9 +14024,22 @@ class Store:
                     committed="a queued audit event")
             return
         terminal: BaseException | None = None
+        self._outbox_flush_depth += 1
         try:
             progressed = True
-            while progressed and terminal is None:
+            while terminal is None:
+                if not progressed:
+                    # Nothing left under the snapshot. A nested flush that was
+                    # turned back by this one's claims asked for another look at
+                    # the table's end (a boxed write from a callback).
+                    if not self._outbox_reflush:
+                        break
+                    self._outbox_reflush = False
+                    newest = self._conn.execute(
+                        "SELECT MAX(id) FROM audit_outbox").fetchone()[0]
+                    if newest is None:
+                        break
+                    last_id = newest
                 progressed = False
                 try:
                     tail: int | None = self._audit._tail_seq()
@@ -14055,6 +14080,9 @@ class Store:
             except Exception:
                 pass
         finally:
+            self._outbox_flush_depth -= 1
+            if not self._outbox_flush_depth:
+                self._outbox_reflush = False
             try:
                 # An interrupt between a statement and its commit leaves a
                 # transaction open; nothing here may hold one past the flush.

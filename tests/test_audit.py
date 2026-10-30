@@ -3595,9 +3595,8 @@ class TestCodexL3TwentySixOhNineOhFour:
             assert store.status().total_episodes == 4, (
                 "the committed episodes did not survive"
             )
-            # L3 r1 (bound): the flush stops at the first failed append, under
-            # its write lock, and the tail stays in the outbox for the next
-            # flush instead of being attempted under that lock.
+            # L3 r1 (bound): the flush stops at the first failed append and
+            # releases the tail for the next flush.
             assert attempts["n"] == 1
             assert store._conn.execute(
                 "SELECT COUNT(*) FROM audit_outbox").fetchone()[0] == 4, (
@@ -3609,7 +3608,8 @@ class TestCodexL3TwentySixOhNineOhFour:
                 "over a real hole"
             )
             # The interrupted row is back in the outbox with a retry backoff
-            # (its failed attempt is counted); once that lapses the next flush
+            # (counted in audit_write_failures, not toward dead: an interrupt
+            # is not the row's fault); once that lapses the next flush
             # delivers all four, in emit order.
             store._conn.execute("UPDATE audit_outbox SET not_before = NULL")
             store._conn.commit()

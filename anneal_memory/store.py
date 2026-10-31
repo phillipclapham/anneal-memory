@@ -415,6 +415,7 @@ StoreOperation = Literal[
     "wrap_bound_token",
     "wrap_today",
     "set_consolidate_requires_baton",
+    "outbox_requeue",
     "get_wrap_history",
     "record_associations",
     "decay_associations",
@@ -13731,6 +13732,65 @@ class Store:
             (event_json, _now_utc()),
         )
         return True
+
+    def outbox_requeue(self, row_id: int) -> None:
+        """Return one ``dead`` audit-outbox row to the queue, then flush.
+
+        A row the flusher could not deliver within its attempts is retained as
+        ``dead`` and its gap marker is in the audit chain; this is the only way
+        back (outbox_claim_ack_design_1028.md, D5). The row goes ``pending``
+        with a fresh attempt budget and is appended by the flush this call ends
+        with, or by the next one. Its entry lands in the chain AFTER the rows
+        that were delivered past it; it carries the ref its gap marker named, so
+        a reader matches the two. If it dies again it is retained again.
+
+        Refused with :class:`StoreError` when the row does not exist, is not
+        ``dead``, or is held by a flusher whose lease has not expired (retry
+        after the lease), and inside ``_batch()``. Nothing is changed on a
+        refusal. Not audited as its own event: the chain already shows the gap
+        marker and, once delivered, the entry under the same ref.
+        """
+        if isinstance(row_id, bool) or not isinstance(row_id, int):
+            raise TypeError(
+                f"outbox_requeue: row_id must be an int, got {type(row_id).__name__}"
+            )
+        if self._defer_commit:
+            raise StoreError(
+                "Cannot outbox_requeue() while inside _batch() context",
+                operation="outbox_requeue",
+            )
+        refusal: str | None = None
+        with self._db_boundary("outbox_requeue"):
+            # BEGIN IMMEDIATE before the read: a flusher claiming the row and this
+            # call must not both act on the state they read.
+            self._conn.execute("BEGIN IMMEDIATE")
+            row = self._conn.execute(
+                "SELECT state, claim_expires_at FROM audit_outbox WHERE id = ?",
+                (row_id,),
+            ).fetchone()
+            if row is None:
+                refusal = f"no audit_outbox row {row_id}"
+            elif row[0] != "dead":
+                refusal = f"audit_outbox row {row_id} is {row[0]}, not dead"
+            elif row[1] is not None and row[1] > _now_utc():
+                refusal = (
+                    f"audit_outbox row {row_id} is held by a flusher until {row[1]}; "
+                    "retry after the lease"
+                )
+            else:
+                # claim_tail_seq and gap_logged stay: the first claim's tail still
+                # bounds the duplicate scan, and the marker in the chain is a fact.
+                self._conn.execute(
+                    "UPDATE audit_outbox SET state = 'pending', attempts = 0, "
+                    "claim_token = NULL, claim_expires_at = NULL, not_before = NULL, "
+                    "dead_at = NULL WHERE id = ?",
+                    (row_id,),
+                )
+            self._conn.commit()
+        # A validation refusal is raised after the boundary (see _db_boundary).
+        if refusal is not None:
+            raise StoreError(refusal, operation="outbox_requeue")
+        self._flush_audit_outbox()
 
     def _outbox_claim(
         self, *, tail_seq: int | None = None, limit: int = _OUTBOX_CLAIM_BATCH,

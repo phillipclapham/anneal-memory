@@ -763,3 +763,88 @@ class TestAuditScanDeepLine:
             fh.write("[" * 200000 + "\n")
         assert trail._tail_seq() == 1
         assert trail._find_outbox_ref("record", "1:abc", None) is None
+
+
+# --------------------------------------------------------------------------
+# D5: Store.outbox_requeue, the only way back for a dead row
+# --------------------------------------------------------------------------
+
+def _kill(store: Store, db, *names: str, poison: str = "poison") -> int:
+    """Insert ``names`` with ``poison`` among them, fail ``poison`` until it is
+    dead and its gap marker is in the chain. Returns the poison row's id and
+    leaves the sink still failing (the caller repairs ``store._audit``)."""
+    ids = _insert(store, *names)
+    real = _failing(store, poison)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        for _ in range(store_mod._OUTBOX_MAX_ATTEMPTS):
+            store._flush_audit_outbox()
+            _lapse(store)
+        store._flush_audit_outbox()
+    store._real_append_once = real
+    return ids[names.index(poison)]
+
+
+class TestOutboxRequeue:
+    def test_a_dead_row_is_delivered_under_its_gap_ref_and_leaves_the_outbox(
+            self, store, tmp_path):
+        """Reproduced on this tree: a dead row was retained forever (the design's
+        'only way back' did not exist). After the sink is repaired and the row
+        requeued it lands in the chain, after the rows delivered past it, with
+        the ref its gap marker named, and the outbox is empty."""
+        db = tmp_path / "ob.db"
+        dead = _kill(store, db, "first", "poison", "third")
+        assert _row(store, dead)[0] == "dead"
+        store._audit._append_once = store._real_append_once   # the sink is repaired
+        store.outbox_requeue(dead)
+        events = _events(db)
+        assert events.index("third") < events.index("poison")
+        gap = next(e for e in _entries(db) if e["event"] == "outbox_gap")
+        entry = next(e for e in _entries(db) if e["event"] == "poison")
+        assert entry["data"]["outbox_ref"] == gap["data"]["dead_ref"]
+        assert events.count("outbox_gap") == 1
+        assert store._conn.execute(
+            "SELECT COUNT(*) FROM audit_outbox").fetchone()[0] == 0
+        assert AuditTrail.verify(db).valid
+
+    def test_a_requeued_row_that_fails_again_is_dead_again_with_one_marker(
+            self, store, tmp_path):
+        db = tmp_path / "ob.db"
+        dead = _kill(store, db, "poison")
+        store.outbox_requeue(dead)                       # sink still failing
+        assert _row(store, dead)[0] == "pending"
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            for _ in range(store_mod._OUTBOX_MAX_ATTEMPTS + 1):
+                _lapse(store)
+                store._flush_audit_outbox()
+        assert _row(store, dead)[0] == "dead"
+        assert _events(db).count("outbox_gap") == 1
+
+    @pytest.mark.parametrize("case", ["unknown", "pending", "held"])
+    def test_a_refusal_changes_nothing(self, store, case):
+        (row,) = _insert(store, "row")
+        if case == "unknown":
+            target = row + 99
+        elif case == "pending":
+            target = row
+        else:
+            store._conn.execute(
+                "UPDATE audit_outbox SET state = 'dead', gap_logged = 1, "
+                "claim_expires_at = '2999-01-01T00:00:00.000000Z' WHERE id = ?", (row,))
+            store._conn.commit()
+            target = row
+        before = [tuple(r) for r in store._conn.execute("SELECT * FROM audit_outbox")]
+        with pytest.raises(store_mod.StoreError) as err:
+            store.outbox_requeue(target)
+        assert err.value.operation == "outbox_requeue"
+        assert [tuple(r) for r in store._conn.execute("SELECT * FROM audit_outbox")] == before
+
+    def test_the_argument_and_the_batch_are_checked(self, store):
+        with pytest.raises(TypeError):
+            store.outbox_requeue("1")  # type: ignore[arg-type]
+        with pytest.raises(TypeError):
+            store.outbox_requeue(True)  # type: ignore[arg-type]
+        with store._batch():
+            with pytest.raises(store_mod.StoreError):
+                store.outbox_requeue(1)

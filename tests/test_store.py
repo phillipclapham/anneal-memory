@@ -390,12 +390,12 @@ class TestANewerSchemaIsRefusedTheWayTheSidecarsRefuseIt:
                 for node in ast.walk(fn)
             )
 
-        # ``close`` and ``set_consolidate_requires_baton`` read the flag to
-        # REFUSE inside a batch rather than to defer, so each is governed by
+        # ``close``, ``set_consolidate_requires_baton`` and ``outbox_requeue``
+        # read the flag to REFUSE inside a batch rather than to defer, so each is governed by
         # its own refusal, not by this contract. Named rather than
         # pattern-matched so the exclusion cannot widen silently; asserted
         # below so it cannot rot either.
-        NOT_A_BATCH_AWARE_WRITE = {"close", "set_consolidate_requires_baton"}
+        NOT_A_BATCH_AWARE_WRITE = {"close", "set_consolidate_requires_baton", "outbox_requeue"}
         assert NOT_A_BATCH_AWARE_WRITE <= {m.name for m in methods}, (
             "the documented exclusion names a method Store no longer has"
         )

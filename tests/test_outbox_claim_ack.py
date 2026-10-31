@@ -769,10 +769,10 @@ class TestAuditScanDeepLine:
 # D5: Store.outbox_requeue, the only way back for a dead row
 # --------------------------------------------------------------------------
 
-def _kill(store: Store, db, *names: str, poison: str = "poison") -> int:
+def _kill(store: Store, *names: str, poison: str = "poison"):
     """Insert ``names`` with ``poison`` among them, fail ``poison`` until it is
-    dead and its gap marker is in the chain. Returns the poison row's id and
-    leaves the sink still failing (the caller repairs ``store._audit``)."""
+    dead and its gap marker is in the chain. Returns the poison row's id and the
+    real sink, to put back; the sink is left failing."""
     ids = _insert(store, *names)
     real = _failing(store, poison)
     with warnings.catch_warnings():
@@ -781,8 +781,7 @@ def _kill(store: Store, db, *names: str, poison: str = "poison") -> int:
             store._flush_audit_outbox()
             _lapse(store)
         store._flush_audit_outbox()
-    store._real_append_once = real
-    return ids[names.index(poison)]
+    return ids[names.index(poison)], real
 
 
 class TestOutboxRequeue:
@@ -793,10 +792,10 @@ class TestOutboxRequeue:
         requeued it lands in the chain, after the rows delivered past it, with
         the ref its gap marker named, and the outbox is empty."""
         db = tmp_path / "ob.db"
-        dead = _kill(store, db, "first", "poison", "third")
+        dead, real = _kill(store, "first", "poison", "third")
         assert _row(store, dead)[0] == "dead"
-        store._audit._append_once = store._real_append_once   # the sink is repaired
-        store.outbox_requeue(dead)
+        store._audit._append_once = real                  # the sink is repaired
+        assert store.outbox_requeue(dead) == "delivered"
         events = _events(db)
         assert events.index("third") < events.index("poison")
         gap = next(e for e in _entries(db) if e["event"] == "outbox_gap")
@@ -807,19 +806,28 @@ class TestOutboxRequeue:
             "SELECT COUNT(*) FROM audit_outbox").fetchone()[0] == 0
         assert AuditTrail.verify(db).valid
 
-    def test_a_requeued_row_that_fails_again_is_dead_again_with_one_marker(
+    def test_a_requeued_row_that_fails_again_says_so_and_adds_no_second_marker(
             self, store, tmp_path):
+        """A re-death raises no warning (its marker is already in the chain), so
+        the return value is the caller's only signal that the row is dead again."""
         db = tmp_path / "ob.db"
-        dead = _kill(store, db, "poison")
-        store.outbox_requeue(dead)                       # sink still failing
-        assert _row(store, dead)[0] == "pending"
+        dead, _real = _kill(store, "poison")
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
+            assert store.outbox_requeue(dead) == "pending"   # sink still failing
             for _ in range(store_mod._OUTBOX_MAX_ATTEMPTS + 1):
                 _lapse(store)
                 store._flush_audit_outbox()
         assert _row(store, dead)[0] == "dead"
         assert _events(db).count("outbox_gap") == 1
+        # the same answer straight from the call, for an event that cannot parse
+        (bad,) = _insert(store, "unreadable")
+        store._conn.execute(
+            "UPDATE audit_outbox SET event_json = 'not json' WHERE id = ?", (bad,))
+        store._conn.commit()
+        store._flush_audit_outbox()
+        assert _row(store, bad)[0] == "dead"
+        assert store.outbox_requeue(bad) == "dead"
 
     @pytest.mark.parametrize("case", ["unknown", "pending", "held"])
     def test_a_refusal_changes_nothing(self, store, case):
@@ -829,16 +837,29 @@ class TestOutboxRequeue:
         elif case == "pending":
             target = row
         else:
-            store._conn.execute(
-                "UPDATE audit_outbox SET state = 'dead', gap_logged = 1, "
-                "claim_expires_at = '2999-01-01T00:00:00.000000Z' WHERE id = ?", (row,))
-            store._conn.commit()
+            # A gap claim in flight, built the way the flush builds it: the row
+            # died on its claim, its marker is owed, its lease is live.
+            (claim,) = store._outbox_claim()
+            assert store._outbox_mark_dead(claim, "event_json does not parse")
+            assert _row(store, row)[0] == "dead" and _row(store, row)[7] == 0
             target = row
         before = [tuple(r) for r in store._conn.execute("SELECT * FROM audit_outbox")]
         with pytest.raises(store_mod.StoreError) as err:
             store.outbox_requeue(target)
         assert err.value.operation == "outbox_requeue"
         assert [tuple(r) for r in store._conn.execute("SELECT * FROM audit_outbox")] == before
+
+    def test_a_dead_row_whose_marker_is_owed_is_requeued_once_its_lease_lapsed(
+            self, store, tmp_path):
+        """No gap marker was written, so none is owed once the row is delivered."""
+        db = tmp_path / "ob.db"
+        (row,) = _insert(store, "owed")
+        (claim,) = store._outbox_claim()
+        store._outbox_mark_dead(claim, "event_json does not parse")
+        _expire(store, row)
+        assert store.outbox_requeue(row) == "delivered"
+        assert _events(db).count("owed") == 1
+        assert "outbox_gap" not in _events(db)
 
     def test_the_argument_and_the_batch_are_checked(self, store):
         with pytest.raises(TypeError):

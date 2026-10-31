@@ -6430,7 +6430,7 @@
     },
     "outbox_requeue": {
      "kind": "method",
-     "signature": "(self, row_id: 'int') -> 'None'"
+     "signature": "(self, row_id: 'int') -> \"Literal['delivered', 'pending', 'claimed', 'dead']\""
     },
     "path": {
      "kind": "property",

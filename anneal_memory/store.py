@@ -13733,7 +13733,7 @@ class Store:
         )
         return True
 
-    def outbox_requeue(self, row_id: int) -> None:
+    def outbox_requeue(self, row_id: int) -> Literal["delivered", "pending", "claimed", "dead"]:
         """Return one ``dead`` audit-outbox row to the queue, then flush.
 
         A row the flusher could not deliver within its attempts is retained as
@@ -13742,7 +13742,19 @@ class Store:
         with a fresh attempt budget and is appended by the flush this call ends
         with, or by the next one. Its entry lands in the chain AFTER the rows
         that were delivered past it; it carries the ref its gap marker named, so
-        a reader matches the two. If it dies again it is retained again.
+        a reader matches the two. If it dies again it is retained again, with
+        no new warning (its marker is already in the chain); the return value
+        is how the caller learns it. After a weekly rotation a second marker
+        with the same ref can be appended on that second death (the duplicate
+        scan reads the active file only), and the duplicate scan starts at the
+        row's first claim, kept on purpose so an entry an earlier attempt
+        appended is still found.
+
+        Returns the row's state after the flush: ``"delivered"`` (the row is
+        gone, its entry is in the chain), ``"pending"`` (not delivered yet, a
+        later flush retries it; also the result when the audit sink is off),
+        ``"claimed"`` (another flusher holds it now) or ``"dead"`` (it failed
+        again, for good).
 
         Refused with :class:`StoreError` when the row does not exist, is not
         ``dead``, or is held by a flusher whose lease has not expired (retry
@@ -13791,6 +13803,11 @@ class Store:
         if refusal is not None:
             raise StoreError(refusal, operation="outbox_requeue")
         self._flush_audit_outbox()
+        with self._db_boundary("outbox_requeue"):
+            state = self._conn.execute(
+                "SELECT state FROM audit_outbox WHERE id = ?", (row_id,)
+            ).fetchone()
+        return "delivered" if state is None else state[0]
 
     def _outbox_claim(
         self, *, tail_seq: int | None = None, limit: int = _OUTBOX_CLAIM_BATCH,

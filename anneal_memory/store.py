@@ -13742,13 +13742,22 @@ class Store:
         with a fresh attempt budget and is appended by the flush this call ends
         with, or by the next one. Its entry lands in the chain AFTER the rows
         that were delivered past it; it carries the ref its gap marker named, so
-        a reader matches the two. If it dies again it is retained again, with
-        no new warning (its marker is already in the chain); the return value
-        is how the caller learns it. After a weekly rotation a second marker
-        with the same ref can be appended on that second death (the duplicate
-        scan reads the active file only), and the duplicate scan starts at the
-        row's first claim, kept on purpose so an entry an earlier attempt
-        appended is still found.
+        a reader matches the two. If it dies again it is retained again: the
+        failed attempts warn as any failed append does, but the final death
+        raises nothing (its marker is already in the chain), so the return
+        value is how the caller learns it.
+
+        Known edges. The flush that ends this call is the ordinary one: it
+        delivers every deliverable row, not only this one. After a weekly
+        rotation a second marker with the same ref can be appended on a second
+        death (the duplicate scan reads the active file only). The duplicate
+        scan starts at the row's first claim, kept on purpose so an entry an
+        earlier attempt appended is still found. A flusher that outlived its
+        lease while holding this row's marker (there is no heartbeat) can still
+        append a marker for a row this call has since delivered. If the store
+        fails or is closed during the flush (an ``on_audit_event`` callback
+        closing it), the call raises AFTER the requeue committed: a retry then
+        reports the row as not dead.
 
         Returns the row's state after the flush: ``"delivered"`` (the row is
         gone, its entry is in the chain), ``"pending"`` (not delivered yet, a
@@ -13771,6 +13780,8 @@ class Store:
                 "Cannot outbox_requeue() while inside _batch() context",
                 operation="outbox_requeue",
             )
+        if not 0 < row_id < 1 << 63:  # SQLite's INTEGER range; nothing past it exists
+            raise StoreError(f"no audit_outbox row {row_id}", operation="outbox_requeue")
         refusal: str | None = None
         with self._db_boundary("outbox_requeue"):
             # BEGIN IMMEDIATE before the read: a flusher claiming the row and this

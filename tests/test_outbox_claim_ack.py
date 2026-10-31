@@ -808,8 +808,9 @@ class TestOutboxRequeue:
 
     def test_a_requeued_row_that_fails_again_says_so_and_adds_no_second_marker(
             self, store, tmp_path):
-        """A re-death raises no warning (its marker is already in the chain), so
-        the return value is the caller's only signal that the row is dead again."""
+        """The failed attempts warn; the final death raises nothing (its marker is
+        already in the chain), so the return value is the caller's only signal
+        that the row is dead again."""
         db = tmp_path / "ob.db"
         dead, _real = _kill(store, "poison")
         with warnings.catch_warnings():
@@ -860,6 +861,14 @@ class TestOutboxRequeue:
         assert store.outbox_requeue(row) == "delivered"
         assert _events(db).count("owed") == 1
         assert "outbox_gap" not in _events(db)
+
+    @pytest.mark.parametrize("row_id", [0, -1, 1 << 63])
+    def test_an_id_outside_sqlites_range_is_an_unknown_row(self, store, row_id):
+        """Reproduced: 2**63 passed the int check and reached SQLite's binder, which
+        raised a bare OverflowError instead of the documented refusal."""
+        with pytest.raises(store_mod.StoreError) as err:
+            store.outbox_requeue(row_id)
+        assert err.value.operation == "outbox_requeue"
 
     def test_the_argument_and_the_batch_are_checked(self, store):
         with pytest.raises(TypeError):

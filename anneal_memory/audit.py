@@ -2979,6 +2979,8 @@ class AuditTrail:
     def _resync_with_disk(self) -> None:
         """Bring the cached chain tip up to date with the active file.
 
+        The caller holds :meth:`_append_lock`.
+
         With a tip in the active file (``self._tip``): if that file is still
         the same one AND the tip's bytes still hash to the hash recorded with
         the tip AND that is ``_prev_hash``, the chain continues from the last

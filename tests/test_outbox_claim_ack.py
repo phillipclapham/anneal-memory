@@ -813,12 +813,19 @@ class TestOutboxRequeue:
         that the row is dead again."""
         db = tmp_path / "ob.db"
         dead, _real = _kill(store, "poison")
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore")
+        with warnings.catch_warnings(record=True) as retries:
+            warnings.simplefilter("always")
             assert store.outbox_requeue(dead) == "pending"   # sink still failing
-            for _ in range(store_mod._OUTBOX_MAX_ATTEMPTS + 1):
+            for _ in range(store_mod._OUTBOX_MAX_ATTEMPTS - 1):
                 _lapse(store)
                 store._flush_audit_outbox()
+        assert len(retries) == store_mod._OUTBOX_MAX_ATTEMPTS   # each failed attempt warned
+        assert _row(store, dead)[0] == "pending"
+        _lapse(store)
+        with warnings.catch_warnings(record=True) as final:
+            warnings.simplefilter("always")
+            store._flush_audit_outbox()                       # the claim that finds it exhausted
+        assert final == []                                    # the final death is silent
         assert _row(store, dead)[0] == "dead"
         assert _events(db).count("outbox_gap") == 1
         # the same answer straight from the call, for an event that cannot parse

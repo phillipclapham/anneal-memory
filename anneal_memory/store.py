@@ -13744,8 +13744,9 @@ class Store:
         that were delivered past it; it carries the ref its gap marker named, so
         a reader matches the two. If it dies again it is retained again: the
         failed attempts warn as any failed append does, but the final death
-        raises nothing (its marker is already in the chain), so the return
-        value is how the caller learns it.
+        raises nothing when its marker is already in the chain (a row that died
+        with its marker still owed gets that marker on its second death), so
+        the return value is how the caller learns it.
 
         Known edges. The flush that ends this call is the ordinary one: it
         delivers every deliverable row, not only this one. After a weekly

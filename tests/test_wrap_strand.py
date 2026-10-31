@@ -235,3 +235,40 @@ def test_record_inside_a_batch_reads_its_session_under_the_write_lock(tmp_path):
     finally:
         peer.close()
         store.close()
+
+
+@pytest.mark.parametrize("offset_days", [-40, 3], ids=["replayed-past", "future"])
+def test_a_mid_wrap_episode_with_a_replayed_timestamp_reaches_the_next_window(
+    tmp_path, offset_days
+):
+    """A caller that replays episodes passes the timestamp each was first written
+    under, so one recorded mid-wrap can sort anywhere in time. A real run (a
+    second process recording across a whole wrap, replayed and future
+    timestamps among them) lost none: the wrap's membership is the frozen id
+    snapshot, never a timestamp, so the late episode stays out of this wrap's
+    compression and is carried to the next one. Mutation-checked: with the
+    carry-over UPDATE in wrap_completed disabled, both cases fail."""
+    store = Store(tmp_path / "m.db", project_name="t")
+    try:
+        # Past the first wrap, so records are session-stamped, not NULL.
+        store.record("seed", "observation")
+        first = prepare_wrap(store)
+        validated_save_continuity(store, _text(0), wrap_token=first["wrap_token"], today=TODAY)
+
+        store.record("in-window", "observation")
+        prep = prepare_wrap(store)
+        snapshot = set(store.load_wrap_snapshot()["episode_ids"])
+        when = (
+            datetime.datetime.now(datetime.timezone.utc)
+            + datetime.timedelta(days=offset_days)
+        ).isoformat()
+        late = store.record("late, replayed", "observation", timestamp=when)
+        assert late.id not in snapshot
+
+        validated_save_continuity(store, _text(1), wrap_token=prep["wrap_token"], today=TODAY)
+
+        assert late.id in {e.id for e in store.episodes_since_wrap()}
+        prepare_wrap(store)
+        assert late.id in set(store.load_wrap_snapshot()["episode_ids"])
+    finally:
+        store.close()

@@ -2690,7 +2690,7 @@ _SUPERSEDES_LOOSE_RE = re.compile(r"\[\s*supersedes\b[^\]\n]*\]?", re.IGNORECASE
 
 
 def _record_wrap_supersessions(
-    store: Store, text: str, valid_ids: set[str]
+    store: Store, text: str, valid_ids: set[str], undo_token: str = "",
 ) -> tuple[int, list[dict[str, str]]]:
     """Record the ``[supersedes: OLD by NEW]`` links a wrap proposes.
 
@@ -2728,6 +2728,7 @@ def _record_wrap_supersessions(
         try:
             if store.supersede(old_id=old_id, new_id=new_id, source="wrap"):
                 recorded += 1
+                store._wrap_undo_supersession(undo_token, old_id, new_id)
         except SupersessionError as exc:
             rejected.append({"old_id": old_id, "new_id": new_id, "reason": str(exc)})
     return recorded, rejected
@@ -3870,6 +3871,10 @@ def validated_save_continuity(
                 "again so the graduation bound reads the current levels."
             )
 
+        # What the revert of this wrap puts back: the levels table and the
+        # grounding a compost deletes, kept before the compost touches them.
+        store._wrap_undo_levels(snapshot["token"][:12])
+        store._wrap_undo_grounding(snapshot["token"][:12], compost_names or ())
         # Compost severance, in THIS transaction so it commits or rolls
         # back with the wrap row below. Inside the batch the Store method
         # defers its commit and queues its audit event until the commit.
@@ -3883,7 +3888,8 @@ def validated_save_continuity(
         # link, and refuse below (after the narrower checks) if it moved.
         _supersedes_moved = _accepted_supersedes() != accepted_supersedes
         supersessions_recorded, supersessions_rejected = \
-            _record_wrap_supersessions(store, grad_result.text, valid_ids)
+            _record_wrap_supersessions(
+                store, grad_result.text, valid_ids, undo_token=snapshot["token"][:12])
         # Re-read under the batch's write lock (codex L3, reproduced: a link
         # another connection committed between validation and this batch
         # let a pattern graduate on the episode it superseded). Raising
@@ -3939,7 +3945,6 @@ def validated_save_continuity(
         # A composted name's level row was deleted with its edges above; the
         # first save's tombstone seed must not bring it back (codex L3 r1 HIGH 2).
         _prior_line_levels = pattern_line_levels(prior_continuity or "", grad_headings)
-        store._wrap_undo_levels(snapshot["token"][:12])
         store._record_pattern_levels(
             pattern_line_levels(grad_result.text, grad_headings), today_str,
             lower_to=_prior_line_levels,

@@ -829,7 +829,10 @@ class WrapRevertReceipt(NamedTuple):
     episode recorded while the revert ran counts only if it was already in the
     window. ``identity_version`` is the generation-3 identity version the
     revert appended (the prior text carried forward), or ``None`` when it
-    restored none.
+    restored none. ``pattern_state_exact`` is False when the wrap's undo rows
+    were not there (a wrap saved before they existed, or a second revert in a
+    row): ``pattern_history`` was left as the wrap wrote it, and a redo of the same
+    episodes on reworded evidence can be demoted ``cross-session-overlap``.
     """
 
     wrap_id: int
@@ -839,6 +842,7 @@ class WrapRevertReceipt(NamedTuple):
     last_wrap_id_after: int
     already_reverted: bool
     identity_version: int | None
+    pattern_state_exact: bool = True
 
 
 class WrapRevertRefused(AnnealMemoryError):
@@ -855,6 +859,9 @@ class WrapRevertRefused(AnnealMemoryError):
       a raw save): restoring the prior text would discard that change.
     - ``no_prior_identity``: the wrap's identity version is the store's first,
       so there is no earlier text to restore.
+    - ``episodes_gone``: fewer episodes would be reopened than the wrap
+      compressed (some were pruned or deleted since), so reverting would discard
+      the only summary of them; ``allow_missing=True`` reverts anyway.
     - ``no_identity_version``: a generation-3 store holds no identity version
       for the wrap (it was recorded by a direct ``wrap_completed`` call or before
       the store migrated), so reverting it would leave its text in the identity
@@ -2348,17 +2355,19 @@ CREATE TABLE IF NOT EXISTS wrap_reverts (
     undone_json TEXT NOT NULL DEFAULT '{}'
 );
 
--- What the newest wrap's save overwrote, so Store.revert_wrap can put it back
--- exactly: pattern_levels as a whole table (one marker row, key '' , plus a row
--- per level) and each pattern_history row the save touched, as it was before
--- (prior_json NULL = the row did not exist). Keyed by the first 12 characters of
+-- What the newest wrap's save overwrote or added, so Store.revert_wrap can put
+-- it back exactly: pattern_levels as a whole table (one marker row, key '', plus a
+-- row per level), each pattern_history row the save touched as it was before
+-- (prior_json NULL = the row did not exist), the pattern_grounding rows a compost
+-- deleted, and each supersession link the save recorded. Keyed by the first 12 characters of
 -- the wrap token, which the wraps row's pair_id keeps; only the newest wrap's rows
 -- are kept (the next save deletes the rest), because only the newest wrap can be
 -- reverted. Written inside the save's batch, so it commits with the wrap or not at
 -- all. Additive: an older binary ignores the table.
 CREATE TABLE IF NOT EXISTS wrap_undo (
     token12 TEXT NOT NULL,
-    kind TEXT NOT NULL CHECK (kind IN ('pattern_levels', 'pattern_history')),
+    kind TEXT NOT NULL CHECK (kind IN
+        ('pattern_levels', 'pattern_history', 'pattern_grounding', 'supersession')),
     key TEXT NOT NULL,
     prior_json TEXT,
     PRIMARY KEY (token12, kind, key)
@@ -9677,6 +9686,7 @@ class Store:
         reason: str,
         actor: str = "",
         lease_token: str | None = None,
+        allow_missing: bool = False,
     ) -> WrapRevertReceipt:
         """Undo the newest completed wrap, so the next ``prepare_wrap`` offers
         its episodes again.
@@ -9719,6 +9729,8 @@ class Store:
             actor: Who, recorded likewise.
             lease_token: The consolidation lease's token, when a lease is live
                 (same rule as :meth:`wrap_cancelled`).
+            allow_missing: Revert although some of the episodes the wrap
+                compressed no longer exist (``episodes_gone`` otherwise).
 
         Returns:
             A :class:`WrapRevertReceipt`. Reverting a wrap that is already
@@ -9739,6 +9751,8 @@ class Store:
             raise ValueError("revert_wrap: reason must be a non-empty str")
         if not isinstance(actor, str):
             raise ValueError("revert_wrap: actor must be a str")
+        if not isinstance(allow_missing, bool):
+            raise ValueError("revert_wrap: allow_missing must be a bool")
         if lease_token is not None and (not isinstance(lease_token, str) or not lease_token):
             raise ValueError("revert_wrap: lease_token must be a non-empty str")
         if not self._closed and self._conn.in_transaction:
@@ -9755,12 +9769,16 @@ class Store:
                     "SELECT id, episodes_reoffered, identity_version_restored "
                     "FROM wrap_reverts WHERE wrap_id = ?", (wrap_id,)).fetchone()
                 if prior is not None:
-                    self._conn.rollback()
-                    return WrapRevertReceipt(
+                    seen = WrapRevertReceipt(
                         wrap_id=wrap_id, revert_id=int(prior["id"]), episodes_reoffered=0,
-                        window_after=self.count_episodes_since_wrap(),
+                        window_after=self._count_episodes_since_wrap(),
                         last_wrap_id_after=self._last_wrap_id(), already_reverted=True,
                         identity_version=prior["identity_version_restored"])
+                    self._conn.rollback()
+                    if self._identity_table_present():
+                        # a retry after a projection that failed is the repair
+                        self._project_after_commit("the wrap revert")
+                    return seen
                 row = self._conn.execute(
                     "SELECT * FROM wraps WHERE id = ?", (wrap_id,)).fetchone()
                 if row is None:
@@ -9792,10 +9810,16 @@ class Store:
                             "this store holds no identity version for the wrap; reverting "
                             "it would leave its text in the identity", wrap_id=wrap_id)
                     latest = self._latest_identity()
-                    # The wrap's own version, or one that carries its exact text: a
-                    # revert of the wrap after this one appended such a row.
+                    # The wrap's own version, or the row a revert of the wrap after
+                    # this one appended (recorded in wrap_reverts) when it carries
+                    # the wrap's exact text. A later save_meta with the same text is
+                    # neither, so it refuses.
+                    restored_by_revert = latest is not None and self._conn.execute(
+                        "SELECT 1 FROM wrap_reverts WHERE identity_version_restored = ?",
+                        (latest["version"],)).fetchone() is not None
                     if latest is None or (int(latest["version"]) != int(own["version"])
-                                          and latest["content_hash"] != own["content_hash"]):
+                                          and not (restored_by_revert
+                                                   and latest["content_hash"] == own["content_hash"])):
                         raise WrapRevertRefused(
                             "identity_moved",
                             "the identity changed after the wrap (a later version "
@@ -9824,6 +9848,8 @@ class Store:
                 window_before = self._count_episodes_since_wrap()
                 undone: dict[str, int] = {}
                 token12 = (row["pair_id"] or "")[:12] if "pair_id" in row.keys() else ""
+                if len(token12) != 12:
+                    undone["wrap_token_missing"] = 1
                 undone["wrap_graduations"] = self._conn.execute(
                     "DELETE FROM wrap_graduations WHERE wrap_id = ?", (wrap_id,)).rowcount
                 undone["drift_results"] = self._conn.execute(
@@ -9844,6 +9870,14 @@ class Store:
                         "DELETE FROM wrap_undo WHERE token12 = ?", (token12,))
                 window_after = self._count_episodes_since_wrap()
                 reoffered = max(0, window_after - window_before)
+                compressed = row["episodes_compressed"] or 0
+                if reoffered < compressed and not allow_missing:
+                    raise WrapRevertRefused(
+                        "episodes_gone",
+                        f"the wrap compressed {compressed} episodes and only {reoffered} "
+                        "still exist (pruned or deleted since); reverting would discard "
+                        "the only summary of the rest", wrap_id=wrap_id)
+                last_after = self._last_wrap_id()
                 now = _now_utc()
                 revert_id = int(self._conn.execute(
                     "INSERT INTO wrap_reverts (wrap_id, reverted_at, reason, actor, "
@@ -9878,26 +9912,30 @@ class Store:
         return WrapRevertReceipt(
             wrap_id=wrap_id, revert_id=revert_id, episodes_reoffered=reoffered,
             window_after=window_after, last_wrap_id_after=self._last_wrap_id(),
-            already_reverted=False, identity_version=restored_version)
+            already_reverted=False, identity_version=restored_version,
+            pattern_state_exact=bool(undone.get("pattern_state_exact", 1)))
 
     def _revert_wrap_derived(
         self, token12: str, restored_text: str | None, reverted_text: str | None,
     ) -> dict[str, int]:
-        """The part of :meth:`revert_wrap` that puts ``pattern_levels`` and
-        ``pattern_history`` back, inside its transaction. From the ``wrap_undo``
-        rows the wrap's save wrote when there are any (exact); otherwise
-        ``pattern_levels`` is adjusted from the two texts (a name the wrap added
-        is dropped, one it raised is lowered) and ``pattern_history`` is left
-        alone, which the returned counts say (``*_exact`` 0)."""
+        """The part of :meth:`revert_wrap` that puts back what the wrap's save
+        changed outside the identity, inside its transaction: ``pattern_levels``,
+        the ``pattern_history`` rows it touched, the ``pattern_grounding`` rows a
+        compost deleted, and the supersession links it recorded. From the
+        ``wrap_undo`` rows the save wrote when there are any (exact). Without them
+        ``pattern_levels`` is adjusted from the two texts (a name the wrap added is
+        dropped, one it raised is lowered), ``pattern_history`` is left as the wrap
+        wrote it, and ``pattern_state_exact`` is 0."""
         from .continuity import _pattern_levels  # continuity imports store
 
-        out = {"pattern_levels_exact": 0, "pattern_history_exact": 0}
-        if len(token12) != 12:
-            return out
-        marker = self._conn.execute(
+        out = {"pattern_levels_exact": 0, "pattern_history_exact": 0,
+               "pattern_state_exact": 0, "supersessions": 0}
+        have_levels = self._has_pattern_levels_table()
+        marker = len(token12) == 12 and self._conn.execute(
             "SELECT 1 FROM wrap_undo WHERE token12 = ? AND kind = 'pattern_levels' "
-            "AND key = ''", (token12,)).fetchone()
-        if marker is not None and self._has_pattern_levels_table():
+            "AND key = ''", (token12,)).fetchone() is not None
+        if marker and have_levels:
+            out["pattern_state_exact"] = 1
             self._conn.execute("DELETE FROM pattern_levels")
             rows = [json.loads(r["prior_json"]) for r in self._conn.execute(
                 "SELECT prior_json FROM wrap_undo WHERE token12 = ? "
@@ -9906,8 +9944,7 @@ class Store:
                 "INSERT INTO pattern_levels (kind, key, level, saved_at) VALUES (?, ?, ?, ?)",
                 [(r["kind"], r["key"], r["level"], r["saved_at"]) for r in rows])
             out["pattern_levels_exact"] = len(rows)
-        elif (restored_text is not None and reverted_text is not None
-              and self._has_pattern_levels_table()):
+        elif (have_levels and restored_text is not None and reverted_text is not None):
             schema = self.section_schema
             now_levels = _pattern_levels(restored_text, schema)
             for name in set(_pattern_levels(reverted_text, schema)) - set(now_levels):
@@ -9917,6 +9954,8 @@ class Store:
                 self._conn.execute(
                     "UPDATE pattern_levels SET level = ? "
                     "WHERE kind = 'name' AND key = ? AND level > ?", (level, name, level))
+        if len(token12) != 12:
+            return out
         for row in self._conn.execute(
                 "SELECT key, prior_json FROM wrap_undo WHERE token12 = ? "
                 "AND kind = 'pattern_history'", (token12,)).fetchall():
@@ -9930,6 +9969,22 @@ class Store:
                     f"VALUES ({', '.join('?' * len(cols))})",
                     [prior[c] for c in cols])
             out["pattern_history_exact"] += 1
+        for row in self._conn.execute(
+                "SELECT prior_json FROM wrap_undo WHERE token12 = ? "
+                "AND kind = 'pattern_grounding'", (token12,)).fetchall():
+            prior = json.loads(row["prior_json"])
+            cols = sorted(prior)
+            self._conn.execute(
+                f"INSERT OR IGNORE INTO pattern_grounding ({', '.join(cols)}) "
+                f"VALUES ({', '.join('?' * len(cols))})", [prior[c] for c in cols])
+        if self._has_supersessions_table():
+            for row in self._conn.execute(
+                    "SELECT key FROM wrap_undo WHERE token12 = ? AND kind = 'supersession'",
+                    (token12,)).fetchall():
+                old_id, _, new_id = row["key"].partition(":")
+                out["supersessions"] += self._conn.execute(
+                    "DELETE FROM supersessions WHERE old_id = ? AND new_id = ? "
+                    "AND source = 'wrap'", (old_id, new_id)).rowcount
         return out
 
     def _revert_wrap_idempotency(self, wrap_id: int) -> int:
@@ -9939,7 +9994,7 @@ class Store:
         gone = 0
         for row in self._conn.execute(
                 "SELECT principal_scope, key, result_json FROM idempotency_keys "
-                "WHERE result_json IS NOT NULL").fetchall():
+                "WHERE result_json LIKE ?", (f'%"wrap_id": {wrap_id}%',)).fetchall():
             try:
                 result = json.loads(row["result_json"])
             except (TypeError, ValueError):
@@ -10120,7 +10175,7 @@ class Store:
         :meth:`revert_wrap`; drop every other wrap's undo rows (only the newest
         wrap can be reverted). Runs inside the save's batch, before
         :meth:`_record_pattern_levels` changes the table."""
-        if not self._has_pattern_levels_table():
+        if len(token12) != 12 or not self._has_pattern_levels_table():
             return
         self._conn.execute("DELETE FROM wrap_undo WHERE token12 != ?", (token12,))
         self._conn.execute(
@@ -10133,6 +10188,30 @@ class Store:
               json.dumps({k: r[k] for k in ("kind", "key", "level", "saved_at")}, sort_keys=True))
              for r in self._conn.execute(
                  "SELECT kind, key, level, saved_at FROM pattern_levels").fetchall()])
+
+    def _wrap_undo_grounding(self, token12: str, names: Iterable[str]) -> None:
+        """Keep the ``pattern_grounding`` rows of ``names`` (a compost deletes them
+        with the concept) under ``token12``, for :meth:`revert_wrap`. Inside the
+        save's batch, before the compost."""
+        names = list(names)
+        if len(token12) != 12 or not names:
+            return
+        for name in names:
+            for r in self._conn.execute(
+                    "SELECT * FROM pattern_grounding WHERE name = ?", (name,)).fetchall():
+                self._conn.execute(
+                    "INSERT OR REPLACE INTO wrap_undo (token12, kind, key, prior_json) "
+                    "VALUES (?, 'pattern_grounding', ?, ?)",
+                    (token12, "|".join(str(r[k]) for k in
+                                       ("name", "level", "earning", "rule", "episode_id")),
+                     json.dumps({k: r[k] for k in r.keys()}, sort_keys=True)))
+
+    def _wrap_undo_supersession(self, token12: str, old_id: str, new_id: str) -> None:
+        """Note a supersession link the save just recorded, for :meth:`revert_wrap`."""
+        if len(token12) == 12:
+            self._conn.execute(
+                "INSERT OR REPLACE INTO wrap_undo (token12, kind, key, prior_json) "
+                "VALUES (?, 'supersession', ?, NULL)", (token12, f"{old_id}:{new_id}"))
 
     def _record_pattern_levels(
         self,

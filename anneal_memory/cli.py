@@ -2176,7 +2176,8 @@ def cmd_revert_wrap(args: argparse.Namespace) -> None:
         try:
             receipt = store.revert_wrap(
                 args.wrap_id, reason=args.reason, actor=args.actor,
-                lease_token=getattr(args, "lease_token", None))
+                lease_token=getattr(args, "lease_token", None),
+                allow_missing=bool(getattr(args, "allow_missing", False)))
         except WrapRevertRefused as exc:
             refuse(exc.code, exc.detail)
         except LeaseFencedError as exc:
@@ -2196,6 +2197,8 @@ def cmd_revert_wrap(args: argparse.Namespace) -> None:
           f"window holds {receipt.window_after}")
     if receipt.identity_version is not None:
         print(f"  identity restored as version {receipt.identity_version}")
+    if not receipt.pattern_state_exact:
+        print("  pattern history was left as the wrap wrote it (no undo record)")
 
 
 def cmd_wrap_token_current(args: argparse.Namespace) -> None:
@@ -5552,6 +5555,9 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_argument(
         "--lease-token", dest="lease_token", default=None,
         help="The consolidation lease token, when a lease is live.")
+    sub.add_argument(
+        "--allow-missing", dest="allow_missing", action="store_true",
+        help="Revert although some episodes the wrap compressed no longer exist.")
     sub.set_defaults(func=cmd_revert_wrap)
 
     # -- wrap-token-current --

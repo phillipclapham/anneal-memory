@@ -11,6 +11,7 @@ from __future__ import annotations
 import datetime
 import json
 import threading
+import time
 
 import pytest
 
@@ -117,6 +118,12 @@ def test_the_revert_is_archived_audited_and_restores_the_prior_identity(tmp_path
         store.close()
 
 
+def _wait(done) -> None:
+    deadline = time.monotonic() + 20
+    while not done() and time.monotonic() < deadline:
+        time.sleep(0.005)
+
+
 def test_an_episode_recorded_on_another_connection_during_the_revert_is_not_lost(tmp_path):
     store, _day1, day2 = _seeded(tmp_path)
     db = store.path
@@ -138,11 +145,9 @@ def test_an_episode_recorded_on_another_connection_during_the_revert_is_not_lost
     thread = threading.Thread(target=recorder)
     thread.start()
     try:
-        while len(recorded) < 5:
-            pass
+        _wait(lambda: len(recorded) >= 5 or errors)
         store.revert_wrap(2, reason="r")
-        while len(recorded) < 12:
-            pass
+        _wait(lambda: len(recorded) >= 12 or errors)
     finally:
         stop.set()
         thread.join(timeout=30)
@@ -255,3 +260,49 @@ def test_the_cli_reverts_refuses_with_exit_3_and_retries_cleanly(tmp_path, capsy
     assert code == 0 and body["status"] == "reverted" and body["episodes_reoffered"] == len(day2)
     code, out = run("2", "--reason", "retry")
     assert code == 0 and json.loads(out)["status"] == "already_reverted"
+
+
+def test_a_later_meta_save_with_the_same_text_and_pruned_episodes_both_refuse(tmp_path):
+    """L3 r1 (codex HIGH, complement MED): a save_meta after the wrap carries the wrap's
+    text, so a text-hash gate let the revert discard the new meta; and a wrap whose episodes
+    were pruned since would be reverted although its summary is all that is left of them."""
+    store, _day1, day2 = _seeded(tmp_path)
+    try:
+        store.save_meta({**store.load_meta(), "operator_note": "set after the wrap"})
+        with pytest.raises(WrapRevertRefused) as exc:
+            store.revert_wrap(2, reason="r")
+        assert exc.value.code == "identity_moved"
+    finally:
+        store.close()
+    (tmp_path / "two").mkdir()
+    store, _day1, day2 = _seeded(tmp_path / "two")
+    try:
+        assert store.delete(day2[0])
+        with pytest.raises(WrapRevertRefused) as exc:
+            store.revert_wrap(2, reason="r")
+        assert exc.value.code == "episodes_gone"
+        assert [w.id for w in store.get_wrap_history()] == [1, 2]
+        receipt = store.revert_wrap(2, reason="r", allow_missing=True)
+        assert receipt.episodes_reoffered == len(day2) - 1
+    finally:
+        store.close()
+
+
+def test_a_supersession_link_the_wrap_recorded_goes_with_it(tmp_path):
+    """L3 r1 (codex MED): the wrap's [supersedes: A by B] decision outlived its rollback."""
+    store = Store(tmp_path / "m.db", project_name="t")
+    try:
+        store.record("seed", "observation")
+        _wrap(store, 1)
+        old = store.record("the old note", "observation").id
+        new = store.record("the newer note", "observation").id
+        prep = prepare_wrap(store)
+        validated_save_continuity(
+            store, _text(2) + f"\n[supersedes: {old} by {new}]\n",
+            wrap_token=prep["wrap_token"], today=TODAY)
+        assert store.supersession_exists(old_id=old, new_id=new)
+        store.revert_wrap(2, reason="r")
+        assert not store.supersession_exists(old_id=old, new_id=new)
+        assert {e.id for e in store.episodes_since_wrap()} >= {old, new}
+    finally:
+        store.close()

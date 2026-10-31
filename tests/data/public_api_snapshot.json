@@ -2959,6 +2959,20 @@
       "action": "_StoreTrueAction",
       "choices": null,
       "const": true,
+      "default": false,
+      "dest": "allow_missing",
+      "flags": [
+       "--allow-missing"
+      ],
+      "metavar": null,
+      "nargs": 0,
+      "required": false,
+      "type": null
+     },
+     {
+      "action": "_StoreTrueAction",
+      "choices": null,
+      "const": true,
       "default": "==SUPPRESS==",
       "dest": "json",
       "flags": [
@@ -6582,7 +6596,7 @@
     },
     "revert_wrap": {
      "kind": "method",
-     "signature": "(self, wrap_id: 'int', *, reason: 'str', actor: 'str' = '', lease_token: 'str | None' = None) -> 'WrapRevertReceipt'"
+     "signature": "(self, wrap_id: 'int', *, reason: 'str', actor: 'str' = '', lease_token: 'str | None' = None, allow_missing: 'bool' = False) -> 'WrapRevertReceipt'"
     },
     "runtime_context": {
      "kind": "method",
@@ -7601,7 +7615,7 @@
    "bases": [
     "builtins.tuple"
    ],
-   "init": "(wrap_id: ForwardRef('int'), revert_id: ForwardRef('int'), episodes_reoffered: ForwardRef('int'), window_after: ForwardRef('int'), last_wrap_id_after: ForwardRef('int'), already_reverted: ForwardRef('bool'), identity_version: ForwardRef('int | None'))",
+   "init": "(wrap_id: ForwardRef('int'), revert_id: ForwardRef('int'), episodes_reoffered: ForwardRef('int'), window_after: ForwardRef('int'), last_wrap_id_after: ForwardRef('int'), already_reverted: ForwardRef('bool'), identity_version: ForwardRef('int | None'), pattern_state_exact: ForwardRef('bool') = True)",
    "kind": "class",
    "members": {
     "already_reverted": {
@@ -7618,6 +7632,10 @@
     },
     "last_wrap_id_after": {
      "index": 4,
+     "kind": "field"
+    },
+    "pattern_state_exact": {
+     "index": 7,
      "kind": "field"
     },
     "revert_id": {

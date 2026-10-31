@@ -5619,8 +5619,8 @@ class Store:
                                  "(key, old_id, new_id) VALUES (?, ?, ?)", (key, old, new))
                 continue  # an operator's row: theirs
             lk = by_entry[linker]
-            # v3 add-checks: existence and cycle only. The importer's order is history
-            # order (no older-than check) and its may_link already ruled.
+            # v3 add-checks: existence and cycle only. A v3 stream is written in history
+            # order with each link authorized at write time, so no order or grounds check.
             problem = self._supersession_problem(old, new, lk["content"], lk["ts"],
                                                  check_grounds=False, check_order=False)
             if problem:

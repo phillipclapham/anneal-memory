@@ -142,7 +142,7 @@ _log = logging.getLogger(__name__)
 CRYSTAL_SCHEMA_VERSION = 1
 
 # The file-name convention that ties a crystal file to its store: ``<stem>.db``
-# beside ``<stem>.crystal.json`` (cli.py builds the path this way).
+# beside ``<stem>.crystal.json``.
 _CRYSTAL_SUFFIX = ".crystal.json"
 # The first store generation that holds the crystal document (design B2).
 _CRYSTAL_DB_GENERATION = 3

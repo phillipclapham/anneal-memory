@@ -2174,8 +2174,6 @@ def _sink_that_fails(store, exc):
     def boom(*args, **kwargs):
         raise exc
     store._audit.log = boom
-    # A boxed event reaches the trail through the outbox flush (_append_once),
-    # not through log(): the sink has two doors, and a failing one fails both.
     store._audit._append_once = boom
 
 
@@ -3274,7 +3272,7 @@ class TestCodexL3TwentySixOhNineOhFour:
             real_append_once = store._audit._append_once
 
             def interrupt_once_append(*args, **kwargs):
-                # The same one-shot counter on the boxed door (the outbox flush).
+                # The same one-shot counter on the boxed door.
                 calls["n"] += 1
                 if calls["n"] == 1:
                     raise KeyboardInterrupt("Ctrl+C during the audit replay")

@@ -187,7 +187,7 @@ class SporeDict(TypedDict):
     # until the next write transaction backfills it (see SporeStore._transaction).
     origin_key: str
     # NOTE — ``disposition`` is DELIBERATELY NOT a field here. It is an opaque
-    # operator-I/O routing tag (the Levain/flow Tray layer's ``seed``/``handoff``/
+    # operator-I/O routing tag (``seed``/``handoff``/
     # ``agenda`` vs the default ``loop``) that anneal carries verbatim but never
     # interprets — so it stays OUTSIDE the modeled schema (a plain loop is key-free;
     # additive, no schema bump). ``add``/``update`` set/clear it via a loosely-typed
@@ -1416,7 +1416,7 @@ class SporeStore:
         it mechanically — types ARE anneal's taxonomy — but does NOT enforce the
         "only while forming" policy (a forming Tray item is plastic; a committed loop
         locks its type): that boundary is disposition-aware, so it lives in the
-        disposition-aware caller (the Levain/flow write seam gates it), not here.
+        disposition-aware caller, not here.
 
         ``expect_disposition`` is an OPTIMISTIC compare-and-set on the disposition
         field, checked INSIDE this transaction's lock so a caller that read the

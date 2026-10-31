@@ -174,7 +174,7 @@ ASSOC_SCORE_THRESHOLD = SCORE_THRESHOLD  # reach floor — the DEFAULT only. ret
 _HIGH_SIGNAL_TYPES = frozenset({EpisodeType.DECISION, EpisodeType.OUTCOME})
 _TYPE_BOOST = 0.5
 
-# Compact function-word stoplist (mirrors the flow hook — deliberately lean;
+# Compact function-word stoplist (deliberately lean;
 # flow-/memory-meaningful words like recall/continuity/memory are NOT here).
 _STOPWORDS = frozenset("""
 a an the this that these those there here it its it's is are was were be been being

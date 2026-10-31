@@ -2041,7 +2041,7 @@ def cmd_wrap_cancel(args: argparse.Namespace) -> None:
             sys.exit(1)
         except WrapCancelGatedError as exc:
             # No recipe in this text, on purpose: the reader of a refusal is the
-            # caller the bound exists to stop. flow's own cancel learned the same.
+            # caller the bound exists to stop.
             print(
                 "Refused: the wrap in progress was prepared under the consolidate "
                 "gate by another session. Cancelling it discards that session's "
@@ -2890,7 +2890,7 @@ def cmd_team_import(args: argparse.Namespace) -> None:
             f"{len(data['links_pending'])} pending"
         )
         # Every note goes before the findings: a caller showing only the last stderr line
-        # (levain's SessionStart seam) then shows a finding, not a note.
+        # then shows a finding, not a note.
         if data["links_unauthorized"]:
             print("  note: a link is judged only on the import that first brings in either "
                   "entry, so re-running with more authority will not make the links below; "

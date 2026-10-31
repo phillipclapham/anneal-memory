@@ -551,9 +551,8 @@ def _crystal_seed_lock(conn: sqlite3.Connection, db_path: str | os.PathLike[str]
 def _reconcile_crystal_projection(conn: sqlite3.Connection, db_path: str | os.PathLike[str]) -> None:
     """A write-capable Store open brings ``<stem>.crystal.json`` in line with the
     ``crystal_document`` row through :meth:`CrystalStore._project` (the one
-    divergence decision), as it does the continuity files: reads never write, so
-    the flow scripts that read the file directly rely on the writers keeping it
-    current. Only when the file is not already the row, and only when the crystal
+    divergence decision), as it does the continuity files: reads never write.
+    Only when the file is not already the row, and only when the crystal
     lock is free (a held lock means a writer is projecting). ``conn`` is the
     Store's connection, outside any transaction. The caller warns on a raise."""
     db_path = Path(db_path)

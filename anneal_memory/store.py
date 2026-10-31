@@ -1682,7 +1682,7 @@ class ContinuityLockUnavailable(AnnealMemoryError):
     relies on this so a post-DB-commit acquire can't brick every wrap on such a
     filesystem. A caller with no other serialization net — e.g. a governed
     external editor doing read→modify→``os.replace`` with no 2PC / recovery oracle
-    of its own (Levain's Class-A State write) — passes ``require=True`` and FAILS
+    of its own — passes ``require=True`` and FAILS
     CLOSED on this rather than risk a silent lost update. [spore-091 #2]"""
 
 
@@ -1695,8 +1695,7 @@ def continuity_lock(
 
     The continuity file is written by anneal's own consolidate
     (:func:`validated_save_continuity`) AND, in a complementary harness, by an
-    external editor in ANOTHER process (e.g. Levain's governed Class-A ``State``
-    write). A threading lock inside either process is blind to the other, so a
+    external editor in ANOTHER process. A threading lock inside either process is blind to the other, so a
     wrap landing between an external editor's read and its ``os.replace`` silently
     clobbers it (or is clobbered). This is the shared lock that closes that window.
 
@@ -2927,8 +2926,7 @@ def _hidden_by_supersession_sql(until: str | None) -> tuple[str, list[str]]:
     store at a cutoff must not hide a fact replaced after that cutoff (a caller
     excluding recent episodes lost a just-updated fact entirely before this,
     reproduced in review)."""
-    # A direct join is enough, and it runs on every recall (flow's hook calls
-    # recall several times per prompt), so no recursive closure here. Two
+    # A direct join is enough, and it runs on every recall, so no recursive closure here. Two
     # invariants make it exact: delete()/prune() rewire links THROUGH a removed
     # episode (A->B->C, delete B: A->C), so a link's replacement is live; and a
     # replacement is never older than what it replaces, so if the direct one is
@@ -5550,8 +5548,8 @@ class Store:
             rep["links_adopted"] = len(adopt)
         overrides = {(r[0], r[1]) for r in conn.execute(
             "SELECT old_id, new_id FROM team_overrides").fetchall()}
-        # The linker maps by (entry_id, hash); the target by id, whatever its hash
-        # (levain hides by id), unless several stored episodes carry that id. An id
+        # The linker maps by (entry_id, hash); the target by id, whatever its hash,
+        # unless several stored episodes carry that id. An id
         # enforced with two hashes (a live twin) maps no linker: never pinned.
         linker_ep = {e: v["ep"] for e, v in by_entry.items()
                      if [v["hash"]] == enforced.get(e)}
@@ -7852,8 +7850,7 @@ class Store:
         # AM-STATUS-HARDEN (spore-084): guard the read. A corrupt / non-UTF8
         # continuity (or a delete/permission race after the exists() check) must
         # NOT fault status() ITSELF — this is a convenience char-count, and
-        # status() is a health surface read by dashboards/consumers (e.g. the
-        # Levain v2 dashboard) that must degrade gracefully. None = "couldn't
+        # status() is a health surface read by dashboards/consumers that must degrade gracefully. None = "couldn't
         # measure" (already the value when the file is absent), not a crash.
         # Generation 3: the latest version's length; the file only with no row.
         continuity_path = self.continuity_path
@@ -10591,8 +10588,7 @@ class Store:
             began = not self._conn.in_transaction
             if began:
                 self._conn.execute("BEGIN IMMEDIATE")
-            # A team episode an active snapshot key enforces mirrors a line levain
-            # enforces: retention keeps it, linker or target, owned or not (an
+            # A team episode an active snapshot key enforces: retention keeps it, linker or target, owned or not (an
             # explicit delete stays the operator's act).
             rows = self._conn.execute(
                 "SELECT * FROM episodes WHERE timestamp < ? AND id NOT IN "

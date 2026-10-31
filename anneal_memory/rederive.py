@@ -959,7 +959,7 @@ class RederiveReport:
 def _judge_line(
     idx: int,
     line: str,
-    root: str,  # the only caller passes the resolved allowed root; a None root never executes
+    root: str,
     ref: str | None,
     ref_error: str | None,
     timeout: float,

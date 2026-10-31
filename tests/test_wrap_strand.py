@@ -262,8 +262,13 @@ def test_a_mid_wrap_episode_with_a_replayed_timestamp_reaches_the_next_window(
             datetime.datetime.now(datetime.timezone.utc)
             + datetime.timedelta(days=offset_days)
         ).isoformat()
+        in_window = next(e for e in store.episodes_since_wrap() if e.content == "in-window")
         late = store.record("late, replayed", "observation", timestamp=when)
         assert late.id not in snapshot
+        # The offset must survive storage, or the two cases collapse into one.
+        stored = datetime.datetime.fromisoformat(late.timestamp)
+        before = stored < datetime.datetime.fromisoformat(in_window.timestamp)
+        assert before == (offset_days < 0)
 
         validated_save_continuity(store, _text(1), wrap_token=prep["wrap_token"], today=TODAY)
 

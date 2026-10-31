@@ -118,6 +118,8 @@
   "WrapPackageDict",
   "WrapRecord",
   "WrapResult",
+  "WrapRevertReceipt",
+  "WrapRevertRefused",
   "WrapSchemaMovedError",
   "WrapWindowMovedError",
   "activation_tier",
@@ -2915,6 +2917,84 @@
       "metavar": null,
       "nargs": null,
       "required": false,
+      "type": null
+     }
+    ],
+    "subcommands": {},
+    "subparsers": null
+   },
+   "revert-wrap": {
+    "defaults": {
+     "func": "anneal_memory.cli.cmd_revert_wrap"
+    },
+    "exclusive_groups": [],
+    "options": [
+     {
+      "action": "_StoreAction",
+      "choices": null,
+      "const": null,
+      "default": null,
+      "dest": "wrap_id",
+      "flags": [],
+      "metavar": null,
+      "nargs": null,
+      "required": true,
+      "type": "int"
+     },
+     {
+      "action": "_StoreAction",
+      "choices": null,
+      "const": null,
+      "default": "",
+      "dest": "actor",
+      "flags": [
+       "--actor"
+      ],
+      "metavar": null,
+      "nargs": null,
+      "required": false,
+      "type": null
+     },
+     {
+      "action": "_StoreTrueAction",
+      "choices": null,
+      "const": true,
+      "default": "==SUPPRESS==",
+      "dest": "json",
+      "flags": [
+       "--json"
+      ],
+      "metavar": null,
+      "nargs": 0,
+      "required": false,
+      "type": null
+     },
+     {
+      "action": "_StoreAction",
+      "choices": null,
+      "const": null,
+      "default": null,
+      "dest": "lease_token",
+      "flags": [
+       "--lease-token"
+      ],
+      "metavar": null,
+      "nargs": null,
+      "required": false,
+      "type": null
+     },
+     {
+      "action": "_StoreAction",
+      "choices": null,
+      "const": null,
+      "default": null,
+      "dest": "reason",
+      "flags": [
+       "--reason"
+      ],
+      "metavar": null,
+      "nargs": null,
+      "required": true,
       "type": null
      }
     ],
@@ -6500,6 +6580,10 @@
      "kind": "method",
      "signature": "(self, probe_id: 'int') -> 'bool'"
     },
+    "revert_wrap": {
+     "kind": "method",
+     "signature": "(self, wrap_id: 'int', *, reason: 'str', actor: 'str' = '', lease_token: 'str | None' = None) -> 'WrapRevertReceipt'"
+    },
     "runtime_context": {
      "kind": "method",
      "signature": "(self, *, tainted_by: 'Iterable[str]' = (), floor: 'str | None' = None) -> 'Iterator[None]'"
@@ -6676,7 +6760,7 @@
   "StoreOperation": {
    "kind": "value",
    "type": "_LiteralGenericAlias",
-   "value": "typing.Literal['get_by_origin_key', 'read_episode_versioned', 'origin_key_status', 'delete_by_origin_key', 'replace_section', 'save_continuity', 'save_meta', 'load_meta', 'load_continuity', 'load_wrap_snapshot', 'wrap_completed', 'prepare_continuity_write', 'prepare_meta_write', 'record', 'get', 'delete', 'recall', 'keyword_candidates', 'redirectable_ids', 'wrap_status_snapshot', 'supersede', 'unsupersede', 'import_team_entries', 'import_team_snapshot', 'drift_probes', 'supersession_exists', 'superseded_by_map', 'trust_map', 'trust_counts', 'origin_map', 'origin_counts', 'set_trust', 'derived_edges', 'supersession_problem', 'supersession_links', 'set_state_key', 'clear_state_key', 'state_key_report', 'episodes_since_wrap', 'store_id', 'row_to_episode', 'status', 'wrap_started', 'wrap_cancelled', 'get_wrap_started_at', 'last_wrap_id', 'count_episodes_since_wrap', 'consolidate_requires_baton', 'wrap_gated_session', 'wrap_derive_roots', 'wrap_bound_token', 'wrap_today', 'set_consolidate_requires_baton', 'outbox_requeue', 'get_wrap_history', 'record_associations', 'decay_associations', 'get_associations', 'get_association_context', 'association_stats', 'association_formation', 'seed_pattern_co_graduation', 'drain_co_surface_events', 'get_pattern_associations', 'pattern_association_stats', 'gc_pattern_associations', 'rename_pattern_association', 'sever_pattern_concept', 'pattern_graph_projection_meta', 'section_schema', 'set_section_schema', 'get_pattern_history', 'upsert_pattern_history', 'seed_pattern_max_level', 'saved_pattern_levels', 'pattern_grounding', 'lease_acquire', 'lease_renew', 'lease_release', 'prune', 'schema_init', 'batch_begin', 'batch_commit', 'supersession_repair', 'close']"
+   "value": "typing.Literal['get_by_origin_key', 'read_episode_versioned', 'origin_key_status', 'delete_by_origin_key', 'replace_section', 'save_continuity', 'save_meta', 'load_meta', 'load_continuity', 'load_wrap_snapshot', 'wrap_completed', 'revert_wrap', 'prepare_continuity_write', 'prepare_meta_write', 'record', 'get', 'delete', 'recall', 'keyword_candidates', 'redirectable_ids', 'wrap_status_snapshot', 'supersede', 'unsupersede', 'import_team_entries', 'import_team_snapshot', 'drift_probes', 'supersession_exists', 'superseded_by_map', 'trust_map', 'trust_counts', 'origin_map', 'origin_counts', 'set_trust', 'derived_edges', 'supersession_problem', 'supersession_links', 'set_state_key', 'clear_state_key', 'state_key_report', 'episodes_since_wrap', 'store_id', 'row_to_episode', 'status', 'wrap_started', 'wrap_cancelled', 'get_wrap_started_at', 'last_wrap_id', 'count_episodes_since_wrap', 'consolidate_requires_baton', 'wrap_gated_session', 'wrap_derive_roots', 'wrap_bound_token', 'wrap_today', 'set_consolidate_requires_baton', 'outbox_requeue', 'get_wrap_history', 'record_associations', 'decay_associations', 'get_associations', 'get_association_context', 'association_stats', 'association_formation', 'seed_pattern_co_graduation', 'drain_co_surface_events', 'get_pattern_associations', 'pattern_association_stats', 'gc_pattern_associations', 'rename_pattern_association', 'sever_pattern_concept', 'pattern_graph_projection_meta', 'section_schema', 'set_section_schema', 'get_pattern_history', 'upsert_pattern_history', 'seed_pattern_max_level', 'saved_pattern_levels', 'pattern_grounding', 'lease_acquire', 'lease_renew', 'lease_release', 'prune', 'schema_init', 'batch_begin', 'batch_commit', 'supersession_repair', 'close']"
   },
   "StoreStatus": {
    "bases": [],
@@ -7512,6 +7596,53 @@
     }
    },
    "module": "anneal_memory.types"
+  },
+  "WrapRevertReceipt": {
+   "bases": [
+    "builtins.tuple"
+   ],
+   "init": "(wrap_id: ForwardRef('int'), revert_id: ForwardRef('int'), episodes_reoffered: ForwardRef('int'), window_after: ForwardRef('int'), last_wrap_id_after: ForwardRef('int'), already_reverted: ForwardRef('bool'), identity_version: ForwardRef('int | None'))",
+   "kind": "class",
+   "members": {
+    "already_reverted": {
+     "index": 5,
+     "kind": "field"
+    },
+    "episodes_reoffered": {
+     "index": 2,
+     "kind": "field"
+    },
+    "identity_version": {
+     "index": 6,
+     "kind": "field"
+    },
+    "last_wrap_id_after": {
+     "index": 4,
+     "kind": "field"
+    },
+    "revert_id": {
+     "index": 1,
+     "kind": "field"
+    },
+    "window_after": {
+     "index": 3,
+     "kind": "field"
+    },
+    "wrap_id": {
+     "index": 0,
+     "kind": "field"
+    }
+   },
+   "module": "anneal_memory.store"
+  },
+  "WrapRevertRefused": {
+   "bases": [
+    "anneal_memory.store.AnnealMemoryError"
+   ],
+   "init": "(code: 'str', detail: 'str', *, wrap_id: 'int | None' = None) -> 'None'",
+   "kind": "class",
+   "members": {},
+   "module": "anneal_memory.store"
   },
   "WrapSchemaMovedError": {
    "bases": [

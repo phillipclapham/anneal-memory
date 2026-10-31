@@ -13766,8 +13766,8 @@ class Store:
         inside a batch. Two groups, unsafe for DIFFERENT reasons — the split
         matters because only the first is mechanically derivable:
         - DB-COMMITTING (``prune``, ``wrap_started``, ``wrap_cancelled``,
-          ``set_section_schema``, ``lease_acquire``, ``lease_renew``,
-          ``lease_release``) — these call ``commit()`` unconditionally
+          ``revert_wrap``, ``set_section_schema``, ``lease_acquire``,
+          ``lease_renew``, ``lease_release``) — these call ``commit()`` unconditionally
           and would break the single-transaction invariant (the three lease
           methods refuse inside a batch or an open transaction).
         - FILE-EXTERNALIZING (``save_continuity``, ``save_meta``) — these

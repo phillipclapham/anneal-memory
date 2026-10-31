@@ -2163,13 +2163,14 @@ def cmd_wrap_cancel(args: argparse.Namespace) -> None:
 def cmd_revert_wrap(args: argparse.Namespace) -> None:
     """Undo the newest completed wrap so the next prepare-wrap offers its episodes
     again (``Store.revert_wrap``). Exit 0 when reverted (or already reverted, an
-    idempotent retry), 2 when refused with nothing changed."""
+    idempotent retry), 3 when refused with nothing changed (2 is argparse's
+    usage-error code, so a refusal must not share it)."""
     def refuse(code: str, detail: str) -> None:
         if args.json:
             _print_json({"refused": code, "detail": detail})
         else:
             print(f"Refused ({code}): {detail}. Nothing was changed.", file=sys.stderr)
-        sys.exit(2)
+        sys.exit(3)
 
     with _open_store(args) as store:
         try:

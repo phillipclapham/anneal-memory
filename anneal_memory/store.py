@@ -855,6 +855,10 @@ class WrapRevertRefused(AnnealMemoryError):
       a raw save): restoring the prior text would discard that change.
     - ``no_prior_identity``: the wrap's identity version is the store's first,
       so there is no earlier text to restore.
+    - ``no_identity_version``: a generation-3 store holds no identity version
+      for the wrap (it was recorded by a direct ``wrap_completed`` call or before
+      the store migrated), so reverting it would leave its text in the identity
+      while its episodes were compressed again.
     """
 
     def __init__(self, code: str, detail: str, *, wrap_id: int | None = None) -> None:
@@ -1959,7 +1963,7 @@ _ANNEAL_TABLES = frozenset({
     "retired_origin_keys", "rewire_origin", "state_keys", "supersessions",
     "team_entries", "team_overrides", "team_snapshot", "team_snapshot_enforced",
     "team_snapshot_notes", "team_snapshot_rows", "tombstones", "wrap_graduations",
-    "wrap_reverts", "wraps",
+    "wrap_reverts", "wrap_undo", "wraps",
 })
 
 
@@ -2342,6 +2346,22 @@ CREATE TABLE IF NOT EXISTS wrap_reverts (
     identity_version_restored INTEGER,
     restored_content_hash TEXT,
     undone_json TEXT NOT NULL DEFAULT '{}'
+);
+
+-- What the newest wrap's save overwrote, so Store.revert_wrap can put it back
+-- exactly: pattern_levels as a whole table (one marker row, key '' , plus a row
+-- per level) and each pattern_history row the save touched, as it was before
+-- (prior_json NULL = the row did not exist). Keyed by the first 12 characters of
+-- the wrap token, which the wraps row's pair_id keeps; only the newest wrap's rows
+-- are kept (the next save deletes the rest), because only the newest wrap can be
+-- reverted. Written inside the save's batch, so it commits with the wrap or not at
+-- all. Additive: an older binary ignores the table.
+CREATE TABLE IF NOT EXISTS wrap_undo (
+    token12 TEXT NOT NULL,
+    kind TEXT NOT NULL CHECK (kind IN ('pattern_levels', 'pattern_history')),
+    key TEXT NOT NULL,
+    prior_json TEXT,
+    PRIMARY KEY (token12, kind, key)
 );
 
 -- Team ledger entries this store imported (0.9.40): the ledger id and hash outlive
@@ -9661,30 +9681,37 @@ class Store:
         """Undo the newest completed wrap, so the next ``prepare_wrap`` offers
         its episodes again.
 
-        Built for a rollback of an unattended consolidation. The wrap's episodes
-        are stamped with its id and the open window is "stamped above the newest
-        wrap", so removing the newest ``wraps`` row reopens them with no restamp.
-        Nothing is silently deleted: the removed row is archived in
-        ``wrap_reverts`` and a ``wrap_reverted`` audit event is written (hash
-        chained, with ``reason`` and ``actor``). ``wraps.id`` is AUTOINCREMENT,
-        so the reverted id is never given to a later wrap.
+        Built for a rollback of an unattended consolidation. Episodes a wrap
+        consumed are stamped at or below its id and the open window is "stamped
+        above the newest wrap", so removing the newest ``wraps`` row reopens them
+        with no restamp. Nothing is silently deleted: the removed row is archived
+        in ``wrap_reverts`` and a ``wrap_reverted`` audit event is written (hash
+        chained, with ``reason`` and ``actor``). ``wraps.id`` is AUTOINCREMENT, so
+        the reverted id is never given to a later wrap.
 
         One transaction (``BEGIN IMMEDIATE``) undoes:
 
         - the ``wraps`` row, and its ``wrap_graduations`` and ``drift_results``;
         - the ``pattern_grounding`` rungs the wrap earned (matched on the wrap
           token's first 12 characters, which the wraps row's ``pair_id`` keeps);
-        - ``pattern_history.last_wrap_id`` where it named the wrap;
-        - the graduation bound's record in ``pattern_levels``: a named pattern
-          the wrap added is dropped, one it raised is lowered to the restored text's level;
-        - in a generation-3 store, the identity: a new ``identity_versions`` row
-          (source ``raw_save``) carries the text and meta of the version before
-          the wrap's, and the files are projected from it after the commit. The
-          wrap's own version row stays (the chain is append-only).
+        - ``pattern_levels`` and each ``pattern_history`` row the wrap's save
+          touched, put back exactly from the ``wrap_undo`` rows that save wrote.
+          A wrap saved before those rows existed, or one that is no longer the
+          newest wrap's save (a second revert in a row), gets ``pattern_levels``
+          adjusted from the two texts and ``pattern_history`` left as the wrap
+          wrote it (``undone["pattern_history_exact"]`` is 0 then), so a re-run
+          of the same episodes with reworded evidence can be demoted as
+          ``cross-session-overlap``;
+        - a save-idempotency record whose stored result names the wrap;
+        - the identity: a new ``identity_versions`` row (source ``raw_save``)
+          carries the text and meta of the version before the wrap's, and the files
+          are projected from it after the commit. The wrap's own version row stays
+          (the chain is append-only). A store without that table has no identity
+          to restore here; its caller restores the text.
 
-        NOT undone, on purpose: the cross-session ``pattern_history`` corpus and
-        high-water level (accumulating records, not per-wrap), Hebbian and
-        pattern-association weights, crystal state, and the episodes' own rows.
+        NOT undone, on purpose: Hebbian and pattern-association weights, crystal
+        state, ``association_formation_off_at_wrap`` if it names the wrap, and the
+        episodes' own rows.
 
         Args:
             wrap_id: The wrap to revert; must be the newest.
@@ -9700,7 +9727,8 @@ class Store:
 
         Raises:
             WrapRevertRefused: the wrap is not newest, unknown, a wrap is open,
-                or the identity cannot be restored safely (see its ``code``).
+                or the identity cannot be restored safely (see its ``code``);
+                nothing is changed.
             LeaseFencedError: a live lease and a missing or wrong ``lease_token``.
             StoreError: inside a batch or an open transaction.
             ValueError: bad arguments.
@@ -9717,8 +9745,6 @@ class Store:
             raise StoreError(
                 "revert_wrap cannot run inside a batch or an open transaction",
                 operation="revert_wrap", path=str(self.path))
-        from .continuity import _pattern_levels  # continuity imports store
-
         project = False
         boxed = False
         payload: dict[str, Any] = {}
@@ -9757,34 +9783,41 @@ class Store:
                 reverted_text: str | None = None
                 if self._identity_table_present():
                     own = self._conn.execute(
-                        "SELECT version, text FROM identity_versions "
+                        "SELECT version, text, content_hash FROM identity_versions "
                         "WHERE wrap_id = ? AND source = 'wrap' ORDER BY version DESC LIMIT 1",
                         (wrap_id,)).fetchone()
-                    if own is not None:
-                        latest = self._latest_identity()
-                        if latest is None or int(latest["version"]) != int(own["version"]):
-                            raise WrapRevertRefused(
-                                "identity_moved",
-                                "the identity changed after the wrap (a later version "
-                                "exists); restoring the prior text would discard it",
-                                wrap_id=wrap_id)
-                        before = self._conn.execute(
-                            "SELECT text, meta_json FROM identity_versions "
-                            "WHERE version < ? ORDER BY version DESC LIMIT 1",
-                            (own["version"],)).fetchone()
-                        if before is None:
-                            raise WrapRevertRefused(
-                                "no_prior_identity",
-                                "the wrap's identity version is the store's first; there "
-                                "is no earlier text to restore", wrap_id=wrap_id)
-                        restored_text = str(before["text"])
-                        reverted_text = str(own["text"])
-                        restored_version = self._insert_identity_version(
-                            restored_text, meta_json=before["meta_json"],
-                            source="raw_save", lease_token=lease_token)
-                        restored_hash = hashlib.sha256(
-                            restored_text.encode("utf-8")).hexdigest()
-                        project = True
+                    if own is None:
+                        raise WrapRevertRefused(
+                            "no_identity_version",
+                            "this store holds no identity version for the wrap; reverting "
+                            "it would leave its text in the identity", wrap_id=wrap_id)
+                    latest = self._latest_identity()
+                    # The wrap's own version, or one that carries its exact text: a
+                    # revert of the wrap after this one appended such a row.
+                    if latest is None or (int(latest["version"]) != int(own["version"])
+                                          and latest["content_hash"] != own["content_hash"]):
+                        raise WrapRevertRefused(
+                            "identity_moved",
+                            "the identity changed after the wrap (a later version "
+                            "exists); restoring the prior text would discard it",
+                            wrap_id=wrap_id)
+                    before = self._conn.execute(
+                        "SELECT text, meta_json FROM identity_versions "
+                        "WHERE version < ? ORDER BY version DESC LIMIT 1",
+                        (own["version"],)).fetchone()
+                    if before is None:
+                        raise WrapRevertRefused(
+                            "no_prior_identity",
+                            "the wrap's identity version is the store's first; there "
+                            "is no earlier text to restore", wrap_id=wrap_id)
+                    restored_text = str(before["text"])
+                    reverted_text = str(own["text"])
+                    restored_version = self._insert_identity_version(
+                        restored_text, meta_json=before["meta_json"],
+                        source="raw_save", lease_token=lease_token)
+                    restored_hash = hashlib.sha256(
+                        restored_text.encode("utf-8")).hexdigest()
+                    project = True
                 if restored_version is None:
                     self._lease_gate("revert_wrap", lease_token, None)
 
@@ -9802,25 +9835,13 @@ class Store:
                 undone["pattern_history_last_wrap"] = self._conn.execute(
                     "UPDATE pattern_history SET last_wrap_id = NULL WHERE last_wrap_id = ?",
                     (wrap_id,)).rowcount
-                if restored_text is not None and reverted_text is not None \
-                        and self._has_pattern_levels_table():
-                    schema = self.section_schema
-                    now_levels = _pattern_levels(restored_text, schema)
-                    gone = set(_pattern_levels(reverted_text, schema)) - set(now_levels)
-                    dropped = 0
-                    for name in gone:
-                        dropped += self._conn.execute(
-                            "DELETE FROM pattern_levels WHERE kind = 'name' AND key = ?",
-                            (name,)).rowcount
-                    lowered = 0
-                    for name, level in now_levels.items():
-                        lowered += self._conn.execute(
-                            "UPDATE pattern_levels SET level = ? "
-                            "WHERE kind = 'name' AND key = ? AND level > ?",
-                            (level, name, level)).rowcount
-                    undone["pattern_levels_dropped"] = dropped
-                    undone["pattern_levels_lowered"] = lowered
+                undone.update(self._revert_wrap_derived(
+                    token12, restored_text, reverted_text))
+                undone["idempotency_keys"] = self._revert_wrap_idempotency(wrap_id)
                 self._conn.execute("DELETE FROM wraps WHERE id = ?", (wrap_id,))
+                if len(token12) == 12:
+                    self._conn.execute(
+                        "DELETE FROM wrap_undo WHERE token12 = ?", (token12,))
                 window_after = self._count_episodes_since_wrap()
                 reoffered = max(0, window_after - window_before)
                 now = _now_utc()
@@ -9858,6 +9879,76 @@ class Store:
             wrap_id=wrap_id, revert_id=revert_id, episodes_reoffered=reoffered,
             window_after=window_after, last_wrap_id_after=self._last_wrap_id(),
             already_reverted=False, identity_version=restored_version)
+
+    def _revert_wrap_derived(
+        self, token12: str, restored_text: str | None, reverted_text: str | None,
+    ) -> dict[str, int]:
+        """The part of :meth:`revert_wrap` that puts ``pattern_levels`` and
+        ``pattern_history`` back, inside its transaction. From the ``wrap_undo``
+        rows the wrap's save wrote when there are any (exact); otherwise
+        ``pattern_levels`` is adjusted from the two texts (a name the wrap added
+        is dropped, one it raised is lowered) and ``pattern_history`` is left
+        alone, which the returned counts say (``*_exact`` 0)."""
+        from .continuity import _pattern_levels  # continuity imports store
+
+        out = {"pattern_levels_exact": 0, "pattern_history_exact": 0}
+        if len(token12) != 12:
+            return out
+        marker = self._conn.execute(
+            "SELECT 1 FROM wrap_undo WHERE token12 = ? AND kind = 'pattern_levels' "
+            "AND key = ''", (token12,)).fetchone()
+        if marker is not None and self._has_pattern_levels_table():
+            self._conn.execute("DELETE FROM pattern_levels")
+            rows = [json.loads(r["prior_json"]) for r in self._conn.execute(
+                "SELECT prior_json FROM wrap_undo WHERE token12 = ? "
+                "AND kind = 'pattern_levels' AND key != ''", (token12,)).fetchall()]
+            self._conn.executemany(
+                "INSERT INTO pattern_levels (kind, key, level, saved_at) VALUES (?, ?, ?, ?)",
+                [(r["kind"], r["key"], r["level"], r["saved_at"]) for r in rows])
+            out["pattern_levels_exact"] = len(rows)
+        elif (restored_text is not None and reverted_text is not None
+              and self._has_pattern_levels_table()):
+            schema = self.section_schema
+            now_levels = _pattern_levels(restored_text, schema)
+            for name in set(_pattern_levels(reverted_text, schema)) - set(now_levels):
+                self._conn.execute(
+                    "DELETE FROM pattern_levels WHERE kind = 'name' AND key = ?", (name,))
+            for name, level in now_levels.items():
+                self._conn.execute(
+                    "UPDATE pattern_levels SET level = ? "
+                    "WHERE kind = 'name' AND key = ? AND level > ?", (level, name, level))
+        for row in self._conn.execute(
+                "SELECT key, prior_json FROM wrap_undo WHERE token12 = ? "
+                "AND kind = 'pattern_history'", (token12,)).fetchall():
+            self._conn.execute(
+                "DELETE FROM pattern_history WHERE pattern_name = ?", (row["key"],))
+            if row["prior_json"] is not None:
+                prior = json.loads(row["prior_json"])
+                cols = sorted(prior)
+                self._conn.execute(
+                    f"INSERT INTO pattern_history ({', '.join(cols)}) "
+                    f"VALUES ({', '.join('?' * len(cols))})",
+                    [prior[c] for c in cols])
+            out["pattern_history_exact"] += 1
+        return out
+
+    def _revert_wrap_idempotency(self, wrap_id: int) -> int:
+        """Delete the save-idempotency records whose stored result names
+        ``wrap_id``: a retry under the same key would otherwise be told the reverted
+        wrap succeeded. Returns how many."""
+        gone = 0
+        for row in self._conn.execute(
+                "SELECT principal_scope, key, result_json FROM idempotency_keys "
+                "WHERE result_json IS NOT NULL").fetchall():
+            try:
+                result = json.loads(row["result_json"])
+            except (TypeError, ValueError):
+                continue
+            if isinstance(result, dict) and result.get("wrap_id") == wrap_id:
+                gone += self._conn.execute(
+                    "DELETE FROM idempotency_keys WHERE principal_scope = ? AND key = ?",
+                    (row["principal_scope"], row["key"])).rowcount
+        return gone
 
     def get_wrap_history(self) -> list[WrapRecord]:
         """Return the full wrap history in chronological order.
@@ -10024,6 +10115,25 @@ class Store:
             "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'pattern_levels'"
         ).fetchone() is not None
 
+    def _wrap_undo_levels(self, token12: str) -> None:
+        """Keep the ``pattern_levels`` table as it is now, under ``token12``, for
+        :meth:`revert_wrap`; drop every other wrap's undo rows (only the newest
+        wrap can be reverted). Runs inside the save's batch, before
+        :meth:`_record_pattern_levels` changes the table."""
+        if not self._has_pattern_levels_table():
+            return
+        self._conn.execute("DELETE FROM wrap_undo WHERE token12 != ?", (token12,))
+        self._conn.execute(
+            "INSERT OR REPLACE INTO wrap_undo (token12, kind, key, prior_json) "
+            "VALUES (?, 'pattern_levels', '', '{}')", (token12,))
+        self._conn.executemany(
+            "INSERT OR REPLACE INTO wrap_undo (token12, kind, key, prior_json) "
+            "VALUES (?, 'pattern_levels', ?, ?)",
+            [(token12, f"{r['kind']}:{r['key']}",
+              json.dumps({k: r[k] for k in ("kind", "key", "level", "saved_at")}, sort_keys=True))
+             for r in self._conn.execute(
+                 "SELECT kind, key, level, saved_at FROM pattern_levels").fetchall()])
+
     def _record_pattern_levels(
         self,
         levels: dict[tuple[str, str], int],
@@ -10139,8 +10249,14 @@ class Store:
         wrap_id: int | None = None,
         *,
         seen_at: str | None = None,
+        undo_token: str | None = None,
     ) -> None:
         """Record or update a pattern's cross-session graduation history.
+
+        ``undo_token`` (the first 12 characters of a wrap token; the save
+        pipeline passes it) records the row as it was before this call in
+        ``wrap_undo``, once per pattern per wrap, so :meth:`revert_wrap` can put
+        it back. Leave it unset for any other caller.
 
         ``seen_at`` (optional ``YYYY-MM-DD``): the pipeline's logical ``today``,
         used as the ``last_seen_at`` recency baseline so deterministic/backdated
@@ -10216,10 +10332,16 @@ class Store:
             # save_continuity batch which holds the SQLite connection
             # exclusively.
             existing_row = self._conn.execute(
-                "SELECT explanation_corpus FROM pattern_history "
-                "WHERE pattern_name = ?",
+                "SELECT * FROM pattern_history WHERE pattern_name = ?",
                 (pattern_name,),
             ).fetchone()
+            if undo_token:
+                self._conn.execute(
+                    "INSERT OR IGNORE INTO wrap_undo (token12, kind, key, prior_json) "
+                    "VALUES (?, 'pattern_history', ?, ?)",
+                    (undo_token, pattern_name,
+                     None if existing_row is None else json.dumps(
+                         {k: existing_row[k] for k in existing_row.keys()}, sort_keys=True)))
             if existing_row is None:
                 # First appearance — corpus starts as this explanation.
                 new_corpus = explanation
@@ -12319,6 +12441,11 @@ class Store:
            Finds episodes belonging to the current (unwrapped) session.
         4. _count_episodes_since_wrap(): Same query as #3 but SELECT COUNT(*).
            Must stay in sync with #3.
+        5. revert_wrap(): deletes the newest wraps row, so #1 falls back to the
+           row before it plus 1 and every episode stamped above that row's id is
+           in the window again; no episode is restamped. The deleted id is never
+           reissued (AUTOINCREMENT), so a later wrap's id can be more than
+           last + 1.
         """
         last_wrap = self._conn.execute(
             "SELECT id FROM wraps ORDER BY id DESC LIMIT 1"
@@ -13989,8 +14116,8 @@ class Store:
         """One ``audit_outbox`` row in the caller's open transaction; False
         (nothing written) when the event is not JSON. The boxed sites are the
         batched pipeline, the identity writers (``save_continuity``,
-        ``replace_section``), and a keyed ``record`` and ``wrap_started``
-        (integration L3 I3). Every other event fired outside a batch keeps the
+        ``replace_section``), ``revert_wrap``, and a keyed ``record`` and
+        ``wrap_started`` (integration L3 I3). Every other event fired outside a batch keeps the
         best-effort post-commit path: a loss there is counted, not prevented
         (spore-774: NOT EVERY LOSS IS RECORDED)."""
         try:

@@ -3939,6 +3939,7 @@ def validated_save_continuity(
         # A composted name's level row was deleted with its edges above; the
         # first save's tombstone seed must not bring it back (codex L3 r1 HIGH 2).
         _prior_line_levels = pattern_line_levels(prior_continuity or "", grad_headings)
+        store._wrap_undo_levels(snapshot["token"][:12])
         store._record_pattern_levels(
             pattern_line_levels(grad_result.text, grad_headings), today_str,
             lower_to=_prior_line_levels,
@@ -4099,6 +4100,7 @@ def validated_save_continuity(
                 # warm-preservation gate's (today − last_seen_at) stays
                 # coherent on deterministic/backdated runs.
                 seen_at=today_str,
+                undo_token=snapshot["token"][:12],
             )
         store._record_wrap_graduations(wrap_graduations)
 

@@ -154,3 +154,104 @@ def test_an_episode_recorded_on_another_connection_during_the_revert_is_not_lost
         assert len(set(recorded)) == len(recorded)
     finally:
         store.close()
+
+
+def _graduating(store: Store, ep_id: str, quote: str) -> str:
+    return (
+        "## State\nw.\n\n## Patterns\n"
+        f'- alpha_proven | 2x ({TODAY}) [evidence: {ep_id} "{quote}"]\n\n'
+        "## Decisions\n- d.\n\n## Context\n- c.\n"
+    )
+
+
+def _graduation_store(tmp_path) -> Store:
+    store = Store(tmp_path / "m.db", project_name="t")
+    for i in range(4):
+        store.record(
+            f"baseline episode {i}: substrate observation about discipline rotation "
+            f"memory tracking topic {i}.", "observation")
+    prep = prepare_wrap(store)
+    validated_save_continuity(
+        store, f"## State\nw1.\n\n## Patterns\n- alpha_proven | 1x ({TODAY})\n\n"
+        "## Decisions\n- d.\n\n## Context\n- c.\n",
+        wrap_token=prep["wrap_token"], today=TODAY)
+    for i in range(4):
+        store.record(
+            f"baseline episode d{i}: substrate observation about discipline rotation "
+            f"memory tracking topic d{i}.", "observation")
+    return store
+
+
+def test_the_pattern_record_is_put_back_so_the_same_episodes_graduate_on_reworded_evidence(tmp_path):
+    """Reviewers L1 and L2 reproduced: a revert that left pattern_levels and the
+    pattern_history corpus as the wrap wrote them demoted the redo (cross-session-overlap)."""
+    store = _graduation_store(tmp_path)
+    try:
+        prep = prepare_wrap(store)
+        ep = store.load_wrap_snapshot()["episode_ids"][0]
+        validated_save_continuity(
+            store, _graduating(store, ep, "baseline substrate observation about discipline rotation memory tracking"),
+            wrap_token=prep["wrap_token"], today=TODAY)
+        assert store.get_pattern_history("alpha_proven") is not None
+        assert store.saved_pattern_levels()[("name", "alpha_proven")] == 2
+
+        receipt = store.revert_wrap(2, reason="r")
+        assert store.get_pattern_history("alpha_proven") is None
+        assert store.saved_pattern_levels()[("name", "alpha_proven")] == 1
+        undone = json.loads(store._conn.execute(
+            "SELECT undone_json FROM wrap_reverts WHERE id = ?", (receipt.revert_id,)).fetchone()[0])
+        assert undone["pattern_history_exact"] == 1 and undone["pattern_levels_exact"] >= 1
+
+        prep = prepare_wrap(store)
+        ep = store.load_wrap_snapshot()["episode_ids"][0]
+        result = validated_save_continuity(
+            store, _graduating(store, ep, "episode substrate observation discipline rotation memory tracking topic"),
+            wrap_token=prep["wrap_token"], today=TODAY)
+        assert result["graduations_validated"] == 1 and result["graduations_demoted"] == 0
+        assert f"alpha_proven | 2x ({TODAY})" in store.load_continuity()
+    finally:
+        store.close()
+
+
+def test_reverting_two_wraps_in_a_row_and_a_save_retry_after_a_revert(tmp_path):
+    store, _day1, _day2 = _seeded(tmp_path)
+    try:
+        store.record("day three", "observation")
+        prep = prepare_wrap(store)
+        validated_save_continuity(
+            store, _text(3), wrap_token=prep["wrap_token"], today=TODAY, idempotency_key="save-3")
+        store.revert_wrap(3, reason="r")
+        store.revert_wrap(2, reason="r")  # was identity_moved: the latest version carries wrap 2's own text
+        assert store.load_continuity() == _text(1)
+        assert [w.id for w in store.get_wrap_history()] == [1]
+        prep = prepare_wrap(store)
+        retried = validated_save_continuity(
+            store, _text(3), wrap_token=prep["wrap_token"], today=TODAY, idempotency_key="save-3")
+        assert not retried.get("replayed"), "a retry after the revert was told the reverted wrap succeeded"
+    finally:
+        store.close()
+
+
+def test_the_cli_reverts_refuses_with_exit_3_and_retries_cleanly(tmp_path, capsys, monkeypatch):
+    from anneal_memory import cli
+
+    store, _day1, day2 = _seeded(tmp_path)
+    db = str(store.path)
+    store.close()
+
+    def run(*argv: str) -> tuple[int, str]:
+        try:
+            monkeypatch.setattr("sys.argv", ["anneal-memory", "--db", db, "revert-wrap", *argv, "--json"])
+            cli.main()
+            code = 0
+        except SystemExit as exc:
+            code = int(exc.code or 0)
+        return code, capsys.readouterr().out
+
+    code, out = run("1", "--reason", "r")
+    assert code == 3 and json.loads(out)["refused"] == "not_latest"
+    code, out = run("2", "--reason", "dream rollback", "--actor", "levain-dream")
+    body = json.loads(out)
+    assert code == 0 and body["status"] == "reverted" and body["episodes_reoffered"] == len(day2)
+    code, out = run("2", "--reason", "retry")
+    assert code == 0 and json.loads(out)["status"] == "already_reverted"

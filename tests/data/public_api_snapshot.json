@@ -6698,7 +6698,7 @@
     },
     "upsert_pattern_history": {
      "kind": "method",
-     "signature": "(self, pattern_name: 'str', level: 'int', explanation: 'str', wrap_id: 'int | None' = None, *, seen_at: 'str | None' = None) -> 'None'"
+     "signature": "(self, pattern_name: 'str', level: 'int', explanation: 'str', wrap_id: 'int | None' = None, *, seen_at: 'str | None' = None, undo_token: 'str | None' = None) -> 'None'"
     },
     "wrap_bound_token": {
      "kind": "method",

@@ -31,7 +31,7 @@ UNRELATED = {
     "drift_probes", "drift_results", "metadata", "pattern_aliases", "pattern_associations",
     "pattern_graph_projection_meta", "pattern_history", "pattern_levels",
     "processed_co_surface_events", "sqlite_sequence", "team_snapshot",
-    "team_snapshot_enforced", "team_snapshot_notes", "wrap_graduations", "wrap_reverts", "wraps",
+    "team_snapshot_enforced", "team_snapshot_notes", "wrap_graduations", "wrap_reverts", "wrap_undo", "wraps",
 }
 EPISODE_ID_COLUMNS = {"id", "episode_id", "episode_a", "episode_b", "source_id", "old_id", "new_id"}
 

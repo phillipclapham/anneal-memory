@@ -2889,8 +2889,8 @@ def cmd_team_import(args: argparse.Namespace) -> None:
             f"{data['skipped_ack']} acks skipped); {data['links_made']} supersession links, "
             f"{len(data['links_pending'])} pending"
         )
-        # Every note goes before the findings: a caller showing only the last stderr line
-        # then shows a finding, not a note.
+        # Every note goes before the findings: a caller that shows only the last stderr line
+        # shows a finding, not a note.
         if data["links_unauthorized"]:
             print("  note: a link is judged only on the import that first brings in either "
                   "entry, so re-running with more authority will not make the links below; "

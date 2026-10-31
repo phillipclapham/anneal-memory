@@ -7,13 +7,13 @@ already scored, ranked, and capped, with zero harness-side query logic. The hook
 shell stays a thin trigger+format adapter; all the retrieval intelligence lives
 here, harness-neutral.
 
-This is the library-ization of the scoring that flow prototyped in its
-``recall_injection_hook.py`` (the documented "swap retrieve_episodes for an anneal
+This is the library-ization of the scoring that was prototyped in a
+harness's recall hook (with a documented "swap retrieve_episodes for an anneal
 call" seam). That hook tokenizes the prompt, OR-matches keywords against episode
 content, and scores by weighted keyword overlap (distinctive snake_case /
 hyphenated / long terms weigh more) — working around plain substring-LIKE
-brittleness. Moving it into the library means every adopter (flow today, Levain v2
-tomorrow) inherits the same precision-biased retrieval, and the SAME scan now also
+brittleness. Moving it into the library means every adopter inherits the same
+precision-biased retrieval, and the SAME scan now also
 surfaces crystallized patterns — the on-demand graduated tier — through the one
 hook.
 
@@ -27,7 +27,7 @@ RETRIEVAL BACKEND — keyword PLUS the evidence edge. The episode tier is weight
 keyword overlap and is reliable (episodes carry rich, varied vocabulary). The
 crystallized PATTERN tier is not: a graduated pattern is compressed to a sparse
 name + clause, so its relevance to a query is usually SEMANTIC, not lexical — and
-keyword scoring is blind to that (flow's dogfood measured it firing on ~2% of
+keyword scoring is blind to that (one operator's dogfood measured it firing on ~2% of
 relevant prompts, surfacing the wrong patterns on coincidental token overlap while
 the genuinely-relevant ones stayed cold). So pattern retrieval is AUGMENTED by an
 associative pass: query → keyword-matched episodes (the seed set) → the patterns
@@ -35,7 +35,7 @@ whose ``evidence`` cites one of them (the evidence edge). A pattern grounded in 
 episode the query matched surfaces even with zero query-keyword overlap.
 
 Until 0.9.26 the pass also followed ONE Hebbian hop (seed → its co-cited episodes
-→ the patterns citing those). It was removed after two measurements on flow's
+→ the patterns citing those). It was removed after two measurements on one operator's
 store. On 2026-09-29, 0 of 788 production crystal exposures had come through it
 (744 through the evidence edge, 44 by keyword), because the episodes the Hebbian
 links connected and the episodes crystals cite were disjoint sets. On 2026-10-03,
@@ -60,7 +60,7 @@ That makes it regime-adaptive WITHOUT a flag: on an entity-dense corpus where ke
 already works, the associative pass surfaces what keyword found (or nothing clears the
 gate); on a conceptual/partnership corpus it surfaces the cold patterns keyword can't
 reach. The result shape and the consumer do not change — one backend swap under this
-function lights up every harness (flow, Chip, the Levain/OpenHands adapters). It needs
+function lights up every harness. It needs
 the episodic :class:`Store` (the seed episodes live there), so the Store-free
 :func:`retrieve_patterns` stays keyword-only by design.
 """
@@ -96,8 +96,8 @@ from .types import (
 
 RetrievalMode = Literal["prompt", "query"]
 
-# --- Tuning (a Levain adapter would expose these as config; defaults match the
-# flow recall-hook prototype so flow's measured keyword baseline carries over) ---
+# --- Tuning (a harness adapter would expose these as config; defaults match the
+# original recall-hook prototype so its measured keyword baseline carries over) ---
 MAX_PATTERNS = 3          # cap on crystallized patterns surfaced
 MAX_EPISODES = 3          # cap on episodes surfaced
 MIN_KEYWORDS = 2          # queries with fewer distinctive keywords → surface nothing
@@ -175,7 +175,7 @@ _HIGH_SIGNAL_TYPES = frozenset({EpisodeType.DECISION, EpisodeType.OUTCOME})
 _TYPE_BOOST = 0.5
 
 # Compact function-word stoplist (deliberately lean;
-# flow-/memory-meaningful words like recall/continuity/memory are NOT here).
+# memory-meaningful words like recall/continuity/memory are NOT here).
 _STOPWORDS = frozenset("""
 a an the this that these those there here it its it's is are was were be been being
 am do does did doing have has had having will would shall should can could may might must
@@ -253,11 +253,11 @@ def _keyword_weight(kw: str) -> float:
     return w
 
 
-# --- Corpus-IDF keyword weighting (the precision fix for the promiscuous flow-meta
+# --- Corpus-IDF keyword weighting (the precision fix for the promiscuous meta-process
 # recall — spore-141 / spore-104 dep-2, 2026-06-21). The length-proxy above is blind
 # to corpus frequency, so high-document-frequency PROCESS words (work/commit/project/
 # load — the connective tissue of a work corpus) score like distinctive terms and
-# float whatever flow-meta episode they brush onto ~every prompt. A real inverse-
+# float whatever meta-process episode they brush onto ~every prompt. A real inverse-
 # document-frequency weight, measured from the episode corpus, deflates those
 # corpus-learned stopwords while preserving genuinely rare terms. ---
 IDF_MIN_CORPUS = 50  # below this many episodes, document frequencies are too noisy to
@@ -268,13 +268,13 @@ IDF_FLOOR = 0.30     # numerical-safety floor for a near-ubiquitous term's weigh
 # common-word noise on its own — the DISTINCTIVE ANCHOR below does that structurally; the
 # floor only bounds how much a floored term adds to the sum of an item that ALREADY has a
 # real distinctive match. Below the floor → clamped here.
-# The IDF regime's precision bar, calibrated on flow's REAL receipt corpus (the threshold
+# The IDF regime's precision bar, calibrated on one operator's REAL receipt corpus (the threshold
 # sweep, 2026-06-21). It is LOWER than SCORE_THRESHOLD (2.5) because the IDF weight band is
 # lower than the length-proxy band — a SEPARATE constant (not a rescale of the weight) so
 # the additive _TYPE_BOOST / multiplicity bonus keep their calibrated proportion. The
 # length-proxy / small-corpus / Store-free paths keep SCORE_THRESHOLD untouched, so the
 # test suite and pre-IDF behavior are byte-unchanged.
-# ⚠ FLOW-CALIBRATED DEFAULTS. IDF_SCORE_THRESHOLD and IDF_MIN_CORPUS are tuned to flow's
+# ⚠ CALIBRATED ON ONE OPERATOR'S CORPUS. IDF_SCORE_THRESHOLD and IDF_MIN_CORPUS are tuned to a
 # conceptual/partnership corpus regime (much repeated abstract vocabulary). An adopter on
 # a different regime (entity-dense: code identifiers, proper nouns → most terms naturally
 # rare) should RE-SWEEP both against their own receipt corpus — `1.6` will under-tighten
@@ -299,11 +299,11 @@ def _idf_weight(df: int, corpus_n: int) -> float:
 
     ``df`` = how many of the ``corpus_n`` episodes contain the keyword (the exact,
     uncapped ``RecallResult.total_matching``). A term in MOST episodes (a corpus-learned
-    stopword — flow's ``work``/``commit``/``project``) gets a low weight; a rare
+    stopword — e.g. ``work``/``commit``/``project``) gets a low weight; a rare
     distinctive term a high one. Smoothed (``+1``) so a ``df`` of 0 can't divide by zero,
     normalized by ``log(n+1)`` into ``[0, 1]`` then floored at :data:`IDF_FLOOR`. Only the
     endpoints are corpus-size-stable (unique → ~1.0; ubiquitous → ~0); a fixed-FRACTION
-    term drifts down as the corpus grows, so :data:`IDF_SCORE_THRESHOLD` is a flow-N
+    term drifts down as the corpus grows, so :data:`IDF_SCORE_THRESHOLD` is a one-corpus
     calibration (the :data:`IDF_ANCHOR_WEIGHT` guard, being a √N point, does not drift).
     A term at/above :data:`IDF_ANCHOR_WEIGHT` is the distinctive anchor an item needs to
     surface; common words accumulate toward :data:`IDF_SCORE_THRESHOLD` only as support."""

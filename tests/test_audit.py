@@ -2174,6 +2174,7 @@ def _sink_that_fails(store, exc):
     def boom(*args, **kwargs):
         raise exc
     store._audit.log = boom
+    # The sink has two doors (log() and the outbox flush's _append_once); a failing one fails both.
     store._audit._append_once = boom
 
 

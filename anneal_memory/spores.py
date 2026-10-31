@@ -55,9 +55,7 @@ is an ISO-8601 **UTC** instant (anneal's machine-timestamp convention) — the
 precise event time a wrap reads to consume "what ascended *this session*".
 
 Lineage: the Protocol Memory "Seeds" model, lexeme changed (seed → spore) to
-avoid colliding with the identity-*seed* that boots an entity. Full philosophy +
-the Levain-generalization notes:
-``projects/anneal_memory/spores_prospective_layer.md`` (flow repo).
+avoid colliding with the identity-*seed* that boots an entity.
 """
 
 from __future__ import annotations
@@ -1169,8 +1167,8 @@ class SporeStore:
         ``ascend``'s ``ref``, which records what the spore *became* at resolution.
         Returns the created record.
 
-        ``disposition`` is an OPAQUE operator-I/O routing tag (the Levain/flow Tray
-        layer's ``seed``/``handoff``/``agenda`` vs the default ``loop``) — anneal
+        ``disposition`` is an OPAQUE operator-I/O routing tag (for example a host
+        application's ``seed``/``handoff``/``agenda`` vs the default ``loop``) — anneal
         stores a truthy value verbatim and NEVER interprets it (the disposition-aware
         layer owns the taxonomy + value-validation, mirroring how germination is
         computed outside the store). Pass ``None`` for a normal loop, which stays
@@ -1416,7 +1414,7 @@ class SporeStore:
         it mechanically — types ARE anneal's taxonomy — but does NOT enforce the
         "only while forming" policy (a forming Tray item is plastic; a committed loop
         locks its type): that boundary is disposition-aware, so it lives in the
-        disposition-aware caller, not here.
+        disposition-aware caller (the host application's write layer), not here.
 
         ``expect_disposition`` is an OPTIMISTIC compare-and-set on the disposition
         field, checked INSIDE this transaction's lock so a caller that read the

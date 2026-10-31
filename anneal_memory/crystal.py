@@ -91,9 +91,7 @@ Dates: ``crystallized_on`` / ``last_activated_on`` / ``retirement.on`` are
 for deterministic runs, defaulting to ``date.today()``. ``retirement.at`` is an
 ISO-8601 **UTC** instant (anneal's machine-timestamp convention).
 
-Full design + the AM-WORKINGSET architecture: ``projects/anneal_memory/next.md``
-(🔴 AM-WORKINGSET) + ``contexts/master_plan.md`` (flow repo). The harness-side
-per-turn surfacing hook is a Levain/flow adapter, NOT this module — anneal owns the
+The per-turn surfacing hook is a harness adapter, NOT this module — anneal owns the
 store + the retrieval API (:func:`anneal_memory.retrieval.retrieve_relevant`); the
 harness owns the firing. "anneal only fully works inside a complementary harness."
 """
@@ -144,7 +142,7 @@ _log = logging.getLogger(__name__)
 CRYSTAL_SCHEMA_VERSION = 1
 
 # The file-name convention that ties a crystal file to its store: ``<stem>.db``
-# beside ``<stem>.crystal.json`` (cli.py and flow/levain build paths this way).
+# beside ``<stem>.crystal.json`` (cli.py builds the path this way).
 _CRYSTAL_SUFFIX = ".crystal.json"
 # The first store generation that holds the crystal document (design B2).
 _CRYSTAL_DB_GENERATION = 3
@@ -215,7 +213,7 @@ RETIRE_KINDS: tuple[str, ...] = ("falsified", "superseded", "merged", "obsolete"
 
 # Activation-tier thresholds (days). Pattern-scale, not task-scale (spores'
 # germination is 3/7) — graduated wisdom re-heats over weeks, not days. The recall
-# layer / a Levain adapter would expose these as config.
+# layer / a harness adapter would expose these as config.
 ACTIVATION_HOT_DAYS = 7
 ACTIVATION_WARM_DAYS = 30
 ACTIVATION_COLD_DAYS = 90
@@ -551,7 +549,8 @@ def _crystal_seed_lock(conn: sqlite3.Connection, db_path: str | os.PathLike[str]
 def _reconcile_crystal_projection(conn: sqlite3.Connection, db_path: str | os.PathLike[str]) -> None:
     """A write-capable Store open brings ``<stem>.crystal.json`` in line with the
     ``crystal_document`` row through :meth:`CrystalStore._project` (the one
-    divergence decision), as it does the continuity files: reads never write.
+    divergence decision), as it does the continuity files: reads never write,
+    so external readers of the file rely on writers keeping it current.
     Only when the file is not already the row, and only when the crystal
     lock is free (a held lock means a writer is projecting). ``conn`` is the
     Store's connection, outside any transaction. The caller warns on a raise."""
@@ -1845,8 +1844,8 @@ def _recency_key(value: object) -> float:
 #
 # ``prepare_wrap`` surfaces cold-Proven crystallization candidates and asks the
 # composer to route each (constitution / crystallize / compost). This channel
-# carries that decision BACK in a machine-parseable form so a consumer (flow's
-# consolidate, the Argus node-3 hub wrapper) can EXECUTE it without re-parsing
+# carries that decision BACK in a machine-parseable form so a consumer (a
+# consolidate wrapper, a hub) can EXECUTE it without re-parsing
 # free prose. anneal PARSES; the harness ROUTES (store-in-anneal, firing-in-
 # harness) — :func:`parse_crystal_decisions` returns the decisions; the consumer
 # calls :meth:`CrystalStore.crystallize` / drops / hands to its bedrock layer.
@@ -1927,7 +1926,7 @@ class CrystalDecision(NamedTuple):
     ``MIN_PROVEN_LEVEL`` and no ceiling, precisely because a pattern earned 4+ times
     could neither validate nor crystallize out — a trap with no exit at either end. This
     contract kept telling consumers to guard ``level in (2, 3)``, and at least one did
-    exactly that (flow's ``scripts/crystal_decision_apply.py``), so the cap the release
+    exactly that, so the cap the release
     removed was **re-derived from the documentation** by every reader who trusted it.
     A widening emits no error signal anywhere downstream — nothing breaks, every
     consumer keeps working correctly against the narrower contract it already knew, and

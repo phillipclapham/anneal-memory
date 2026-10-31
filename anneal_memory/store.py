@@ -832,11 +832,11 @@ class WrapInProgressError(AnnealMemoryError):
     spent the compression.
 
     This refusal makes the single-writer invariant **structural** at the
-    library layer, so every adapter inherits it — Levain's seeded entity
-    (which wires :func:`~anneal_memory.prepare_wrap` directly), the MCP
+    library layer, so every adapter inherits it — a harness entity
+    that wires :func:`~anneal_memory.prepare_wrap` directly, the MCP
     ``prepare_wrap`` tool, the ``prepare-wrap`` CLI, a future agent. It
-    previously lived only in flow's CLI wrapper, leaving every other
-    caller unprotected.
+    would otherwise live only in a wrapper around the CLI, leaving every
+    other caller unprotected.
 
     Subclasses :class:`AnnealMemoryError` directly — **not**
     :class:`StoreError`. It is a precondition/state refusal, not a store
@@ -853,7 +853,7 @@ class WrapInProgressError(AnnealMemoryError):
     ``save-continuity`` / ``wrap-cancel`` CLI subcommands — and the
     message this class raises names all three (``_WRAP_FINISH_PATHS``,
     ``_WRAP_CANCEL_PATHS`` above). A deliberate
-    "discard the in-progress wrap and restart compression" flow passes
+    "discard the in-progress wrap and restart compression" path passes
     ``allow_restart=True`` to :meth:`Store.wrap_started` — though
     :meth:`Store.wrap_cancelled` followed by a fresh ``prepare_wrap``
     achieves the same thing with a cancel event in the audit trail.
@@ -1514,7 +1514,7 @@ def _rebaseline_wrap_crystal(
     Ruled 2026-10-24 (1024+7 head, integration L3 r2 I1): only a LEASED wrap is
     fenced on crystals. Without a lease nothing tells the wrap's own crystal
     change from another writer's, and refusing every crystal change would refuse
-    every flow wrap that crystallizes; an unleased wrap keeps 1.0's behaviour
+    every wrap that crystallizes; an unleased wrap keeps 1.0's behaviour
     (no crystal precondition). A caller that needs the fence takes the lease."""
     if lease_token is None:
         return
@@ -1695,7 +1695,9 @@ def continuity_lock(
 
     The continuity file is written by anneal's own consolidate
     (:func:`validated_save_continuity`) AND, in a complementary harness, by an
-    external editor in ANOTHER process. A threading lock inside either process is blind to the other, so a
+    external editor in ANOTHER process (e.g. a host application that edits the
+    file directly with its own read→modify→``os.replace``). A threading lock
+    inside either process is blind to the other, so a
     wrap landing between an external editor's read and its ``os.replace`` silently
     clobbers it (or is clobbered). This is the shared lock that closes that window.
 
@@ -2562,7 +2564,7 @@ _SQLITE_LOCKED = 6
 # audit write, which ``_seed_audit_health`` already reads as zero, and seeding
 # a "0" into every database on earth to say "nothing has gone wrong yet" is
 # storage spent on the absence of news.
-# Per-store consolidate policy (flow spore-1169); see Store.consolidate_requires_baton.
+# Per-store consolidate policy; see Store.consolidate_requires_baton.
 _CONSOLIDATE_REQUIRES_BATON_KEY = "consolidate_requires_baton"
 _AUDIT_FAILURES_KEY = "audit_write_failures"
 _AUDIT_LAST_FAILURE_KEY = "audit_last_failure"
@@ -2926,8 +2928,8 @@ def _hidden_by_supersession_sql(until: str | None) -> tuple[str, list[str]]:
     store at a cutoff must not hide a fact replaced after that cutoff (a caller
     excluding recent episodes lost a just-updated fact entirely before this,
     reproduced in review)."""
-    # A direct join is enough, and it runs on every recall, so no recursive closure here. Two
-    # invariants make it exact: delete()/prune() rewire links THROUGH a removed
+    # A direct join is enough, and it runs on every recall, so no recursive
+    # closure here. Two invariants make it exact: delete()/prune() rewire links THROUGH a removed
     # episode (A->B->C, delete B: A->C), so a link's replacement is live; and a
     # replacement is never older than what it replaces, so if the direct one is
     # after ``until`` every later one is too. A link whose replacement vanished
@@ -3062,7 +3064,7 @@ class WrapStatusSnapshot(NamedTuple):
 
 
 # Team episodes retention keeps: the copy (entry id AND hash) of an entry that an
-# ACTIVE snapshot key's last complete stream enforces (flow seam design §3b.7).
+# ACTIVE snapshot key's last complete stream enforces.
 _STALE_TWIN_MARK = ("[stale: the team ledger's current entry with this id could not be "
                     "imported; see team-status] ")
 _PROTECTED_TEAM_EPISODES = (
@@ -4957,7 +4959,7 @@ class Store:
         unmappable: Iterable[dict[str, Any]] = (),
         dry_run: bool = False,
     ) -> dict[str, Any]:
-        """Import a v3 team stream (flow seam design §3b): the episodes, then, when
+        """Import a v3 team stream: the episodes, then, when
         the stream is complete, ``judged == "full"`` and wins on order, REPLACE the
         team state this ``key`` owns with the stream's verdict, in ONE write
         transaction. ``enforced`` maps each enforced ledger id to its hash(es) (two
@@ -5617,8 +5619,8 @@ class Store:
                                  "(key, old_id, new_id) VALUES (?, ?, ?)", (key, old, new))
                 continue  # an operator's row: theirs
             lk = by_entry[linker]
-            # v3 add-checks: existence and cycle only. levain's order is history
-            # order (no older-than check) and levain's may_link already ruled.
+            # v3 add-checks: existence and cycle only. The importer's order is history
+            # order (no older-than check) and its may_link already ruled.
             problem = self._supersession_problem(old, new, lk["content"], lk["ts"],
                                                  check_grounds=False, check_order=False)
             if problem:
@@ -7850,7 +7852,8 @@ class Store:
         # AM-STATUS-HARDEN (spore-084): guard the read. A corrupt / non-UTF8
         # continuity (or a delete/permission race after the exists() check) must
         # NOT fault status() ITSELF — this is a convenience char-count, and
-        # status() is a health surface read by dashboards/consumers that must degrade gracefully. None = "couldn't
+        # status() is a health surface read by dashboards/consumers that
+        # must degrade gracefully. None = "couldn't
         # measure" (already the value when the file is absent), not a crash.
         # Generation 3: the latest version's length; the file only with no row.
         continuity_path = self.continuity_path
@@ -8952,7 +8955,7 @@ class Store:
         refuses a save that does not round-trip the prepare ``wrap_token``.
         It exists so a consumer that calls the library directly, without
         opting into the session gate, cannot recompose the felt layer of a
-        store its operator has protected (flow spore-1169).
+        store its operator has protected.
 
         ⚠ Enforced only by anneal versions that know this key; an older
         anneal opening the same store ignores it. The JSON export records it
@@ -10588,7 +10591,8 @@ class Store:
             began = not self._conn.in_transaction
             if began:
                 self._conn.execute("BEGIN IMMEDIATE")
-            # A team episode an active snapshot key enforces: retention keeps it, linker or target, owned or not (an
+            # A team episode an active snapshot key enforces: retention keeps it,
+            # linker or target, owned or not (an
             # explicit delete stays the operator's act).
             rows = self._conn.execute(
                 "SELECT * FROM episodes WHERE timestamp < ? AND id NOT IN "
@@ -12120,7 +12124,7 @@ class Store:
         metadata and **never read it back**, so the two halves of one store
         failed in OPPOSITE directions under version skew: the sidecars failed
         CLOSED and loud, the SQLite half degraded SILENTLY. That asymmetry is
-        what made a levain two-anneal skew a correctness hazard rather than a
+        what made two processes on different anneal versions a correctness hazard rather than a
         reporting gap.
 
         ⚠ RUNS BEFORE ``_init_schema`` ON PURPOSE. Schema init applies

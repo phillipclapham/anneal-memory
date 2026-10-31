@@ -152,6 +152,8 @@ from .store import (
     WrapCancelGatedError,
     SupersessionError,
     WrapOwnershipError,
+    WrapRevertRefused,
+    LeaseFencedError,
     _WRAP_TOKEN_RE,
     _SCHEMA_VERSION,
     _parse_format_version,
@@ -2156,6 +2158,43 @@ def cmd_wrap_cancel(args: argparse.Namespace) -> None:
             print(f"  {count} episode(s) released — not deleted; the next prepare-wrap picks them up")
         else:
             print("no wrap was in progress (state cleared anyway)")
+
+
+def cmd_revert_wrap(args: argparse.Namespace) -> None:
+    """Undo the newest completed wrap so the next prepare-wrap offers its episodes
+    again (``Store.revert_wrap``). Exit 0 when reverted (or already reverted, an
+    idempotent retry), 2 when refused with nothing changed."""
+    def refuse(code: str, detail: str) -> None:
+        if args.json:
+            _print_json({"refused": code, "detail": detail})
+        else:
+            print(f"Refused ({code}): {detail}. Nothing was changed.", file=sys.stderr)
+        sys.exit(2)
+
+    with _open_store(args) as store:
+        try:
+            receipt = store.revert_wrap(
+                args.wrap_id, reason=args.reason, actor=args.actor,
+                lease_token=getattr(args, "lease_token", None))
+        except WrapRevertRefused as exc:
+            refuse(exc.code, exc.detail)
+        except LeaseFencedError as exc:
+            refuse("lease_fenced", str(exc))
+        except ValueError as exc:
+            refuse("bad_argument", str(exc))
+    if args.json:
+        _print_json({"status": "already_reverted" if receipt.already_reverted else "reverted",
+                     **receipt._asdict()})
+        return
+    if receipt.already_reverted:
+        print(f"wrap {receipt.wrap_id} was already reverted (revert {receipt.revert_id}); "
+              "nothing changed")
+        return
+    print(f"wrap {receipt.wrap_id} reverted (revert {receipt.revert_id})")
+    print(f"  {receipt.episodes_reoffered} episode(s) reopened; the next prepare-wrap "
+          f"window holds {receipt.window_after}")
+    if receipt.identity_version is not None:
+        print(f"  identity restored as version {receipt.identity_version}")
 
 
 def cmd_wrap_token_current(args: argparse.Namespace) -> None:
@@ -5499,6 +5538,20 @@ def build_parser() -> argparse.ArgumentParser:
              "store is idle. Needs no token; cannot be combined with --wrap-token.",
     )
     sub.set_defaults(func=cmd_wrap_cancel)
+
+    # -- revert-wrap --
+    sub = subparsers.add_parser(
+        "revert-wrap",
+        help="Undo the newest completed wrap so its episodes are offered again",
+        parents=[json_parent],
+    )
+    sub.add_argument("wrap_id", type=int, help="The wrap to revert; must be the newest.")
+    sub.add_argument("--reason", required=True, help="Why; recorded in the audit trail.")
+    sub.add_argument("--actor", default="", help="Who; recorded in the audit trail.")
+    sub.add_argument(
+        "--lease-token", dest="lease_token", default=None,
+        help="The consolidation lease token, when a lease is live.")
+    sub.set_defaults(func=cmd_revert_wrap)
 
     # -- wrap-token-current --
     sub = subparsers.add_parser(

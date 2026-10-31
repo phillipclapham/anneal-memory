@@ -773,7 +773,7 @@ class AuditTrail:
                    Episode/store lifecycle:
                      record, delete, prune
                    Wrap lifecycle:
-                     wrap_started, wrap_cancelled, wrap_completed
+                     wrap_started, wrap_cancelled, wrap_completed, wrap_reverted
                    Continuity:
                      continuity_saved, continuity_refused, section_schema_set,
                      section_replaced

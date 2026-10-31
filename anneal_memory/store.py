@@ -359,6 +359,7 @@ StoreOperation = Literal[
     "load_continuity",  # gen 3: the identity is read from the database
     "load_wrap_snapshot",
     "wrap_completed",
+    "revert_wrap",
     # Two-phase commit tmp sidecar writes (10.5c.5 — pre-existing
     # raise sites that were missing from the Literal until 10.5c.6
     # audit caught the drift. Both surface from
@@ -815,6 +816,52 @@ class WrapCancelReceipt(NamedTuple):
     started_at: str | None
     episode_ids: list[str] | None
     partial_state: bool
+
+
+class WrapRevertReceipt(NamedTuple):
+    """What a :meth:`Store.revert_wrap` call did, read inside its transaction.
+
+    ``already_reverted`` is True when the wrap had been reverted before this
+    call: nothing changed, ``revert_id`` is the earlier revert's, and
+    ``episodes_reoffered`` is 0, so a caller that retries after a crash gets
+    an answer and not an error. ``episodes_reoffered`` is the growth of the
+    open compression window (what the next ``prepare_wrap`` is offered), so an
+    episode recorded while the revert ran counts only if it was already in the
+    window. ``identity_version`` is the generation-3 identity version the
+    revert appended (the prior text carried forward), or ``None`` when it
+    restored none.
+    """
+
+    wrap_id: int
+    revert_id: int
+    episodes_reoffered: int
+    window_after: int
+    last_wrap_id_after: int
+    already_reverted: bool
+    identity_version: int | None
+
+
+class WrapRevertRefused(AnnealMemoryError):
+    """Raised by :meth:`Store.revert_wrap` when it will not revert; nothing is
+    changed. ``code`` is one of:
+
+    - ``not_latest``: ``wrap_id`` is not the newest wrap. A wrap's episodes
+      are stamped with its id, so undoing an earlier one would reopen episodes
+      a later wrap has already compressed on top of.
+    - ``unknown_wrap``: no such wrap, and none was reverted under that id.
+    - ``wrap_open``: a wrap is in progress (or its lifecycle state is
+      partial); cancel it first.
+    - ``identity_moved``: the identity changed after the wrap (a section edit,
+      a raw save): restoring the prior text would discard that change.
+    - ``no_prior_identity``: the wrap's identity version is the store's first,
+      so there is no earlier text to restore.
+    """
+
+    def __init__(self, code: str, detail: str, *, wrap_id: int | None = None) -> None:
+        self.code = code
+        self.detail = detail
+        self.wrap_id = wrap_id
+        super().__init__(f"revert_wrap refused ({code}): {detail}")
 
 
 class WrapInProgressError(AnnealMemoryError):
@@ -1912,7 +1959,7 @@ _ANNEAL_TABLES = frozenset({
     "retired_origin_keys", "rewire_origin", "state_keys", "supersessions",
     "team_entries", "team_overrides", "team_snapshot", "team_snapshot_enforced",
     "team_snapshot_notes", "team_snapshot_rows", "tombstones", "wrap_graduations",
-    "wraps",
+    "wrap_reverts", "wraps",
 })
 
 
@@ -2276,6 +2323,25 @@ CREATE TABLE IF NOT EXISTS wrap_graduations (
     level INTEGER NOT NULL,
     explanation TEXT,
     PRIMARY KEY (wrap_id, name)
+);
+
+-- What Store.revert_wrap archived: the wraps row it removed and what else it
+-- undid. Append-only (a revert is never itself reverted) and additive: an older
+-- binary ignores the table. wrap_id is UNIQUE, so a second revert of the same
+-- wrap is told apart from a first. wraps.id is AUTOINCREMENT, so a reverted id
+-- is never given to a later wrap and the audit trail's wrap_id stays unambiguous.
+-- Holds no episode ids and no episode content.
+CREATE TABLE IF NOT EXISTS wrap_reverts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    wrap_id INTEGER NOT NULL UNIQUE,
+    reverted_at TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    actor TEXT NOT NULL DEFAULT '',
+    wrap_row_json TEXT NOT NULL,
+    episodes_reoffered INTEGER NOT NULL,
+    identity_version_restored INTEGER,
+    restored_content_hash TEXT,
+    undone_json TEXT NOT NULL DEFAULT '{}'
 );
 
 -- Team ledger entries this store imported (0.9.40): the ledger id and hash outlive
@@ -9583,6 +9649,215 @@ class Store:
             associations_decayed=associations_decayed,
             wrap_id=wrap_row_id,
         )
+
+    def revert_wrap(
+        self,
+        wrap_id: int,
+        *,
+        reason: str,
+        actor: str = "",
+        lease_token: str | None = None,
+    ) -> WrapRevertReceipt:
+        """Undo the newest completed wrap, so the next ``prepare_wrap`` offers
+        its episodes again.
+
+        Built for a rollback of an unattended consolidation. The wrap's episodes
+        are stamped with its id and the open window is "stamped above the newest
+        wrap", so removing the newest ``wraps`` row reopens them with no restamp.
+        Nothing is silently deleted: the removed row is archived in
+        ``wrap_reverts`` and a ``wrap_reverted`` audit event is written (hash
+        chained, with ``reason`` and ``actor``). ``wraps.id`` is AUTOINCREMENT,
+        so the reverted id is never given to a later wrap.
+
+        One transaction (``BEGIN IMMEDIATE``) undoes:
+
+        - the ``wraps`` row, and its ``wrap_graduations`` and ``drift_results``;
+        - the ``pattern_grounding`` rungs the wrap earned (matched on the wrap
+          token's first 12 characters, which the wraps row's ``pair_id`` keeps);
+        - ``pattern_history.last_wrap_id`` where it named the wrap;
+        - the graduation bound's record in ``pattern_levels``: a named pattern
+          the wrap added is dropped, one it raised is lowered to the restored text's level;
+        - in a generation-3 store, the identity: a new ``identity_versions`` row
+          (source ``raw_save``) carries the text and meta of the version before
+          the wrap's, and the files are projected from it after the commit. The
+          wrap's own version row stays (the chain is append-only).
+
+        NOT undone, on purpose: the cross-session ``pattern_history`` corpus and
+        high-water level (accumulating records, not per-wrap), Hebbian and
+        pattern-association weights, crystal state, and the episodes' own rows.
+
+        Args:
+            wrap_id: The wrap to revert; must be the newest.
+            reason: Why, recorded in the archive row and the audit event.
+            actor: Who, recorded likewise.
+            lease_token: The consolidation lease's token, when a lease is live
+                (same rule as :meth:`wrap_cancelled`).
+
+        Returns:
+            A :class:`WrapRevertReceipt`. Reverting a wrap that is already
+            reverted returns the earlier revert's receipt with
+            ``already_reverted=True`` and changes nothing.
+
+        Raises:
+            WrapRevertRefused: the wrap is not newest, unknown, a wrap is open,
+                or the identity cannot be restored safely (see its ``code``).
+            LeaseFencedError: a live lease and a missing or wrong ``lease_token``.
+            StoreError: inside a batch or an open transaction.
+            ValueError: bad arguments.
+        """
+        if isinstance(wrap_id, bool) or not isinstance(wrap_id, int) or wrap_id < 1:
+            raise ValueError("revert_wrap: wrap_id must be a positive int")
+        if not isinstance(reason, str) or not reason.strip():
+            raise ValueError("revert_wrap: reason must be a non-empty str")
+        if not isinstance(actor, str):
+            raise ValueError("revert_wrap: actor must be a str")
+        if lease_token is not None and (not isinstance(lease_token, str) or not lease_token):
+            raise ValueError("revert_wrap: lease_token must be a non-empty str")
+        if not self._closed and self._conn.in_transaction:
+            raise StoreError(
+                "revert_wrap cannot run inside a batch or an open transaction",
+                operation="revert_wrap", path=str(self.path))
+        from .continuity import _pattern_levels  # continuity imports store
+
+        project = False
+        boxed = False
+        payload: dict[str, Any] = {}
+        with self._db_boundary("revert_wrap"):
+            self._conn.execute("BEGIN IMMEDIATE")
+            try:
+                prior = self._conn.execute(
+                    "SELECT id, episodes_reoffered, identity_version_restored "
+                    "FROM wrap_reverts WHERE wrap_id = ?", (wrap_id,)).fetchone()
+                if prior is not None:
+                    self._conn.rollback()
+                    return WrapRevertReceipt(
+                        wrap_id=wrap_id, revert_id=int(prior["id"]), episodes_reoffered=0,
+                        window_after=self.count_episodes_since_wrap(),
+                        last_wrap_id_after=self._last_wrap_id(), already_reverted=True,
+                        identity_version=prior["identity_version_restored"])
+                row = self._conn.execute(
+                    "SELECT * FROM wraps WHERE id = ?", (wrap_id,)).fetchone()
+                if row is None:
+                    raise WrapRevertRefused(
+                        "unknown_wrap", f"there is no wrap {wrap_id}", wrap_id=wrap_id)
+                newest = self._last_wrap_id()
+                if wrap_id != newest:
+                    raise WrapRevertRefused(
+                        "not_latest",
+                        f"wrap {wrap_id} is not the newest wrap ({newest}); later wraps "
+                        "compressed on top of its episodes", wrap_id=wrap_id)
+                if any(self._get_metadata(k) for k in (
+                        "wrap_started_at", "wrap_token", "wrap_episode_ids")):
+                    raise WrapRevertRefused(
+                        "wrap_open", "a wrap is in progress; cancel it first", wrap_id=wrap_id)
+
+                restored_version: int | None = None
+                restored_hash: str | None = None
+                restored_text: str | None = None
+                reverted_text: str | None = None
+                if self._identity_table_present():
+                    own = self._conn.execute(
+                        "SELECT version, text FROM identity_versions "
+                        "WHERE wrap_id = ? AND source = 'wrap' ORDER BY version DESC LIMIT 1",
+                        (wrap_id,)).fetchone()
+                    if own is not None:
+                        latest = self._latest_identity()
+                        if latest is None or int(latest["version"]) != int(own["version"]):
+                            raise WrapRevertRefused(
+                                "identity_moved",
+                                "the identity changed after the wrap (a later version "
+                                "exists); restoring the prior text would discard it",
+                                wrap_id=wrap_id)
+                        before = self._conn.execute(
+                            "SELECT text, meta_json FROM identity_versions "
+                            "WHERE version < ? ORDER BY version DESC LIMIT 1",
+                            (own["version"],)).fetchone()
+                        if before is None:
+                            raise WrapRevertRefused(
+                                "no_prior_identity",
+                                "the wrap's identity version is the store's first; there "
+                                "is no earlier text to restore", wrap_id=wrap_id)
+                        restored_text = str(before["text"])
+                        reverted_text = str(own["text"])
+                        restored_version = self._insert_identity_version(
+                            restored_text, meta_json=before["meta_json"],
+                            source="raw_save", lease_token=lease_token)
+                        restored_hash = hashlib.sha256(
+                            restored_text.encode("utf-8")).hexdigest()
+                        project = True
+                if restored_version is None:
+                    self._lease_gate("revert_wrap", lease_token, None)
+
+                window_before = self._count_episodes_since_wrap()
+                undone: dict[str, int] = {}
+                token12 = (row["pair_id"] or "")[:12] if "pair_id" in row.keys() else ""
+                undone["wrap_graduations"] = self._conn.execute(
+                    "DELETE FROM wrap_graduations WHERE wrap_id = ?", (wrap_id,)).rowcount
+                undone["drift_results"] = self._conn.execute(
+                    "DELETE FROM drift_results WHERE wrap_id = ?", (wrap_id,)).rowcount
+                undone["pattern_grounding"] = (
+                    self._conn.execute(
+                        "DELETE FROM pattern_grounding WHERE substr(earning, 1, 12) = ?",
+                        (token12,)).rowcount if len(token12) == 12 else 0)
+                undone["pattern_history_last_wrap"] = self._conn.execute(
+                    "UPDATE pattern_history SET last_wrap_id = NULL WHERE last_wrap_id = ?",
+                    (wrap_id,)).rowcount
+                if restored_text is not None and reverted_text is not None \
+                        and self._has_pattern_levels_table():
+                    schema = self.section_schema
+                    now_levels = _pattern_levels(restored_text, schema)
+                    gone = set(_pattern_levels(reverted_text, schema)) - set(now_levels)
+                    dropped = 0
+                    for name in gone:
+                        dropped += self._conn.execute(
+                            "DELETE FROM pattern_levels WHERE kind = 'name' AND key = ?",
+                            (name,)).rowcount
+                    lowered = 0
+                    for name, level in now_levels.items():
+                        lowered += self._conn.execute(
+                            "UPDATE pattern_levels SET level = ? "
+                            "WHERE kind = 'name' AND key = ? AND level > ?",
+                            (level, name, level)).rowcount
+                    undone["pattern_levels_dropped"] = dropped
+                    undone["pattern_levels_lowered"] = lowered
+                self._conn.execute("DELETE FROM wraps WHERE id = ?", (wrap_id,))
+                window_after = self._count_episodes_since_wrap()
+                reoffered = max(0, window_after - window_before)
+                now = _now_utc()
+                revert_id = int(self._conn.execute(
+                    "INSERT INTO wrap_reverts (wrap_id, reverted_at, reason, actor, "
+                    "wrap_row_json, episodes_reoffered, identity_version_restored, "
+                    "restored_content_hash, undone_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (wrap_id, now, reason, actor,
+                     json.dumps({k: row[k] for k in row.keys()}, sort_keys=True),
+                     reoffered, restored_version, restored_hash,
+                     json.dumps(undone, sort_keys=True))).lastrowid)
+                payload = {
+                    "wrap_id": wrap_id, "revert_id": revert_id, "reason": reason,
+                    "actor": actor, "episodes_reoffered": reoffered,
+                    "identity_version_restored": restored_version,
+                    "restored_content_hash": restored_hash, "undone": undone,
+                }
+                if self._audit is not None:
+                    boxed = self._box_audit_event(
+                        "wrap_reverted", payload, {}, method="revert_wrap",
+                        committed="the revert")
+                self._conn.commit()
+            except BaseException:
+                self._rollback_quietly()
+                raise
+        if project:
+            self._project_after_commit("the wrap revert")
+        if boxed:
+            self._flush_audit_outbox()
+        elif self._audit is not None:
+            self._audit_log_after_commit(
+                "wrap_reverted", payload, method="revert_wrap",
+                committed="the revert", batch_aware=False)
+        return WrapRevertReceipt(
+            wrap_id=wrap_id, revert_id=revert_id, episodes_reoffered=reoffered,
+            window_after=window_after, last_wrap_id_after=self._last_wrap_id(),
+            already_reverted=False, identity_version=restored_version)
 
     def get_wrap_history(self) -> list[WrapRecord]:
         """Return the full wrap history in chronological order.

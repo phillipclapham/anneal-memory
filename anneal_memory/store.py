@@ -9724,7 +9724,8 @@ class Store:
         wrap saved by a build that writes ``wrap_undo`` (the receipt's
         ``pattern_state_exact`` is False for an older one).
 
-        NOT undone, on purpose: Hebbian and pattern-association weights, crystal
+        NOT undone, on purpose: Hebbian and pattern-association weights, the
+        concept generation a compost bumped (``pattern_aliases``), crystal
         state, ``association_formation_off_at_wrap`` if it names the wrap, and the
         episodes' own rows. A change to ``pattern_levels`` or ``pattern_history`` made
         between the wrap and its revert (a rename, a seed) is overwritten.
@@ -11066,6 +11067,22 @@ class Store:
             self._conn.executemany(
                 f"UPDATE {table} SET gone_trust = ? "
                 f"WHERE {column} = ? AND gone_trust IS NULL",
+                [(eff.get(i, DEFAULT_TRUST), i) for i in episode_ids],
+            )
+        # A compost's pattern_grounding rows live only as JSON in wrap_undo until a
+        # revert_wrap puts them back, so the UPDATE above cannot mark them. Mark the
+        # stash too, or the restored row comes back unmarked for an episode that is
+        # gone and reads as a retraction instead of an aged-out ground.
+        if self._conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'wrap_undo'"
+        ).fetchone() is not None:
+            self._conn.executemany(
+                "UPDATE wrap_undo SET prior_json = json_set(prior_json, '$.gone_trust', ?) "
+                "WHERE kind = 'pattern_grounding' AND json_valid(prior_json) "
+                "AND CASE WHEN json_valid(prior_json) "
+                "THEN json_extract(prior_json, '$.episode_id') END = ? "
+                "AND CASE WHEN json_valid(prior_json) "
+                "THEN json_extract(prior_json, '$.gone_trust') END IS NULL",
                 [(eff.get(i, DEFAULT_TRUST), i) for i in episode_ids],
             )
 

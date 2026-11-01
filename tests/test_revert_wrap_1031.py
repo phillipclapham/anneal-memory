@@ -328,3 +328,46 @@ def test_a_revert_that_loses_the_race_still_repairs_the_projection(tmp_path):
         assert store.continuity_path.read_text(encoding="utf-8") == _text(1)
     finally:
         store.close()
+
+
+def test_a_prune_between_a_compost_and_its_revert_marks_the_restored_grounding_as_aged_out(tmp_path):
+    """Diogenes 11-01: a compost's grounding rows live only as JSON in wrap_undo, so a prune
+    between the wrap and its revert could not mark them; the revert then put them back with
+    gone_trust NULL for a gone episode, which reads as a retraction. Reproduced run: the
+    composting wrap's restored row came back None where a non-composting control read 'agent'."""
+    def run(compost: bool) -> list[tuple[str, str | None]]:
+        sub = tmp_path / ("c" if compost else "k")
+        sub.mkdir()
+        store = _graduation_store(sub)
+        try:
+            prep = prepare_wrap(store)
+            ep = store.load_wrap_snapshot()["episode_ids"][0]
+            validated_save_continuity(
+                store, _graduating(store, ep, "baseline substrate observation about discipline rotation memory tracking"),
+                wrap_token=prep["wrap_token"], today=TODAY)
+            grounded = [r[0] for r in store._conn.execute(
+                "SELECT DISTINCT episode_id FROM pattern_grounding WHERE name = 'alpha_proven'")]
+            assert grounded
+            store.record("day three thing", "observation")
+            prep = prepare_wrap(store)
+            keep = "" if compost else f"- alpha_proven | 1x ({TODAY})\n"
+            validated_save_continuity(
+                store,
+                f"## State\nw3.\n\n## Patterns\n{keep}- beta | 1x ({TODAY})\n\n## Decisions\n- d.\n\n## Context\n- c.\n",
+                wrap_token=prep["wrap_token"], today=TODAY, compost=["alpha_proven"] if compost else None)
+            full = [r[0] for r in store._conn.execute(
+                "SELECT id FROM episodes WHERE substr(id, 1, 8) IN (%s)" % ",".join("?" * len(grounded)), grounded)]
+            store._conn.execute(
+                "UPDATE episodes SET timestamp = '2000-01-01T00:00:00Z' WHERE id IN (%s)" % ",".join("?" * len(full)), full)
+            store._conn.commit()
+            assert store.prune(older_than_days=30) >= 1
+            store.revert_wrap(3, reason="r")
+            return [(r[0], r[1]) for r in store._conn.execute(
+                "SELECT episode_id, gone_trust FROM pattern_grounding WHERE name = 'alpha_proven'")]
+        finally:
+            store.close()
+
+    control = run(compost=False)
+    composted = run(compost=True)
+    assert control and all(trust is not None for _, trust in control)
+    assert composted and all(trust is not None for _, trust in composted), composted

@@ -9892,14 +9892,18 @@ class Store:
                         "the only summary of the rest", wrap_id=wrap_id)
                 last_after = self._last_wrap_id()
                 now = _now_utc()
-                revert_id = int(self._conn.execute(
+                inserted = self._conn.execute(
                     "INSERT INTO wrap_reverts (wrap_id, reverted_at, reason, actor, "
                     "wrap_row_json, episodes_reoffered, identity_version_restored, "
                     "restored_content_hash, undone_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (wrap_id, now, reason, actor,
                      json.dumps({k: row[k] for k in row.keys()}, sort_keys=True),
                      reoffered, restored_version, restored_hash,
-                     json.dumps(undone, sort_keys=True))).lastrowid or 0)
+                     json.dumps(undone, sort_keys=True)))
+                if inserted.lastrowid is None:
+                    raise StoreError("revert_wrap: the archive row has no id",
+                                     operation="revert_wrap", path=str(self.path))
+                revert_id = int(inserted.lastrowid)
                 payload = {
                     "wrap_id": wrap_id, "revert_id": revert_id, "reason": reason,
                     "actor": actor, "episodes_reoffered": reoffered,
@@ -10025,8 +10029,8 @@ class Store:
         if json_each_available(self._conn):
             found = self._conn.execute(
                 "SELECT principal_scope, key, result_json FROM idempotency_keys "
-                "WHERE result_json LIKE ? AND json_valid(result_json) "
-                "AND json_extract(result_json, '$.wrap_id') = ?",
+                "WHERE result_json LIKE ? AND CASE WHEN json_valid(result_json) "
+                "THEN json_extract(result_json, '$.wrap_id') END = ?",
                 ('%"wrap_id"%', wrap_id)).fetchall()
         else:
             found = self._conn.execute(

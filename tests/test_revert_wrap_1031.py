@@ -307,3 +307,24 @@ def test_a_supersession_link_the_wrap_recorded_goes_with_it(tmp_path):
         assert {e.id for e in store.episodes_since_wrap()} >= {old, new}
     finally:
         store.close()
+
+
+def test_a_revert_that_loses_the_race_still_repairs_the_projection(tmp_path):
+    """L3 r3 (codex MED): the in-lock already-reverted return skipped the projection repair."""
+    store, _day1, _day2 = _seeded(tmp_path)
+    try:
+        store.revert_wrap(2, reason="r")
+        store.continuity_path.write_text("stale projection a failed write left\n", encoding="utf-8")
+        real = store._already_reverted_receipt
+        calls = []
+
+        def first_call_sees_nothing(wrap_id):
+            calls.append(wrap_id)
+            return None if len(calls) == 1 else real(wrap_id)
+
+        store._already_reverted_receipt = first_call_sees_nothing  # the race: the revert commits after the unlocked check
+        again = store.revert_wrap(2, reason="retry")
+        assert again.already_reverted and len(calls) == 2
+        assert store.continuity_path.read_text(encoding="utf-8") == _text(1)
+    finally:
+        store.close()

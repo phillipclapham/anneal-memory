@@ -9781,8 +9781,16 @@ class Store:
                 prior = self._conn.execute(
                     "SELECT id FROM wrap_reverts WHERE wrap_id = ?", (wrap_id,)).fetchone()
                 if prior is not None:
+                    # Another revert committed after the unlocked check above: the
+                    # same answer, and the same repair of its projection.
                     seen = self._already_reverted_receipt(wrap_id)
                     self._conn.rollback()
+                    if seen is None:  # the row read a moment ago under the same lock
+                        raise StoreError(
+                            "revert_wrap: the revert record vanished under the write lock",
+                            operation="revert_wrap", path=str(self.path))
+                    if self._identity_table_present():
+                        self._project_after_commit("the wrap revert")
                     return seen
                 row = self._conn.execute(
                     "SELECT * FROM wraps WHERE id = ?", (wrap_id,)).fetchone()
@@ -9891,7 +9899,7 @@ class Store:
                     (wrap_id, now, reason, actor,
                      json.dumps({k: row[k] for k in row.keys()}, sort_keys=True),
                      reoffered, restored_version, restored_hash,
-                     json.dumps(undone, sort_keys=True))).lastrowid)
+                     json.dumps(undone, sort_keys=True))).lastrowid or 0)
                 payload = {
                     "wrap_id": wrap_id, "revert_id": revert_id, "reason": reason,
                     "actor": actor, "episodes_reoffered": reoffered,
@@ -10014,9 +10022,17 @@ class Store:
         ``wrap_id``: a retry under the same key would otherwise be told the reverted
         wrap succeeded. Returns how many."""
         gone = 0
-        for row in self._conn.execute(
+        if json_each_available(self._conn):
+            found = self._conn.execute(
                 "SELECT principal_scope, key, result_json FROM idempotency_keys "
-                "WHERE result_json LIKE ?", ('%"wrap_id"%',)).fetchall():
+                "WHERE result_json LIKE ? AND json_valid(result_json) "
+                "AND json_extract(result_json, '$.wrap_id') = ?",
+                ('%"wrap_id"%', wrap_id)).fetchall()
+        else:
+            found = self._conn.execute(
+                "SELECT principal_scope, key, result_json FROM idempotency_keys "
+                "WHERE result_json LIKE ?", ('%"wrap_id"%',)).fetchall()
+        for row in found:
             try:
                 result = json.loads(row["result_json"])
             except (TypeError, ValueError):

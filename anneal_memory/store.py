@@ -11076,15 +11076,25 @@ class Store:
         if self._conn.execute(
                 "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'wrap_undo'"
         ).fetchone() is not None:
-            self._conn.executemany(
-                "UPDATE wrap_undo SET prior_json = json_set(prior_json, '$.gone_trust', ?) "
-                "WHERE kind = 'pattern_grounding' AND json_valid(prior_json) "
-                "AND CASE WHEN json_valid(prior_json) "
-                "THEN json_extract(prior_json, '$.episode_id') END = ? "
-                "AND CASE WHEN json_valid(prior_json) "
-                "THEN json_extract(prior_json, '$.gone_trust') END IS NULL",
-                [(eff.get(i, DEFAULT_TRUST), i) for i in episode_ids],
-            )
+            # Read, edit and write back in Python, not SQL: this must not need JSON1
+            # (a prune on a build without it would otherwise fail outright).
+            ids = set(episode_ids)
+            for row in self._conn.execute(
+                    "SELECT token12, key, prior_json FROM wrap_undo "
+                    "WHERE kind = 'pattern_grounding'").fetchall():
+                try:
+                    prior = json.loads(row["prior_json"])
+                except (TypeError, ValueError):
+                    continue
+                if (not isinstance(prior, dict) or prior.get("gone_trust") is not None
+                        or not isinstance(prior.get("episode_id"), str)
+                        or prior["episode_id"] not in ids):
+                    continue
+                prior["gone_trust"] = eff.get(prior["episode_id"], DEFAULT_TRUST)
+                self._conn.execute(
+                    "UPDATE wrap_undo SET prior_json = ? "
+                    "WHERE token12 = ? AND kind = 'pattern_grounding' AND key = ?",
+                    (json.dumps(prior, sort_keys=True), row["token12"], row["key"]))
 
     def prune(self, older_than_days: int | None = None) -> int:
         """Prune old episodes, optionally creating tombstones.

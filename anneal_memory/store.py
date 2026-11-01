@@ -2359,15 +2359,16 @@ CREATE TABLE IF NOT EXISTS wrap_reverts (
 -- it back exactly: pattern_levels as a whole table (one marker row, key '', plus a
 -- row per level), each pattern_history row the save touched as it was before
 -- (prior_json NULL = the row did not exist), the pattern_grounding rows a compost
--- deleted, and each supersession link the save recorded. Keyed by the first 12 characters of
+-- deleted, and each supersession link the save recorded. kind has no CHECK on
+-- purpose: CREATE TABLE IF NOT EXISTS cannot widen one on a store that has the table,
+-- so a new kind would fail every save there. Keyed by the first 12 characters of
 -- the wrap token, which the wraps row's pair_id keeps; only the newest wrap's rows
 -- are kept (the next save deletes the rest), because only the newest wrap can be
 -- reverted. Written inside the save's batch, so it commits with the wrap or not at
 -- all. Additive: an older binary ignores the table.
 CREATE TABLE IF NOT EXISTS wrap_undo (
     token12 TEXT NOT NULL,
-    kind TEXT NOT NULL CHECK (kind IN
-        ('pattern_levels', 'pattern_history', 'pattern_grounding', 'supersession')),
+    kind TEXT NOT NULL,
     key TEXT NOT NULL,
     prior_json TEXT,
     PRIMARY KEY (token12, kind, key)
@@ -9719,9 +9720,14 @@ class Store:
           (the chain is append-only). A store without that table has no identity
           to restore here; its caller restores the text.
 
+        The supersession links and the compost's grounding are undone only for a
+        wrap saved by a build that writes ``wrap_undo`` (the receipt's
+        ``pattern_state_exact`` is False for an older one).
+
         NOT undone, on purpose: Hebbian and pattern-association weights, crystal
         state, ``association_formation_off_at_wrap`` if it names the wrap, and the
-        episodes' own rows.
+        episodes' own rows. A change to ``pattern_levels`` or ``pattern_history`` made
+        between the wrap and its revert (a rename, a seed) is overwritten.
 
         Args:
             wrap_id: The wrap to revert; must be the newest.
@@ -9759,6 +9765,13 @@ class Store:
             raise StoreError(
                 "revert_wrap cannot run inside a batch or an open transaction",
                 operation="revert_wrap", path=str(self.path))
+        with self._db_boundary("revert_wrap"):
+            seen = self._already_reverted_receipt(wrap_id)
+        if seen is not None:
+            if self._identity_table_present():
+                # a retry after a projection that failed is the repair
+                self._project_after_commit("the wrap revert")
+            return seen
         project = False
         boxed = False
         payload: dict[str, Any] = {}
@@ -9766,18 +9779,10 @@ class Store:
             self._conn.execute("BEGIN IMMEDIATE")
             try:
                 prior = self._conn.execute(
-                    "SELECT id, episodes_reoffered, identity_version_restored "
-                    "FROM wrap_reverts WHERE wrap_id = ?", (wrap_id,)).fetchone()
+                    "SELECT id FROM wrap_reverts WHERE wrap_id = ?", (wrap_id,)).fetchone()
                 if prior is not None:
-                    seen = WrapRevertReceipt(
-                        wrap_id=wrap_id, revert_id=int(prior["id"]), episodes_reoffered=0,
-                        window_after=self._count_episodes_since_wrap(),
-                        last_wrap_id_after=self._last_wrap_id(), already_reverted=True,
-                        identity_version=prior["identity_version_restored"])
+                    seen = self._already_reverted_receipt(wrap_id)
                     self._conn.rollback()
-                    if self._identity_table_present():
-                        # a retry after a projection that failed is the repair
-                        self._project_after_commit("the wrap revert")
                     return seen
                 row = self._conn.execute(
                     "SELECT * FROM wraps WHERE id = ?", (wrap_id,)).fetchone()
@@ -9911,9 +9916,26 @@ class Store:
                 committed="the revert", batch_aware=False)
         return WrapRevertReceipt(
             wrap_id=wrap_id, revert_id=revert_id, episodes_reoffered=reoffered,
-            window_after=window_after, last_wrap_id_after=self._last_wrap_id(),
+            window_after=window_after, last_wrap_id_after=last_after,
             already_reverted=False, identity_version=restored_version,
             pattern_state_exact=bool(undone.get("pattern_state_exact", 1)))
+
+    def _already_reverted_receipt(self, wrap_id: int) -> WrapRevertReceipt | None:
+        """The receipt for a wrap a revert already undid, or ``None``; read-only."""
+        row = self._conn.execute(
+            "SELECT id, identity_version_restored, undone_json FROM wrap_reverts "
+            "WHERE wrap_id = ?", (wrap_id,)).fetchone()
+        if row is None:
+            return None
+        try:
+            exact = bool(json.loads(row["undone_json"]).get("pattern_state_exact", 1))
+        except (TypeError, ValueError, AttributeError):
+            exact = True
+        return WrapRevertReceipt(
+            wrap_id=wrap_id, revert_id=int(row["id"]), episodes_reoffered=0,
+            window_after=self._count_episodes_since_wrap(),
+            last_wrap_id_after=self._last_wrap_id(), already_reverted=True,
+            identity_version=row["identity_version_restored"], pattern_state_exact=exact)
 
     def _revert_wrap_derived(
         self, token12: str, restored_text: str | None, reverted_text: str | None,
@@ -9994,7 +10016,7 @@ class Store:
         gone = 0
         for row in self._conn.execute(
                 "SELECT principal_scope, key, result_json FROM idempotency_keys "
-                "WHERE result_json LIKE ?", (f'%"wrap_id": {wrap_id}%',)).fetchall():
+                "WHERE result_json LIKE ?", ('%"wrap_id"%',)).fetchall():
             try:
                 result = json.loads(row["result_json"])
             except (TypeError, ValueError):
@@ -10202,8 +10224,8 @@ class Store:
                 self._conn.execute(
                     "INSERT OR REPLACE INTO wrap_undo (token12, kind, key, prior_json) "
                     "VALUES (?, 'pattern_grounding', ?, ?)",
-                    (token12, "|".join(str(r[k]) for k in
-                                       ("name", "level", "earning", "rule", "episode_id")),
+                    (token12, json.dumps([r[k] for k in
+                                          ("name", "level", "earning", "rule", "episode_id")]),
                      json.dumps({k: r[k] for k in r.keys()}, sort_keys=True)))
 
     def _wrap_undo_supersession(self, token12: str, old_id: str, new_id: str) -> None:

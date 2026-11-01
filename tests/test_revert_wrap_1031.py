@@ -118,10 +118,11 @@ def test_the_revert_is_archived_audited_and_restores_the_prior_identity(tmp_path
         store.close()
 
 
-def _wait(done) -> None:
+def _wait(done) -> bool:
     deadline = time.monotonic() + 20
     while not done() and time.monotonic() < deadline:
         time.sleep(0.005)
+    return bool(done())
 
 
 def test_an_episode_recorded_on_another_connection_during_the_revert_is_not_lost(tmp_path):
@@ -145,9 +146,9 @@ def test_an_episode_recorded_on_another_connection_during_the_revert_is_not_lost
     thread = threading.Thread(target=recorder)
     thread.start()
     try:
-        _wait(lambda: len(recorded) >= 5 or errors)
+        assert _wait(lambda: len(recorded) >= 5 or errors), "the recorder made no progress"
         store.revert_wrap(2, reason="r")
-        _wait(lambda: len(recorded) >= 12 or errors)
+        assert _wait(lambda: len(recorded) >= 12 or errors), "the recorder stopped after the revert"
     finally:
         stop.set()
         thread.join(timeout=30)

@@ -2365,7 +2365,9 @@ CREATE TABLE IF NOT EXISTS wrap_reverts (
 -- the wrap token, which the wraps row's pair_id keeps; only the newest wrap's rows
 -- are kept (the next save deletes the rest), because only the newest wrap can be
 -- reverted. Written inside the save's batch, so it commits with the wrap or not at
--- all. Additive: an older binary ignores the table.
+-- all. A later prune marks gone_trust on the stashed pattern_grounding rows
+-- (Store._mark_aged_out), so those rows are not byte-exact: prior_json is only
+-- ever json.loads'd, never hash-checked. Additive: an older binary ignores the table.
 CREATE TABLE IF NOT EXISTS wrap_undo (
     token12 TEXT NOT NULL,
     kind TEXT NOT NULL,
@@ -11048,7 +11050,8 @@ class Store:
 
     def _mark_aged_out(self, episode_ids: list[str]) -> None:
         """Before a prune deletes these episodes, mark every row that cited one
-        (``episode_derived`` as a source, ``pattern_grounding``) with its
+        (``episode_derived`` as a source, ``pattern_grounding``, and the compost's
+        stashed copies of those grounding rows in ``wrap_undo``) with its
         effective trust now, where not marked already. Aging out is not a
         retraction, so it must not read as the ``external`` the delete trigger
         would otherwise write (CAP-08 D3 R3, complement r4 MED 1). Runs inside

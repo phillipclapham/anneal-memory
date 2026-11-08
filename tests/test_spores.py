@@ -1429,13 +1429,19 @@ class TestTimedNext:
     def test_aware_non_local_now_is_one_local_clock_for_dates_too(self, store):
         """Diogenes 2026-11-08 LOW: a UTC-aware ``now`` was converted to local only
         inside the next-check, so seen-age and the touch stamp used the zone's date."""
-        utc = datetime(2026, 11, 8, 3, 0, tzinfo=timezone.utc)
-        local = utc.astimezone().replace(tzinfo=None)
+        # An instant whose date in its OWN zone differs from the host-local date,
+        # whatever the host zone is (a UTC runner included): local noon, re-expressed
+        # 13 hours east of the host offset.
+        local_noon = datetime(2026, 11, 8, 12, 0).astimezone()
+        east = timezone(local_noon.utcoffset() + timedelta(hours=13))
+        aware = local_noon.astimezone(east)
+        assert aware.date() != local_noon.date()
         s = {"tier": "warm", "seen": "2026-11-05"}
-        assert germination_tier(s, now=utc) == germination_tier(s, now=local)
+        assert germination_tier(s, now=aware) == germination_tier(
+            s, now=local_noon.replace(tzinfo=None))
         store.add(type="task", text="a", today=date(2026, 11, 1))
-        got = store.touch("spore-001", now=utc)
-        assert got["seen"] == local.date().isoformat()
+        got = store.touch("spore-001", now=aware)
+        assert got["seen"] == "2026-11-08"
 
     def test_pinned_today_without_now_is_day_granularity(self):
         s = {"tier": "warm", "seen": "2026-11-09", "next": "2026-11-10T14:30"}

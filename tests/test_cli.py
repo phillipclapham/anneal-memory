@@ -4099,8 +4099,8 @@ class TestSporeCLI:
         timed ``next`` later today read as due from midnight (dormant) there while
         touch and the server read the minute (growing)."""
         now = datetime.now()
-        if (now.hour, now.minute) == (23, 59):
-            pytest.skip("no later minute left today")
+        if now.hour == 23 and now.minute >= 50:
+            pytest.skip("too close to midnight for a later minute to stay later")
         nxt = now.replace(hour=23, minute=59).strftime("%Y-%m-%dT%H:%M")
         self._run("--db", tmp_db, "spore", "add", "--type", "task", "--text", "later today",
                   "--next", nxt)

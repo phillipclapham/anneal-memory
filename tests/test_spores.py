@@ -1398,3 +1398,50 @@ class TestOpaqueAgendaKeys:
         r = store.add(type="task", text="x", germinated=g, today=T0)
         g["a"] = 2
         assert r["germinated"] == {"a": 1}
+
+
+# -- timed next (YYYY-MM-DDTHH:MM, local, naive) -----------------------------
+
+
+class TestTimedNext:
+    def test_accepts_timed_on_add_and_update_and_rejects_malformed(self, store):
+        store.add(type="task", text="a", next="2026-11-10T14:30", today=date(2026, 11, 7))
+        assert store.get("spore-001")["next"] == "2026-11-10T14:30"
+        store.update("spore-001", next="2026-11-11T09:05")
+        assert store.get("spore-001")["next"] == "2026-11-11T09:05"
+        store.update("spore-001", next="2026-11-12")  # date form still fine
+        for bad in ("2026-11-10T25:00", "2026-11-10 14:30", "2026-11-10T14:3", "2026-11-10T14:30:00"):
+            with pytest.raises(ValueError):
+                store.update("spore-001", next=bad)
+            with pytest.raises(ValueError):
+                store.add(type="task", text="b", next=bad)
+
+    def test_due_at_the_minute_not_midnight(self):
+        s = {"tier": "warm", "seen": "2026-11-10", "next": "2026-11-10T14:30"}
+        d = date(2026, 11, 10)
+        assert germination_tier(s, d, datetime(2026, 11, 10, 14, 29)) == "growing"
+        assert germination_tier(s, d, datetime(2026, 11, 10, 14, 30)) == "dormant"
+        # a pinned day with no clock reads at day granularity, like a dated next
+        assert germination_tier(s, d) == "dormant"
+
+    def test_mixed_date_and_timed_order_in_list_open(self, store):
+        d = date(2026, 11, 10)
+        store.add(type="task", text="timed", next="2026-11-10T14:30", today=d)
+        store.add(type="task", text="dated", next="2026-11-10", today=d)
+        store.add(type="task", text="none", today=d)
+        at = datetime(2026, 11, 10, 9, 0)  # dated is due, timed is not yet
+        dormant = {s["text"] for s in store.list_open(germination="dormant", today=d, now=at)}
+        assert dormant == {"dated"}
+        at = datetime(2026, 11, 10, 14, 30)
+        dormant = {s["text"] for s in store.list_open(germination="dormant", today=d, now=at)}
+        assert dormant == {"dated", "timed"}
+        ranked = [s["text"] for s in store.surface(today=d, now=at)]
+        assert ranked.index("none") < ranked.index("dated")
+
+    def test_touch_keeps_a_timed_next_that_has_not_arrived(self, store):
+        store.add(type="task", text="a", next="2999-01-01T10:00", today=date(2026, 1, 1))
+        store.touch("spore-001", today=date(2026, 1, 5))
+        assert store.get("spore-001")["next"] == "2999-01-01T10:00"
+        store.update("spore-001", next="2000-01-01T10:00")
+        store.touch("spore-001")
+        assert store.get("spore-001")["next"] is None

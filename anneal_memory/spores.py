@@ -211,15 +211,49 @@ def _parse_date(value: object) -> date | None:
         return None
 
 
+def _parse_timed(value: object) -> datetime | None:
+    """Parse a ``YYYY-MM-DDTHH:MM`` prefix (local, naive, minute precision) to a
+    datetime, else None. A bare ``YYYY-MM-DD`` is not timed."""
+    if not value or not isinstance(value, str) or len(value) < 16 or value[10] != "T":
+        return None
+    try:
+        return datetime.strptime(value[:16], "%Y-%m-%dT%H:%M")
+    except (ValueError, TypeError):
+        return None
+
+
 def _validate_date(value: str | None, field: str = "next") -> str | None:
-    """A write-path date must be exactly ``YYYY-MM-DD``, or ``None``/``''``
-    (= unset / clear). Fail loud (``ValueError``) so a typo can't silently
-    strand a spore dormant by being stored verbatim then read as no-date."""
+    """A write-path date must be exactly ``YYYY-MM-DD`` or ``YYYY-MM-DDTHH:MM``
+    (local time, no zone, minute precision), or ``None``/``''`` (= unset / clear).
+    Fail loud (``ValueError``) so a typo can't silently strand a spore dormant by
+    being stored verbatim then read as no-date."""
     if value in (None, ""):
         return None
+    if isinstance(value, str) and len(value) == 16:
+        if _parse_timed(value) is None:
+            raise ValueError(f"{field} must be YYYY-MM-DD or YYYY-MM-DDTHH:MM (got {value!r}).")
+        return value
     if not isinstance(value, str) or len(value) != 10 or _parse_date(value) is None:
-        raise ValueError(f"{field} must be YYYY-MM-DD (got {value!r}).")
+        raise ValueError(f"{field} must be YYYY-MM-DD or YYYY-MM-DDTHH:MM (got {value!r}).")
     return value
+
+
+def _next_elapsed(
+    value: object, today: date | None, now: datetime | None
+) -> bool:
+    """Has a ``next`` alarm arrived? A dated ``next`` is due from that day's start
+    (``today >= date``). A timed one is due at its minute: against ``now`` when
+    given; else against the real clock when ``today`` is not pinned; else (``today``
+    pinned, no ``now``) at day granularity, like a dated one."""
+    timed = _parse_timed(value)
+    if timed is not None:
+        if now is not None:
+            return now >= timed
+        if today is None:
+            return datetime.now() >= timed
+        return today >= timed.date()
+    nxt = _parse_date(value)
+    return bool(nxt) and (today or date.today()) >= nxt
 
 
 def _safe_int(value: object, default: int = 0) -> int:
@@ -277,20 +311,22 @@ def _flush_dir(fd: int | None) -> None:
         os.close(fd)
 
 
-def germination_tier(spore: SporeDict, today: date | None = None) -> Germination:
+def germination_tier(
+    spore: SporeDict, today: date | None = None, now: datetime | None = None
+) -> Germination:
     """Compute ``growing | resting | dormant | parked`` from ``seen`` / ``next``.
 
     ``parked`` (``tier == "parked"``) is *deliberate* dormancy, distinct from
     dormant-by-neglect. A ``next:`` on or before ``today`` forces ``dormant``
-    regardless of ``seen`` (it asked to be re-surfaced and the day arrived). No
+    regardless of ``seen`` (it asked to be re-surfaced and the day, or the minute of a
+    ``YYYY-MM-DDTHH:MM`` ``next``, arrived). No
     parseable ``seen`` → ``dormant`` (unknown age).
     """
     if spore.get("tier") == "parked":
         return "parked"
-    today = today or date.today()
-    nxt = _parse_date(spore.get("next"))
-    if nxt and today >= nxt:
+    if _next_elapsed(spore.get("next"), today, now):
         return "dormant"
+    today = today or date.today()
     seen = _parse_date(spore.get("seen"))
     if seen is None:
         return "dormant"
@@ -1347,13 +1383,13 @@ class SporeStore:
         domain: str | None = None,
         germination: Germination | None = None,
         today: date | None = None,
+        now: datetime | None = None,
     ) -> list[SporeDict]:
         """Open spores, filtered then ranked (tier → salience desc → germination).
 
         Germination is NOT written onto the returned dicts (it's computed, never
         stored); call :func:`germination_tier` on a row to annotate it.
         """
-        today = today or date.today()
         items = list(self._load_keyed().get("spores", []))
         if type is not None:
             items = [s for s in items if s.get("type") == type]
@@ -1364,40 +1400,46 @@ class SporeStore:
         if germination is not None:
             items = [
                 s for s in items
-                if germination_tier(cast("SporeDict", s), today) == germination
+                if germination_tier(cast("SporeDict", s), today, now) == germination
             ]
-        return self._rank(items, today)
+        return self._rank(items, today, now)
 
     @staticmethod
-    def _rank(items: list, today: date) -> list[SporeDict]:
+    def _rank(
+        items: list, today: date | None, now: datetime | None = None
+    ) -> list[SporeDict]:
         return sorted(
             (cast("SporeDict", s) for s in items),
             key=lambda s: (
                 _TIER_ORDER.get(s.get("tier", ""), 9),
                 -_safe_int(s.get("salience")),
-                _GERM_ORDER.get(germination_tier(s, today), 9),
+                _GERM_ORDER.get(germination_tier(s, today, now), 9),
             ),
         )
 
     def surface(
-        self, *, top_of_mind: bool = False, today: date | None = None
+        self,
+        *,
+        top_of_mind: bool = False,
+        today: date | None = None,
+        now: datetime | None = None,
     ) -> list[SporeDict]:
         """The seed-side surface a salience generator consumes. With
         ``top_of_mind=True``, only the ToM contribution — spores that are ``hot``
         OR ``growing``, ranked, across all three types. Otherwise all open
         spores, ranked. The downstream consumer composes the full Top of Mind
-        from this × Active Threads × recent ships."""
-        today = today or date.today()
+        from this × Active Threads × recent ships. ``now`` pins the clock for a timed
+        ``next``; without it the real clock decides (or the day, if ``today`` is pinned)."""
         open_items = list(self._load_keyed().get("spores", []))
         if top_of_mind:
             pool = [
                 s for s in open_items
                 if s.get("tier") == "hot"
-                or germination_tier(cast("SporeDict", s), today) == "growing"
+                or germination_tier(cast("SporeDict", s), today, now) == "growing"
             ]
         else:
             pool = open_items
-        return self._rank(pool, today)
+        return self._rank(pool, today, now)
 
     # --- public API: grow ---------------------------------------------------
 
@@ -1421,8 +1463,7 @@ class SporeStore:
             item = self._require_open(data, spore_id)
             _check_expected_version(item, expected_version, version_of)
             item["seen"] = today.isoformat()
-            nxt = _parse_date(item.get("next"))
-            if nxt and today >= nxt:
+            if _next_elapsed(item.get("next"), today, None):
                 item["next"] = None
             return item
 

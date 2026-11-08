@@ -212,7 +212,7 @@ def _parse_date(value: object) -> date | None:
 def _parse_timed(value: object) -> datetime | None:
     """Parse a ``YYYY-MM-DDTHH:MM`` prefix (local, naive, minute precision) to a
     datetime, else None. A bare ``YYYY-MM-DD`` is not timed."""
-    if not value or not isinstance(value, str) or len(value) < 16 or value[10] != "T":
+    if not value or not isinstance(value, str) or len(value) != 16 or value[10] != "T":
         return None
     try:
         return datetime.strptime(value[:16], "%Y-%m-%dT%H:%M")
@@ -241,17 +241,21 @@ def _next_elapsed(
 ) -> bool:
     """Has a ``next`` alarm arrived? A dated ``next`` is due from that day's start
     (``today >= date``). A timed one is due at its minute: against ``now`` when
-    given; else against the real clock when ``today`` is not pinned; else (``today``
-    pinned, no ``now``) at day granularity, like a dated one."""
+    given; else against the real clock when ``today`` is unpinned or is the real
+    today; a pinned ``today`` on another day compares by day (past: due, future: not)."""
     timed = _parse_timed(value)
     if timed is not None:
-        if now is not None:
-            return now >= timed
-        if today is None:
-            return datetime.now() >= timed
-        return today >= timed.date()
+        if now is None:
+            now = datetime.now()
+            if today is not None and today != now.date():
+                return today > timed.date()
+        return now >= timed
     nxt = _parse_date(value)
-    return bool(nxt) and (today or date.today()) >= nxt
+    if not nxt:
+        return False
+    if today is None:
+        today = now.date() if now is not None else date.today()
+    return today >= nxt
 
 
 def _safe_int(value: object, default: int = 0) -> int:
@@ -324,7 +328,7 @@ def germination_tier(
         return "parked"
     if _next_elapsed(spore.get("next"), today, now):
         return "dormant"
-    today = today or date.today()
+    today = today or (now.date() if now is not None else date.today())
     seen = _parse_date(spore.get("seen"))
     if seen is None:
         return "dormant"
@@ -1388,6 +1392,8 @@ class SporeStore:
         Germination is NOT written onto the returned dicts (it's computed, never
         stored); call :func:`germination_tier` on a row to annotate it.
         """
+        if now is None and today is None:
+            now = datetime.now()  # one reading for the filter and rank passes
         items = list(self._load_keyed().get("spores", []))
         if type is not None:
             items = [s for s in items if s.get("type") == type]
@@ -1428,6 +1434,8 @@ class SporeStore:
         spores, ranked. The downstream consumer composes the full Top of Mind
         from this × Active Threads × recent ships. ``now`` pins the clock for a timed
         ``next``; without it the real clock decides (or the day, if ``today`` is pinned)."""
+        if now is None and today is None:
+            now = datetime.now()
         open_items = list(self._load_keyed().get("spores", []))
         if top_of_mind:
             pool = [

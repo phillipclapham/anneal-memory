@@ -1421,8 +1421,15 @@ class TestTimedNext:
         d = date(2026, 11, 10)
         assert germination_tier(s, d, datetime(2026, 11, 10, 14, 29)) == "growing"
         assert germination_tier(s, d, datetime(2026, 11, 10, 14, 30)) == "dormant"
-        # a pinned day with no clock reads at day granularity, like a dated next
-        assert germination_tier(s, d) == "dormant"
+        # a pinned day other than today, no clock: by day (past due, future not)
+        assert germination_tier(s, date(2026, 11, 11)) == "dormant"
+        later = {"tier": "warm", "seen": "2026-11-09", "next": "2026-11-10T14:30"}
+        assert germination_tier(later, date(2026, 11, 9)) == "growing"
+        # a pinned today that IS today reads the real clock, never midnight
+        far = {"tier": "warm", "seen": date.today().isoformat(),
+               "next": date.today().isoformat() + "T23:59"}
+        if datetime.now().strftime("%H:%M") < "23:59":
+            assert germination_tier(far, date.today()) == "growing"
 
     def test_mixed_date_and_timed_order_in_list_open(self, store):
         d = date(2026, 11, 10)
@@ -1442,6 +1449,11 @@ class TestTimedNext:
         store.add(type="task", text="a", next="2999-01-01T10:00", today=date(2026, 1, 1))
         store.touch("spore-001", today=date(2026, 1, 5))
         assert store.get("spore-001")["next"] == "2999-01-01T10:00"
+        # touching today must not clear a timed alarm set later today
+        if datetime.now().strftime("%H:%M") < "23:59":
+            store.update("spore-001", next=date.today().isoformat() + "T23:59")
+            store.touch("spore-001")
+            assert store.get("spore-001")["next"] == date.today().isoformat() + "T23:59"
         store.update("spore-001", next="2000-01-01T10:00")
         store.touch("spore-001")
         assert store.get("spore-001")["next"] is None

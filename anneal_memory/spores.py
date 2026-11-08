@@ -239,17 +239,20 @@ def _validate_date(value: str | None, field: str = "next") -> str | None:
 def _next_elapsed(
     value: object, today: date | None, now: datetime | None
 ) -> bool:
-    """Has a ``next`` alarm arrived? A dated ``next`` is due from that day's start
-    (``today >= date``). A timed one is due at its minute: against ``now`` when
-    given; else against the real clock when ``today`` is unpinned or is the real
-    today; a pinned ``today`` on another day compares by day (past: due, future: not)."""
+    """Has a ``next`` alarm arrived? ``now`` is the one clock: a timed ``next`` is
+    due at its minute (``now >= next``; a zone-aware ``now`` is read as local time).
+    A ``today`` pinned WITHOUT ``now`` means day granularity: a timed ``next`` is due
+    from the start of its day, like a dated one. Only with neither does the real
+    clock decide; the entry points read it once and pass it down."""
+    if now is not None and now.tzinfo is not None:
+        now = now.astimezone().replace(tzinfo=None)
     timed = _parse_timed(value)
     if timed is not None:
-        if now is None:
-            now = datetime.now()
-            if today is not None and today != now.date():
-                return today > timed.date()
-        return now >= timed
+        if now is not None:
+            return now >= timed
+        if today is not None:
+            return today >= timed.date()
+        return datetime.now() >= timed
     nxt = _parse_date(value)
     if not nxt:
         return False
@@ -326,6 +329,8 @@ def germination_tier(
     """
     if spore.get("tier") == "parked":
         return "parked"
+    if now is None and today is None:
+        now = datetime.now()  # one reading for the whole call
     if _next_elapsed(spore.get("next"), today, now):
         return "dormant"
     today = today or (now.date() if now is not None else date.today())
@@ -1454,6 +1459,7 @@ class SporeStore:
         spore_id: str,
         *,
         today: date | None = None,
+        now: datetime | None = None,
         expected_version: str | None = None,
         version_of: VersionOf | None = None,
     ) -> SporeDict:
@@ -1464,12 +1470,15 @@ class SporeStore:
         ``update(tier=...)``, not by touching.)
         """
         _validate_guards(expected_version, version_of, _UNSET)
-        today = today or date.today()
+        if now is None and today is None:
+            now = datetime.now()
+        if today is None:
+            today = now.date() if now is not None else date.today()
         with self._transaction() as data:
             item = self._require_open(data, spore_id)
             _check_expected_version(item, expected_version, version_of)
             item["seen"] = today.isoformat()
-            if _next_elapsed(item.get("next"), today, None):
+            if _next_elapsed(item.get("next"), today if now is None else None, now):
                 item["next"] = None
             return item
 

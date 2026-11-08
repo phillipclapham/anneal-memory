@@ -1431,14 +1431,18 @@ class TestTimedNext:
         inside the next-check, so seen-age and the touch stamp used the zone's date."""
         # An instant whose date in its OWN zone differs from the host-local date,
         # whatever the host zone is (a UTC runner included): local noon, re-expressed
-        # 13 hours east of the host offset.
+        # 13 hours east of the host offset (west of it when that would pass +-24 h).
         local_noon = datetime(2026, 11, 8, 12, 0).astimezone()
-        east = timezone(local_noon.utcoffset() + timedelta(hours=13))
-        aware = local_noon.astimezone(east)
+        off = local_noon.utcoffset()
+        east = off <= timedelta(hours=10)
+        aware = local_noon.astimezone(
+            timezone(off + timedelta(hours=13 if east else -13)))
         assert aware.date() != local_noon.date()
-        s = {"tier": "warm", "seen": "2026-11-05"}
-        assert germination_tier(s, now=aware) == germination_tier(
-            s, now=local_noon.replace(tzinfo=None))
+        local = local_noon.replace(tzinfo=None)
+        if east:  # zone date 11-09: seen-age 3 (resting) vs local 2 (growing)
+            s = {"tier": "warm", "seen": "2026-11-06"}
+            assert germination_tier(s, now=local) == "growing"
+            assert germination_tier(s, now=aware) == "growing"
         store.add(type="task", text="a", today=date(2026, 11, 1))
         got = store.touch("spore-001", now=aware)
         assert got["seen"] == "2026-11-08"

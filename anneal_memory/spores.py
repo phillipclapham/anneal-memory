@@ -470,6 +470,16 @@ def _opaque_value(name: str, value: object) -> object:
         raise ValueError(f"{name} must be {kinds} (got {value!r}).")
     if isinstance(value, str):
         value = normalize_spore_field(value)
+    elif isinstance(value, dict) and value:
+        # Must be JSON with string keys (a save would otherwise fail late or rewrite
+        # the keys), and is copied so the stored row never aliases the caller's dict.
+        if not all(isinstance(k, str) for k in value):
+            raise ValueError(f"{name} object keys must be strings.")
+        try:
+            json.dumps(value, allow_nan=False)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"{name} must be JSON ({exc}).") from exc
+        value = json.loads(json.dumps(value))
     return value or None
 
 

@@ -1340,3 +1340,50 @@ class TestDuplicateOpenId:
                 "ascend": lambda: s.ascend("spore-001", kind="pattern", ref="p", today=T0),
             }[call]()
         assert store.path.read_text() == before
+
+
+# -- the opaque agenda keys: target, attention, germinated (stored verbatim) ---------
+
+class TestOpaqueAgendaKeys:
+    def test_unknown_key_survives_a_write_that_does_not_name_it(self, store):
+        """A key some other layer put on the row is kept by an update that names only
+        other fields: the store carries what it does not model."""
+        store.add(type="thought", text="x", disposition="agenda", today=T0)
+        raw = json.loads(store.path.read_text(encoding="utf-8"))
+        raw["spores"][0]["some_future_key"] = {"a": 1}
+        store.path.write_text(json.dumps(raw), encoding="utf-8")
+        store.update("spore-001", tier="hot", target="board")
+        kept = SporeStore(store.path).get("spore-001")
+        assert kept["some_future_key"] == {"a": 1}
+        assert kept["target"] == "board"
+
+    def test_target_and_attention_store_verbatim_and_clear(self, store):
+        s = store.add(type="task", text="x", disposition="agenda", target="band",
+                      attention="talk", today=T0)
+        assert (s["target"], s["attention"]) == ("band", "talk")
+        plain = store.add(type="task", text="y", today=T0)
+        assert "target" not in plain and "attention" not in plain
+        # omitted leaves them, None clears one, a value the store never validates is kept
+        store.update("spore-001", tier="hot")
+        assert SporeStore(store.path).get("spore-001")["attention"] == "talk"
+        s = store.update("spore-001", target=None, attention="not-a-real-attention")
+        assert "target" not in s and s["attention"] == "not-a-real-attention"
+        with pytest.raises(ValueError, match="target must be a string"):
+            store.update("spore-001", target=3)  # type: ignore[arg-type]
+
+    def test_germinated_takes_an_object_through_add_update_and_apply(self, store):
+        stamp = {"on": "2026-11-07", "target": "board", "ref": "row-1"}
+        s = store.add(type="task", text="x", disposition="agenda", germinated=stamp, today=T0)
+        assert SporeStore(store.path).get(s["id"])["germinated"] == stamp
+        s = store.update(s["id"], germinated=None)
+        assert "germinated" not in s
+        if _spores.fcntl is not None:
+            from anneal_memory.spores import SporeApply
+            res = store.apply(SporeApply(
+                op="add", origin_key="pend.2:agenda",
+                args={"type": "task", "text": "z", "target": "band", "germinated": stamp, "today": T0},
+                postcondition={"type": "task", "text": "z", "target": "band",
+                               "germinated": stamp}))
+            assert res.outcome == "applied" and res.spore["germinated"] == stamp
+        with pytest.raises(ValueError, match="germinated must be"):
+            store.update(s["id"], germinated=7)  # type: ignore[arg-type]

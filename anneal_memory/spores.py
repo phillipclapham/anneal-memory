@@ -471,15 +471,16 @@ def _opaque_value(name: str, value: object) -> object:
     if isinstance(value, str):
         value = normalize_spore_field(value)
     elif isinstance(value, dict) and value:
-        # Must be JSON with string keys (a save would otherwise fail late or rewrite
-        # the keys), and is copied so the stored row never aliases the caller's dict.
-        if not all(isinstance(k, str) for k in value):
-            raise ValueError(f"{name} object keys must be strings.")
+        # Must survive a JSON round trip unchanged (non-string keys, tuples, NaN would
+        # otherwise be rewritten or fail late at save), and is copied so the stored
+        # row never aliases the caller's dict.
         try:
-            json.dumps(value, allow_nan=False)
-        except (TypeError, ValueError) as exc:
+            copied = json.loads(json.dumps(value, allow_nan=False))
+        except (TypeError, ValueError, RecursionError) as exc:
             raise ValueError(f"{name} must be JSON ({exc}).") from exc
-        value = json.loads(json.dumps(value))
+        if copied != value:
+            raise ValueError(f"{name} must be JSON with string keys and list values.")
+        value = copied
     return value or None
 
 
@@ -1461,7 +1462,7 @@ class SporeStore:
         ``target``, ``attention`` and ``germinated`` are three more opaque keys of the
         same kind (the Tray layer's agenda fields): a truthy value is stored verbatim,
         ``None``/``''`` clears the key, an omitted argument leaves it, and no value is
-        ever interpreted. ``germinated`` also takes an object (the caller's stamp).
+        ever interpreted. ``germinated`` also takes a JSON object (the caller's stamp; ``{}`` clears it). Strings are normalised like ``disposition``; an object's contents are kept as given.
         Any other key already on the stored row is untouched by an update.
 
         ``type`` retypes the spore (validated against ``VALID_TYPES``). anneal allows
@@ -1573,11 +1574,12 @@ class SporeStore:
                 _view["disposition"] = stored
             else:  # None / "" → metabolize back to a plain (key-free) loop
                 _view.pop("disposition", None)
+        opaque = {}
         for name, given in (("target", target), ("attention", attention),
                             ("germinated", germinated)):
-            if isinstance(given, _Unset):
-                continue
-            kept = _opaque_value(name, given)  # type-checks; falsy -> None -> key cleared
+            if not isinstance(given, _Unset):
+                opaque[name] = _opaque_value(name, given)  # all checked before any is set
+        for name, kept in opaque.items():
             if kept:
                 cast("dict[str, object]", item)[name] = kept
             else:

@@ -6112,7 +6112,7 @@
     },
     "touch": {
      "kind": "method",
-     "signature": "(self, spore_id: 'str', *, today: 'date | None' = None, expected_version: 'str | None' = None, version_of: 'VersionOf | None' = None) -> 'SporeDict'"
+     "signature": "(self, spore_id: 'str', *, today: 'date | None' = None, now: 'datetime | None' = None, expected_version: 'str | None' = None, version_of: 'VersionOf | None' = None) -> 'SporeDict'"
     },
     "update": {
      "kind": "method",

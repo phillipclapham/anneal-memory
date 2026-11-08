@@ -579,7 +579,7 @@ TOOLS: list[dict[str, Any]] = [
             "(which accretes and never completes). Use for an open intention you "
             "want to carry forward and close later: a `task` (open doing), a "
             "`question` (open not-knowing), or a `thought` (open idea). Set `tier` "
-            "to weight intent (hot/warm/cold/parked) and `next` (YYYY-MM-DD) to "
+            "to weight intent (hot/warm/cold/parked) and `next` (YYYY-MM-DD or YYYY-MM-DDTHH:MM) to "
             "ask for re-surfacing on a date. Resolve later via spore_descend "
             "(compost) or spore_ascend (transmute into memory/a project)."
         ),
@@ -599,7 +599,7 @@ TOOLS: list[dict[str, Any]] = [
                     "description": "Intent priority (default warm). 'parked' = deliberate dormancy.",
                 },
                 "salience": {"type": "integer", "minimum": 0, "maximum": 3, "description": "0–3 weight (the !/!!/!!! marker). Default 0."},
-                "next": {"type": "string", "description": "YYYY-MM-DD — when to re-surface (a reminder date, NOT a deadline)."},
+                "next": {"type": "string", "description": "YYYY-MM-DD or YYYY-MM-DDTHH:MM (local time) — when to re-surface (a reminder date, NOT a deadline)."},
                 "pointer": {"type": "string", "description": "Optional link to fuller context for the loop as it stands."},
             },
             "required": ["type", "text"],
@@ -662,7 +662,7 @@ TOOLS: list[dict[str, Any]] = [
             "properties": {
                 "spore_id": {"type": "string"},
                 "tier": {"type": "string", "enum": ["hot", "warm", "cold", "parked"]},
-                "next": {"type": "string", "description": "YYYY-MM-DD, or empty string to clear."},
+                "next": {"type": "string", "description": "YYYY-MM-DD or YYYY-MM-DDTHH:MM, or empty string to clear."},
                 "text": {"type": "string"},
                 "salience": {"type": "integer", "minimum": 0, "maximum": 3},
                 "domain": {"type": "string", "description": "Empty string clears."},

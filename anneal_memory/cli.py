@@ -5716,7 +5716,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--domain", help="health|career|strategic|life|flow|apps|... (free text)")
     sp.add_argument("--tier", choices=VALID_TIERS, default="warm")
     sp.add_argument("--salience", type=int, choices=range(0, 4), default=0)
-    sp.add_argument("--next", help="YYYY-MM-DD — when to re-surface (not a deadline)")
+    sp.add_argument("--next", help="YYYY-MM-DD or YYYY-MM-DDTHH:MM (local time) — when to re-surface (not a deadline)")
     sp.add_argument("--pointer", help="Optional link to fuller detail")
     sp.set_defaults(func=cmd_spore_add)
 
@@ -5742,7 +5742,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp = spore_sub.add_parser("update", help="Update an open spore's metadata", parents=[json_parent])
     sp.add_argument("spore_id", help="Spore id")
     sp.add_argument("--tier", choices=VALID_TIERS)
-    sp.add_argument("--next", help="YYYY-MM-DD, or empty string to clear")
+    sp.add_argument("--next", help="YYYY-MM-DD or YYYY-MM-DDTHH:MM, or empty string to clear")
     sp.add_argument("--text")
     sp.add_argument("--salience", type=int, choices=range(0, 4))
     sp.add_argument("--domain", help="Set/replace domain (empty string clears)")

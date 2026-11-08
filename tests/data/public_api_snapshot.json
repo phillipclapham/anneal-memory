@@ -6293,11 +6293,11 @@
     },
     "list_open": {
      "kind": "method",
-     "signature": "(self, *, type: 'SporeType | None' = None, tier: 'Tier | None' = None, domain: 'str | None' = None, germination: 'Germination | None' = None, today: 'date | None' = None) -> 'list[SporeDict]'"
+     "signature": "(self, *, type: 'SporeType | None' = None, tier: 'Tier | None' = None, domain: 'str | None' = None, germination: 'Germination | None' = None, today: 'date | None' = None, now: 'datetime | None' = None) -> 'list[SporeDict]'"
     },
     "surface": {
      "kind": "method",
-     "signature": "(self, *, top_of_mind: 'bool' = False, today: 'date | None' = None) -> 'list[SporeDict]'"
+     "signature": "(self, *, top_of_mind: 'bool' = False, today: 'date | None' = None, now: 'datetime | None' = None) -> 'list[SporeDict]'"
     },
     "touch": {
      "kind": "method",
@@ -7130,7 +7130,7 @@
      "name": "crystal_index"
     },
     {
-     "description": "Plant a spore — an open cognitive loop in the PROSPECTIVE layer (a thing that must RESOLVE), distinct from episodic/continuity memory (which accretes and never completes). Use for an open intention you want to carry forward and close later: a `task` (open doing), a `question` (open not-knowing), or a `thought` (open idea). Set `tier` to weight intent (hot/warm/cold/parked) and `next` (YYYY-MM-DD) to ask for re-surfacing on a date. Resolve later via spore_descend (compost) or spore_ascend (transmute into memory/a project).",
+     "description": "Plant a spore — an open cognitive loop in the PROSPECTIVE layer (a thing that must RESOLVE), distinct from episodic/continuity memory (which accretes and never completes). Use for an open intention you want to carry forward and close later: a `task` (open doing), a `question` (open not-knowing), or a `thought` (open idea). Set `tier` to weight intent (hot/warm/cold/parked) and `next` (YYYY-MM-DD or YYYY-MM-DDTHH:MM) to ask for re-surfacing on a date. Resolve later via spore_descend (compost) or spore_ascend (transmute into memory/a project).",
      "inputSchema": {
       "properties": {
        "domain": {
@@ -7138,7 +7138,7 @@
         "type": "string"
        },
        "next": {
-        "description": "YYYY-MM-DD — when to re-surface (a reminder date, NOT a deadline).",
+        "description": "YYYY-MM-DD or YYYY-MM-DDTHH:MM (local time) — when to re-surface (a reminder date, NOT a deadline).",
         "type": "string"
        },
        "pointer": {
@@ -7265,7 +7265,7 @@
         "type": "string"
        },
        "next": {
-        "description": "YYYY-MM-DD, or empty string to clear.",
+        "description": "YYYY-MM-DD or YYYY-MM-DDTHH:MM, or empty string to clear.",
         "type": "string"
        },
        "pointer": {
@@ -7778,7 +7778,7 @@
   "germination_tier": {
    "kind": "function",
    "module": "anneal_memory.spores",
-   "signature": "(spore: 'SporeDict', today: 'date | None' = None) -> 'Germination'"
+   "signature": "(spore: 'SporeDict', today: 'date | None' = None, now: 'datetime | None' = None) -> 'Germination'"
   },
   "graduating_headings": {
    "kind": "function",
@@ -8323,7 +8323,7 @@
      "type": "string"
     },
     "next": {
-     "description": "YYYY-MM-DD — when to re-surface (a reminder date, NOT a deadline).",
+     "description": "YYYY-MM-DD or YYYY-MM-DDTHH:MM (local time) — when to re-surface (a reminder date, NOT a deadline).",
      "type": "string"
     },
     "pointer": {
@@ -8495,7 +8495,7 @@
      "type": "string"
     },
     "next": {
-     "description": "YYYY-MM-DD, or empty string to clear.",
+     "description": "YYYY-MM-DD or YYYY-MM-DDTHH:MM, or empty string to clear.",
      "type": "string"
     },
     "pointer": {

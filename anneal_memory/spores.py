@@ -401,9 +401,10 @@ SporeOp = Literal["add", "update", "descend", "ascend", "delete"]
 # leaf can name, which a retried apply would append twice.
 _APPLY_ARGS: dict[str, frozenset[str]] = {
     "add": frozenset({"type", "text", "domain", "tier", "salience", "next", "pointer",
-                      "disposition", "today"}),
+                      "disposition", "target", "attention", "germinated", "today"}),
     "update": frozenset({"type", "tier", "next", "text", "salience", "domain", "pointer",
-                         "disposition", "expect_disposition"}),
+                         "disposition", "target", "attention", "germinated",
+                         "expect_disposition"}),
     "descend": frozenset({"kind", "expect_disposition", "today", "now"}),
     "ascend": frozenset({"kind", "ref", "expect_disposition", "today", "now"}),
     "delete": frozenset({"today", "now"}),
@@ -454,6 +455,23 @@ class SporeApplyResult:
 
 _MISSING = object()
 
+# Opaque verbatim keys beside ``disposition`` (the agenda fields of the Tray layer):
+# stored only when truthy, cleared by None/"", never interpreted. ``germinated`` may be
+# a JSON object (the caller's stamp) or a string; the other two are strings.
+_OPAQUE_KEYS = ("target", "attention", "germinated")
+
+
+def _opaque_value(name: str, value: object) -> object:
+    """The value an opaque key stores for ``value`` (falsy -> ``None``, meaning the key
+    is absent), or a ValueError for a type the key does not take."""
+    allowed = (str, dict) if name == "germinated" else (str,)
+    if value is not None and not isinstance(value, allowed):
+        kinds = "a string, an object or None" if name == "germinated" else "a string or None"
+        raise ValueError(f"{name} must be {kinds} (got {value!r}).")
+    if isinstance(value, str):
+        value = normalize_spore_field(value)
+    return value or None
+
 
 def _canonical(value: object) -> str:
     return json.dumps(value, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
@@ -471,6 +489,8 @@ def _stored_form(path: tuple[str, ...], value: object) -> object:
         return normalize_spore_field(value) if value else ""
     if name == "disposition" and (value is None or isinstance(value, str)):
         return (normalize_spore_field(value) if value else "") or _MISSING
+    if name in _OPAQUE_KEYS and (value is None or isinstance(value, (str, dict))):
+        return _opaque_value(name, value) or _MISSING
     if name in ("pointer", "next") and (value is None or isinstance(value, str)):
         return value or None
     return value
@@ -1161,6 +1181,9 @@ class SporeStore:
         next: str | None = None,
         pointer: str | None = None,
         disposition: str | None = None,
+        target: str | None = None,
+        attention: str | None = None,
+        germinated: str | dict | None = None,
         today: date | None = None,
         origin_key: str | None = None,
     ) -> SporeDict:
@@ -1186,7 +1209,8 @@ class SporeStore:
         stored as :func:`normalize_spore_field` returns them."""
         fields = self._prepare_add(
             type=type, text=text, domain=domain, tier=tier, salience=salience, next=next,
-            pointer=pointer, disposition=disposition, today=today)
+            pointer=pointer, disposition=disposition, target=target, attention=attention,
+            germinated=germinated, today=today)
         if origin_key is not None:
             _validate_origin_key(origin_key)
         with self._transaction() as data:
@@ -1207,6 +1231,9 @@ class SporeStore:
         next: str | None = None,
         pointer: str | None = None,
         disposition: str | None = None,
+        target: str | None = None,
+        attention: str | None = None,
+        germinated: str | dict | None = None,
         today: date | None = None,
     ) -> dict:
         """:meth:`add`'s argument checks and normalisation, before any lock: the
@@ -1241,6 +1268,8 @@ class SporeStore:
             "type": type, "text": text, "domain": domain or "", "tier": tier,
             "salience": salience, "next": next_validated, "now": now,
             "pointer": pointer or None, "disposition": disposition,
+            "opaque": {k: _opaque_value(k, v) for k, v in
+                       (("target", target), ("attention", attention), ("germinated", germinated))},
         }
 
     def _add_locked(self, data: dict, fields: dict, origin_key: str | None) -> SporeDict:
@@ -1273,6 +1302,10 @@ class SporeStore:
         # modeled SporeDict field (see the SporeDict note).
         if fields["disposition"]:
             cast("dict[str, object]", item)["disposition"] = fields["disposition"]
+        # The agenda keys are the same kind of opaque extra key: truthy -> stored verbatim.
+        for name, value in fields["opaque"].items():
+            if value:
+                cast("dict[str, object]", item)[name] = value
         data["spores"].append(item)
         return item
 
@@ -1394,6 +1427,9 @@ class SporeStore:
         domain: str | _Unset = _UNSET,
         pointer: str | None | _Unset = _UNSET,
         disposition: str | None | _Unset = _UNSET,
+        target: str | None | _Unset = _UNSET,
+        attention: str | None | _Unset = _UNSET,
+        germinated: str | dict | None | _Unset = _UNSET,
         expect_disposition: str | None | _Unset = _UNSET,
         add_note: str | None = None,
         today: date | None = None,
@@ -1411,6 +1447,12 @@ class SporeStore:
         ``handoff``), and ``None``/``''`` clears the key (metabolize back to a
         plain key-free loop). anneal stores/clears it without interpreting the
         value — the disposition-aware layer owns the taxonomy.
+
+        ``target``, ``attention`` and ``germinated`` are three more opaque keys of the
+        same kind (the Tray layer's agenda fields): a truthy value is stored verbatim,
+        ``None``/``''`` clears the key, an omitted argument leaves it, and no value is
+        ever interpreted. ``germinated`` also takes an object (the caller's stamp).
+        Any other key already on the stored row is untouched by an update.
 
         ``type`` retypes the spore (validated against ``VALID_TYPES``). anneal allows
         it mechanically — types ARE anneal's taxonomy — but does NOT enforce the
@@ -1448,6 +1490,7 @@ class SporeStore:
             self._update_fields(
                 item, type=type, tier=tier, next=next, text=text, salience=salience,
                 domain=domain, pointer=pointer, disposition=disposition,
+                target=target, attention=attention, germinated=germinated,
                 expect_disposition=expect_disposition, add_note=add_note, today=today)
             return item
 
@@ -1463,6 +1506,9 @@ class SporeStore:
         domain: str | _Unset = _UNSET,
         pointer: str | None | _Unset = _UNSET,
         disposition: str | None | _Unset = _UNSET,
+        target: str | None | _Unset = _UNSET,
+        attention: str | None | _Unset = _UNSET,
+        germinated: str | dict | None | _Unset = _UNSET,
         expect_disposition: str | None | _Unset = _UNSET,
         add_note: str | None = None,
         today: date | None = None,
@@ -1517,6 +1563,15 @@ class SporeStore:
                 _view["disposition"] = stored
             else:  # None / "" → metabolize back to a plain (key-free) loop
                 _view.pop("disposition", None)
+        for name, given in (("target", target), ("attention", attention),
+                            ("germinated", germinated)):
+            if isinstance(given, _Unset):
+                continue
+            kept = _opaque_value(name, given)  # type-checks; falsy -> None -> key cleared
+            if kept:
+                cast("dict[str, object]", item)[name] = kept
+            else:
+                cast("dict[str, object]", item).pop(name, None)
         if add_note:
             stamp = (today or date.today()).isoformat()
             if not isinstance(item.get("notes"), list):

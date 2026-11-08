@@ -1387,3 +1387,14 @@ class TestOpaqueAgendaKeys:
             assert res.outcome == "applied" and res.spore["germinated"] == stamp
         with pytest.raises(ValueError, match="germinated must be"):
             store.update(s["id"], germinated=7)  # type: ignore[arg-type]
+
+    def test_germinated_object_is_json_and_not_aliased(self, store):
+        from datetime import date as _d
+        with pytest.raises(ValueError, match="germinated must be JSON"):
+            store.add(type="task", text="x", germinated={"d": _d(2026, 1, 1)}, today=T0)
+        with pytest.raises(ValueError, match="keys must be strings"):
+            store.add(type="task", text="x", germinated={1: "a"}, today=T0)  # type: ignore[dict-item]
+        g = {"a": 1}
+        r = store.add(type="task", text="x", germinated=g, today=T0)
+        g["a"] = 2
+        assert r["germinated"] == {"a": 1}

@@ -1392,7 +1392,7 @@ class TestOpaqueAgendaKeys:
         from datetime import date as _d
         with pytest.raises(ValueError, match="germinated must be JSON"):
             store.add(type="task", text="x", germinated={"d": _d(2026, 1, 1)}, today=T0)
-        with pytest.raises(ValueError, match="keys must be strings"):
+        with pytest.raises(ValueError, match="string keys"):
             store.add(type="task", text="x", germinated={1: "a"}, today=T0)  # type: ignore[dict-item]
         g = {"a": 1}
         r = store.add(type="task", text="x", germinated=g, today=T0)

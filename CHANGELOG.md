@@ -2,6 +2,11 @@
 
 All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project uses [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.3] — 2026-11-07
+
+### Added
+- **`SporeStore.add` / `update` / `apply` carry `target`, `attention` and `germinated` as opaque keys.** Like `disposition`, each is stored verbatim only when truthy, cleared by `None` or `""`, and never interpreted; a caller that owns the vocabulary (the Tray's agenda fields) gates it. `target` and `attention` take a string, `germinated` a string or an object. An update leaves any other key on the row alone. No schema change.
+
 ## [1.0.2] — 2026-10-24
 
 ### Changed

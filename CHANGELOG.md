@@ -2,6 +2,11 @@
 
 All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project uses [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.4] — 2026-11-07
+
+### Added
+- **A spore's `next` accepts `YYYY-MM-DDTHH:MM`** (local time, no zone, minute precision) on `SporeStore.add`, `update` and `apply`, besides `YYYY-MM-DD`. A timed `next` is due at its minute, not at midnight: `germination_tier`, `list_open`, `surface` and `touch` take an optional `now` (a datetime; a zone-aware one is read as local time). With neither `today` nor `now` the real clock decides, read once per call; a `today` given without `now` reads by day, as before. A bare date behaves as in 1.0.3. No schema change.
+
 ## [1.0.3] — 2026-11-07
 
 ### Added

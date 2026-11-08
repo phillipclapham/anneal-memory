@@ -4094,6 +4094,22 @@ class TestSporeCLI:
         assert body["tier"] == "hot"
         assert body["salience"] == 2
 
+    def test_list_and_surface_read_a_same_day_future_timed_next_by_the_minute(self, tmp_db):
+        """Diogenes 2026-11-08 MED: list/surface pinned ``today`` without ``now``, so a
+        timed ``next`` later today read as due from midnight (dormant) there while
+        touch and the server read the minute (growing)."""
+        now = datetime.now()
+        if (now.hour, now.minute) == (23, 59):
+            pytest.skip("no later minute left today")
+        nxt = now.replace(hour=23, minute=59).strftime("%Y-%m-%dT%H:%M")
+        self._run("--db", tmp_db, "spore", "add", "--type", "task", "--text", "later today",
+                  "--next", nxt)
+        for verb in ("list", "surface"):
+            rows = json.loads(self._run("--db", tmp_db, "spore", verb, "--json").stdout)
+            assert [r["germination"] for r in rows] == ["growing"], verb
+        listed = self._run("--db", tmp_db, "spore", "list", "--germination", "dormant").stdout
+        assert "later today" not in listed
+
     def test_glyph_output_survives_a_non_utf8_locale_encoding(self, tmp_db):
         """Diogenes census 2026-09-15, run on the ci-windows branch, HEAD
         09bd778: piped/redirected/subprocess CLI output crashed with

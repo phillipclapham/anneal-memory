@@ -11052,7 +11052,9 @@ class Store:
         effective trust now, where not marked already. Aging out is not a
         retraction, so it must not read as the ``external`` the delete trigger
         would otherwise write (CAP-08 D3 R3, complement r4 MED 1). Runs inside
-        the prune's transaction, before the deletes."""
+        the prune's transaction, before the deletes. A prune also rewrites the
+        ``wrap_undo`` stash: a compost's ``pattern_grounding`` rows live only there
+        until a revert, so they are marked in the stash (see the comment below)."""
         if not episode_ids:
             return
         eff = self.effective_trust_map(episode_ids)

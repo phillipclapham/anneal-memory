@@ -1426,6 +1426,17 @@ class TestTimedNext:
         local = datetime(2026, 11, 10, 14, 29).astimezone()
         assert germination_tier(s, now=local) == "growing"
 
+    def test_aware_non_local_now_is_one_local_clock_for_dates_too(self, store):
+        """Diogenes 2026-11-08 LOW: a UTC-aware ``now`` was converted to local only
+        inside the next-check, so seen-age and the touch stamp used the zone's date."""
+        utc = datetime(2026, 11, 8, 3, 0, tzinfo=timezone.utc)
+        local = utc.astimezone().replace(tzinfo=None)
+        s = {"tier": "warm", "seen": "2026-11-05"}
+        assert germination_tier(s, now=utc) == germination_tier(s, now=local)
+        store.add(type="task", text="a", today=date(2026, 11, 1))
+        got = store.touch("spore-001", now=utc)
+        assert got["seen"] == local.date().isoformat()
+
     def test_pinned_today_without_now_is_day_granularity(self):
         s = {"tier": "warm", "seen": "2026-11-09", "next": "2026-11-10T14:30"}
         assert germination_tier(s, date(2026, 11, 9)) == "growing"

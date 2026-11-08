@@ -3963,10 +3963,10 @@ def _open_spore_store(args: argparse.Namespace) -> SporeStore:
     return SporeStore(db_path.parent / f"{db_path.stem}.spores.json")
 
 
-def _spore_row(s: SporeDict, today: date) -> dict[str, Any]:
+def _spore_row(s: SporeDict, now: datetime) -> dict[str, Any]:
     """A JSON-serializable spore dict annotated with its computed germination."""
     row: dict[str, Any] = dict(s)
-    row["germination"] = germination_tier(s, today)
+    row["germination"] = germination_tier(s, now=now)
     return row
 
 
@@ -4026,22 +4026,22 @@ def cmd_spore_get(args: argparse.Namespace) -> None:
 def cmd_spore_list(args: argparse.Namespace) -> None:
     """List open spores (filtered, ranked by tier -> salience -> germination)."""
     store = _open_spore_store(args)
-    today = date.today()
+    now = datetime.now()  # one clock reading, minute precision for a timed next
     items = store.list_open(
         type=args.type,
         tier=args.tier,
         domain=args.domain,
         germination=args.germination,
-        today=today,
+        now=now,
     )
     if args.json:
-        _print_json([_spore_row(s, today) for s in items])
+        _print_json([_spore_row(s, now) for s in items])
         return
     if not items:
         print("No open spores match.")
         return
     for s in items:
-        germ = germination_tier(s, today)
+        germ = germination_tier(s, now=now)
         glyph = _SPORE_TYPE_GLYPH.get(s.get("type", ""), "·")
         print(f"  [{s['id']}] {glyph} {s.get('tier')}/{germ} {_spore_salience_bang(s)} "
               f"{_truncate(s.get('text', ''), 90)}")
@@ -4050,7 +4050,7 @@ def cmd_spore_list(args: argparse.Namespace) -> None:
                   f"seen={s.get('seen')} next={s.get('next')}")
             if s.get("pointer"):
                 print(f"      -> {s['pointer']}")
-    dormant = [s for s in items if germination_tier(s, today) == "dormant"]
+    dormant = [s for s in items if germination_tier(s, now=now) == "dormant"]
     if dormant:
         print(f"\n{len(dormant)} dormant — still alive, or ready to compost?")
 
@@ -4138,15 +4138,15 @@ def cmd_spore_ascend(args: argparse.Namespace) -> None:
 def cmd_spore_surface(args: argparse.Namespace) -> None:
     """Seed-side surface for a salience generator (the consumer composes the rest)."""
     store = _open_spore_store(args)
-    today = date.today()
-    items = store.surface(top_of_mind=args.top_of_mind, today=today)
+    now = datetime.now()  # one clock reading, minute precision for a timed next
+    items = store.surface(top_of_mind=args.top_of_mind, now=now)
     if args.json:
-        _print_json([_spore_row(s, today) for s in items])
+        _print_json([_spore_row(s, now) for s in items])
         return
     label = "Top of Mind (seed contribution)" if args.top_of_mind else "Open spores"
     print(f"**{label}** — {len(items)} items")
     for s in items:
-        germ = germination_tier(s, today)
+        germ = germination_tier(s, now=now)
         print(f"- ({s.get('type')}/{s.get('tier')}/{germ}) {_spore_salience_bang(s)} "
               f"{_truncate(s.get('text', ''), 160)}")
 

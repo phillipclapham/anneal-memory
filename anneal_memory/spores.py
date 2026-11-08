@@ -236,6 +236,14 @@ def _validate_date(value: str | None, field: str = "next") -> str | None:
     return value
 
 
+def _local_clock(now: datetime | None) -> datetime | None:
+    """``now`` as naive local time: a zone-aware instant is converted once, so every
+    date and minute read off it in one call comes from the same local clock."""
+    if now is not None and now.tzinfo is not None:
+        return now.astimezone().replace(tzinfo=None)
+    return now
+
+
 def _next_elapsed(
     value: object, today: date | None, now: datetime | None
 ) -> bool:
@@ -244,8 +252,7 @@ def _next_elapsed(
     A ``today`` pinned WITHOUT ``now`` means day granularity: a timed ``next`` is due
     from the start of its day, like a dated one. Only with neither does the real
     clock decide; the entry points read it once and pass it down."""
-    if now is not None and now.tzinfo is not None:
-        now = now.astimezone().replace(tzinfo=None)
+    now = _local_clock(now)
     timed = _parse_timed(value)
     if timed is not None:
         if now is not None:
@@ -331,6 +338,7 @@ def germination_tier(
         return "parked"
     if now is None and today is None:
         now = datetime.now()  # one reading for the whole call
+    now = _local_clock(now)
     if _next_elapsed(spore.get("next"), today, now):
         return "dormant"
     today = today or (now.date() if now is not None else date.today())
@@ -1399,6 +1407,7 @@ class SporeStore:
         """
         if now is None and today is None:
             now = datetime.now()  # one reading for the filter and rank passes
+        now = _local_clock(now)
         items = list(self._load_keyed().get("spores", []))
         if type is not None:
             items = [s for s in items if s.get("type") == type]
@@ -1441,6 +1450,7 @@ class SporeStore:
         ``next``; without it the real clock decides (or the day, if ``today`` is pinned)."""
         if now is None and today is None:
             now = datetime.now()
+        now = _local_clock(now)
         open_items = list(self._load_keyed().get("spores", []))
         if top_of_mind:
             pool = [
@@ -1472,6 +1482,7 @@ class SporeStore:
         _validate_guards(expected_version, version_of, _UNSET)
         if now is None and today is None:
             now = datetime.now()
+        now = _local_clock(now)
         if today is None:
             today = now.date() if now is not None else date.today()
         with self._transaction() as data:

@@ -1439,11 +1439,11 @@ class TestTimedNext:
             timezone(off + timedelta(hours=13 if east else -13)))
         assert aware.date() != local_noon.date()
         local = local_noon.replace(tzinfo=None)
-        if east:  # zone date 11-09: seen-age 3 (resting) vs local 2 (growing)
+        if east:  # zone date 11-09 would give seen-age 3 (resting); local 11-08 gives 2 (growing)
             s = {"tier": "warm", "seen": "2026-11-06"}
             assert germination_tier(s, now=local) == "growing"
             assert germination_tier(s, now=aware) == "growing"
-        else:  # zone date 11-07: seen-age 2 (growing) vs local 3 (resting)
+        else:  # zone date 11-07 would give seen-age 2 (growing); local 11-08 gives 3 (resting)
             s = {"tier": "warm", "seen": "2026-11-05"}
             assert germination_tier(s, now=local) == "resting"
             assert germination_tier(s, now=aware) == "resting"

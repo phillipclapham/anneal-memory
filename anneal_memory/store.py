@@ -9960,7 +9960,9 @@ class Store:
         changed outside the identity, inside its transaction: ``pattern_levels``,
         the ``pattern_history`` rows it touched, the ``pattern_grounding`` rows a
         compost deleted, and the supersession links it recorded. From the
-        ``wrap_undo`` rows the save wrote when there are any (exact). Without them
+        ``wrap_undo`` rows the save wrote when there are any (exact, bar the
+        aged-out mark a prune puts on a restored ``pattern_grounding`` row; see
+        the ``wrap_undo`` schema comment). Without them
         ``pattern_levels`` is adjusted from the two texts (a name the wrap added is
         dropped, one it raised is lowered), ``pattern_history`` is left as the wrap
         wrote it, and ``pattern_state_exact`` is 0."""

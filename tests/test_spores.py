@@ -1443,6 +1443,10 @@ class TestTimedNext:
             s = {"tier": "warm", "seen": "2026-11-06"}
             assert germination_tier(s, now=local) == "growing"
             assert germination_tier(s, now=aware) == "growing"
+        else:  # zone date 11-07: seen-age 2 (growing) vs local 3 (resting)
+            s = {"tier": "warm", "seen": "2026-11-05"}
+            assert germination_tier(s, now=local) == "resting"
+            assert germination_tier(s, now=aware) == "resting"
         store.add(type="task", text="a", today=date(2026, 11, 1))
         got = store.touch("spore-001", now=aware)
         assert got["seen"] == "2026-11-08"

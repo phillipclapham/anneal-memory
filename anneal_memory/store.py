@@ -2356,10 +2356,13 @@ CREATE TABLE IF NOT EXISTS wrap_reverts (
 );
 
 -- What the newest wrap's save overwrote or added, so Store.revert_wrap can put
--- it back exactly: pattern_levels as a whole table (one marker row, key '', plus a
+-- it back: pattern_levels as a whole table (one marker row, key '', plus a
 -- row per level), each pattern_history row the save touched as it was before
 -- (prior_json NULL = the row did not exist), the pattern_grounding rows a compost
--- deleted, and each supersession link the save recorded. kind has no CHECK on
+-- deleted, and each supersession link the save recorded. A prune rewrites the
+-- pattern_grounding rows here for the episodes it deletes (``_mark_aged_out`` marks
+-- them aged out), so a revert after a prune restores that mark, and prior_json is
+-- not a byte-stable record of what the save wrote. kind has no CHECK on
 -- purpose: CREATE TABLE IF NOT EXISTS cannot widen one on a store that has the table,
 -- so a new kind would fail every save there. Keyed by the first 12 characters of
 -- the wrap token, which the wraps row's pair_id keeps; only the newest wrap's rows

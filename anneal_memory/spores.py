@@ -446,9 +446,9 @@ SporeOp = Literal["add", "update", "descend", "ascend", "delete"]
 # leaf can name, which a retried apply would append twice.
 _APPLY_ARGS: dict[str, frozenset[str]] = {
     "add": frozenset({"type", "text", "domain", "tier", "salience", "next", "pointer",
-                      "disposition", "target", "attention", "germinated", "today"}),
+                      "disposition", "target", "attention", "recur", "recur_anchor", "germinated", "today"}),
     "update": frozenset({"type", "tier", "next", "text", "salience", "domain", "pointer",
-                         "disposition", "target", "attention", "germinated",
+                         "disposition", "target", "attention", "recur", "recur_anchor", "germinated",
                          "expect_disposition"}),
     "descend": frozenset({"kind", "expect_disposition", "today", "now"}),
     "ascend": frozenset({"kind", "ref", "expect_disposition", "today", "now"}),
@@ -503,7 +503,7 @@ _MISSING = object()
 # Opaque verbatim keys beside ``disposition`` (the agenda fields of the Tray layer):
 # stored only when truthy, cleared by None/"", never interpreted. ``germinated`` may be
 # a JSON object (the caller's stamp) or a string; the other two are strings.
-_OPAQUE_KEYS = ("target", "attention", "germinated")
+_OPAQUE_KEYS = ("target", "attention", "recur", "recur_anchor", "germinated")
 
 
 def _opaque_value(name: str, value: object) -> object:
@@ -1239,6 +1239,8 @@ class SporeStore:
         disposition: str | None = None,
         target: str | None = None,
         attention: str | None = None,
+        recur: str | None = None,
+        recur_anchor: str | None = None,
         germinated: str | dict | None = None,
         today: date | None = None,
         origin_key: str | None = None,
@@ -1266,7 +1268,7 @@ class SporeStore:
         fields = self._prepare_add(
             type=type, text=text, domain=domain, tier=tier, salience=salience, next=next,
             pointer=pointer, disposition=disposition, target=target, attention=attention,
-            germinated=germinated, today=today)
+            recur=recur, recur_anchor=recur_anchor, germinated=germinated, today=today)
         if origin_key is not None:
             _validate_origin_key(origin_key)
         with self._transaction() as data:
@@ -1289,6 +1291,8 @@ class SporeStore:
         disposition: str | None = None,
         target: str | None = None,
         attention: str | None = None,
+        recur: str | None = None,
+        recur_anchor: str | None = None,
         germinated: str | dict | None = None,
         today: date | None = None,
     ) -> dict:
@@ -1325,7 +1329,8 @@ class SporeStore:
             "salience": salience, "next": next_validated, "now": now,
             "pointer": pointer or None, "disposition": disposition,
             "opaque": {k: _opaque_value(k, v) for k, v in
-                       (("target", target), ("attention", attention), ("germinated", germinated))},
+                       (("target", target), ("attention", attention), ("recur", recur),
+                        ("recur_anchor", recur_anchor), ("germinated", germinated))},
         }
 
     def _add_locked(self, data: dict, fields: dict, origin_key: str | None) -> SporeDict:
@@ -1498,6 +1503,8 @@ class SporeStore:
         disposition: str | None | _Unset = _UNSET,
         target: str | None | _Unset = _UNSET,
         attention: str | None | _Unset = _UNSET,
+        recur: str | None | _Unset = _UNSET,
+        recur_anchor: str | None | _Unset = _UNSET,
         germinated: str | dict | None | _Unset = _UNSET,
         expect_disposition: str | None | _Unset = _UNSET,
         add_note: str | None = None,
@@ -1517,7 +1524,7 @@ class SporeStore:
         plain key-free loop). anneal stores/clears it without interpreting the
         value — the disposition-aware layer owns the taxonomy.
 
-        ``target``, ``attention`` and ``germinated`` are three more opaque keys of the
+        ``target``, ``attention``, ``recur``, ``recur_anchor`` and ``germinated`` are more opaque keys of the
         same kind (the Tray layer's agenda fields): a truthy value is stored verbatim,
         ``None``/``''`` clears the key, an omitted argument leaves it, and no value is
         ever interpreted. ``germinated`` also takes a JSON object (the caller's stamp; ``{}`` clears it). Strings are normalised like ``disposition``; an object's contents are kept as given.
@@ -1559,7 +1566,8 @@ class SporeStore:
             self._update_fields(
                 item, type=type, tier=tier, next=next, text=text, salience=salience,
                 domain=domain, pointer=pointer, disposition=disposition,
-                target=target, attention=attention, germinated=germinated,
+                target=target, attention=attention, recur=recur,
+                recur_anchor=recur_anchor, germinated=germinated,
                 expect_disposition=expect_disposition, add_note=add_note, today=today)
             return item
 
@@ -1577,6 +1585,8 @@ class SporeStore:
         disposition: str | None | _Unset = _UNSET,
         target: str | None | _Unset = _UNSET,
         attention: str | None | _Unset = _UNSET,
+        recur: str | None | _Unset = _UNSET,
+        recur_anchor: str | None | _Unset = _UNSET,
         germinated: str | dict | None | _Unset = _UNSET,
         expect_disposition: str | None | _Unset = _UNSET,
         add_note: str | None = None,
@@ -1634,6 +1644,7 @@ class SporeStore:
                 _view.pop("disposition", None)
         opaque = {}
         for name, given in (("target", target), ("attention", attention),
+                            ("recur", recur), ("recur_anchor", recur_anchor),
                             ("germinated", germinated)):
             if not isinstance(given, _Unset):
                 opaque[name] = _opaque_value(name, given)  # all checked before any is set

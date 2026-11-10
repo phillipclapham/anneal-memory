@@ -1388,6 +1388,44 @@ class TestOpaqueAgendaKeys:
         with pytest.raises(ValueError, match="germinated must be"):
             store.update(s["id"], germinated=7)  # type: ignore[arg-type]
 
+    def test_recur_and_recur_anchor_are_opaque_agenda_keys(self, store):
+        s = store.add(type="task", text="x", disposition="agenda", recur="every 2 weeks",
+                      recur_anchor="2026-11-10", today=T0)
+        assert (s["recur"], s["recur_anchor"]) == ("every 2 weeks", "2026-11-10")
+        got = SporeStore(store.path).get(s["id"])
+        assert (got["recur"], got["recur_anchor"]) == ("every 2 weeks", "2026-11-10")
+        plain = store.add(type="task", text="y", today=T0)
+        assert "recur" not in plain and "recur_anchor" not in plain
+        # omitted leaves them; a value the store never validates is kept; None clears
+        store.update(s["id"], tier="hot")
+        assert SporeStore(store.path).get(s["id"])["recur"] == "every 2 weeks"
+        s = store.update(s["id"], recur="FREQ=whatever", recur_anchor=None)
+        assert s["recur"] == "FREQ=whatever" and "recur_anchor" not in s
+        s = store.update(s["id"], recur="")
+        assert "recur" not in s
+        with pytest.raises(ValueError, match="recur must be a string"):
+            store.update(s["id"], recur=3)  # type: ignore[arg-type]
+
+    def test_recur_round_trips_through_apply_and_clears(self, store):
+        if _spores.fcntl is None:
+            pytest.skip("apply needs flock")
+        from anneal_memory.spores import SporeApply
+        res = store.apply(SporeApply(
+            op="add", origin_key="pend.3:recur",
+            args={"type": "task", "text": "z", "recur": "weekly", "recur_anchor": "2026-11-10",
+                  "today": T0},
+            postcondition={"type": "task", "text": "z", "recur": "weekly",
+                           "recur_anchor": "2026-11-10"}))
+        assert res.outcome == "applied"
+        assert res.spore["recur"] == "weekly" and res.spore["recur_anchor"] == "2026-11-10"
+        res = store.apply(SporeApply(
+            op="update", origin_key="pend.3:recur",
+            args={"recur": None, "recur_anchor": None},
+            postcondition={"recur": None, "recur_anchor": None},
+            expected_version=_spores.spore_version(res.spore)))
+        assert res.outcome == "applied"
+        assert "recur" not in res.spore and "recur_anchor" not in res.spore
+
     def test_germinated_object_is_json_and_not_aliased(self, store):
         from datetime import date as _d
         with pytest.raises(ValueError, match="germinated must be JSON"):

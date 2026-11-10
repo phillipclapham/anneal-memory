@@ -6072,7 +6072,7 @@
    "members": {
     "add": {
      "kind": "method",
-     "signature": "(self, *, type: 'SporeType', text: 'str', domain: 'str' = '', tier: 'Tier' = 'warm', salience: 'int' = 0, next: 'str | None' = None, pointer: 'str | None' = None, disposition: 'str | None' = None, target: 'str | None' = None, attention: 'str | None' = None, germinated: 'str | dict | None' = None, today: 'date | None' = None, origin_key: 'str | None' = None) -> 'SporeDict'"
+     "signature": "(self, *, type: 'SporeType', text: 'str', domain: 'str' = '', tier: 'Tier' = 'warm', salience: 'int' = 0, next: 'str | None' = None, pointer: 'str | None' = None, disposition: 'str | None' = None, target: 'str | None' = None, attention: 'str | None' = None, recur: 'str | None' = None, recur_anchor: 'str | None' = None, germinated: 'str | dict | None' = None, today: 'date | None' = None, origin_key: 'str | None' = None) -> 'SporeDict'"
     },
     "apply": {
      "kind": "method",
@@ -6116,7 +6116,7 @@
     },
     "update": {
      "kind": "method",
-     "signature": "(self, spore_id: 'str', *, type: 'SporeType | _Unset' = <anneal_memory.spores._Unset object>, tier: 'Tier | _Unset' = <anneal_memory.spores._Unset object>, next: 'str | None | _Unset' = <anneal_memory.spores._Unset object>, text: 'str | _Unset' = <anneal_memory.spores._Unset object>, salience: 'int | _Unset' = <anneal_memory.spores._Unset object>, domain: 'str | _Unset' = <anneal_memory.spores._Unset object>, pointer: 'str | None | _Unset' = <anneal_memory.spores._Unset object>, disposition: 'str | None | _Unset' = <anneal_memory.spores._Unset object>, target: 'str | None | _Unset' = <anneal_memory.spores._Unset object>, attention: 'str | None | _Unset' = <anneal_memory.spores._Unset object>, germinated: 'str | dict | None | _Unset' = <anneal_memory.spores._Unset object>, expect_disposition: 'str | None | _Unset' = <anneal_memory.spores._Unset object>, add_note: 'str | None' = None, today: 'date | None' = None, expected_version: 'str | None' = None, version_of: 'VersionOf | None' = None) -> 'SporeDict'"
+     "signature": "(self, spore_id: 'str', *, type: 'SporeType | _Unset' = <anneal_memory.spores._Unset object>, tier: 'Tier | _Unset' = <anneal_memory.spores._Unset object>, next: 'str | None | _Unset' = <anneal_memory.spores._Unset object>, text: 'str | _Unset' = <anneal_memory.spores._Unset object>, salience: 'int | _Unset' = <anneal_memory.spores._Unset object>, domain: 'str | _Unset' = <anneal_memory.spores._Unset object>, pointer: 'str | None | _Unset' = <anneal_memory.spores._Unset object>, disposition: 'str | None | _Unset' = <anneal_memory.spores._Unset object>, target: 'str | None | _Unset' = <anneal_memory.spores._Unset object>, attention: 'str | None | _Unset' = <anneal_memory.spores._Unset object>, recur: 'str | None | _Unset' = <anneal_memory.spores._Unset object>, recur_anchor: 'str | None | _Unset' = <anneal_memory.spores._Unset object>, germinated: 'str | dict | None | _Unset' = <anneal_memory.spores._Unset object>, expect_disposition: 'str | None | _Unset' = <anneal_memory.spores._Unset object>, add_note: 'str | None' = None, today: 'date | None' = None, expected_version: 'str | None' = None, version_of: 'VersionOf | None' = None) -> 'SporeDict'"
     }
    },
    "module": "anneal_memory.spores"

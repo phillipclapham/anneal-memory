@@ -2,6 +2,11 @@
 
 All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project uses [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.5] — 2026-11-10
+
+### Added
+- **`SporeStore.add` / `update` / `apply` carry `recur` and `recur_anchor` as two more opaque agenda keys.** Like `target` and `attention`, each is stored verbatim only when truthy, cleared by `None` or `""`, and never interpreted or validated; both are strings.
+
 ## [1.0.4] — 2026-11-07
 
 ### Added

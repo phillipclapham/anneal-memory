@@ -502,7 +502,7 @@ _MISSING = object()
 
 # Opaque verbatim keys beside ``disposition`` (the agenda fields of the Tray layer):
 # stored only when truthy, cleared by None/"", never interpreted. ``germinated`` may be
-# a JSON object (the caller's stamp) or a string; the other two are strings.
+# a JSON object (the caller's stamp) or a string; every other key is a string.
 _OPAQUE_KEYS = ("target", "attention", "recur", "recur_anchor", "germinated")
 
 

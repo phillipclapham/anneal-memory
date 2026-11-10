@@ -1426,6 +1426,42 @@ class TestOpaqueAgendaKeys:
         assert res.outcome == "applied"
         assert "recur" not in res.spore and "recur_anchor" not in res.spore
 
+    def test_on_event_and_check_by_are_opaque_agenda_keys(self, store):
+        s = store.add(type="task", text="x", disposition="agenda", on_event="deploy-done",
+                      check_by="2026-11-20", today=T0)
+        got = SporeStore(store.path).get(s["id"])
+        assert (got["on_event"], got["check_by"]) == ("deploy-done", "2026-11-20")
+        plain = store.add(type="task", text="y", today=T0)
+        assert "on_event" not in plain and "check_by" not in plain
+        store.update(s["id"], tier="hot")
+        assert SporeStore(store.path).get(s["id"])["on_event"] == "deploy-done"
+        s = store.update(s["id"], on_event="anything at all", check_by=None)
+        assert s["on_event"] == "anything at all" and "check_by" not in s
+        s = store.update(s["id"], on_event="")
+        assert "on_event" not in s
+        with pytest.raises(ValueError, match="check_by must be a string"):
+            store.update(s["id"], check_by=3)  # type: ignore[arg-type]
+
+    def test_on_event_and_check_by_round_trip_through_apply_and_clear(self, store):
+        if _spores.fcntl is None:
+            pytest.skip("apply needs flock")
+        from anneal_memory.spores import SporeApply
+        res = store.apply(SporeApply(
+            op="add", origin_key="pend.4:event",
+            args={"type": "task", "text": "z", "on_event": "ev", "check_by": "2026-11-20",
+                  "today": T0},
+            postcondition={"type": "task", "text": "z", "on_event": "ev",
+                           "check_by": "2026-11-20"}))
+        assert res.outcome == "applied"
+        assert res.spore["on_event"] == "ev" and res.spore["check_by"] == "2026-11-20"
+        res = store.apply(SporeApply(
+            op="update", origin_key="pend.4:event",
+            args={"on_event": None, "check_by": None},
+            postcondition={"on_event": None, "check_by": None},
+            expected_version=_spores.spore_version(res.spore)))
+        assert res.outcome == "applied"
+        assert "on_event" not in res.spore and "check_by" not in res.spore
+
     def test_germinated_object_is_json_and_not_aliased(self, store):
         from datetime import date as _d
         with pytest.raises(ValueError, match="germinated must be JSON"):

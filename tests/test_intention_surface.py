@@ -96,6 +96,8 @@ def test_an_exact_spelling_wins_when_a_store_holds_both_numbers(tmp_path):
     assert store.get("intention-005")["text"] == "i"
     assert store.update("intention-005", text="i2")["text"] == "i2"
     assert store.get("spore-005")["text"] == "s"
+    if spores.fcntl is None:  # apply needs the POSIX file lock (as in test_spore_apply.py)
+        return
     # an apply naming the OTHER spelling of its row's id is refused, not mutated through
     key_a, key_b = "a" * 32, "b" * 32
     rows[0]["origin_key"], rows[1]["origin_key"] = key_a, key_b

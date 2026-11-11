@@ -17,7 +17,7 @@ class TestToolDefinitions:
     """Verify canonical tool definitions are well-formed."""
 
     def test_tool_count(self):
-        assert len(TOOLS) == 17  # 7 core + 2 crystal + 8 spore (prospective layer)
+        assert len(TOOLS) == 25  # 7 core + 2 crystal + 8 spore + 8 intention (the spore tools' new names, additive)
 
     def test_tool_names(self):
         names = {t["name"] for t in TOOLS}
@@ -27,6 +27,8 @@ class TestToolDefinitions:
             "crystal_recall", "crystal_index",
             "spore_add", "spore_get", "spore_list", "spore_touch",
             "spore_update", "spore_descend", "spore_ascend", "spore_surface",
+            "intention_add", "intention_get", "intention_list", "intention_touch",
+            "intention_update", "intention_close", "intention_promote", "intention_surface",
         }
 
     def test_all_tools_have_required_fields(self):
@@ -206,7 +208,7 @@ class TestVerifyIntegrity:
         path.write_text(json.dumps({"version": 1, "tools": {}}))
         valid, issues = verify_integrity(path)
         assert valid is False
-        assert len(issues) == 17  # All 17 tools missing
+        assert len(issues) == 25  # All 25 tools missing
 
 
 class TestTheTwoManifestsCannotDrift:
@@ -687,8 +689,8 @@ class TestDocumentedToolCount:
         readme = (self._root() / "README.md").read_text(encoding="utf-8")
         for tool in TOOLS:
             name = tool["name"]
-            if name.startswith("spore_"):
-                continue  # documented collectively as `spore_*`
+            if name.startswith(("spore_", "intention_")):
+                continue  # documented collectively as `spore_*` / `intention_*`
             assert f"`{name}`" in readme, f"MCP tool {name!r} is not documented in README.md"
 
     def test_no_skill_row_marks_an_mcp_tool_as_having_no_mcp_surface(self):
@@ -924,8 +926,8 @@ class TestDocumentedToolCount:
         text = skill.read_text(encoding="utf-8")
         for tool in TOOLS:
             name = tool["name"]
-            if name.startswith("spore_"):
-                continue  # documented collectively as `spore_*`
+            if name.startswith(("spore_", "intention_")):
+                continue  # documented collectively as `spore_*` / `intention_*`
             assert f"`{name}`" in text, (
                 f"MCP tool {name!r} is not documented in SKILL.md — the depth "
                 f"doc an agent loads. It cannot use a tool it never learns of."

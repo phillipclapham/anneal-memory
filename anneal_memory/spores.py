@@ -72,7 +72,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
 from pathlib import Path
-from typing import Callable, Iterator, Literal, Mapping, TypedDict, cast
+from typing import Any, Callable, Iterable, Iterator, Literal, Mapping, TypedDict, cast
 
 try:  # POSIX advisory locking; absent on Windows (see SporeStore._transaction).
     import fcntl
@@ -84,6 +84,36 @@ from .origin import validate_origin_key as _validate_narrow_origin_key
 from .store import AnnealMemoryError
 
 SPORE_SCHEMA_VERSION = 1
+
+# The two spellings of one record's id. ``spore`` is the original and the default
+# mint; ``intention`` is the same concept under its new name. A store may hold
+# both (an install that switches prefix keeps its old records), so a lookup by
+# either spelling finds the record; the exact spelling wins when both exist.
+ID_PREFIXES: tuple[str, str] = ("spore", "intention")
+DEFAULT_ID_PREFIX = "spore"
+
+
+def _id_alias(item_id: object) -> str | None:
+    """The other prefix's spelling of ``item_id`` (``spore-007`` <-> ``intention-007``),
+    or None when it is not an id of the ``<prefix>-<rest>`` shape."""
+    if not isinstance(item_id, str):
+        return None
+    prefix, sep, rest = item_id.partition("-")
+    if not sep or not rest or prefix not in ID_PREFIXES:
+        return None
+    other = ID_PREFIXES[1] if prefix == ID_PREFIXES[0] else ID_PREFIXES[0]
+    return f"{other}-{rest}"
+
+
+def _rows_with_id(rows: Iterable[Mapping[str, Any]], wanted: object) -> list[Any]:
+    """The rows whose id is ``wanted`` exactly, else the rows whose id is its
+    other-prefix spelling. Never both: an exact match hides the alias."""
+    rows = list(rows)
+    exact = [r for r in rows if r.get("id") == wanted]
+    if exact:
+        return exact
+    alias = _id_alias(wanted)
+    return [r for r in rows if alias is not None and r.get("id") == alias]
 
 SporeType = Literal["task", "question", "thought"]
 Tier = Literal["hot", "warm", "cold", "parked"]
@@ -654,8 +684,17 @@ class SporeStore:
     silently re-inits (that would overwrite recoverable open loops on next save).
     """
 
-    def __init__(self, path: str | os.PathLike[str]) -> None:
+    def __init__(
+        self, path: str | os.PathLike[str], *, id_prefix: str = DEFAULT_ID_PREFIX
+    ) -> None:
+        """``id_prefix`` is the prefix a NEW record's id is minted with: ``"spore"``
+        (the default, every existing caller) or ``"intention"``. It changes nothing
+        about reading: ids of both prefixes are found, updated and resolved in any
+        store, and the counter runs across both so a number is never reused."""
+        if id_prefix not in ID_PREFIXES:
+            raise ValueError(f"id_prefix must be one of {ID_PREFIXES}, got {id_prefix!r}.")
         self.path = Path(path)
+        self.id_prefix = id_prefix
 
     # --- io -----------------------------------------------------------------
 
@@ -867,10 +906,10 @@ class SporeStore:
 
     # --- internal lookups ---------------------------------------------------
 
-    @staticmethod
-    def _next_id(data: dict) -> str:
-        """Next ``spore-NNN`` id, counted across live, resolved and deleted spores
-        so an id is never reused after a spore resolves or is deleted."""
+    def _next_id(self, data: dict) -> str:
+        """Next ``<id_prefix>-NNN`` id, counted across live, resolved and deleted
+        spores (of either prefix) so an id is never reused after a spore resolves
+        or is deleted."""
         max_num = 0
         rows = list(data.get("spores", [])) + list(data.get("resolved", []))
         for item in rows + SporeStore._deleted(data):
@@ -879,7 +918,7 @@ class SporeStore:
             except (IndexError, ValueError, KeyError, TypeError):
                 continue
             max_num = max(max_num, num)
-        return f"spore-{max_num + 1:03d}"
+        return f"{self.id_prefix}-{max_num + 1:03d}"
 
     @staticmethod
     def _find_open(data: dict, spore_id: str) -> SporeDict | None:
@@ -888,13 +927,13 @@ class SporeStore:
         ``expected_version`` may describe the other, so it is refused here, the
         lookup every id-addressed mutator goes through. An id that is open and
         also resolved is refused the same way."""
-        matches = [item for item in data.get("spores", []) if item.get("id") == spore_id]
+        matches = _rows_with_id(data.get("spores", []), spore_id)
         if len(matches) > 1:
             raise SporeError(
                 f"{len(matches)} open spores share id {spore_id!r}; refusing to "
                 f"write to an ambiguous id (store drift — repair by hand)."
             )
-        if matches and any(r.get("id") == spore_id for r in data.get("resolved", [])):
+        if matches and _rows_with_id(data.get("resolved", []), spore_id):
             raise SporeError(
                 f"spore {spore_id!r} is both open and resolved; refusing to write to "
                 f"an ambiguous id (store drift — repair by hand)."
@@ -921,14 +960,14 @@ class SporeStore:
                     f"status='resolved' (store drift — repair by hand)."
                 )
             return item
-        for r in data.get("resolved", []):
-            if r.get("id") == spore_id:
-                res = r.get("resolution") or {}
-                raise SporeError(
-                    f"spore '{spore_id}' is already resolved "
-                    f"({res.get('direction')}/{res.get('kind')} on "
-                    f"{res.get('on')})."
-                )
+        resolved = _rows_with_id(data.get("resolved", []), spore_id)
+        if resolved:
+            res = resolved[0].get("resolution") or {}
+            raise SporeError(
+                f"spore '{spore_id}' is already resolved "
+                f"({res.get('direction')}/{res.get('kind')} on "
+                f"{res.get('on')})."
+            )
         raise SporeError(f"spore '{spore_id}' not found.")
 
     @staticmethod
@@ -954,7 +993,7 @@ class SporeStore:
         item = SporeStore._find_open(data, spore_id)
         if item is not None:
             return item
-        matches = [r for r in data.get("resolved", []) if r.get("id") == spore_id]
+        matches = _rows_with_id(data.get("resolved", []), spore_id)
         if len(matches) > 1:
             raise SporeError(
                 f"{len(matches)} resolved spores share id {spore_id!r}; refusing to "
@@ -1012,7 +1051,7 @@ class SporeStore:
         with self._transaction() as data:
             item = self._find_any(data, spore_id)
             if item is None:
-                if any(r.get("id") == spore_id for r in self._deleted(data)):
+                if _rows_with_id(self._deleted(data), spore_id):
                     return False
                 raise SporeError(f"spore '{spore_id}' not found.")
             if origin_key is not None and item.get("origin_key") != origin_key:
@@ -1150,7 +1189,8 @@ class SporeStore:
         row = self._find_by_origin_key(data, key)
         gone = [r for r in self._deleted(data) if r.get("origin_key") == key]
         named = row if row is not None else (gone[0] if gone else None)
-        if named is not None and effect.spore_id is not None and named.get("id") != effect.spore_id:
+        if (named is not None and effect.spore_id is not None
+                and named.get("id") not in (effect.spore_id, _id_alias(effect.spore_id))):
             raise ValueError(
                 f"spore_id {effect.spore_id!r} is not the id of the spore carrying "
                 f"origin_key {key!r} ({named.get('id')!r}).")
@@ -1389,9 +1429,10 @@ class SporeStore:
         """Fetch a spore by id, searching the open set first then the resolved
         set (open takes precedence if an id somehow appears in both), or None."""
         data = self._load_keyed()
-        for item in data.get("spores", []) + data.get("resolved", []):
-            if item.get("id") == spore_id:
-                return cast("SporeDict", item)
+        for rows in (data.get("spores", []), data.get("resolved", [])):
+            found = _rows_with_id(rows, spore_id)
+            if found:
+                return cast("SporeDict", found[0])
         return None
 
     def get_by_origin_key(self, origin_key: str) -> SporeDict | None:
@@ -1850,3 +1891,21 @@ class SporeStore:
         }
         data["spores"] = [s for s in data["spores"] if s.get("id") != spore_id]
         data["resolved"].append(item)
+
+
+# --- the INTENTION names: the same objects under the concept's new name ---------
+# Aliases, not subclasses: ``IntentionStore is SporeStore``, so isinstance,
+# pickling, and every existing caller keep working, and the old names are not
+# deprecated. ``IntentionStore(path, id_prefix="intention")`` mints
+# ``intention-NNN``; the default still mints ``spore-NNN``.
+IntentionStore = SporeStore
+IntentionType = SporeType
+IntentionError = SporeError
+IntentionApply = SporeApply
+IntentionApplyResult = SporeApplyResult
+IntentionOp = SporeOp
+IntentionDict = SporeDict
+intention_version = spore_version
+INTENTION_VERSION_EXCLUDED = SPORE_VERSION_EXCLUDED
+normalize_intention_field = normalize_spore_field
+INTENTION_SCHEMA_VERSION = SPORE_SCHEMA_VERSION

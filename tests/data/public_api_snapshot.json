@@ -42,7 +42,15 @@
   "FoldResult",
   "ForeignOutcomeLogError",
   "Germination",
+  "INTENTION_VERSION_EXCLUDED",
   "IdempotencyConflictError",
+  "IntentionApply",
+  "IntentionApplyResult",
+  "IntentionDict",
+  "IntentionError",
+  "IntentionOp",
+  "IntentionStore",
+  "IntentionType",
   "LeaseFencedError",
   "LeaseGrant",
   "LogBinding",
@@ -145,7 +153,9 @@
   "graduating_headings",
   "hard_max_chars",
   "heading_marker",
+  "intention_version",
   "name_for_schema",
+  "normalize_intention_field",
   "normalize_spore_field",
   "origin_key_usable",
   "outcome_log_path",
@@ -2054,6 +2064,783 @@
     "subcommands": {},
     "subparsers": null
    },
+   "intention": {
+    "defaults": {
+     "func": "anneal_memory.cli._require_spore_subcommand",
+     "spore_group": "intention"
+    },
+    "exclusive_groups": [],
+    "options": [],
+    "subcommands": {
+     "add": {
+      "defaults": {
+       "func": "anneal_memory.cli.cmd_spore_add",
+       "id_prefix": "intention"
+      },
+      "exclusive_groups": [],
+      "options": [
+       {
+        "action": "_StoreAction",
+        "choices": null,
+        "const": null,
+        "default": null,
+        "dest": "domain",
+        "flags": [
+         "--domain"
+        ],
+        "metavar": null,
+        "nargs": null,
+        "required": false,
+        "type": null
+       },
+       {
+        "action": "_StoreTrueAction",
+        "choices": null,
+        "const": true,
+        "default": "==SUPPRESS==",
+        "dest": "json",
+        "flags": [
+         "--json"
+        ],
+        "metavar": null,
+        "nargs": 0,
+        "required": false,
+        "type": null
+       },
+       {
+        "action": "_StoreAction",
+        "choices": null,
+        "const": null,
+        "default": null,
+        "dest": "next",
+        "flags": [
+         "--next"
+        ],
+        "metavar": null,
+        "nargs": null,
+        "required": false,
+        "type": null
+       },
+       {
+        "action": "_StoreAction",
+        "choices": null,
+        "const": null,
+        "default": null,
+        "dest": "pointer",
+        "flags": [
+         "--pointer"
+        ],
+        "metavar": null,
+        "nargs": null,
+        "required": false,
+        "type": null
+       },
+       {
+        "action": "_StoreAction",
+        "choices": [
+         0,
+         1,
+         2,
+         3
+        ],
+        "const": null,
+        "default": 0,
+        "dest": "salience",
+        "flags": [
+         "--salience"
+        ],
+        "metavar": null,
+        "nargs": null,
+        "required": false,
+        "type": "int"
+       },
+       {
+        "action": "_StoreAction",
+        "choices": null,
+        "const": null,
+        "default": null,
+        "dest": "text",
+        "flags": [
+         "--text"
+        ],
+        "metavar": null,
+        "nargs": null,
+        "required": true,
+        "type": null
+       },
+       {
+        "action": "_StoreAction",
+        "choices": [
+         "hot",
+         "warm",
+         "cold",
+         "parked"
+        ],
+        "const": null,
+        "default": "warm",
+        "dest": "tier",
+        "flags": [
+         "--tier"
+        ],
+        "metavar": null,
+        "nargs": null,
+        "required": false,
+        "type": null
+       },
+       {
+        "action": "_StoreAction",
+        "choices": [
+         "task",
+         "question",
+         "thought"
+        ],
+        "const": null,
+        "default": null,
+        "dest": "type",
+        "flags": [
+         "--type"
+        ],
+        "metavar": null,
+        "nargs": null,
+        "required": true,
+        "type": null
+       }
+      ],
+      "subcommands": {},
+      "subparsers": null
+     },
+     "ascend": {
+      "defaults": {
+       "func": "anneal_memory.cli.cmd_spore_ascend",
+       "id_prefix": "intention"
+      },
+      "exclusive_groups": [],
+      "options": [
+       {
+        "action": "_StoreAction",
+        "choices": null,
+        "const": null,
+        "default": null,
+        "dest": "spore_id",
+        "flags": [],
+        "metavar": null,
+        "nargs": null,
+        "required": true,
+        "type": null
+       },
+       {
+        "action": "_StoreTrueAction",
+        "choices": null,
+        "const": true,
+        "default": "==SUPPRESS==",
+        "dest": "json",
+        "flags": [
+         "--json"
+        ],
+        "metavar": null,
+        "nargs": 0,
+        "required": false,
+        "type": null
+       },
+       {
+        "action": "_StoreAction",
+        "choices": [
+         "episode",
+         "essay",
+         "pattern",
+         "project",
+         "thread"
+        ],
+        "const": null,
+        "default": null,
+        "dest": "kind",
+        "flags": [
+         "--kind"
+        ],
+        "metavar": null,
+        "nargs": null,
+        "required": true,
+        "type": null
+       },
+       {
+        "action": "_StoreAction",
+        "choices": null,
+        "const": null,
+        "default": null,
+        "dest": "ref",
+        "flags": [
+         "--ref"
+        ],
+        "metavar": null,
+        "nargs": null,
+        "required": true,
+        "type": null
+       }
+      ],
+      "subcommands": {},
+      "subparsers": null
+     },
+     "close": {
+      "defaults": {
+       "func": "anneal_memory.cli.cmd_spore_descend",
+       "id_prefix": "intention"
+      },
+      "exclusive_groups": [],
+      "options": [
+       {
+        "action": "_StoreAction",
+        "choices": null,
+        "const": null,
+        "default": null,
+        "dest": "spore_id",
+        "flags": [],
+        "metavar": null,
+        "nargs": null,
+        "required": true,
+        "type": null
+       },
+       {
+        "action": "_StoreTrueAction",
+        "choices": null,
+        "const": true,
+        "default": "==SUPPRESS==",
+        "dest": "json",
+        "flags": [
+         "--json"
+        ],
+        "metavar": null,
+        "nargs": 0,
+        "required": false,
+        "type": null
+       },
+       {
+        "action": "_StoreAction",
+        "choices": [
+         "answered",
+         "composted",
+         "done",
+         "dropped",
+         "explored",
+         "mooted"
+        ],
+        "const": null,
+        "default": null,
+        "dest": "kind",
+        "flags": [
+         "--kind"
+        ],
+        "metavar": null,
+        "nargs": null,
+        "required": true,
+        "type": null
+       }
+      ],
+      "subcommands": {},
+      "subparsers": null
+     },
+     "descend": {
+      "defaults": {
+       "func": "anneal_memory.cli.cmd_spore_descend",
+       "id_prefix": "intention"
+      },
+      "exclusive_groups": [],
+      "options": [
+       {
+        "action": "_StoreAction",
+        "choices": null,
+        "const": null,
+        "default": null,
+        "dest": "spore_id",
+        "flags": [],
+        "metavar": null,
+        "nargs": null,
+        "required": true,
+        "type": null
+       },
+       {
+        "action": "_StoreTrueAction",
+        "choices": null,
+        "const": true,
+        "default": "==SUPPRESS==",
+        "dest": "json",
+        "flags": [
+         "--json"
+        ],
+        "metavar": null,
+        "nargs": 0,
+        "required": false,
+        "type": null
+       },
+       {
+        "action": "_StoreAction",
+        "choices": [
+         "answered",
+         "composted",
+         "done",
+         "dropped",
+         "explored",
+         "mooted"
+        ],
+        "const": null,
+        "default": null,
+        "dest": "kind",
+        "flags": [
+         "--kind"
+        ],
+        "metavar": null,
+        "nargs": null,
+        "required": true,
+        "type": null
+       }
+      ],
+      "subcommands": {},
+      "subparsers": null
+     },
+     "get": {
+      "defaults": {
+       "func": "anneal_memory.cli.cmd_spore_get",
+       "id_prefix": "intention"
+      },
+      "exclusive_groups": [],
+      "options": [
+       {
+        "action": "_StoreAction",
+        "choices": null,
+        "const": null,
+        "default": null,
+        "dest": "spore_id",
+        "flags": [],
+        "metavar": null,
+        "nargs": null,
+        "required": true,
+        "type": null
+       },
+       {
+        "action": "_StoreTrueAction",
+        "choices": null,
+        "const": true,
+        "default": "==SUPPRESS==",
+        "dest": "json",
+        "flags": [
+         "--json"
+        ],
+        "metavar": null,
+        "nargs": 0,
+        "required": false,
+        "type": null
+       }
+      ],
+      "subcommands": {},
+      "subparsers": null
+     },
+     "list": {
+      "defaults": {
+       "func": "anneal_memory.cli.cmd_spore_list",
+       "id_prefix": "intention"
+      },
+      "exclusive_groups": [],
+      "options": [
+       {
+        "action": "_StoreAction",
+        "choices": null,
+        "const": null,
+        "default": null,
+        "dest": "domain",
+        "flags": [
+         "--domain"
+        ],
+        "metavar": null,
+        "nargs": null,
+        "required": false,
+        "type": null
+       },
+       {
+        "action": "_StoreAction",
+        "choices": [
+         "growing",
+         "resting",
+         "dormant",
+         "parked"
+        ],
+        "const": null,
+        "default": null,
+        "dest": "germination",
+        "flags": [
+         "--germination"
+        ],
+        "metavar": null,
+        "nargs": null,
+        "required": false,
+        "type": null
+       },
+       {
+        "action": "_StoreTrueAction",
+        "choices": null,
+        "const": true,
+        "default": "==SUPPRESS==",
+        "dest": "json",
+        "flags": [
+         "--json"
+        ],
+        "metavar": null,
+        "nargs": 0,
+        "required": false,
+        "type": null
+       },
+       {
+        "action": "_StoreAction",
+        "choices": [
+         "hot",
+         "warm",
+         "cold",
+         "parked"
+        ],
+        "const": null,
+        "default": null,
+        "dest": "tier",
+        "flags": [
+         "--tier"
+        ],
+        "metavar": null,
+        "nargs": null,
+        "required": false,
+        "type": null
+       },
+       {
+        "action": "_StoreAction",
+        "choices": [
+         "task",
+         "question",
+         "thought"
+        ],
+        "const": null,
+        "default": null,
+        "dest": "type",
+        "flags": [
+         "--type"
+        ],
+        "metavar": null,
+        "nargs": null,
+        "required": false,
+        "type": null
+       },
+       {
+        "action": "_StoreTrueAction",
+        "choices": null,
+        "const": true,
+        "default": false,
+        "dest": "verbose",
+        "flags": [
+         "--verbose",
+         "-v"
+        ],
+        "metavar": null,
+        "nargs": 0,
+        "required": false,
+        "type": null
+       }
+      ],
+      "subcommands": {},
+      "subparsers": null
+     },
+     "promote": {
+      "defaults": {
+       "func": "anneal_memory.cli.cmd_spore_ascend",
+       "id_prefix": "intention"
+      },
+      "exclusive_groups": [],
+      "options": [
+       {
+        "action": "_StoreAction",
+        "choices": null,
+        "const": null,
+        "default": null,
+        "dest": "spore_id",
+        "flags": [],
+        "metavar": null,
+        "nargs": null,
+        "required": true,
+        "type": null
+       },
+       {
+        "action": "_StoreTrueAction",
+        "choices": null,
+        "const": true,
+        "default": "==SUPPRESS==",
+        "dest": "json",
+        "flags": [
+         "--json"
+        ],
+        "metavar": null,
+        "nargs": 0,
+        "required": false,
+        "type": null
+       },
+       {
+        "action": "_StoreAction",
+        "choices": [
+         "episode",
+         "essay",
+         "pattern",
+         "project",
+         "thread"
+        ],
+        "const": null,
+        "default": null,
+        "dest": "kind",
+        "flags": [
+         "--kind"
+        ],
+        "metavar": null,
+        "nargs": null,
+        "required": true,
+        "type": null
+       },
+       {
+        "action": "_StoreAction",
+        "choices": null,
+        "const": null,
+        "default": null,
+        "dest": "ref",
+        "flags": [
+         "--ref"
+        ],
+        "metavar": null,
+        "nargs": null,
+        "required": true,
+        "type": null
+       }
+      ],
+      "subcommands": {},
+      "subparsers": null
+     },
+     "surface": {
+      "defaults": {
+       "func": "anneal_memory.cli.cmd_spore_surface",
+       "id_prefix": "intention"
+      },
+      "exclusive_groups": [],
+      "options": [
+       {
+        "action": "_StoreTrueAction",
+        "choices": null,
+        "const": true,
+        "default": "==SUPPRESS==",
+        "dest": "json",
+        "flags": [
+         "--json"
+        ],
+        "metavar": null,
+        "nargs": 0,
+        "required": false,
+        "type": null
+       },
+       {
+        "action": "_StoreTrueAction",
+        "choices": null,
+        "const": true,
+        "default": false,
+        "dest": "top_of_mind",
+        "flags": [
+         "--top-of-mind"
+        ],
+        "metavar": null,
+        "nargs": 0,
+        "required": false,
+        "type": null
+       }
+      ],
+      "subcommands": {},
+      "subparsers": null
+     },
+     "touch": {
+      "defaults": {
+       "func": "anneal_memory.cli.cmd_spore_touch",
+       "id_prefix": "intention"
+      },
+      "exclusive_groups": [],
+      "options": [
+       {
+        "action": "_StoreAction",
+        "choices": null,
+        "const": null,
+        "default": null,
+        "dest": "spore_id",
+        "flags": [],
+        "metavar": null,
+        "nargs": null,
+        "required": true,
+        "type": null
+       },
+       {
+        "action": "_StoreTrueAction",
+        "choices": null,
+        "const": true,
+        "default": "==SUPPRESS==",
+        "dest": "json",
+        "flags": [
+         "--json"
+        ],
+        "metavar": null,
+        "nargs": 0,
+        "required": false,
+        "type": null
+       }
+      ],
+      "subcommands": {},
+      "subparsers": null
+     },
+     "update": {
+      "defaults": {
+       "func": "anneal_memory.cli.cmd_spore_update",
+       "id_prefix": "intention"
+      },
+      "exclusive_groups": [],
+      "options": [
+       {
+        "action": "_StoreAction",
+        "choices": null,
+        "const": null,
+        "default": null,
+        "dest": "spore_id",
+        "flags": [],
+        "metavar": null,
+        "nargs": null,
+        "required": true,
+        "type": null
+       },
+       {
+        "action": "_StoreAction",
+        "choices": null,
+        "const": null,
+        "default": null,
+        "dest": "add_note",
+        "flags": [
+         "--add-note"
+        ],
+        "metavar": null,
+        "nargs": null,
+        "required": false,
+        "type": null
+       },
+       {
+        "action": "_StoreAction",
+        "choices": null,
+        "const": null,
+        "default": null,
+        "dest": "domain",
+        "flags": [
+         "--domain"
+        ],
+        "metavar": null,
+        "nargs": null,
+        "required": false,
+        "type": null
+       },
+       {
+        "action": "_StoreTrueAction",
+        "choices": null,
+        "const": true,
+        "default": "==SUPPRESS==",
+        "dest": "json",
+        "flags": [
+         "--json"
+        ],
+        "metavar": null,
+        "nargs": 0,
+        "required": false,
+        "type": null
+       },
+       {
+        "action": "_StoreAction",
+        "choices": null,
+        "const": null,
+        "default": null,
+        "dest": "next",
+        "flags": [
+         "--next"
+        ],
+        "metavar": null,
+        "nargs": null,
+        "required": false,
+        "type": null
+       },
+       {
+        "action": "_StoreAction",
+        "choices": null,
+        "const": null,
+        "default": null,
+        "dest": "pointer",
+        "flags": [
+         "--pointer"
+        ],
+        "metavar": null,
+        "nargs": null,
+        "required": false,
+        "type": null
+       },
+       {
+        "action": "_StoreAction",
+        "choices": [
+         0,
+         1,
+         2,
+         3
+        ],
+        "const": null,
+        "default": null,
+        "dest": "salience",
+        "flags": [
+         "--salience"
+        ],
+        "metavar": null,
+        "nargs": null,
+        "required": false,
+        "type": "int"
+       },
+       {
+        "action": "_StoreAction",
+        "choices": null,
+        "const": null,
+        "default": null,
+        "dest": "text",
+        "flags": [
+         "--text"
+        ],
+        "metavar": null,
+        "nargs": null,
+        "required": false,
+        "type": null
+       },
+       {
+        "action": "_StoreAction",
+        "choices": [
+         "hot",
+         "warm",
+         "cold",
+         "parked"
+        ],
+        "const": null,
+        "default": null,
+        "dest": "tier",
+        "flags": [
+         "--tier"
+        ],
+        "metavar": null,
+        "nargs": null,
+        "required": false,
+        "type": null
+       }
+      ],
+      "subcommands": {},
+      "subparsers": null
+     }
+    },
+    "subparsers": {
+     "dest": "spore_command",
+     "required": false
+    }
+   },
    "migrate": {
     "defaults": {
      "func": "anneal_memory.cli._require_migrate_subcommand"
@@ -3443,14 +4230,16 @@
    },
    "spore": {
     "defaults": {
-     "func": "anneal_memory.cli._require_spore_subcommand"
+     "func": "anneal_memory.cli._require_spore_subcommand",
+     "spore_group": "spore"
     },
     "exclusive_groups": [],
     "options": [],
     "subcommands": {
      "add": {
       "defaults": {
-       "func": "anneal_memory.cli.cmd_spore_add"
+       "func": "anneal_memory.cli.cmd_spore_add",
+       "id_prefix": "spore"
       },
       "exclusive_groups": [],
       "options": [
@@ -3586,7 +4375,8 @@
      },
      "ascend": {
       "defaults": {
-       "func": "anneal_memory.cli.cmd_spore_ascend"
+       "func": "anneal_memory.cli.cmd_spore_ascend",
+       "id_prefix": "spore"
       },
       "exclusive_groups": [],
       "options": [
@@ -3656,7 +4446,8 @@
      },
      "descend": {
       "defaults": {
-       "func": "anneal_memory.cli.cmd_spore_descend"
+       "func": "anneal_memory.cli.cmd_spore_descend",
+       "id_prefix": "spore"
       },
       "exclusive_groups": [],
       "options": [
@@ -3713,7 +4504,8 @@
      },
      "get": {
       "defaults": {
-       "func": "anneal_memory.cli.cmd_spore_get"
+       "func": "anneal_memory.cli.cmd_spore_get",
+       "id_prefix": "spore"
       },
       "exclusive_groups": [],
       "options": [
@@ -3749,7 +4541,8 @@
      },
      "list": {
       "defaults": {
-       "func": "anneal_memory.cli.cmd_spore_list"
+       "func": "anneal_memory.cli.cmd_spore_list",
+       "id_prefix": "spore"
       },
       "exclusive_groups": [],
       "options": [
@@ -3858,7 +4651,8 @@
      },
      "surface": {
       "defaults": {
-       "func": "anneal_memory.cli.cmd_spore_surface"
+       "func": "anneal_memory.cli.cmd_spore_surface",
+       "id_prefix": "spore"
       },
       "exclusive_groups": [],
       "options": [
@@ -3896,7 +4690,8 @@
      },
      "touch": {
       "defaults": {
-       "func": "anneal_memory.cli.cmd_spore_touch"
+       "func": "anneal_memory.cli.cmd_spore_touch",
+       "id_prefix": "spore"
       },
       "exclusive_groups": [],
       "options": [
@@ -3932,7 +4727,8 @@
      },
      "update": {
       "defaults": {
-       "func": "anneal_memory.cli.cmd_spore_update"
+       "func": "anneal_memory.cli.cmd_spore_update",
+       "id_prefix": "spore"
       },
       "exclusive_groups": [],
       "options": [
@@ -5395,6 +6191,14 @@
    "type": "_LiteralGenericAlias",
    "value": "typing.Literal['growing', 'resting', 'dormant', 'parked']"
   },
+  "INTENTION_VERSION_EXCLUDED": {
+   "kind": "value",
+   "type": "frozenset",
+   "value": [
+    "origin_key",
+    "seen"
+   ]
+  },
   "IdempotencyConflictError": {
    "bases": [
     "anneal_memory.store.StoreError"
@@ -5403,6 +6207,152 @@
    "kind": "class",
    "members": {},
    "module": "anneal_memory.store"
+  },
+  "IntentionApply": {
+   "bases": [],
+   "init": "(op: 'SporeOp', origin_key: 'str', spore_id: 'str | None' = None, args: 'Mapping[str, object]' = <factory>, expected_version: 'str | None' = None, version_of: 'VersionOf | None' = None, postcondition: 'Mapping[str | tuple[str, ...], object]' = <factory>) -> None",
+   "kind": "class",
+   "members": {
+    "expected_version": {
+     "kind": "attribute",
+     "value": null
+    },
+    "spore_id": {
+     "kind": "attribute",
+     "value": null
+    },
+    "version_of": {
+     "kind": "attribute",
+     "value": null
+    }
+   },
+   "module": "anneal_memory.spores"
+  },
+  "IntentionApplyResult": {
+   "bases": [],
+   "init": "(outcome: \"Literal['applied', 'already', 'precondition_lost']\", spore_id: 'str | None', spore: 'SporeDict | None', version: 'str | None') -> None",
+   "kind": "class",
+   "members": {},
+   "module": "anneal_memory.spores"
+  },
+  "IntentionDict": {
+   "bases": [
+    "builtins.dict"
+   ],
+   "init": null,
+   "kind": "class",
+   "members": {},
+   "module": "anneal_memory.spores",
+   "typed_dict": {
+    "annotations": {
+     "created": "ForwardRef('str', module='anneal_memory.spores')",
+     "domain": "ForwardRef('str', module='anneal_memory.spores')",
+     "id": "ForwardRef('str', module='anneal_memory.spores')",
+     "next": "ForwardRef('str | None', module='anneal_memory.spores')",
+     "notes": "ForwardRef('list[str]', module='anneal_memory.spores')",
+     "origin_key": "ForwardRef('str', module='anneal_memory.spores')",
+     "pointer": "ForwardRef('str | None', module='anneal_memory.spores')",
+     "resolution": "ForwardRef('ResolutionDict | None', module='anneal_memory.spores')",
+     "salience": "ForwardRef('int', module='anneal_memory.spores')",
+     "seen": "ForwardRef('str', module='anneal_memory.spores')",
+     "status": "ForwardRef('Status', module='anneal_memory.spores')",
+     "text": "ForwardRef('str', module='anneal_memory.spores')",
+     "tier": "ForwardRef('Tier', module='anneal_memory.spores')",
+     "type": "ForwardRef('SporeType', module='anneal_memory.spores')"
+    },
+    "optional": [],
+    "required": [
+     "created",
+     "domain",
+     "id",
+     "next",
+     "notes",
+     "origin_key",
+     "pointer",
+     "resolution",
+     "salience",
+     "seen",
+     "status",
+     "text",
+     "tier",
+     "type"
+    ]
+   }
+  },
+  "IntentionError": {
+   "bases": [
+    "anneal_memory.store.AnnealMemoryError"
+   ],
+   "init": null,
+   "kind": "class",
+   "members": {},
+   "module": "anneal_memory.spores"
+  },
+  "IntentionOp": {
+   "kind": "value",
+   "type": "_LiteralGenericAlias",
+   "value": "typing.Literal['add', 'update', 'descend', 'ascend', 'delete']"
+  },
+  "IntentionStore": {
+   "bases": [],
+   "init": "(path: 'str | os.PathLike[str]', *, id_prefix: 'str' = 'spore') -> 'None'",
+   "kind": "class",
+   "members": {
+    "add": {
+     "kind": "method",
+     "signature": "(self, *, type: 'SporeType', text: 'str', domain: 'str' = '', tier: 'Tier' = 'warm', salience: 'int' = 0, next: 'str | None' = None, pointer: 'str | None' = None, disposition: 'str | None' = None, target: 'str | None' = None, attention: 'str | None' = None, recur: 'str | None' = None, recur_anchor: 'str | None' = None, on_event: 'str | None' = None, check_by: 'str | None' = None, germinated: 'str | dict | None' = None, today: 'date | None' = None, origin_key: 'str | None' = None) -> 'SporeDict'"
+    },
+    "apply": {
+     "kind": "method",
+     "signature": "(self, effect: 'SporeApply') -> 'SporeApplyResult'"
+    },
+    "ascend": {
+     "kind": "method",
+     "signature": "(self, spore_id: 'str', *, kind: 'str', ref: 'str', expect_disposition: 'str | None | _Unset' = <anneal_memory.spores._Unset object>, today: 'date | None' = None, now: 'datetime | None' = None, expected_version: 'str | None' = None, version_of: 'VersionOf | None' = None) -> 'SporeDict'"
+    },
+    "backfill_origin_keys": {
+     "kind": "method",
+     "signature": "(self) -> 'int'"
+    },
+    "delete": {
+     "kind": "method",
+     "signature": "(self, spore_id: 'str', *, expected_version: 'str', version_of: 'VersionOf | None' = None, origin_key: 'str | None' = None, today: 'date | None' = None, now: 'datetime | None' = None) -> 'bool'"
+    },
+    "descend": {
+     "kind": "method",
+     "signature": "(self, spore_id: 'str', *, kind: 'str', expect_disposition: 'str | None | _Unset' = <anneal_memory.spores._Unset object>, today: 'date | None' = None, now: 'datetime | None' = None, expected_version: 'str | None' = None, version_of: 'VersionOf | None' = None) -> 'SporeDict'"
+    },
+    "get": {
+     "kind": "method",
+     "signature": "(self, spore_id: 'str') -> 'SporeDict | None'"
+    },
+    "get_by_origin_key": {
+     "kind": "method",
+     "signature": "(self, origin_key: 'str') -> 'SporeDict | None'"
+    },
+    "list_open": {
+     "kind": "method",
+     "signature": "(self, *, type: 'SporeType | None' = None, tier: 'Tier | None' = None, domain: 'str | None' = None, germination: 'Germination | None' = None, today: 'date | None' = None, now: 'datetime | None' = None) -> 'list[SporeDict]'"
+    },
+    "surface": {
+     "kind": "method",
+     "signature": "(self, *, top_of_mind: 'bool' = False, today: 'date | None' = None, now: 'datetime | None' = None) -> 'list[SporeDict]'"
+    },
+    "touch": {
+     "kind": "method",
+     "signature": "(self, spore_id: 'str', *, today: 'date | None' = None, now: 'datetime | None' = None, expected_version: 'str | None' = None, version_of: 'VersionOf | None' = None) -> 'SporeDict'"
+    },
+    "update": {
+     "kind": "method",
+     "signature": "(self, spore_id: 'str', *, type: 'SporeType | _Unset' = <anneal_memory.spores._Unset object>, tier: 'Tier | _Unset' = <anneal_memory.spores._Unset object>, next: 'str | None | _Unset' = <anneal_memory.spores._Unset object>, text: 'str | _Unset' = <anneal_memory.spores._Unset object>, salience: 'int | _Unset' = <anneal_memory.spores._Unset object>, domain: 'str | _Unset' = <anneal_memory.spores._Unset object>, pointer: 'str | None | _Unset' = <anneal_memory.spores._Unset object>, disposition: 'str | None | _Unset' = <anneal_memory.spores._Unset object>, target: 'str | None | _Unset' = <anneal_memory.spores._Unset object>, attention: 'str | None | _Unset' = <anneal_memory.spores._Unset object>, recur: 'str | None | _Unset' = <anneal_memory.spores._Unset object>, recur_anchor: 'str | None | _Unset' = <anneal_memory.spores._Unset object>, on_event: 'str | None | _Unset' = <anneal_memory.spores._Unset object>, check_by: 'str | None | _Unset' = <anneal_memory.spores._Unset object>, germinated: 'str | dict | None | _Unset' = <anneal_memory.spores._Unset object>, expect_disposition: 'str | None | _Unset' = <anneal_memory.spores._Unset object>, add_note: 'str | None' = None, today: 'date | None' = None, expected_version: 'str | None' = None, version_of: 'VersionOf | None' = None) -> 'SporeDict'"
+    }
+   },
+   "module": "anneal_memory.spores"
+  },
+  "IntentionType": {
+   "kind": "value",
+   "type": "_LiteralGenericAlias",
+   "value": "typing.Literal['task', 'question', 'thought']"
   },
   "LeaseFencedError": {
    "bases": [
@@ -6256,7 +7206,7 @@
   },
   "SporeStore": {
    "bases": [],
-   "init": "(path: 'str | os.PathLike[str]') -> 'None'",
+   "init": "(path: 'str | os.PathLike[str]', *, id_prefix: 'str' = 'spore') -> 'None'",
    "kind": "class",
    "members": {
     "add": {
@@ -7372,6 +8322,250 @@
       "type": "object"
      },
      "name": "spore_surface"
+    },
+    {
+     "description": "Add an intention — an open cognitive loop in the PROSPECTIVE layer (a thing that must RESOLVE), distinct from episodic/continuity memory (which accretes and never completes). Use for an open intention you want to carry forward and close later: a `task` (open doing), a `question` (open not-knowing), or a `thought` (open idea). Set `tier` to weight intent (hot/warm/cold/parked) and `next` (YYYY-MM-DD or YYYY-MM-DDTHH:MM) to ask for re-surfacing on a date. Resolve later via intention_close (done / dropped / composted) or intention_promote (into memory/a project).",
+     "inputSchema": {
+      "properties": {
+       "domain": {
+        "description": "Optional free-text domain tag (e.g. health, strategic, flow).",
+        "type": "string"
+       },
+       "next": {
+        "description": "YYYY-MM-DD or YYYY-MM-DDTHH:MM (local time) — when to re-surface (a reminder date, NOT a deadline).",
+        "type": "string"
+       },
+       "pointer": {
+        "description": "Optional link to fuller context for the loop as it stands.",
+        "type": "string"
+       },
+       "salience": {
+        "description": "0–3 weight (the !/!!/!!! marker). Default 0.",
+        "maximum": 3,
+        "minimum": 0,
+        "type": "integer"
+       },
+       "text": {
+        "description": "The open loop itself.",
+        "type": "string"
+       },
+       "tier": {
+        "description": "Intent priority (default warm). 'parked' = deliberate dormancy.",
+        "enum": [
+         "hot",
+         "warm",
+         "cold",
+         "parked"
+        ],
+        "type": "string"
+       },
+       "type": {
+        "description": "What KIND of openness: task=doing, question=not-knowing, thought=idea.",
+        "enum": [
+         "task",
+         "question",
+         "thought"
+        ],
+        "type": "string"
+       }
+      },
+      "required": [
+       "type",
+       "text"
+      ],
+      "type": "object"
+     },
+     "name": "intention_add"
+    },
+    {
+     "description": "Fetch one intention by id (searches open first, then resolved). Returns its full record including computed germination and any resolution. Reads either id spelling: 'intention-007' or the older 'spore-007'.",
+     "inputSchema": {
+      "properties": {
+       "intention_id": {
+        "description": "Intention id, e.g. 'intention-007' (an older 'spore-007' reads too).",
+        "type": "string"
+       }
+      },
+      "required": [
+       "intention_id"
+      ],
+      "type": "object"
+     },
+     "name": "intention_get"
+    },
+    {
+     "description": "List OPEN intentions, ranked by tier then salience then germination. Germination is computed at read-time (growing <3d / resting 3–7d / dormant >7d or past its `next:` / parked). Filter by type, tier, domain, or germination. This is the working view; for the salience-generator surface use intention_surface.",
+     "inputSchema": {
+      "properties": {
+       "domain": {
+        "type": "string"
+       },
+       "germination": {
+        "enum": [
+         "growing",
+         "resting",
+         "dormant",
+         "parked"
+        ],
+        "type": "string"
+       },
+       "tier": {
+        "enum": [
+         "hot",
+         "warm",
+         "cold",
+         "parked"
+        ],
+        "type": "string"
+       },
+       "type": {
+        "enum": [
+         "task",
+         "question",
+         "thought"
+        ],
+        "type": "string"
+       }
+      },
+      "type": "object"
+     },
+     "name": "intention_list"
+    },
+    {
+     "description": "Engage an intention: set `seen` to today and clear an elapsed `next:` alarm (returning it to 'growing'). Call when you revisit an open loop but aren't resolving it — keeps germination honest.",
+     "inputSchema": {
+      "properties": {
+       "intention_id": {
+        "type": "string"
+       }
+      },
+      "required": [
+       "intention_id"
+      ],
+      "type": "object"
+     },
+     "name": "intention_touch"
+    },
+    {
+     "description": "Metadata surgery on an OPEN intention. Only the fields you pass change; pass an empty string to next/pointer/domain to CLEAR them. Does NOT bump `seen` (use intention_touch to signal engagement). Use add_note to append a dated note.",
+     "inputSchema": {
+      "properties": {
+       "add_note": {
+        "description": "Append a dated note.",
+        "type": "string"
+       },
+       "domain": {
+        "description": "Empty string clears.",
+        "type": "string"
+       },
+       "intention_id": {
+        "type": "string"
+       },
+       "next": {
+        "description": "YYYY-MM-DD or YYYY-MM-DDTHH:MM, or empty string to clear.",
+        "type": "string"
+       },
+       "pointer": {
+        "description": "Empty string clears.",
+        "type": "string"
+       },
+       "salience": {
+        "maximum": 3,
+        "minimum": 0,
+        "type": "integer"
+       },
+       "text": {
+        "type": "string"
+       },
+       "tier": {
+        "enum": [
+         "hot",
+         "warm",
+         "cold",
+         "parked"
+        ],
+        "type": "string"
+       }
+      },
+      "required": [
+       "intention_id"
+      ],
+      "type": "object"
+     },
+     "name": "intention_update"
+    },
+    {
+     "description": "Close an intention DOWNWARD — done, dropped, or composted. `kind` must fit the intention's type: task -> done|dropped|composted; question -> answered|mooted|composted; thought -> explored|dropped|composted ('composted' is the universal neglect-close). This is the close that does NOT cross into retrospective memory.",
+     "inputSchema": {
+      "properties": {
+       "intention_id": {
+        "type": "string"
+       },
+       "kind": {
+        "description": "Terminal kind; must be valid for the intention's type.",
+        "enum": [
+         "done",
+         "dropped",
+         "composted",
+         "answered",
+         "mooted",
+         "explored"
+        ],
+        "type": "string"
+       }
+      },
+      "required": [
+       "intention_id",
+       "kind"
+      ],
+      "type": "object"
+     },
+     "name": "intention_close"
+    },
+    {
+     "description": "Close an intention UPWARD — the membrane INTO retrospective memory. The intention became real work: record a `ref` (a pointer to what it became — a project path, an episode id, a pattern name). `kind` must fit the type: task -> project|thread; question -> episode|pattern; thought -> essay|pattern|project. In v1 this RECORDS the pointer; the actual episode/continuity write stays the host's act.",
+     "inputSchema": {
+      "properties": {
+       "intention_id": {
+        "type": "string"
+       },
+       "kind": {
+        "description": "Promote target; must be valid for the intention's type.",
+        "enum": [
+         "project",
+         "thread",
+         "episode",
+         "pattern",
+         "essay"
+        ],
+        "type": "string"
+       },
+       "ref": {
+        "description": "What the intention became (project path / episode id / pattern name).",
+        "type": "string"
+       }
+      },
+      "required": [
+       "intention_id",
+       "kind",
+       "ref"
+      ],
+      "type": "object"
+     },
+     "name": "intention_promote"
+    },
+    {
+     "description": "The surface a salience generator consumes. With top_of_mind=true, only the Top-of-Mind contribution (intentions that are 'hot' OR 'growing', ranked, across all three types); otherwise all open intentions, ranked. The downstream consumer composes the full Top of Mind from this x active threads x recent ships.",
+     "inputSchema": {
+      "properties": {
+       "top_of_mind": {
+        "description": "Only the hot-or-growing ToM contribution (default false = all open).",
+        "type": "boolean"
+       }
+      },
+      "type": "object"
+     },
+     "name": "intention_surface"
     }
    ]
   },
@@ -7795,10 +8989,20 @@
    "module": "anneal_memory.schema",
    "signature": "(heading: 'str') -> 'str'"
   },
+  "intention_version": {
+   "kind": "function",
+   "module": "anneal_memory.spores",
+   "signature": "(spore: 'SporeDict') -> 'str'"
+  },
   "name_for_schema": {
    "kind": "function",
    "module": "anneal_memory.schema",
    "signature": "(schema: 'list[SectionSpec]') -> 'str | None'"
+  },
+  "normalize_intention_field": {
+   "kind": "function",
+   "module": "anneal_memory.spores",
+   "signature": "(value: 'str') -> 'str'"
   },
   "normalize_spore_field": {
    "kind": "function",
@@ -8135,6 +9339,218 @@
    },
    "required": [
     "episode_id"
+   ],
+   "type": "object"
+  },
+  "intention_add": {
+   "properties": {
+    "domain": {
+     "description": "Optional free-text domain tag (e.g. health, strategic, flow).",
+     "type": "string"
+    },
+    "next": {
+     "description": "YYYY-MM-DD or YYYY-MM-DDTHH:MM (local time) — when to re-surface (a reminder date, NOT a deadline).",
+     "type": "string"
+    },
+    "pointer": {
+     "description": "Optional link to fuller context for the loop as it stands.",
+     "type": "string"
+    },
+    "salience": {
+     "description": "0–3 weight (the !/!!/!!! marker). Default 0.",
+     "maximum": 3,
+     "minimum": 0,
+     "type": "integer"
+    },
+    "text": {
+     "description": "The open loop itself.",
+     "type": "string"
+    },
+    "tier": {
+     "description": "Intent priority (default warm). 'parked' = deliberate dormancy.",
+     "enum": [
+      "hot",
+      "warm",
+      "cold",
+      "parked"
+     ],
+     "type": "string"
+    },
+    "type": {
+     "description": "What KIND of openness: task=doing, question=not-knowing, thought=idea.",
+     "enum": [
+      "task",
+      "question",
+      "thought"
+     ],
+     "type": "string"
+    }
+   },
+   "required": [
+    "type",
+    "text"
+   ],
+   "type": "object"
+  },
+  "intention_close": {
+   "properties": {
+    "intention_id": {
+     "type": "string"
+    },
+    "kind": {
+     "description": "Terminal kind; must be valid for the intention's type.",
+     "enum": [
+      "done",
+      "dropped",
+      "composted",
+      "answered",
+      "mooted",
+      "explored"
+     ],
+     "type": "string"
+    }
+   },
+   "required": [
+    "intention_id",
+    "kind"
+   ],
+   "type": "object"
+  },
+  "intention_get": {
+   "properties": {
+    "intention_id": {
+     "description": "Intention id, e.g. 'intention-007' (an older 'spore-007' reads too).",
+     "type": "string"
+    }
+   },
+   "required": [
+    "intention_id"
+   ],
+   "type": "object"
+  },
+  "intention_list": {
+   "properties": {
+    "domain": {
+     "type": "string"
+    },
+    "germination": {
+     "enum": [
+      "growing",
+      "resting",
+      "dormant",
+      "parked"
+     ],
+     "type": "string"
+    },
+    "tier": {
+     "enum": [
+      "hot",
+      "warm",
+      "cold",
+      "parked"
+     ],
+     "type": "string"
+    },
+    "type": {
+     "enum": [
+      "task",
+      "question",
+      "thought"
+     ],
+     "type": "string"
+    }
+   },
+   "type": "object"
+  },
+  "intention_promote": {
+   "properties": {
+    "intention_id": {
+     "type": "string"
+    },
+    "kind": {
+     "description": "Promote target; must be valid for the intention's type.",
+     "enum": [
+      "project",
+      "thread",
+      "episode",
+      "pattern",
+      "essay"
+     ],
+     "type": "string"
+    },
+    "ref": {
+     "description": "What the intention became (project path / episode id / pattern name).",
+     "type": "string"
+    }
+   },
+   "required": [
+    "intention_id",
+    "kind",
+    "ref"
+   ],
+   "type": "object"
+  },
+  "intention_surface": {
+   "properties": {
+    "top_of_mind": {
+     "description": "Only the hot-or-growing ToM contribution (default false = all open).",
+     "type": "boolean"
+    }
+   },
+   "type": "object"
+  },
+  "intention_touch": {
+   "properties": {
+    "intention_id": {
+     "type": "string"
+    }
+   },
+   "required": [
+    "intention_id"
+   ],
+   "type": "object"
+  },
+  "intention_update": {
+   "properties": {
+    "add_note": {
+     "description": "Append a dated note.",
+     "type": "string"
+    },
+    "domain": {
+     "description": "Empty string clears.",
+     "type": "string"
+    },
+    "intention_id": {
+     "type": "string"
+    },
+    "next": {
+     "description": "YYYY-MM-DD or YYYY-MM-DDTHH:MM, or empty string to clear.",
+     "type": "string"
+    },
+    "pointer": {
+     "description": "Empty string clears.",
+     "type": "string"
+    },
+    "salience": {
+     "maximum": 3,
+     "minimum": 0,
+     "type": "integer"
+    },
+    "text": {
+     "type": "string"
+    },
+    "tier": {
+     "enum": [
+      "hot",
+      "warm",
+      "cold",
+      "parked"
+     ],
+     "type": "string"
+    }
+   },
+   "required": [
+    "intention_id"
    ],
    "type": "object"
   },

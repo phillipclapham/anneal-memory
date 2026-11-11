@@ -80,7 +80,7 @@ class TestPing:
 class TestToolsList:
     def test_returns_all_tools(self, server):
         result = server._handle_tools_list({})
-        assert len(result["tools"]) == 17  # 7 core + 2 crystal + 8 spore tools
+        assert len(result["tools"]) == 25  # 7 core + 2 crystal + 8 spore + 8 intention tools
 
     def test_crystal_tools_registered(self, server):
         names = {t["name"] for t in server._handle_tools_list({})["tools"]}
@@ -126,7 +126,7 @@ class TestResourcesRead:
         assert "spore_add" in manifest["tools"]
         assert "crystal_recall" in manifest["tools"]
         assert "crystal_index" in manifest["tools"]
-        assert len(manifest["tools"]) == 17  # 7 core + 2 crystal + 8 spore tools
+        assert len(manifest["tools"]) == 25  # 7 core + 2 crystal + 8 spore + 8 intention tools
 
     def test_unknown_uri_returns_empty(self, server):
         result = server._handle_resources_read({"uri": "anneal://unknown"})

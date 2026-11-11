@@ -471,6 +471,8 @@ anneal ships **spores** as a separate sibling store (`<stem>.spores.json`) for e
 - **Prospective** — what you intend (spores). It completes and clears.
 - **Methodology** — the procedure you run (your wrap discipline, your recall habits). It operates on the other two.
 
+**Spores are also called intentions.** The same store, under the concept's new name: `IntentionStore` (an alias of `SporeStore`; `id_prefix="intention"` mints `intention-NNN` ids, the default still mints `spore-NNN`), the `intention_*` MCP tools and `anneal-memory intention …` beside the `spore_*` ones. Nothing named `spore` is deprecated, an id of either spelling reads in either, and the file is still `<stem>.spores.json`.
+
 If you're integrating anneal into an existing agent that already tracks open loops, spores is the typed store those loops route *into* — your methodology *operates* the spore store, it doesn't compete with it.
 
 ## The Consolidation Landscape (2026)
@@ -538,9 +540,10 @@ The graduation system depends on wraps to function. Patterns can only be promote
 | `wrap_cancel` | Abandon a wrap that is open and will not be finished — the escape hatch when `prepare_wrap` refuses with "a wrap is already in progress". Episodes are not deleted; the next `prepare_wrap` picks them up. Optional `wrap_token`: cancel only if that wrap is still the one in progress, refused with no change otherwise. A wrap prepared under the consolidate gate is cancelled without its token only with the preparing `session_id`, or `force: true`. `partial: true` clears partial (corrupt) wrap state only, and refuses if a healthy wrap replaced it |
 | `crystal_recall` | Recall crystallized (graduated, long-term) patterns relevant to a query — the on-demand semantic tier. Keyword scoring is corpus-aware (rare, distinctive terms outweigh common process-words, so recall stays precise on a large store), and recall also follows evidence edges — surfacing a pattern grounded in an episode your query matched even with zero keyword overlap. Pass `mode: "query"` for a question you are asking on purpose (one keyword is enough, weaker matches come back too); the default `"prompt"` stays strict. See [The Memory Architecture](#the-memory-architecture-complementary-learning-systems) |
 | `crystal_index` | The always-on name + one-clause menu of the crystallized store — what graduated wisdom exists, so the agent isn't blind to its own corpus (the bodies fill on cue via `crystal_recall`) |
+| `intention_*` | The same layer under its new name — `intention_add` / `intention_list` / `intention_surface` / `intention_get` / `intention_update` / `intention_touch` / `intention_close` / `intention_promote`. One store file with the `spore_*` tools: an id from either family reads in the other, `intention_add` mints `intention-NNN`. `intention_close` and `intention_promote` are the names for `spore_descend` and `spore_ascend` |
 | `spore_*` | The prospective (spore) layer — open loops that must resolve, distinct from retrospective memory: `spore_add` / `spore_list` / `spore_surface` / `spore_get` / `spore_update` / `spore_touch` / `spore_descend` / `spore_ascend`. See [Prospective memory — spores](#prospective-memory--spores) |
 
-**17 tools total** (7 memory + 2 crystal + 8 spore). The crystallized tier exposes only its **read** surface over MCP (`crystal_recall` / `crystal_index`); crystallizing *out* stays a wrap-time / CLI / library action (it carries the opt-in + decision-channel governance).
+**25 tools total** (7 memory + 2 crystal + 8 spore + 8 intention, the spore tools' additive new names). The crystallized tier exposes only its **read** surface over MCP (`crystal_recall` / `crystal_index`); crystallizing *out* stays a wrap-time / CLI / library action (it carries the opt-in + decision-channel governance).
 
 **Resources:** `anneal://continuity` — the current continuity file, auto-loaded at session start. `anneal://integrity/manifest` — SHA-256 hashes for host-side tool description verification.
 

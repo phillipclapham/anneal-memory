@@ -2,6 +2,11 @@
 
 All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project uses [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.7] — 2026-11-11
+
+### Added
+- **The spore layer under its new name, INTENTION: an additive public surface; every `spore` name is unchanged and not deprecated.** `IntentionStore`, `IntentionType`, `IntentionError`, `IntentionApply`, `IntentionApplyResult`, `IntentionOp`, `IntentionDict`, `intention_version`, `INTENTION_VERSION_EXCLUDED` and `normalize_intention_field` are aliases of the `Spore*` objects (`IntentionStore is SporeStore`). `SporeStore(path, *, id_prefix="spore")` gains a keyword-only `id_prefix`: the default mints `spore-NNN` exactly as before, `id_prefix="intention"` mints `intention-NNN`. Reading is not affected by the prefix: `get`, `update`, `touch`, `descend`, `ascend` and `delete` find a record by either spelling (`spore-007` or `intention-007`), an exact spelling wins when a store somehow holds both, and the counter runs across both prefixes so a number is never reused. MCP gains eight tools beside the eight `spore_*` ones, on the same store file: `intention_add`, `intention_get`, `intention_list`, `intention_touch`, `intention_update`, `intention_close` (the new name for `spore_descend`), `intention_promote` (for `spore_ascend`) and `intention_surface`; they take `intention_id` where the spore tools take `spore_id` (the intention tools also read `spore_id`), and `intention_add` mints `intention-NNN` ids. CLI: `anneal-memory intention <add|get|list|touch|update|close|promote|surface>` is an alias group of `anneal-memory spore <...>` (it also takes `descend` and `ascend`). The tool count is 25 (the original 17 are unchanged by name and input schema; the eight `intention_*` tools are additions). Known edges: the store file is still `<stem>.spores.json` (no second file is created, and none is read); `IntentionApply` keeps the field name `spore_id`; error and CLI text messages still say "spore"; the module is still `anneal_memory/spores.py`.
+
 ## [1.0.6] — 2026-11-10
 
 ### Added

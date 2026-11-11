@@ -3871,7 +3871,10 @@ def _open_spore_store(args: argparse.Namespace) -> SporeStore:
     creates it on first write, so spores can be planted into a fresh store
     location (the prospective layer is independent of the episodic db)."""
     db_path = _db_path(args.db)
-    return SporeStore(db_path.parent / f"{db_path.stem}.spores.json")
+    return SporeStore(
+        db_path.parent / f"{db_path.stem}.spores.json",
+        id_prefix=getattr(args, "id_prefix", "spore"),
+    )
 
 
 def _spore_row(s: SporeDict, today: date) -> dict[str, Any]:
@@ -4064,10 +4067,94 @@ def cmd_spore_surface(args: argparse.Namespace) -> None:
 
 def _require_spore_subcommand(args: argparse.Namespace) -> None:
     """``anneal-memory spore`` with no action — point at the available actions."""
-    print("Error: 'spore' requires a subcommand: "
-          "add / get / list / touch / update / descend / ascend / surface.",
-          file=sys.stderr)
+    group = getattr(args, "spore_group", "spore")
+    verbs = ("add / get / list / touch / update / close / promote / surface"
+             if group == "intention"
+             else "add / get / list / touch / update / descend / ascend / surface")
+    print(f"Error: '{group}' requires a subcommand: {verbs}.", file=sys.stderr)
     sys.exit(1)
+
+
+def _register_spore_group(
+    subparsers: Any, json_parent: argparse.ArgumentParser, *, intention: bool
+) -> None:
+    """Register the ``spore`` group, or its ``intention`` twin (same store and
+    subcommands; ``id_prefix`` decides what a NEW id is minted as)."""
+    if intention:
+        group, noun, prefix = "intention", "intention", "intention"
+        group_help = "Intentions (the spore layer's new name): typed open loops (task/question/thought)"
+        add_help, get_help, id_help = "Add a new intention", "Show a single intention by id", "Intention id"
+        id_eg = "Intention id (e.g. intention-007; spore-007 reads too)"
+    else:
+        group, noun, prefix = "spore", "spore", "spore"
+        group_help = "Prospective-intention layer: typed open loops (task/question/thought)"
+        add_help, get_help, id_help = "Plant a new spore", "Show a single spore by id", "Spore id"
+        id_eg = "Spore id (e.g. spore-007)"
+    spore_parser = subparsers.add_parser(group, help=group_help)
+    spore_parser.set_defaults(func=_require_spore_subcommand, spore_group=group)
+    spore_sub = spore_parser.add_subparsers(dest="spore_command")
+
+    def leaf(*names: str, **kw: Any) -> argparse.ArgumentParser:
+        parser = spore_sub.add_parser(
+            names[0], aliases=list(names[1:]) if intention else [], parents=[json_parent], **kw
+        )
+        parser.set_defaults(id_prefix=prefix)
+        return parser
+
+    sp = leaf("add", help=add_help)
+    sp.add_argument("--type", choices=VALID_TYPES, required=True)
+    sp.add_argument("--text", required=True, help="The open loop")
+    sp.add_argument("--domain", help="health|career|strategic|life|flow|apps|... (free text)")
+    sp.add_argument("--tier", choices=VALID_TIERS, default="warm")
+    sp.add_argument("--salience", type=int, choices=range(0, 4), default=0)
+    sp.add_argument("--next", help="YYYY-MM-DD or YYYY-MM-DDTHH:MM (local time) — when to re-surface (not a deadline)")
+    sp.add_argument("--pointer", help="Optional link to fuller detail")
+    sp.set_defaults(func=cmd_spore_add)
+
+    sp = leaf("get", help=get_help)
+    sp.add_argument("spore_id", help=id_eg)
+    sp.set_defaults(func=cmd_spore_get)
+
+    sp = leaf("list", help=f"List open {noun}s")
+    sp.add_argument("--type", choices=VALID_TYPES)
+    sp.add_argument("--tier", choices=VALID_TIERS)
+    sp.add_argument("--germination", choices=VALID_GERMINATIONS)
+    sp.add_argument("--domain")
+    sp.add_argument("--verbose", "-v", action="store_true")
+    sp.set_defaults(func=cmd_spore_list)
+
+    sp = leaf("touch", help="Engage: seen=today + clear an elapsed next: (returns to growing)")
+    sp.add_argument("spore_id", help=id_help)
+    sp.set_defaults(func=cmd_spore_touch)
+
+    sp = leaf("update", help=f"Update an open {noun}'s metadata")
+    sp.add_argument("spore_id", help=id_help)
+    sp.add_argument("--tier", choices=VALID_TIERS)
+    sp.add_argument("--next", help="YYYY-MM-DD or YYYY-MM-DDTHH:MM, or empty string to clear")
+    sp.add_argument("--text")
+    sp.add_argument("--salience", type=int, choices=range(0, 4))
+    sp.add_argument("--domain", help="Set/replace domain (empty string clears)")
+    sp.add_argument("--pointer", help="Set/replace pointer (empty string clears)")
+    sp.add_argument("--add-note")
+    sp.set_defaults(func=cmd_spore_update)
+
+    sp = leaf(*(("close", "descend") if intention else ("descend",)),
+              help=f"Resolve downward (compost); kind must fit the {noun}'s type")
+    sp.add_argument("spore_id", help=id_help)
+    sp.add_argument("--kind", choices=ALL_DESCEND_KINDS, required=True)
+    sp.set_defaults(func=cmd_spore_descend)
+
+    sp = leaf(*(("promote", "ascend") if intention else ("ascend",)),
+              help="Resolve upward (transmute into memory/project); kind must fit the type")
+    sp.add_argument("spore_id", help=id_help)
+    sp.add_argument("--kind", choices=ALL_ASCEND_KINDS, required=True)
+    sp.add_argument("--ref", required=True, help="What it became (project path / episode id / pattern)")
+    sp.set_defaults(func=cmd_spore_ascend)
+
+    sp = leaf("surface", help="Seed-side surface for a salience generator")
+    sp.add_argument("--top-of-mind", action="store_true",
+                    help="Only the ToM contribution (hot or growing, ranked)")
+    sp.set_defaults(func=cmd_spore_surface)
 
 
 # -- Crystal subcommands (the on-demand graduated tier) --
@@ -5594,76 +5681,11 @@ def build_parser() -> argparse.ArgumentParser:
     sub.set_defaults(func=cmd_history)
 
     # -- spore (prospective-intention layer: typed open cognitive loops) --
-    spore_parser = subparsers.add_parser(
-        "spore",
-        help="Prospective-intention layer: typed open loops (task/question/thought)",
-    )
-    spore_parser.set_defaults(func=_require_spore_subcommand)
-    spore_sub = spore_parser.add_subparsers(dest="spore_command")
-
-    sp = spore_sub.add_parser("add", help="Plant a new spore", parents=[json_parent])
-    sp.add_argument("--type", choices=VALID_TYPES, required=True)
-    sp.add_argument("--text", required=True, help="The open loop")
-    sp.add_argument("--domain", help="health|career|strategic|life|flow|apps|... (free text)")
-    sp.add_argument("--tier", choices=VALID_TIERS, default="warm")
-    sp.add_argument("--salience", type=int, choices=range(0, 4), default=0)
-    sp.add_argument("--next", help="YYYY-MM-DD or YYYY-MM-DDTHH:MM (local time) — when to re-surface (not a deadline)")
-    sp.add_argument("--pointer", help="Optional link to fuller detail")
-    sp.set_defaults(func=cmd_spore_add)
-
-    sp = spore_sub.add_parser("get", help="Show a single spore by id", parents=[json_parent])
-    sp.add_argument("spore_id", help="Spore id (e.g. spore-007)")
-    sp.set_defaults(func=cmd_spore_get)
-
-    sp = spore_sub.add_parser("list", help="List open spores", parents=[json_parent])
-    sp.add_argument("--type", choices=VALID_TYPES)
-    sp.add_argument("--tier", choices=VALID_TIERS)
-    sp.add_argument("--germination", choices=VALID_GERMINATIONS)
-    sp.add_argument("--domain")
-    sp.add_argument("--verbose", "-v", action="store_true")
-    sp.set_defaults(func=cmd_spore_list)
-
-    sp = spore_sub.add_parser(
-        "touch", help="Engage: seen=today + clear an elapsed next: (returns to growing)",
-        parents=[json_parent],
-    )
-    sp.add_argument("spore_id", help="Spore id")
-    sp.set_defaults(func=cmd_spore_touch)
-
-    sp = spore_sub.add_parser("update", help="Update an open spore's metadata", parents=[json_parent])
-    sp.add_argument("spore_id", help="Spore id")
-    sp.add_argument("--tier", choices=VALID_TIERS)
-    sp.add_argument("--next", help="YYYY-MM-DD or YYYY-MM-DDTHH:MM, or empty string to clear")
-    sp.add_argument("--text")
-    sp.add_argument("--salience", type=int, choices=range(0, 4))
-    sp.add_argument("--domain", help="Set/replace domain (empty string clears)")
-    sp.add_argument("--pointer", help="Set/replace pointer (empty string clears)")
-    sp.add_argument("--add-note")
-    sp.set_defaults(func=cmd_spore_update)
-
-    sp = spore_sub.add_parser(
-        "descend", help="Resolve downward (compost); kind must fit the spore's type",
-        parents=[json_parent],
-    )
-    sp.add_argument("spore_id", help="Spore id")
-    sp.add_argument("--kind", choices=ALL_DESCEND_KINDS, required=True)
-    sp.set_defaults(func=cmd_spore_descend)
-
-    sp = spore_sub.add_parser(
-        "ascend", help="Resolve upward (transmute into memory/project); kind must fit the type",
-        parents=[json_parent],
-    )
-    sp.add_argument("spore_id", help="Spore id")
-    sp.add_argument("--kind", choices=ALL_ASCEND_KINDS, required=True)
-    sp.add_argument("--ref", required=True, help="What it became (project path / episode id / pattern)")
-    sp.set_defaults(func=cmd_spore_ascend)
-
-    sp = spore_sub.add_parser(
-        "surface", help="Seed-side surface for a salience generator", parents=[json_parent],
-    )
-    sp.add_argument("--top-of-mind", action="store_true",
-                    help="Only the ToM contribution (hot or growing, ranked)")
-    sp.set_defaults(func=cmd_spore_surface)
+    # ``intention`` is the same group under the concept's new name: the same
+    # subcommands on the same store, minting ``intention-NNN`` ids; ``close`` /
+    # ``promote`` are its names for ``descend`` / ``ascend`` (which it also takes).
+    _register_spore_group(subparsers, json_parent, intention=False)
+    _register_spore_group(subparsers, json_parent, intention=True)
 
     # -- crystal (the on-demand graduated tier: crystallized proven patterns) --
     crystal_parser = subparsers.add_parser(

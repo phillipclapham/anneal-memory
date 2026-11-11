@@ -1,7 +1,7 @@
 """MCP server for anneal-memory.
 
 Implements the Model Context Protocol over stdio transport (JSON-RPC 2.0,
-newline-delimited). 17 tools + 2 resources. Zero dependencies beyond Python
+newline-delimited). 25 tools + 2 resources. Zero dependencies beyond Python
 stdlib.
 
 Usage:
@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import json
+from functools import partial
 import shlex
 import logging
 import os
@@ -247,6 +248,12 @@ class Server:
         # Created on first write, so it need not pre-exist.
         base = Path(store.path) if store.path is not None else Path("memory.db")
         self._spore_store = SporeStore(base.parent / f"{base.stem}.spores.json")
+        # The ``intention_*`` tools run on the SAME file under the concept's new
+        # name: a second view of it that mints ``intention-NNN`` ids. Both views
+        # find either spelling of an id, so ``intention_add`` then ``spore_get``
+        # on the returned id works. One file, never two live stores.
+        self._intention_store = SporeStore(
+            base.parent / f"{base.stem}.spores.json", id_prefix="intention")
         # The crystallized-pattern store is another JSON sibling
         # (``<stem>.crystal.json``) — the on-demand graduated tier (AM-CRYSTAL).
         # AM-CRYSTAL-OPTIN: store the PATH only; the wrap handlers pass it into
@@ -283,6 +290,14 @@ class Server:
             "spore_descend": self._tool_spore_descend,
             "spore_ascend": self._tool_spore_ascend,
             "spore_surface": self._tool_spore_surface,
+            "intention_add": partial(self._tool_spore_add, intention=True),
+            "intention_get": partial(self._tool_spore_get, intention=True),
+            "intention_list": partial(self._tool_spore_list, intention=True),
+            "intention_touch": partial(self._tool_spore_touch, intention=True),
+            "intention_update": partial(self._tool_spore_update, intention=True),
+            "intention_close": partial(self._tool_spore_descend, intention=True),
+            "intention_promote": partial(self._tool_spore_ascend, intention=True),
+            "intention_surface": partial(self._tool_spore_surface, intention=True),
         }
 
     def run(self) -> None:
@@ -1615,11 +1630,12 @@ class Server:
     # SporeError / ValueError raised by the store propagate to
     # _handle_tools_call, which converts them to an is_error tool result.
 
-    def _tool_spore_add(self, args: dict[str, Any]) -> dict[str, Any]:
+    def _tool_spore_add(self, args: dict[str, Any], *, intention: bool = False) -> dict[str, Any]:
+        store = self._intention_store if intention else self._spore_store
         # Pass salience through RAW (no int() coercion) so the library validates
         # type+range — coercing here would silently turn 2.9 into 2, "" into 0,
         # etc., diverging from the declared integer/0-3 schema.
-        item = self._spore_store.add(
+        item = store.add(
             type=args.get("type", ""),
             text=args.get("text", ""),
             domain=args.get("domain", "") or "",
@@ -1628,24 +1644,29 @@ class Server:
             next=args.get("next"),
             pointer=args.get("pointer"),
         )
+        verb = "Added" if intention else "Planted"
         return _tool_result(
-            f"Planted {item['id']} ({item['type']}/{item['tier']}): {item['text']}"
+            f"{verb} {item['id']} ({item['type']}/{item['tier']}): {item['text']}"
         )
 
-    def _tool_spore_get(self, args: dict[str, Any]) -> dict[str, Any]:
-        spore_id = (args.get("spore_id") or "").strip()
+    def _tool_spore_get(self, args: dict[str, Any], *, intention: bool = False) -> dict[str, Any]:
+        store = self._intention_store if intention else self._spore_store
+        id_key = "intention_id" if intention else "spore_id"
+        spore_id = (args.get(id_key) or (args.get("spore_id") if intention else "") or "").strip()
         if not spore_id:
-            return _tool_result("Error: spore_id is required", is_error=True)
-        item = self._spore_store.get(spore_id)
+            return _tool_result(f"Error: {id_key} is required", is_error=True)
+        item = store.get(spore_id)
         if item is None:
-            return _tool_result(f"Spore {spore_id} not found.", is_error=True)
+            noun = "Intention" if intention else "Spore"
+            return _tool_result(f"{noun} {spore_id} not found.", is_error=True)
         # Annotate computed germination — the tool description promises it, and
         # list_open's silent equality filter doesn't add it to the stored row.
         row = dict(item)
         row["germination"] = germination_tier(item)
         return _tool_result(json.dumps(row, indent=2, ensure_ascii=False))
 
-    def _tool_spore_list(self, args: dict[str, Any]) -> dict[str, Any]:
+    def _tool_spore_list(self, args: dict[str, Any], *, intention: bool = False) -> dict[str, Any]:
+        store = self._intention_store if intention else self._spore_store
         # The library equality-filters without validating, so an invalid enum
         # (e.g. type='tasks') would silently return "no matches". Validate against
         # the declared schema enums and fail loudly, mirroring the CLI's choices=.
@@ -1659,14 +1680,15 @@ class Server:
                 return _tool_result(
                     f"Error: invalid {field} {v!r}; valid: {list(valid)}", is_error=True
                 )
-        items = self._spore_store.list_open(
+        items = store.list_open(
             type=args.get("type"),
             tier=args.get("tier"),
             domain=args.get("domain"),
             germination=args.get("germination"),
         )
         if not items:
-            return _tool_result("No open spores match.")
+            return _tool_result(
+                "No open intentions match." if intention else "No open spores match.")
         lines = [
             f"[{s['id']}] {s.get('type')}/{s.get('tier')}/{germination_tier(s)} "
             f"salience={s.get('salience')}: {s.get('text', '')}"
@@ -1674,19 +1696,23 @@ class Server:
         ]
         return _tool_result("\n".join(lines))
 
-    def _tool_spore_touch(self, args: dict[str, Any]) -> dict[str, Any]:
-        spore_id = (args.get("spore_id") or "").strip()
+    def _tool_spore_touch(self, args: dict[str, Any], *, intention: bool = False) -> dict[str, Any]:
+        store = self._intention_store if intention else self._spore_store
+        id_key = "intention_id" if intention else "spore_id"
+        spore_id = (args.get(id_key) or (args.get("spore_id") if intention else "") or "").strip()
         if not spore_id:
-            return _tool_result("Error: spore_id is required", is_error=True)
-        item = self._spore_store.touch(spore_id)
+            return _tool_result(f"Error: {id_key} is required", is_error=True)
+        item = store.touch(spore_id)
         return _tool_result(
             f"Touched {item['id']} (seen -> {item['seen']}, {germination_tier(item)})"
         )
 
-    def _tool_spore_update(self, args: dict[str, Any]) -> dict[str, Any]:
-        spore_id = (args.get("spore_id") or "").strip()
+    def _tool_spore_update(self, args: dict[str, Any], *, intention: bool = False) -> dict[str, Any]:
+        store = self._intention_store if intention else self._spore_store
+        id_key = "intention_id" if intention else "spore_id"
+        spore_id = (args.get(id_key) or (args.get("spore_id") if intention else "") or "").strip()
         if not spore_id:
-            return _tool_result("Error: spore_id is required", is_error=True)
+            return _tool_result(f"Error: {id_key} is required", is_error=True)
         # Pass only the keys the caller actually sent — presence in `args`
         # distinguishes "omitted (leave)" from "empty string (clear)".
         kwargs: dict[str, Any] = {}
@@ -1697,33 +1723,41 @@ class Server:
             kwargs["add_note"] = args["add_note"]
         if not kwargs:
             return _tool_result("Error: no fields to update", is_error=True)
-        item = self._spore_store.update(spore_id, **kwargs)
+        item = store.update(spore_id, **kwargs)
         return _tool_result(f"Updated {item['id']}")
 
-    def _tool_spore_descend(self, args: dict[str, Any]) -> dict[str, Any]:
-        spore_id = (args.get("spore_id") or "").strip()
+    def _tool_spore_descend(self, args: dict[str, Any], *, intention: bool = False) -> dict[str, Any]:
+        store = self._intention_store if intention else self._spore_store
+        id_key = "intention_id" if intention else "spore_id"
+        spore_id = (args.get(id_key) or (args.get("spore_id") if intention else "") or "").strip()
         if not spore_id:
-            return _tool_result("Error: spore_id is required", is_error=True)
+            return _tool_result(f"Error: {id_key} is required", is_error=True)
         kind = args.get("kind", "")
-        item = self._spore_store.descend(spore_id, kind=kind)
+        item = store.descend(spore_id, kind=kind)
+        if intention:
+            return _tool_result(f"Closed {item['id']} ({kind}) -> resolved down.")
         return _tool_result(f"Descended {item['id']} ({kind}) -> resolved down.")
 
-    def _tool_spore_ascend(self, args: dict[str, Any]) -> dict[str, Any]:
-        spore_id = (args.get("spore_id") or "").strip()
+    def _tool_spore_ascend(self, args: dict[str, Any], *, intention: bool = False) -> dict[str, Any]:
+        store = self._intention_store if intention else self._spore_store
+        id_key = "intention_id" if intention else "spore_id"
+        spore_id = (args.get(id_key) or (args.get("spore_id") if intention else "") or "").strip()
         if not spore_id:
-            return _tool_result("Error: spore_id is required", is_error=True)
+            return _tool_result(f"Error: {id_key} is required", is_error=True)
         kind = args.get("kind", "")
         ref = args.get("ref", "")
-        item = self._spore_store.ascend(spore_id, kind=kind, ref=ref)
-        return _tool_result(f"Ascended {item['id']} -> {kind}: {ref}")
+        item = store.ascend(spore_id, kind=kind, ref=ref)
+        verb = "Promoted" if intention else "Ascended"
+        return _tool_result(f"{verb} {item['id']} -> {kind}: {ref}")
 
-    def _tool_spore_surface(self, args: dict[str, Any]) -> dict[str, Any]:
+    def _tool_spore_surface(self, args: dict[str, Any], *, intention: bool = False) -> dict[str, Any]:
+        store = self._intention_store if intention else self._spore_store
         # `is True` (not bool()) so a non-boolean truthy value like the string
         # "false" can't flip on the ToM subset — matches the save_continuity
         # allow_shrink convention and fails safe to "all open spores".
-        items = self._spore_store.surface(top_of_mind=args.get("top_of_mind") is True)
+        items = store.surface(top_of_mind=args.get("top_of_mind") is True)
         if not items:
-            return _tool_result("(no open spores)")
+            return _tool_result("(no open intentions)" if intention else "(no open spores)")
         lines = [
             f"({s.get('type')}/{s.get('tier')}/{germination_tier(s)}) {s.get('text', '')}"
             for s in items

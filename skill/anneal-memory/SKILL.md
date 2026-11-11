@@ -110,6 +110,7 @@ CLI and MCP forms of the same loop. Set `ANNEAL_MEMORY_DB` (or pass `--db`) for 
 | Plant a spore | `anneal-memory spore add --type task --text "…"` | `spore_add` |
 | List / surface spores | `anneal-memory spore list` · `spore surface` | `spore_list` · `spore_surface` |
 | Resolve a spore | `anneal-memory spore descend …` · `spore ascend …` | `spore_descend` · `spore_ascend` |
+| The same layer as intentions | `anneal-memory intention add\|list\|surface\|close\|promote …` (`intention` is an alias group of `spore`, minting `intention-NNN` ids) | `intention_add` · `intention_list` · `intention_surface` · `intention_get` · `intention_update` · `intention_touch` · `intention_close` · `intention_promote` |
 | Crystallized index / recall | `anneal-memory crystal index` · `crystal recall "<query>"` | `crystal_index` · `crystal_recall` |
 | Crystallize a pattern out | `anneal-memory crystal crystallize …` | — (CLI / library) |
 | Store status / health | `anneal-memory status` | `status` |

@@ -1,6 +1,6 @@
 """The INTENTION names for the spore layer: additive, one store, either id spelling.
 
-Every old ``spore`` name stays (docs/stability.md); these pin the additions:
+Every old ``spore`` name stays and none is deprecated; these pin the additions:
 the aliases, the ``id_prefix`` mint, a mixed-prefix store, the MCP tools and the
 CLI group beside the spore ones, and that no second store file is ever made.
 """
@@ -18,7 +18,7 @@ import anneal_memory
 from anneal_memory import spores
 from anneal_memory.integrity import TOOLS
 from anneal_memory.server import Server
-from anneal_memory.spores import SporeError, SporeStore
+from anneal_memory.spores import SporeApply, SporeError, SporeStore
 from anneal_memory.store import Store
 
 _PAIRS = {
@@ -96,6 +96,17 @@ def test_an_exact_spelling_wins_when_a_store_holds_both_numbers(tmp_path):
     assert store.get("intention-005")["text"] == "i"
     assert store.update("intention-005", text="i2")["text"] == "i2"
     assert store.get("spore-005")["text"] == "s"
+    # an apply naming the OTHER spelling of its row's id is refused, not mutated through
+    key_a, key_b = "a" * 32, "b" * 32
+    rows[0]["origin_key"], rows[1]["origin_key"] = key_a, key_b
+    path.write_text(json.dumps({"spores": rows, "resolved": [], "schema_version": 1}))
+    store = SporeStore(path)
+    effect = SporeApply(op="update", origin_key=key_a, spore_id="intention-005",
+                        args={"text": "hijack"}, postcondition={"text": "hijack"},
+                        expected_version=spores.spore_version(store.get("spore-005")))
+    with pytest.raises(ValueError, match="is not the id of the spore carrying"):
+        store.apply(effect)
+    assert store.get("spore-005")["text"] == "s"
 
 
 def test_mcp_has_both_tool_families_on_one_store_file(tmp_path):
@@ -166,3 +177,8 @@ def test_get_prefers_the_exact_spelling_across_the_open_and_resolved_sets(tmp_pa
     store = SporeStore(path)
     assert store.get("spore-007")["text"] == "done"
     assert store.get("intention-007")["text"] == "open"
+    # the open row is a distinct record: it still mutates, not refused as "both open and resolved"
+    assert store.update("intention-007", text="open2")["text"] == "open2"
+    assert store.touch("intention-007")["id"] == "intention-007"
+    with pytest.raises(SporeError, match="already resolved"):
+        store.touch("spore-007")

@@ -4157,7 +4157,8 @@ def cmd_spore_surface(args: argparse.Namespace) -> None:
 def _require_spore_subcommand(args: argparse.Namespace) -> None:
     """``anneal-memory spore`` with no action — point at the available actions."""
     group = getattr(args, "spore_group", "spore")
-    verbs = ("add / get / list / touch / update / close / promote / surface"
+    verbs = ("add / get / list / touch / update / close / promote / surface "
+             "(descend / ascend also work)"
              if group == "intention"
              else "add / get / list / touch / update / descend / ascend / surface")
     print(f"Error: '{group}' requires a subcommand: {verbs}.", file=sys.stderr)

@@ -72,7 +72,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Iterable, Iterator, Literal, Mapping, TypedDict, cast
+from typing import Any, Callable, Iterator, Literal, Mapping, TypedDict, cast
 
 try:  # POSIX advisory locking; absent on Windows (see SporeStore._transaction).
     import fcntl
@@ -105,15 +105,24 @@ def _id_alias(item_id: object) -> str | None:
     return f"{other}-{rest}"
 
 
-def _rows_with_id(rows: Iterable[Mapping[str, Any]], wanted: object) -> list[Any]:
-    """The rows whose id is ``wanted`` exactly, else the rows whose id is its
-    other-prefix spelling. Never both: an exact match hides the alias."""
-    rows = list(rows)
-    exact = [r for r in rows if r.get("id") == wanted]
-    if exact:
-        return exact
+def _effective_id(data: Mapping[str, Any], wanted: str) -> str:
+    """The one spelling of ``wanted`` the store is addressed by, chosen ONCE for the
+    whole store (open, resolved and deleted rows together): ``wanted`` itself when
+    any row carries it exactly, else its other-prefix spelling when a row carries
+    that, else ``wanted``. Every lookup then compares ids exactly, so the open and
+    resolved sets can never be resolved to two different spellings."""
     alias = _id_alias(wanted)
-    return [r for r in rows if alias is not None and r.get("id") == alias]
+    if alias is None:
+        return wanted
+    held: set[object] = set()
+    for key in ("spores", "resolved", "deleted"):
+        rows = data.get(key)
+        if isinstance(rows, list):
+            held.update(r.get("id") for r in rows if isinstance(r, dict))
+    if wanted not in held and alias in held:
+        return alias
+    return wanted
+
 
 SporeType = Literal["task", "question", "thought"]
 Tier = Literal["hot", "warm", "cold", "parked"]
@@ -927,13 +936,14 @@ class SporeStore:
         ``expected_version`` may describe the other, so it is refused here, the
         lookup every id-addressed mutator goes through. An id that is open and
         also resolved is refused the same way."""
-        matches = _rows_with_id(data.get("spores", []), spore_id)
+        spore_id = _effective_id(data, spore_id)
+        matches = [item for item in data.get("spores", []) if item.get("id") == spore_id]
         if len(matches) > 1:
             raise SporeError(
                 f"{len(matches)} open spores share id {spore_id!r}; refusing to "
                 f"write to an ambiguous id (store drift — repair by hand)."
             )
-        if matches and _rows_with_id(data.get("resolved", []), spore_id):
+        if matches and any(r.get("id") == spore_id for r in data.get("resolved", [])):
             raise SporeError(
                 f"spore {spore_id!r} is both open and resolved; refusing to write to "
                 f"an ambiguous id (store drift — repair by hand)."
@@ -960,7 +970,8 @@ class SporeStore:
                     f"status='resolved' (store drift — repair by hand)."
                 )
             return item
-        resolved = _rows_with_id(data.get("resolved", []), spore_id)
+        spore_id = _effective_id(data, spore_id)
+        resolved = [r for r in data.get("resolved", []) if r.get("id") == spore_id]
         if resolved:
             res = resolved[0].get("resolution") or {}
             raise SporeError(
@@ -993,7 +1004,8 @@ class SporeStore:
         item = SporeStore._find_open(data, spore_id)
         if item is not None:
             return item
-        matches = _rows_with_id(data.get("resolved", []), spore_id)
+        spore_id = _effective_id(data, spore_id)
+        matches = [r for r in data.get("resolved", []) if r.get("id") == spore_id]
         if len(matches) > 1:
             raise SporeError(
                 f"{len(matches)} resolved spores share id {spore_id!r}; refusing to "
@@ -1051,7 +1063,7 @@ class SporeStore:
         with self._transaction() as data:
             item = self._find_any(data, spore_id)
             if item is None:
-                if _rows_with_id(self._deleted(data), spore_id):
+                if any(r.get("id") == _effective_id(data, spore_id) for r in self._deleted(data)):
                     return False
                 raise SporeError(f"spore '{spore_id}' not found.")
             if origin_key is not None and item.get("origin_key") != origin_key:
@@ -1190,9 +1202,7 @@ class SporeStore:
         gone = [r for r in self._deleted(data) if r.get("origin_key") == key]
         named = row if row is not None else (gone[0] if gone else None)
         if (named is not None and effect.spore_id is not None
-                and named.get("id") != effect.spore_id
-                and (_id_alias(effect.spore_id) is None
-                     or named.get("id") != _id_alias(effect.spore_id))):
+                and named.get("id") != _effective_id(data, effect.spore_id)):
             raise ValueError(
                 f"spore_id {effect.spore_id!r} is not the id of the spore carrying "
                 f"origin_key {key!r} ({named.get('id')!r}).")
@@ -1431,9 +1441,11 @@ class SporeStore:
         """Fetch a spore by id, searching the open set first then the resolved
         set (open takes precedence if an id somehow appears in both), or None."""
         data = self._load_keyed()
-        rows = data.get("spores", []) + data.get("resolved", [])
-        found = _rows_with_id(rows, spore_id)  # the exact spelling first, in either set
-        return cast("SporeDict", found[0]) if found else None
+        spore_id = _effective_id(data, spore_id)
+        for item in data.get("spores", []) + data.get("resolved", []):
+            if item.get("id") == spore_id:
+                return cast("SporeDict", item)
+        return None
 
     def get_by_origin_key(self, origin_key: str) -> SporeDict | None:
         """The spore (open or resolved) carrying ``origin_key``, or None. Takes the
@@ -1908,4 +1920,3 @@ IntentionDict = SporeDict
 intention_version = spore_version
 INTENTION_VERSION_EXCLUDED = SPORE_VERSION_EXCLUDED
 normalize_intention_field = normalize_spore_field
-INTENTION_SCHEMA_VERSION = SPORE_SCHEMA_VERSION

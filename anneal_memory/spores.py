@@ -1190,7 +1190,9 @@ class SporeStore:
         gone = [r for r in self._deleted(data) if r.get("origin_key") == key]
         named = row if row is not None else (gone[0] if gone else None)
         if (named is not None and effect.spore_id is not None
-                and named.get("id") not in (effect.spore_id, _id_alias(effect.spore_id))):
+                and named.get("id") != effect.spore_id
+                and (_id_alias(effect.spore_id) is None
+                     or named.get("id") != _id_alias(effect.spore_id))):
             raise ValueError(
                 f"spore_id {effect.spore_id!r} is not the id of the spore carrying "
                 f"origin_key {key!r} ({named.get('id')!r}).")
@@ -1429,11 +1431,9 @@ class SporeStore:
         """Fetch a spore by id, searching the open set first then the resolved
         set (open takes precedence if an id somehow appears in both), or None."""
         data = self._load_keyed()
-        for rows in (data.get("spores", []), data.get("resolved", [])):
-            found = _rows_with_id(rows, spore_id)
-            if found:
-                return cast("SporeDict", found[0])
-        return None
+        rows = data.get("spores", []) + data.get("resolved", [])
+        found = _rows_with_id(rows, spore_id)  # the exact spelling first, in either set
+        return cast("SporeDict", found[0]) if found else None
 
     def get_by_origin_key(self, origin_key: str) -> SporeDict | None:
         """The spore (open or resolved) carrying ``origin_key``, or None. Takes the

@@ -156,3 +156,13 @@ def test_cli_intention_group_is_an_alias_of_spore_and_adds_no_second_file(tmp_pa
     # the filename decision: one sibling file, the spore one, never a second live store
     assert sorted(p.name for p in Path(tmp_path).iterdir() if "spore" in p.name or "intention" in p.name
                   if not p.name.endswith(".lock")) == ["m.spores.json"]
+
+
+def test_get_prefers_the_exact_spelling_across_the_open_and_resolved_sets(tmp_path):
+    path = tmp_path / "m.spores.json"
+    open_row = {"id": "intention-007", "type": "task", "text": "open", "status": "open", "tier": "warm"}
+    done_row = {"id": "spore-007", "type": "task", "text": "done", "status": "resolved", "tier": "warm"}
+    path.write_text(json.dumps({"spores": [open_row], "resolved": [done_row], "schema_version": 1}))
+    store = SporeStore(path)
+    assert store.get("spore-007")["text"] == "done"
+    assert store.get("intention-007")["text"] == "open"

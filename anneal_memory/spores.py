@@ -1008,6 +1008,8 @@ class SporeStore:
                 raw = self.path.read_bytes()
             except FileNotFoundError as e:
                 raise SporeError(f"{self.path} does not exist; nothing to migrate.") from e
+            except OSError as e:
+                raise SporeError(f"{self.path} cannot be read ({e}); nothing was changed.") from e
             try:
                 data = json.loads(raw.decode("utf-8"))
             except (UnicodeDecodeError, json.JSONDecodeError) as e:
@@ -1038,7 +1040,7 @@ class SporeStore:
             try:
                 self._save(converted)
                 after = self._load()
-            except (OSError, SporeSchemaError) as exc:
+            except (OSError, SporeError) as exc:
                 raise SporeError(
                     f"writing or reading back the converted {self.path} failed ({exc}); the "
                     f"byte-for-byte backup is {backup}; the store is untouched or already "
@@ -1087,7 +1089,7 @@ class SporeStore:
                 except FileExistsError:
                     continue
                 try:
-                    with os.fdopen(fd, "wb") as f:
+                    with os.fdopen(fd, "wb") as f:      # fdopen takes the fd over; if it fails the unlink below still runs
                         f.write(raw)
                         f.flush()
                         _full_fsync(f.fileno())

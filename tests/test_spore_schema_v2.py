@@ -359,3 +359,15 @@ def test_a_backup_that_cannot_complete_leaves_no_partial_file_and_the_store_unto
         v1_store.migrate_to_v2(backup_dir=tmp_path / "bk")
     assert v1_store.path.read_bytes() == before
     assert list((tmp_path / "bk").iterdir()) == []         # the partial .bak was removed, not left as a recovery-looking artifact
+
+
+@pytest.mark.skipif(sys.platform == "win32" or (hasattr(__import__("os"), "geteuid") and __import__("os").geteuid() == 0),
+                    reason="needs a POSIX file mode that the reader actually honours")
+def test_an_unreadable_source_is_a_clean_refusal_naming_the_path(v1_store):
+    path = v1_store.path
+    path.chmod(0)
+    try:
+        with pytest.raises(SporeError, match="cannot be read"):
+            v1_store.migrate_to_v2(dry_run=True)
+    finally:
+        path.chmod(0o600)

@@ -103,7 +103,7 @@ def test_an_empty_object_is_a_fresh_v2_store(tmp_path):
 def test_a_v2_store_still_carrying_the_old_key_is_refused(tmp_path):
     path = tmp_path / "both.json"
     path.write_text(json.dumps({"intentions": [], "spores": [], "resolved": [], "schema_version": 2}))
-    with pytest.raises(SporeError, match="still carries"):
+    with pytest.raises(SporeSchemaError, match="still carries"):     # a SCHEMA refusal: the CLI prints it as one clean line
         SporeStore(path).list_open()
 
 
@@ -138,7 +138,8 @@ def test_migrate_backup_is_byte_exact_and_never_overwritten(v1_store, tmp_path):
     backup = Path(result["backup"])
     assert backup.parent == tmp_path / "bk" and backup.name.startswith("x.spores.json.v1-")
     assert backup.read_bytes() == raw
-    assert (backup.stat().st_mode & 0o777) == 0o600
+    if sys.platform != "win32":
+        assert (backup.stat().st_mode & 0o777) == 0o600
 
 
 def test_migrate_default_backup_sits_beside_the_file(v1_store):
@@ -170,6 +171,9 @@ def test_dry_run_writes_nothing_not_even_a_backup(v1_store, tmp_path):
     {"spores": [], "resolved": {}, "schema_version": 1},                      # resolved is not a list
     {"spores": [], "resolved": [], "schema_version": 3},                      # a schema it does not know
     {"spores": [], "resolved": [], "schema_version": True},                   # a bool is not a version
+    {"spores": [], "resolved": [], "schema_version": 0},                      # an explicit version below 1 is unknown
+    {"spores": [], "resolved": [], "schema_version": -1},
+    {"spores": [], "resolved": [], "deleted": ["x"], "schema_version": 1},    # a corrupt tombstone list would fail the next add
     {"resolved": [], "schema_version": 1},                                    # no open key at all
 ])
 def test_migrate_refuses_what_it_cannot_convert_and_leaves_it_alone(tmp_path, doc):
@@ -192,7 +196,7 @@ def test_migrate_refuses_a_missing_or_unreadable_file(tmp_path):
 
 
 def test_migrate_holds_the_store_lock_through_the_rewrite(v1_store, monkeypatch):
-    import fcntl
+    fcntl = pytest.importorskip("fcntl")             # POSIX only; Windows runs unlocked
     import os
 
     seen = {}
@@ -276,11 +280,15 @@ def test_load_and_migrate_classify_a_document_the_same_way(tmp_path):
         "v1_no_spores_key": {"resolved": [], "schema_version": 1},
         "both_keys_v1": {"spores": [], "intentions": [], "schema_version": 1},
         "float_version": {"spores": [], "schema_version": 1.0},
+        "negative_version": {"spores": [], "schema_version": -1},
+        "non_object_row": {"spores": ["x"], "schema_version": 1},
+        "resolved_not_a_list": {"spores": [], "resolved": {}, "schema_version": 1},
+        "corrupt_tombstones": {"spores": [], "deleted": ["x"], "schema_version": 1},
     }
     for name, doc in docs.items():
         path = tmp_path / f"{name}.json"
         path.write_text(json.dumps(doc))
-        with pytest.raises(SporeError) as exc:       # a float version is a plain SporeError, the rest SporeSchemaError
+        with pytest.raises(SporeSchemaError) as exc:
             SporeStore(path).list_open()
         says_migrate = "intention migrate-key" in str(exc.value)
         assert says_migrate == _is_convertible_v1(doc), name
@@ -337,3 +345,17 @@ def test_the_instruction_quotes_a_path_with_a_space(tmp_path):
     with pytest.raises(SporeSchemaError) as exc:
         SporeStore(path).list_open()
     assert f"--file '{path}'" in str(exc.value)
+
+
+def test_a_backup_that_cannot_complete_leaves_no_partial_file_and_the_store_untouched(v1_store, tmp_path, monkeypatch):
+    from anneal_memory import spores
+
+    def boom(fd):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(spores, "_full_fsync", boom)
+    before = v1_store.path.read_bytes()
+    with pytest.raises(SporeError, match="could not write the backup"):
+        v1_store.migrate_to_v2(backup_dir=tmp_path / "bk")
+    assert v1_store.path.read_bytes() == before
+    assert list((tmp_path / "bk").iterdir()) == []         # the partial .bak was removed, not left as a recovery-looking artifact

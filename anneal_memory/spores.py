@@ -685,13 +685,17 @@ def _validate_guards(
 def _is_convertible_v1(data: Mapping[str, Any]) -> bool:
     """True for exactly the documents :meth:`SporeStore.migrate_to_v2` converts, and the ONLY ones
     :meth:`SporeStore._load` tells the operator to migrate: open rows under the legacy key, none
-    under the current one, and a ``schema_version`` that is absent, null or an integer below the
-    current one (a bool or a float is not a version)."""
+    under the current one, a ``schema_version`` that is absent, null or exactly the integer 1 (a bool,
+    a float, 0 or a negative number is not a version this code knows), and every row list
+    (``spores``, ``resolved``, ``deleted``) a list of objects, so the renamed store loads afterwards."""
     if LEGACY_OPEN_KEY not in data or OPEN_KEY in data:
         return False
     version = data.get("schema_version")
-    return version is None or (
-        isinstance(version, int) and not isinstance(version, bool) and version < SPORE_SCHEMA_VERSION)
+    if not (version is None or (isinstance(version, int) and not isinstance(version, bool) and version == 1)):
+        return False
+    return all(
+        isinstance(data.get(key, []), list) and all(isinstance(r, dict) for r in data.get(key, []))
+        for key in (LEGACY_OPEN_KEY, "resolved", "deleted"))
 
 
 class SporeStore:
@@ -762,7 +766,7 @@ class SporeStore:
         elif version is None:
             version = 1  # a v1 document that predates the version field
         if not isinstance(version, int) or isinstance(version, bool):
-            raise SporeError(
+            raise SporeSchemaError(
                 f"{self.path} has a non-integer schema_version ({version!r}); "
                 f"refusing to proceed — inspect it by hand."
             )
@@ -788,11 +792,11 @@ class SporeStore:
                 f"with a backup: anneal-memory intention migrate-key --file {shlex.quote(str(self.path))}"
             )
         if LEGACY_OPEN_KEY in data:
-            raise SporeError(
+            raise SporeSchemaError(
                 f"{self.path} is schema v{version} but still carries a "
-                f"{LEGACY_OPEN_KEY!r} key beside {OPEN_KEY!r}; refusing to proceed so "
-                f"no row is read from one and written over the other — inspect it "
-                f"by hand."
+                f"{LEGACY_OPEN_KEY!r} key (a schema v{version} store keeps its open rows under "
+                f"{OPEN_KEY!r} only); refusing to proceed so no row is read from one key and "
+                f"written over the other — inspect it by hand."
             )
         data.setdefault(OPEN_KEY, [])
         data.setdefault("resolved", [])
@@ -1018,12 +1022,6 @@ class SporeStore:
                 loaded = self._load()   # a current document answers already-current; anything else refuses in its own words
                 return self._migration_summary(
                     "already-current", loaded, loaded[OPEN_KEY], None)
-            for key in (LEGACY_OPEN_KEY, "resolved"):
-                rows = data.get(key, [])
-                if not isinstance(rows, list) or not all(isinstance(r, dict) for r in rows):
-                    raise SporeError(
-                        f"{self.path} has a {key!r} that is not a list of objects; "
-                        f"refusing to migrate it — inspect it by hand.")
             if dry_run:
                 return self._migration_summary(
                     "would-migrate", data, data[LEGACY_OPEN_KEY], None)
@@ -1040,10 +1038,11 @@ class SporeStore:
             try:
                 self._save(converted)
                 after = self._load()
-            except OSError as exc:
+            except (OSError, SporeSchemaError) as exc:
                 raise SporeError(
-                    f"writing the converted {self.path} failed ({exc}); the byte-for-byte "
-                    f"backup is {backup} and the original is as it was or restorable from it."
+                    f"writing or reading back the converted {self.path} failed ({exc}); the "
+                    f"byte-for-byte backup is {backup}; the store is untouched or already "
+                    f"converted, so restore the backup over it if in doubt."
                 ) from exc
             expected = {**{k: v for k, v in data.items() if k != LEGACY_OPEN_KEY},
                         OPEN_KEY: data[LEGACY_OPEN_KEY],
@@ -1087,14 +1086,19 @@ class SporeStore:
                     fd = os.open(backup, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
                 except FileExistsError:
                     continue
-                with os.fdopen(fd, "wb") as f:
-                    f.write(raw)
-                    f.flush()
-                    _full_fsync(f.fileno())
-                if backup.read_bytes() != raw:
-                    raise SporeError(
-                        f"the backup {backup} does not match {self.path}; nothing was changed "
-                        f"(delete the backup).")
+                try:
+                    with os.fdopen(fd, "wb") as f:
+                        f.write(raw)
+                        f.flush()
+                        _full_fsync(f.fileno())
+                    if backup.read_bytes() != raw:
+                        raise SporeError(
+                            f"the backup {backup} does not match {self.path}; nothing was changed.")
+                    _flush_dir(_open_dir(target_dir))    # the new directory entry is on disk before the source is replaced
+                except BaseException:
+                    with contextlib.suppress(OSError):
+                        backup.unlink()                  # a backup that did not complete is not a recovery artifact
+                    raise
                 return backup
         except OSError as exc:
             raise SporeError(f"could not write the backup in {target_dir} ({exc}); nothing was changed.") from exc

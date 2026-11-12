@@ -262,3 +262,78 @@ def test_cli_migrate_key_takes_an_explicit_file(v1_store, tmp_path):
     assert out.returncode == 0 and out.stdout.startswith("migrated: ")
     missing = _cli("intention", "migrate-key", "--file", str(tmp_path / "none.json"), cwd=tmp_path)
     assert missing.returncode == 1 and "does not exist" in missing.stderr
+
+
+def test_load_and_migrate_classify_a_document_the_same_way(tmp_path):
+    """_load tells the operator to run migrate-key only for a document migrate converts."""
+    from anneal_memory.spores import _is_convertible_v1
+
+    docs = {
+        "no_version": {"spores": []},
+        "null_version": {"spores": [], "schema_version": None},
+        "v0": {"spores": [], "schema_version": 0},
+        "v1": {"spores": [], "schema_version": 1},
+        "v1_no_spores_key": {"resolved": [], "schema_version": 1},
+        "both_keys_v1": {"spores": [], "intentions": [], "schema_version": 1},
+        "float_version": {"spores": [], "schema_version": 1.0},
+    }
+    for name, doc in docs.items():
+        path = tmp_path / f"{name}.json"
+        path.write_text(json.dumps(doc))
+        with pytest.raises(SporeError) as exc:       # a float version is a plain SporeError, the rest SporeSchemaError
+            SporeStore(path).list_open()
+        says_migrate = "intention migrate-key" in str(exc.value)
+        assert says_migrate == _is_convertible_v1(doc), name
+        if says_migrate:
+            assert SporeStore(path).migrate_to_v2(backup_dir=tmp_path / "bk")["status"] == "migrated", name
+        else:
+            before = path.read_bytes()
+            with pytest.raises(SporeError):
+                SporeStore(path).migrate_to_v2(backup_dir=tmp_path / "bk")
+            assert path.read_bytes() == before, name
+
+
+def test_migrate_of_an_empty_object_is_already_current(tmp_path):
+    path = tmp_path / "e.json"
+    path.write_text("{}")
+    assert SporeStore(path).migrate_to_v2()["status"] == "already-current"
+
+
+def test_a_retry_in_the_same_second_takes_the_next_backup_name(v1_store, tmp_path, monkeypatch):
+    real_save = SporeStore._save
+    calls = {"n": 0}
+
+    def failing_once(self, data):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise OSError("disk full")
+        return real_save(self, data)
+
+    monkeypatch.setattr(SporeStore, "_save", failing_once)
+    raw = v1_store.path.read_bytes()
+    with pytest.raises(SporeError, match="disk full"):
+        v1_store.migrate_to_v2(backup_dir=tmp_path / "bk")
+    assert v1_store.path.read_bytes() == raw            # the failed attempt changed nothing
+    second = v1_store.migrate_to_v2(backup_dir=tmp_path / "bk")
+    assert second["status"] == "migrated"
+    assert len(list((tmp_path / "bk").iterdir())) == 2   # two distinct backups, no FileExistsError
+
+
+def test_dry_run_and_a_missing_file_plant_no_directory_or_lock(tmp_path):
+    ghost = tmp_path / "typo" / "dir" / "x.json"
+    with pytest.raises(SporeError, match="does not exist"):
+        SporeStore(ghost).migrate_to_v2(dry_run=True)
+    assert not (tmp_path / "typo").exists()
+    path = tmp_path / "v1.json"
+    path.write_text(json.dumps(_v1_doc()))
+    SporeStore(path).migrate_to_v2(dry_run=True)
+    assert not path.with_name(path.name + ".lock").exists()
+
+
+def test_the_instruction_quotes_a_path_with_a_space(tmp_path):
+    path = tmp_path / "with space" / "s.spores.json"
+    path.parent.mkdir()
+    path.write_text(json.dumps(_v1_doc()))
+    with pytest.raises(SporeSchemaError) as exc:
+        SporeStore(path).list_open()
+    assert f"--file '{path}'" in str(exc.value)

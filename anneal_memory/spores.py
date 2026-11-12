@@ -64,11 +64,13 @@ the Levain-generalization notes:
 
 from __future__ import annotations
 
+import contextlib
 import copy
 import errno
 import hashlib
 import json
 import os
+import shlex
 import tempfile
 import unicodedata
 import uuid
@@ -680,6 +682,18 @@ def _validate_guards(
         )
 
 
+def _is_convertible_v1(data: Mapping[str, Any]) -> bool:
+    """True for exactly the documents :meth:`SporeStore.migrate_to_v2` converts, and the ONLY ones
+    :meth:`SporeStore._load` tells the operator to migrate: open rows under the legacy key, none
+    under the current one, and a ``schema_version`` that is absent, null or an integer below the
+    current one (a bool or a float is not a version)."""
+    if LEGACY_OPEN_KEY not in data or OPEN_KEY in data:
+        return False
+    version = data.get("schema_version")
+    return version is None or (
+        isinstance(version, int) and not isinstance(version, bool) and version < SPORE_SCHEMA_VERSION)
+
+
 class SporeStore:
     """A JSON-backed store of open cognitive loops (the prospective layer).
 
@@ -760,12 +774,18 @@ class SporeStore:
                 f"on the next save."
             )
         if version < SPORE_SCHEMA_VERSION:
+            if not _is_convertible_v1(data):
+                raise SporeSchemaError(
+                    f"{self.path} claims schema v{version} but is not a store "
+                    f"migrate-key can convert (its keys: {sorted(data)}); refusing to read "
+                    f"it so no row is silently missed — inspect it by hand."
+                )
             raise SporeSchemaError(
                 f"{self.path} is a schema v{version} store (its open rows sit under "
                 f"{LEGACY_OPEN_KEY!r}); this anneal-memory reads schema "
                 f"v{SPORE_SCHEMA_VERSION} only (open rows under {OPEN_KEY!r}). It is "
                 f"refused, not read, so no row is silently missed. Convert it once, "
-                f"with a backup: anneal-memory intention migrate-key --file {self.path}"
+                f"with a backup: anneal-memory intention migrate-key --file {shlex.quote(str(self.path))}"
             )
         if LEGACY_OPEN_KEY in data:
             raise SporeError(
@@ -971,17 +991,15 @@ class SporeStore:
         writes nothing. A document that is neither (both keys, a row that is not an
         object, a schema this version does not know) raises :class:`SporeError`
         and is left as it was. ``dry_run`` reports what would change and writes
-        nothing, backup included. Needs a file lock: where there is none it
-        refuses, since the conversion could not be held against a concurrent writer.
+        nothing (no backup, no lock file, no directory). Where there is no file lock (Windows, which is
+        single-writer) it runs unlocked, like every other write there.
 
         Returns ``{"status": "migrated" | "would-migrate" | "already-current",
         "path", "schema_version", "open", "resolved", "deleted", "backup"}``."""
-        if fcntl is None:
-            raise SporeError(
-                "migrating a store needs a file lock, which this platform does not "
-                "have; the conversion could not be held against a concurrent writer."
-            )
-        with self._exclusive():
+        if not self.path.is_file():     # before the lock: a mistyped path plants no directory and no lock file
+            raise SporeError(f"{self.path} does not exist; nothing to migrate.")
+        # a dry run reads like every lock-free reader does (the file is replaced atomically) and takes no lock
+        with (contextlib.nullcontext() if dry_run else self._exclusive()):
             try:
                 raw = self.path.read_bytes()
             except FileNotFoundError as e:
@@ -996,23 +1014,10 @@ class SporeStore:
             if not isinstance(data, dict):
                 raise SporeError(
                     f"{self.path} must contain a JSON object, got {type(data).__name__}.")
-            version = data.get("schema_version", 1 if LEGACY_OPEN_KEY in data else None)
-            if version == SPORE_SCHEMA_VERSION and LEGACY_OPEN_KEY not in data:
-                loaded = self._load()  # a v2 document that is not sound refuses here
+            if not _is_convertible_v1(data):
+                loaded = self._load()   # a current document answers already-current; anything else refuses in its own words
                 return self._migration_summary(
                     "already-current", loaded, loaded[OPEN_KEY], None)
-            if (
-                isinstance(version, bool)
-                or version != 1
-                or LEGACY_OPEN_KEY not in data
-                or OPEN_KEY in data
-            ):
-                raise SporeError(
-                    f"{self.path} is not a schema v1 store this can convert "
-                    f"(schema_version {version!r}; keys "
-                    f"{sorted(k for k in data if k in (LEGACY_OPEN_KEY, OPEN_KEY, 'resolved'))}); "
-                    f"refusing to migrate it — inspect it by hand."
-                )
             for key in (LEGACY_OPEN_KEY, "resolved"):
                 rows = data.get(key, [])
                 if not isinstance(rows, list) or not all(isinstance(r, dict) for r in rows):
@@ -1031,9 +1036,15 @@ class SporeStore:
                     converted[key] = SPORE_SCHEMA_VERSION
                 else:
                     converted[key] = value
-            converted.setdefault("schema_version", SPORE_SCHEMA_VERSION)
-            self._save(converted)
-            after = self._load()
+            converted["schema_version"] = SPORE_SCHEMA_VERSION
+            try:
+                self._save(converted)
+                after = self._load()
+            except OSError as exc:
+                raise SporeError(
+                    f"writing the converted {self.path} failed ({exc}); the byte-for-byte "
+                    f"backup is {backup} and the original is as it was or restorable from it."
+                ) from exc
             expected = {**{k: v for k, v in data.items() if k != LEGACY_OPEN_KEY},
                         OPEN_KEY: data[LEGACY_OPEN_KEY],
                         "schema_version": SPORE_SCHEMA_VERSION}
@@ -1062,20 +1073,32 @@ class SporeStore:
     def _write_migration_backup(
         self, raw: bytes, backup_dir: str | os.PathLike[str] | None
     ) -> Path:
-        """Write ``raw`` (the v1 file's exact bytes) to a new sibling backup file and read
-        it back. A name that exists is never overwritten."""
+        """Write ``raw`` (the v1 file's exact bytes) to a new backup file and read it back.
+        A name that exists is never overwritten: a retry in the same second takes the next
+        ``-N`` name. Any failure is a :class:`SporeError` and nothing has been changed."""
         target_dir = Path(backup_dir) if backup_dir is not None else self.path.parent
-        os.makedirs(target_dir, exist_ok=True)
         stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-        backup = target_dir / f"{self.path.name}.v1-{stamp}.bak"
-        fd = os.open(backup, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        with os.fdopen(fd, "wb") as f:
-            f.write(raw)
-            f.flush()
-            _full_fsync(f.fileno())
-        if backup.read_bytes() != raw:
-            raise SporeError(f"the backup {backup} does not match {self.path}; nothing was changed.")
-        return backup
+        try:
+            os.makedirs(target_dir, exist_ok=True)
+            for n in range(1000):
+                backup = target_dir / (
+                    f"{self.path.name}.v1-{stamp}.bak" if n == 0 else f"{self.path.name}.v1-{stamp}-{n}.bak")
+                try:
+                    fd = os.open(backup, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                except FileExistsError:
+                    continue
+                with os.fdopen(fd, "wb") as f:
+                    f.write(raw)
+                    f.flush()
+                    _full_fsync(f.fileno())
+                if backup.read_bytes() != raw:
+                    raise SporeError(
+                        f"the backup {backup} does not match {self.path}; nothing was changed "
+                        f"(delete the backup).")
+                return backup
+        except OSError as exc:
+            raise SporeError(f"could not write the backup in {target_dir} ({exc}); nothing was changed.") from exc
+        raise SporeError(f"no free backup name in {target_dir}; nothing was changed.")
 
     # --- internal lookups ---------------------------------------------------
 

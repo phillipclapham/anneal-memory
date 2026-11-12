@@ -961,7 +961,7 @@ class AssociationFormationOffError(AnnealMemoryError):
     that would form or decay links refuse instead of writing, so a caller that
     still builds the graph learns it at once rather than reading a count that
     no longer means anything. Existing links stay readable. These methods are
-    removed in 2.0.
+    removed no earlier than 2.0.
     """
 
 
@@ -8856,7 +8856,7 @@ class Store:
     ) -> tuple[int, int]:
         """Record or strengthen Hebbian association links from co-citation.
 
-        LEGACY, removed in 2.0. No save calls it since 1.0.2, and on a store
+        LEGACY, removed no earlier than 2.0. No save calls it since 1.0.2, and on a store
         whose formation is off it raises :class:`AssociationFormationOffError`.
         Direct pairs get stronger links than session pairs.
 
@@ -8918,7 +8918,7 @@ class Store:
     ) -> int:
         """Decay associations not reinforced this wrap.
 
-        LEGACY, removed in 2.0. No save calls it since 1.0.2, and on a store
+        LEGACY, removed no earlier than 2.0. No save calls it since 1.0.2, and on a store
         whose formation is off it raises :class:`AssociationFormationOffError`.
 
         Args:
@@ -9042,7 +9042,7 @@ class Store:
             f"{method}: this store forms no association links (turned off by "
             f"the first save of anneal-memory 1.0.2 or later; see "
             f"Store.association_formation()). Existing links stay readable; "
-            f"{method} is removed in 2.0. Stop calling it."
+            f"{method} is removed no earlier than 2.0. Stop calling it."
         )
 
     def _record_formation_off(self, wrap_id: int | None) -> None:
@@ -9087,7 +9087,7 @@ class Store:
     ) -> int:
         """Seed weak pattern links from co-graduation (same wrap).
 
-        LEGACY, removed in 2.0. No save calls it since 1.0.2, and on a store
+        LEGACY, removed no earlier than 2.0. No save calls it since 1.0.2, and on a store
         whose formation is off it raises :class:`AssociationFormationOffError`.
         Returns links newly seeded.
 
@@ -9117,7 +9117,7 @@ class Store:
     ) -> dict[str, int]:
         """Drain a batch of co-surface events into the pattern graph (idempotent).
 
-        LEGACY, removed in 2.0. On a store whose formation is off it parses the
+        LEGACY, removed no earlier than 2.0. On a store whose formation is off it parses the
         events and discards them, returning zero counts (``events_seen`` counts
         its distinct event ids), so a harness that still drains its spool keeps working.
 
@@ -9135,7 +9135,7 @@ class Store:
         day = today or _today_local()
         with self._db_boundary("drain_co_surface_events"):
             if self._formation_off():
-                # A compatibility drain through 1.x, so a harness that still
+                # A compatibility drain kept until a later MAJOR release, so a harness that still
                 # drains a spool at wrap time keeps working: it discards. The
                 # events are still parsed, so a malformed batch fails here as
                 # it always did.

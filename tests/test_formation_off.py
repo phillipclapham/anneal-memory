@@ -1,7 +1,7 @@
 """1.0.2: a save forms no association link, and says so on the store.
 
 Phill ruled the cut 2026-10-23 (both Hebbian graphs and the affect weight stop
-forming; the public association APIs stay as legacy until 2.0).
+forming; the public association APIs stay as legacy until a later MAJOR release removes them).
 """
 from __future__ import annotations
 
@@ -107,7 +107,7 @@ def test_legacy_apis_answer_and_refuse_to_form(tmp_path):
             lambda: store.decay_associations(),
             lambda: store.seed_pattern_co_graduation(["x_pattern", "y_pattern"]),
         ):
-            with pytest.raises(AssociationFormationOffError, match="removed in 2.0"):
+            with pytest.raises(AssociationFormationOffError, match="removed no earlier than 2.0"):
                 call()
         # A caught refusal must not cost the caller's own writes in an open batch
         # (L2 1023+25, reproduced: raised inside the store boundary, the refusal

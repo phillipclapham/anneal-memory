@@ -2,9 +2,12 @@
 
 All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project uses [SemVer](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [2.0.0] — 2026-11-12
+
+**Action required: run `anneal-memory intention migrate-key` once on every spore/intention store before using 2.0.0.** A schema-1 store (open rows under `spores`) is refused by 2.0.0 with the command that converts it; the command copies the file byte-for-byte first, converts it in place under the store's own lock, and verifies the result. Use `--dry-run` to see what it would do. This is a MAJOR because the stored document is public (see `docs/stability.md`, "The files on disk"), and refusing the old key is an incompatible change to it.
 
 ### Changed
+- **The 1.0.2 deprecations are NOT removed in 2.0.0.** `allow_unlinked`, `--affect-tag`, `--affect-intensity`, `affective_state` and the legacy association APIs still work as they did in 1.0.7; every place that said "removed in 2.0" now says "removed no earlier than 2.0", and `docs/stability.md` says the same. A later MAJOR release removes them.
 - **The spore/intention store is schema v2: its open rows are keyed `intentions`, not `spores`. A v1 store is refused until it is converted, once.** The stored document (`<stem>.spores.json`, or any path given to `SporeStore` / `IntentionStore`) keeps its open rows under `"intentions"` and carries `"schema_version": 2`; the resolved rows, the `deleted` tombstones, every row's fields, ids, `origin_key`s and `version`s are unchanged. A v1 document (open rows under `"spores"`) raises `SporeSchemaError` (a `SporeError`) on any read or write, naming the file and the command that converts it; nothing reads both spellings, so no row is silently missed. A v2 document that still carries a `"spores"` key is refused too. The CLI prints the refusal as `Error: …` with exit 1, and the MCP spore and intention tools return it as an error result. The file name does not change.
 
 ### Added

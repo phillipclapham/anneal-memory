@@ -2,7 +2,7 @@
 
 LEGACY since 1.0.2: no save forms or decays a link (``Store.association_formation``);
 the forming functions below run only through the legacy Store methods, which refuse
-on a store a 1.0.2 save has marked, and are removed in 2.0. The reads stay.
+on a store a 1.0.2 save has marked, and are removed no earlier than 2.0. The reads stay.
 
 What it was, the third cognitive layer: lateral links between episodes that strengthen
 via co-citation during graduation. Deep Hebbian — associations form from

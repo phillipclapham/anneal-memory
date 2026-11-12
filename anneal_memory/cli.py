@@ -1731,7 +1731,7 @@ def cmd_save_continuity(args: argparse.Namespace) -> None:
         if args.affect_tag:
             print(
                 "Note: --affect-tag is deprecated and ignored since anneal-memory "
-                "1.0.2 (a save forms no association links); it is removed in 2.0.",
+                "1.0.2 (a save forms no association links); it is removed no earlier than 2.0.",
                 file=sys.stderr,
             )
 
@@ -5439,8 +5439,8 @@ def build_parser() -> argparse.ArgumentParser:
         parents=[json_parent],
     )
     sub.add_argument("file", help="Path to continuity markdown file (use '-' for stdin)")
-    sub.add_argument("--affect-tag", help="Deprecated and ignored since 1.0.2; removed in 2.0")
-    sub.add_argument("--affect-intensity", type=float, default=0.5, help="Deprecated and ignored since 1.0.2; removed in 2.0")
+    sub.add_argument("--affect-tag", help="Deprecated and ignored since 1.0.2; removed no earlier than 2.0")
+    sub.add_argument("--affect-intensity", type=float, default=0.5, help="Deprecated and ignored since 1.0.2; removed no earlier than 2.0")
     sub.add_argument(
         "--wrap-token",
         help=(

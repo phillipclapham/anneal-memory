@@ -267,7 +267,7 @@ TOOLS: list[dict[str, Any]] = [
                     "description": (
                         "DEPRECATED and ignored: omit it. It weighted association "
                         "links, which a save no longer forms; it is accepted so "
-                        "older clients keep working, and removed in 2.0."
+                        "older clients keep working, and removed no earlier than 2.0."
                     ),
                     "properties": {
                         "tag": {

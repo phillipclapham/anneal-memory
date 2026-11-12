@@ -1795,6 +1795,17 @@ class TestSporeTools:
         body = json.loads(_text_from_result(_call(server, "spore_get", {"spore_id": "spore-001"})))
         assert body["pointer"] is None
 
+    def test_a_v1_store_is_an_error_result_naming_the_migration(self, server, store):
+        # the stored document of schema v1 (open rows under 'spores') is refused, not read
+        # as empty: the tool result is an error carrying the instruction
+        spore_file = store.path.parent / f"{store.path.stem}.spores.json"
+        spore_file.write_text(json.dumps({"spores": [], "resolved": [], "schema_version": 1}))
+        for tool, args in (("spore_list", {}), ("intention_list", {}),
+                           ("spore_add", {"type": "task", "text": "t"})):
+            result = _call(server, tool, args)
+            assert _is_error(result), tool
+            assert "migrate-key" in _text_from_result(result), tool
+
     def test_descend_valid_and_invalid_kind(self, server):
         _call(server, "spore_add", {"type": "task", "text": "t"})
         # 'answered' is a question-kind, invalid for a task

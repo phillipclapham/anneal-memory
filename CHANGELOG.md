@@ -2,6 +2,14 @@
 
 All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project uses [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+- **The spore/intention store is schema v2: its open rows are keyed `intentions`, not `spores`. A v1 store is refused until it is converted, once.** The stored document (`<stem>.spores.json`, or any path given to `SporeStore` / `IntentionStore`) keeps its open rows under `"intentions"` and carries `"schema_version": 2`; the resolved rows, the `deleted` tombstones, every row's fields, ids, `origin_key`s and `version`s are unchanged. A v1 document (open rows under `"spores"`) raises `SporeSchemaError` (a `SporeError`) on any read or write, naming the file and the command that converts it; nothing reads both spellings, so no row is silently missed. A v2 document that still carries a `"spores"` key is refused too. The CLI prints the refusal as `Error: …` with exit 1, and the MCP spore and intention tools return it as an error result. The file name does not change.
+
+### Added
+- **`anneal-memory intention migrate-key` (also `spore migrate-key`) and `SporeStore.migrate_to_v2(*, backup_dir=None, dry_run=False)` convert a v1 store in place, once.** Under the store's own exclusive lock it copies the file byte for byte to `<name>.v1-<UTC stamp>.bak` (beside it, or in `--backup-dir`; fsynced and read back before anything changes), rewrites it atomically with `spores` renamed to `intentions` in the same position and `schema_version` set to 2, then reloads the result and compares it with the v1 document before the lock is released. A store already at v2 is a no-op (`already-current`); a document it cannot convert (both keys, a row that is not an object, an unknown schema) is refused and left as it was. `--dry-run` reports and writes nothing, backup included; `--file PATH` names a store other than the one beside `--db`. The migration needs a file lock, so it refuses on a platform without one. `--json` prints `{status, path, schema_version, open, resolved, deleted, backup}`. `SporeSchemaError` is a new subclass of `SporeError`, importable from `anneal_memory.spores`.
+
 ## [1.0.7] — 2026-11-11
 
 ### Added

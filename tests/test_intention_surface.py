@@ -90,7 +90,7 @@ def test_an_exact_spelling_wins_when_a_store_holds_both_numbers(tmp_path):
         {"id": "spore-005", "type": "task", "text": "s", "status": "open", "tier": "warm"},
         {"id": "intention-005", "type": "task", "text": "i", "status": "open", "tier": "warm"},
     ]
-    path.write_text(json.dumps({"spores": rows, "resolved": [], "schema_version": 1}))
+    path.write_text(json.dumps({"intentions": rows, "resolved": [], "schema_version": 2}))
     store = SporeStore(path)
     assert store.get("spore-005")["text"] == "s"
     assert store.get("intention-005")["text"] == "i"
@@ -101,7 +101,7 @@ def test_an_exact_spelling_wins_when_a_store_holds_both_numbers(tmp_path):
     # an apply naming the OTHER spelling of its row's id is refused, not mutated through
     key_a, key_b = "a" * 32, "b" * 32
     rows[0]["origin_key"], rows[1]["origin_key"] = key_a, key_b
-    path.write_text(json.dumps({"spores": rows, "resolved": [], "schema_version": 1}))
+    path.write_text(json.dumps({"intentions": rows, "resolved": [], "schema_version": 2}))
     store = SporeStore(path)
     effect = SporeApply(op="update", origin_key=key_a, spore_id="intention-005",
                         args={"text": "hijack"}, postcondition={"text": "hijack"},
@@ -175,7 +175,7 @@ def test_get_prefers_the_exact_spelling_across_the_open_and_resolved_sets(tmp_pa
     path = tmp_path / "m.spores.json"
     open_row = {"id": "intention-007", "type": "task", "text": "open", "status": "open", "tier": "warm"}
     done_row = {"id": "spore-007", "type": "task", "text": "done", "status": "resolved", "tier": "warm"}
-    path.write_text(json.dumps({"spores": [open_row], "resolved": [done_row], "schema_version": 1}))
+    path.write_text(json.dumps({"intentions": [open_row], "resolved": [done_row], "schema_version": 2}))
     store = SporeStore(path)
     assert store.get("spore-007")["text"] == "done"
     assert store.get("intention-007")["text"] == "open"

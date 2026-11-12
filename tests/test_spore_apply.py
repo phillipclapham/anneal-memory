@@ -228,7 +228,7 @@ def test_an_id_reused_by_an_old_writer_is_never_taken_for_the_deleted_spore(stor
     store.apply(SporeApply(op="delete", origin_key=KEY, expected_version=seeded.version))
     doc = json.loads(_raw(store))
     reused = dict(seeded.spore, origin_key="0" * 32)
-    doc["spores"].append(reused)
+    doc["intentions"].append(reused)
     store.path.write_text(json.dumps(doc), encoding="utf-8")
     v = spore_version(reused)
     assert v == seeded.version  # the version does not see origin_key
@@ -408,7 +408,7 @@ def test_a_cleared_next_matches_its_stored_form(store):
 
 
 def test_a_store_that_is_not_utf8_is_a_store_error(store):
-    store.path.write_bytes(b'{"spores": ["\xff"]}')
+    store.path.write_bytes(b'{"intentions": ["\xff"]}')
     with pytest.raises(SporeError) as caught:
         _seed(store)
     assert not isinstance(caught.value, ApplyRefused)
@@ -460,7 +460,7 @@ def test_delete_locked_removes_only_the_row_it_was_given():
     # guard pre-empts it from the public path).
     a = {"id": "spore-001", "origin_key": "a"}
     b = {"id": "spore-001", "origin_key": "b"}
-    data = {"spores": [a], "resolved": [b]}
+    data = {"intentions": [a], "resolved": [b]}
     SporeStore("/nonexistent/spores.json")._delete_locked(data, a, DAY, None)
-    assert data["spores"] == [] and data["resolved"] == [b]
+    assert data["intentions"] == [] and data["resolved"] == [b]
     assert [r["origin_key"] for r in data["deleted"]] == ["a"]

@@ -473,6 +473,8 @@ anneal ships **spores** as a separate sibling store (`<stem>.spores.json`) for e
 
 **Spores are also called intentions.** The same store, under the concept's new name: `IntentionStore` (an alias of `SporeStore`; `id_prefix="intention"` mints `intention-NNN` ids, the default still mints `spore-NNN`), the `intention_*` MCP tools and `anneal-memory intention …` beside the `spore_*` ones. Nothing named `spore` is deprecated, an id of either spelling reads in either, and the file is still `<stem>.spores.json`.
 
+**A store from an earlier release is converted once.** The spore store's stored document keeps its open rows under `"intentions"` (schema 2); a file written by 1.0.7 or earlier keeps them under `"spores"` and is refused, with the command that fixes it: `anneal-memory intention migrate-key` (add `--file PATH` for a store beside no db, `--dry-run` to see what it would do). It copies the file first, byte for byte, and changes nothing about any row.
+
 If you're integrating anneal into an existing agent that already tracks open loops, spores is the typed store those loops route *into* — your methodology *operates* the spore store, it doesn't compete with it.
 
 ## The Consolidation Landscape (2026)

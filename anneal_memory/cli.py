@@ -123,6 +123,7 @@ from .spores import (
     VALID_TYPES,
     SporeDict,
     SporeError,
+    SporeSchemaError,
     SporeStore,
     germination_tier,
 )
@@ -3969,6 +3970,28 @@ def cmd_spore_list(args: argparse.Namespace) -> None:
         print(f"\n{len(dormant)} dormant — still alive, or ready to compost?")
 
 
+def cmd_spore_migrate_key(args: argparse.Namespace) -> None:
+    """Convert a schema v1 store to schema v2 (the open rows move from ``spores`` to
+    ``intentions``), once. Backs the file up byte for byte first; see
+    :meth:`SporeStore.migrate_to_v2`."""
+    if args.file:
+        store = SporeStore(args.file, id_prefix=getattr(args, "id_prefix", "spore"))
+    else:
+        store = _open_spore_store(args)
+    try:
+        result = store.migrate_to_v2(backup_dir=args.backup_dir, dry_run=args.dry_run)
+    except SporeError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        sys.exit(1)
+    if args.json:
+        _print_json(result)
+        return
+    print(f"{result['status']}: {result['path']} ({result['open']} open, "
+          f"{result['resolved']} resolved, {result['deleted']} deleted)")
+    if result["backup"]:
+        print(f"backup: {result['backup']}")
+
+
 def cmd_spore_touch(args: argparse.Namespace) -> None:
     """Engage a spore: seen=today, and clear an elapsed next: alarm (-> growing)."""
     store = _open_spore_store(args)
@@ -4068,10 +4091,10 @@ def cmd_spore_surface(args: argparse.Namespace) -> None:
 def _require_spore_subcommand(args: argparse.Namespace) -> None:
     """``anneal-memory spore`` with no action — point at the available actions."""
     group = getattr(args, "spore_group", "spore")
-    verbs = ("add / get / list / touch / update / close / promote / surface "
+    verbs = ("add / get / list / touch / update / close / promote / surface / migrate-key "
              "(descend / ascend also work)"
              if group == "intention"
-             else "add / get / list / touch / update / descend / ascend / surface")
+             else "add / get / list / touch / update / descend / ascend / surface / migrate-key")
     print(f"Error: '{group}' requires a subcommand: {verbs}.", file=sys.stderr)
     sys.exit(1)
 
@@ -4156,6 +4179,13 @@ def _register_spore_group(
     sp.add_argument("--top-of-mind", action="store_true",
                     help="Only the ToM contribution (hot or growing, ranked)")
     sp.set_defaults(func=cmd_spore_surface)
+
+    sp = leaf("migrate-key",
+              help="Convert a schema v1 store (open rows under 'spores') to schema v2 ('intentions'), once, backup first")
+    sp.add_argument("--file", help="The store file to convert (default: the <db-stem>.spores.json beside the db)")
+    sp.add_argument("--backup-dir", help="Where the byte-for-byte v1 backup goes (default: beside the file)")
+    sp.add_argument("--dry-run", action="store_true", help="Report what would change; write nothing, backup included")
+    sp.set_defaults(func=cmd_spore_migrate_key)
 
 
 # -- Crystal subcommands (the on-demand graduated tier) --
@@ -5978,6 +6008,11 @@ def main() -> None:
         # Any subcommand that reaches Store/sqlite_path with a URI-shaped path
         # (crystal recall, init, serve build a Store directly): one clean refusal
         # here, not one handler per call site (walopen L3 r9, codex, reproduced).
+        print(f"Error: {exc}", file=sys.stderr)
+        sys.exit(1)
+    except SporeSchemaError as exc:
+        # A spore store of another schema (a v1 file after an upgrade): the message
+        # names the fix; one clean refusal here, not a traceback per spore command.
         print(f"Error: {exc}", file=sys.stderr)
         sys.exit(1)
     except StoreDatabaseError as exc:

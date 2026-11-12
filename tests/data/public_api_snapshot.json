@@ -2537,6 +2537,73 @@
       "subcommands": {},
       "subparsers": null
      },
+     "migrate-key": {
+      "defaults": {
+       "func": "anneal_memory.cli.cmd_spore_migrate_key",
+       "id_prefix": "intention"
+      },
+      "exclusive_groups": [],
+      "options": [
+       {
+        "action": "_StoreAction",
+        "choices": null,
+        "const": null,
+        "default": null,
+        "dest": "backup_dir",
+        "flags": [
+         "--backup-dir"
+        ],
+        "metavar": null,
+        "nargs": null,
+        "required": false,
+        "type": null
+       },
+       {
+        "action": "_StoreTrueAction",
+        "choices": null,
+        "const": true,
+        "default": false,
+        "dest": "dry_run",
+        "flags": [
+         "--dry-run"
+        ],
+        "metavar": null,
+        "nargs": 0,
+        "required": false,
+        "type": null
+       },
+       {
+        "action": "_StoreAction",
+        "choices": null,
+        "const": null,
+        "default": null,
+        "dest": "file",
+        "flags": [
+         "--file"
+        ],
+        "metavar": null,
+        "nargs": null,
+        "required": false,
+        "type": null
+       },
+       {
+        "action": "_StoreTrueAction",
+        "choices": null,
+        "const": true,
+        "default": "==SUPPRESS==",
+        "dest": "json",
+        "flags": [
+         "--json"
+        ],
+        "metavar": null,
+        "nargs": 0,
+        "required": false,
+        "type": null
+       }
+      ],
+      "subcommands": {},
+      "subparsers": null
+     },
      "promote": {
       "defaults": {
        "func": "anneal_memory.cli.cmd_spore_ascend",
@@ -4517,6 +4584,73 @@
       "subcommands": {},
       "subparsers": null
      },
+     "migrate-key": {
+      "defaults": {
+       "func": "anneal_memory.cli.cmd_spore_migrate_key",
+       "id_prefix": "spore"
+      },
+      "exclusive_groups": [],
+      "options": [
+       {
+        "action": "_StoreAction",
+        "choices": null,
+        "const": null,
+        "default": null,
+        "dest": "backup_dir",
+        "flags": [
+         "--backup-dir"
+        ],
+        "metavar": null,
+        "nargs": null,
+        "required": false,
+        "type": null
+       },
+       {
+        "action": "_StoreTrueAction",
+        "choices": null,
+        "const": true,
+        "default": false,
+        "dest": "dry_run",
+        "flags": [
+         "--dry-run"
+        ],
+        "metavar": null,
+        "nargs": 0,
+        "required": false,
+        "type": null
+       },
+       {
+        "action": "_StoreAction",
+        "choices": null,
+        "const": null,
+        "default": null,
+        "dest": "file",
+        "flags": [
+         "--file"
+        ],
+        "metavar": null,
+        "nargs": null,
+        "required": false,
+        "type": null
+       },
+       {
+        "action": "_StoreTrueAction",
+        "choices": null,
+        "const": true,
+        "default": "==SUPPRESS==",
+        "dest": "json",
+        "flags": [
+         "--json"
+        ],
+        "metavar": null,
+        "nargs": 0,
+        "required": false,
+        "type": null
+       }
+      ],
+      "subcommands": {},
+      "subparsers": null
+     },
      "surface": {
       "defaults": {
        "func": "anneal_memory.cli.cmd_spore_surface",
@@ -6193,6 +6327,10 @@
      "kind": "method",
      "signature": "(self, *, type: 'SporeType | None' = None, tier: 'Tier | None' = None, domain: 'str | None' = None, germination: 'Germination | None' = None, today: 'date | None' = None, now: 'datetime | None' = None) -> 'list[SporeDict]'"
     },
+    "migrate_to_v2": {
+     "kind": "method",
+     "signature": "(self, *, backup_dir: 'str | os.PathLike[str] | None' = None, dry_run: 'bool' = False) -> 'dict[str, Any]'"
+    },
     "surface": {
      "kind": "method",
      "signature": "(self, *, top_of_mind: 'bool' = False, today: 'date | None' = None, now: 'datetime | None' = None) -> 'list[SporeDict]'"
@@ -7055,6 +7193,10 @@
     "list_open": {
      "kind": "method",
      "signature": "(self, *, type: 'SporeType | None' = None, tier: 'Tier | None' = None, domain: 'str | None' = None, germination: 'Germination | None' = None, today: 'date | None' = None, now: 'datetime | None' = None) -> 'list[SporeDict]'"
+    },
+    "migrate_to_v2": {
+     "kind": "method",
+     "signature": "(self, *, backup_dir: 'str | os.PathLike[str] | None' = None, dry_run: 'bool' = False) -> 'dict[str, Any]'"
     },
     "surface": {
      "kind": "method",

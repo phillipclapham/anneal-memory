@@ -128,7 +128,11 @@ def test_shipped_formation_off_entry_is_not_rewritten() -> None:
     assert "ignored until 2.0. " in old["summary"]
     [new] = [e for e in MIGRATION_MANIFEST if e["feature"] == "AM-SPORE-SCHEMA-V2"]
     assert MIGRATION_MANIFEST.index(new) > MIGRATION_MANIFEST.index(old)
-    assert [e["feature"] for e in pending_migrations("1.0.7")] == ["AM-SPORE-SCHEMA-V2"]
+    # Seen by an adopter who acknowledged under 1.0.7 AND by one who acknowledged
+    # under the published 2.0.0 (the entry is keyed to the release that carries it).
+    for acked in ("1.0.7", "2.0.0"):
+        got = [e["feature"] for e in pending_migrations(acked, current_version="2.0.1")]
+        assert got == ["AM-SPORE-SCHEMA-V2"]
 
 
 # -- AM-WRAP-GENERATED: the first file-RETIREMENT entry (spore-217) --

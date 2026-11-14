@@ -1095,12 +1095,7 @@ class SporeStore:
                 except FileExistsError:
                     continue
                 try:
-                    try:
-                        f = os.fdopen(fd, "wb")
-                    except BaseException:
-                        os.close(fd)                    # fdopen did not take ownership: close the raw fd
-                        raise
-                    with f:
+                    with os.fdopen(fd, "wb") as f:      # fdopen takes the fd over; if it fails the unlink below still runs
                         f.write(raw)
                         f.flush()
                         _full_fsync(f.fileno())

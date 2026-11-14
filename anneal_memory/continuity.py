@@ -3098,8 +3098,8 @@ def validated_save_continuity(
         text: The agent-compressed continuity text.
         affective_state: DEPRECATED, accepted and ignored since 1.0.2: it
             weighted association links, which a save no longer forms. Passing
-            one emits one ``UserWarning`` after the save commits. Removed in
-            2.0. CLI ``--affect-tag``; MCP ``"affective_state"``.
+            one emits one ``UserWarning`` after the save commits. Removed no
+            earlier than a later MAJOR release. CLI ``--affect-tag``; MCP ``"affective_state"``.
         today: Optional override for today's date as ``YYYY-MM-DD``.
             Defaults to ``date.today().isoformat()`` (wall clock). Passing
             an explicit value makes the function fully deterministic —

@@ -6659,8 +6659,19 @@
       "GEMINI.md"
      ],
      "suggested_edit": "Remove any instruction to pass an affective state or affect tag at the wrap, any step that reads an \"Association Context\" from `prepare_wrap`, and any statement that co-citing episodes forms or strengthens links. Keep instructions to cite every episode that genuinely supports a pattern: the immune system's citation checks are unchanged.",
-     "summary": "anneal-memory 1.0.2 stops forming association links. A save forms and decays no link in either the episode graph or the pattern graph, and the affect input no longer weights anything: recall never read the episode links, and the pattern graph was shadow-only. The first 1.0.2 save records this on the store (`Store.association_formation()`). Links formed earlier stay readable until a later MAJOR release removes them. `prepare_wrap` no longer returns association context (`assoc_context` is always `None`), and the `affective_state` argument, the MCP `affective_state` property and the CLI `--affect-tag` / `--affect-intensity` flags are accepted and ignored until a later MAJOR release removes it (no earlier than 2.0). AM-WARN Signal B is retired. The 0.9.26 entry's line that co-citation still forms Hebbian links no longer holds.",
+     "summary": "anneal-memory 1.0.2 stops forming association links. A save forms and decays no link in either the episode graph or the pattern graph, and the affect input no longer weights anything: recall never read the episode links, and the pattern graph was shadow-only. The first 1.0.2 save records this on the store (`Store.association_formation()`). Links formed earlier stay readable through 1.x. `prepare_wrap` no longer returns association context (`assoc_context` is always `None`), and the `affective_state` argument, the MCP `affective_state` property and the CLI `--affect-tag` / `--affect-intensity` flags are accepted and ignored until 2.0. AM-WARN Signal B is retired. The 0.9.26 entry's line that co-citation still forms Hebbian links no longer holds.",
      "version": "1.0.2"
+    },
+    {
+     "feature": "AM-SPORE-SCHEMA-V2",
+     "files": [
+      "CLAUDE.md",
+      "AGENTS.md",
+      "GEMINI.md"
+     ],
+     "suggested_edit": "Run `anneal-memory intention migrate-key` once on every spore/intention store before using 2.0.0, and change any instruction that says those 1.0.2 items are removed in 2.0 to say a later MAJOR release removes them.",
+     "summary": "anneal-memory 2.0.0 keeps the spore/intention store's open rows under `intentions` (schema 2), not `spores`; a store written by 1.0.7 or earlier is refused until `anneal-memory intention migrate-key` converts it once (it copies the file first; `--dry-run` shows what it would do). It also corrects the 1.0.2 entry's timeline: the 1.0.2 deprecations (`allow_unlinked`, `affective_state`, `--affect-tag`, `--affect-intensity`, the legacy association APIs, and the links formed earlier) are NOT removed in 2.0.0; a later MAJOR release removes them.",
+     "version": "2.0.0"
     }
    ]
   },

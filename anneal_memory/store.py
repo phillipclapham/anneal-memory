@@ -1384,7 +1384,7 @@ def _corroborative_trust(own: str, source_levels: Iterable[str]) -> str:
 
 
 # The name this rule had before the three axes were named apart; kept for callers
-# that imported it, until 2.0.
+# that imported it, until a later MAJOR release.
 _derived_trust = _corroborative_trust
 
 

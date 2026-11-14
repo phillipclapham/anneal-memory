@@ -119,6 +119,18 @@ class TestPendingMigrations:
             assert entry["files"] and all(isinstance(f, str) for f in entry["files"])
 
 
+def test_shipped_formation_off_entry_is_not_rewritten() -> None:
+    # The manifest APPENDS; a shipped entry is never rewritten (an adopter may
+    # have acknowledged up to it). The 1.0.2 text shipped in 1.0.7 says "1.x" and
+    # "until 2.0"; the corrected timeline lives in a later, appended entry.
+    [old] = [e for e in MIGRATION_MANIFEST if e["feature"] == "AM-FORMATION-OFF"]
+    assert "stay readable through 1.x." in old["summary"]
+    assert "ignored until 2.0. " in old["summary"]
+    [new] = [e for e in MIGRATION_MANIFEST if e["feature"] == "AM-SPORE-SCHEMA-V2"]
+    assert MIGRATION_MANIFEST.index(new) > MIGRATION_MANIFEST.index(old)
+    assert [e["feature"] for e in pending_migrations("1.0.7")] == ["AM-SPORE-SCHEMA-V2"]
+
+
 # -- AM-WRAP-GENERATED: the first file-RETIREMENT entry (spore-217) --
 
 class TestWrapGeneratedEntry:

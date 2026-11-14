@@ -3779,7 +3779,7 @@ def validated_save_continuity(
     #     and the save still returns success (it committed).
     # (Phase 1, the pre-commit tmp write and the operator ``mv`` recovery,
     # was the generation-2 pipeline; its orphan scan stays for stores not
-    # yet migrated and goes in 2.0.)
+    # yet migrated and goes in a later MAJOR release.)
     sections = measure_sections(grad_result.text)
     patterns = len(re.findall(r"\|\s*\d+x", mask_explanations_text(grad_result.text)))
     total_demoted = grad_result.demoted + grad_result.bare_demoted

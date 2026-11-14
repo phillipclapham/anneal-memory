@@ -134,7 +134,7 @@ def _effective_id(data: Mapping[str, Any], wanted: str) -> str:
     return wanted
 
 
-SporeType =Literal["task", "question", "thought"]
+SporeType = Literal["task", "question", "thought"]
 Tier = Literal["hot", "warm", "cold", "parked"]
 Germination = Literal["growing", "resting", "dormant", "parked"]
 Direction = Literal["descend", "ascend"]

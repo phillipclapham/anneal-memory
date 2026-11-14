@@ -1029,7 +1029,7 @@ class Server:
             lines.append(
                 "affective_state is deprecated and was ignored: since anneal-memory "
                 "1.0.2 a save forms no association links for it to weight. Stop "
-                "sending it; it is removed in 2.0."
+                "sending it; it is removed no earlier than 2.0."
             )
         lines.append(f"Episodes compressed: {result['episodes_compressed']}")
         if result.get("stale_state"):

@@ -27,7 +27,7 @@ A public name, flag or field is deprecated before it is removed:
 2. Using it emits a warning, and the [CHANGELOG](../CHANGELOG.md) has a line that names the replacement.
 3. It is removed no earlier than the next MAJOR release.
 
-The first deprecation is `allow_unlinked` (the `allow_unlinked` argument of `validated_save_continuity`, the CLI flag `--allow-unlinked`, and the MCP argument of the same name). It is accepted and does nothing. The library and the CLI emit a `UserWarning` after the save has committed, which Python shows by default (a `DeprecationWarning` would be hidden from a CLI user), and the MCP tool's result carries a line saying the same. It stays accepted through 1.x and is removed in 2.0.
+The first deprecation is `allow_unlinked` (the `allow_unlinked` argument of `validated_save_continuity`, the CLI flag `--allow-unlinked`, and the MCP argument of the same name). It is accepted and does nothing. The library and the CLI emit a `UserWarning` after the save has committed, which Python shows by default (a `DeprecationWarning` would be hidden from a CLI user), and the MCP tool's result carries a line saying the same. It stays accepted and is removed no earlier than 2.0.
 
 ## Supported environments
 

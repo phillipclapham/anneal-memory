@@ -36,7 +36,9 @@ Germination (computed at read-time, NEVER stored — parallel to "top of mind"):
   - ``dormant``  seen > 7 days ago OR past next: — "still alive, or ready to compost?"
   - ``parked``   tier == parked                  — deliberate dormancy, not neglect
 
-Storage: a single JSON document, written atomically (unique-tmp + fsync + rename +
+Storage: a single JSON document (schema 2: the open rows under ``"intentions"``, the
+resolved rows under ``"resolved"``; a schema 1 document, which keyed the open rows
+``"spores"``, is refused until ``migrate_to_v2`` converts it), written atomically (unique-tmp + fsync + rename +
 dir-flush). The dir-flush is ``_flush_dir``: ``F_FULLFSYNC`` on macOS, and a real
 failure raises (the shared ``_fsync_dir`` helper (:mod:`anneal_memory._fsdir`)
 swallows ``OSError`` instead).
@@ -60,11 +62,13 @@ avoid colliding with the identity-*seed* that boots an entity.
 
 from __future__ import annotations
 
+import contextlib
 import copy
 import errno
 import hashlib
 import json
 import os
+import shlex
 import tempfile
 import unicodedata
 import uuid
@@ -83,7 +87,13 @@ from .origin import _BIDI_CONTROLS, strip_hidden_controls  # noqa: F401 (re-expo
 from .origin import validate_origin_key as _validate_narrow_origin_key
 from .store import AnnealMemoryError
 
-SPORE_SCHEMA_VERSION = 1
+# The stored document. Schema v2 keys the open rows under ``OPEN_KEY``
+# ("intentions"); v1 keyed them under ``LEGACY_OPEN_KEY`` ("spores"). A v1 file is
+# REFUSED, never read or upgraded implicitly (no dual-read): ``migrate_to_v2`` /
+# ``anneal-memory intention migrate-key`` converts it once, backup first.
+SPORE_SCHEMA_VERSION = 2
+OPEN_KEY = "intentions"
+LEGACY_OPEN_KEY = "spores"
 
 # The two spellings of one record's id. ``spore`` is the original and the default
 # mint; ``intention`` is the same concept under its new name. A store may hold
@@ -115,7 +125,7 @@ def _effective_id(data: Mapping[str, Any], wanted: str) -> str:
     if alias is None:
         return wanted
     held: set[object] = set()
-    for key in ("spores", "resolved", "deleted"):
+    for key in (OPEN_KEY, "resolved", "deleted"):
         rows = data.get(key)
         if isinstance(rows, list):
             held.update(r.get("id") for r in rows if isinstance(r, dict))
@@ -124,7 +134,7 @@ def _effective_id(data: Mapping[str, Any], wanted: str) -> str:
     return wanted
 
 
-SporeType = Literal["task", "question", "thought"]
+SporeType =Literal["task", "question", "thought"]
 Tier = Literal["hot", "warm", "cold", "parked"]
 Germination = Literal["growing", "resting", "dormant", "parked"]
 Direction = Literal["descend", "ascend"]
@@ -179,6 +189,13 @@ class SporeError(AnnealMemoryError):
         out of this module's introduction to keep its blast radius to one new
         module + the ``__init__`` re-export.
     """
+
+
+class SporeSchemaError(SporeError):
+    """The document's schema is not the one this version reads: an older store (v1,
+    convert it with ``migrate-key``) or a newer one. A :class:`SporeError`, so every
+    existing ``except SporeError`` still catches it; the CLI prints it as a plain
+    refusal instead of a traceback."""
 
 
 class _Unset:
@@ -671,6 +688,22 @@ def _validate_guards(
         )
 
 
+def _is_convertible_v1(data: Mapping[str, Any]) -> bool:
+    """True for exactly the documents :meth:`SporeStore.migrate_to_v2` converts, and the ONLY ones
+    :meth:`SporeStore._load` tells the operator to migrate: open rows under the legacy key, none
+    under the current one, a ``schema_version`` that is absent, null or exactly the integer 1 (a bool,
+    a float, 0 or a negative number is not a version this code knows), and every row list
+    (``spores``, ``resolved``, ``deleted``) a list of objects, so the renamed store loads afterwards."""
+    if LEGACY_OPEN_KEY not in data or OPEN_KEY in data:
+        return False
+    version = data.get("schema_version")
+    if not (version is None or (isinstance(version, int) and not isinstance(version, bool) and version == 1)):
+        return False
+    return all(
+        isinstance(data.get(key, []), list) and all(isinstance(r, dict) for r in data.get(key, []))
+        for key in (LEGACY_OPEN_KEY, "resolved", "deleted"))
+
+
 class SporeStore:
     """A JSON-backed store of open cognitive loops (the prospective layer).
 
@@ -713,7 +746,7 @@ class SporeStore:
                 data = json.load(f)
         except FileNotFoundError:
             return {
-                "spores": [],
+                OPEN_KEY: [],
                 "resolved": [],
                 "schema_version": SPORE_SCHEMA_VERSION,
             }
@@ -732,36 +765,61 @@ class SporeStore:
                 f"{self.path} must contain a JSON object, got "
                 f"{type(data).__name__}."
             )
-        data.setdefault("spores", [])
-        data.setdefault("resolved", [])
-        data.setdefault("schema_version", SPORE_SCHEMA_VERSION)
-        if not isinstance(data["spores"], list) or not isinstance(
-            data["resolved"], list
-        ):
-            raise SporeError(
-                f"{self.path} is structurally invalid ('spores' and 'resolved' "
-                f"must be lists); refusing to proceed so recoverable open loops "
-                f"aren't lost — inspect it by hand."
-            )
-        if not all(isinstance(s, dict) for s in data["spores"]) or not all(
-            isinstance(s, dict) for s in data["resolved"]
-        ):
-            raise SporeError(
-                f"{self.path} has non-object rows in 'spores'/'resolved'; "
-                f"refusing to proceed — inspect it by hand."
-            )
-        version = data["schema_version"]
+        version = data.get("schema_version")
+        if version is None and LEGACY_OPEN_KEY not in data:
+            # No version and no v1 rows: a fresh document, born at the current schema.
+            version = data["schema_version"] = SPORE_SCHEMA_VERSION
+        elif version is None:
+            version = 1  # a v1 document that predates the version field
         if not isinstance(version, int) or isinstance(version, bool):
-            raise SporeError(
+            raise SporeSchemaError(
                 f"{self.path} has a non-integer schema_version ({version!r}); "
                 f"refusing to proceed — inspect it by hand."
             )
         if version > SPORE_SCHEMA_VERSION:
-            raise SporeError(
+            raise SporeSchemaError(
                 f"{self.path} was written by a newer spore schema "
                 f"(v{version} > v{SPORE_SCHEMA_VERSION}); refusing to read it so "
                 f"fields this version doesn't understand aren't silently dropped "
                 f"on the next save."
+            )
+        if version < SPORE_SCHEMA_VERSION:
+            if not _is_convertible_v1(data):
+                raise SporeSchemaError(
+                    f"{self.path} claims schema v{version} but is not a store "
+                    f"migrate-key can convert (its keys: {sorted(data)}); refusing to read "
+                    f"it so no row is silently missed — inspect it by hand."
+                )
+            raise SporeSchemaError(
+                f"{self.path} is a schema v{version} store (its open rows sit under "
+                f"{LEGACY_OPEN_KEY!r}); this anneal-memory reads schema "
+                f"v{SPORE_SCHEMA_VERSION} only (open rows under {OPEN_KEY!r}). It is "
+                f"refused, not read, so no row is silently missed. Convert it once, "
+                f"with a backup: anneal-memory intention migrate-key --file {shlex.quote(str(self.path))}"
+            )
+        if LEGACY_OPEN_KEY in data:
+            raise SporeSchemaError(
+                f"{self.path} is schema v{version} but still carries a "
+                f"{LEGACY_OPEN_KEY!r} key (a schema v{version} store keeps its open rows under "
+                f"{OPEN_KEY!r} only); refusing to proceed so no row is read from one key and "
+                f"written over the other — inspect it by hand."
+            )
+        data.setdefault(OPEN_KEY, [])
+        data.setdefault("resolved", [])
+        if not isinstance(data[OPEN_KEY], list) or not isinstance(
+            data["resolved"], list
+        ):
+            raise SporeError(
+                f"{self.path} is structurally invalid ({OPEN_KEY!r} and 'resolved' "
+                f"must be lists); refusing to proceed so recoverable open loops "
+                f"aren't lost — inspect it by hand."
+            )
+        if not all(isinstance(s, dict) for s in data[OPEN_KEY]) or not all(
+            isinstance(s, dict) for s in data["resolved"]
+        ):
+            raise SporeError(
+                f"{self.path} has non-object rows in {OPEN_KEY!r}/'resolved'; "
+                f"refusing to proceed — inspect it by hand."
             )
         return data
 
@@ -836,6 +894,22 @@ class SporeStore:
         writer is unaffected, but cross-process serialization is guaranteed only
         for a local POSIX filesystem.
         """
+        with self._exclusive():
+            data = self._load()
+            loaded = json.dumps(data, sort_keys=True)
+            n = self._backfill_origin_keys(data)
+            if backfilled is not None:
+                backfilled.append(n)
+            yield data
+            # A body that changed nothing (a retried create, a no-op) writes nothing.
+            if json.dumps(data, sort_keys=True) != loaded:
+                self._save(data)
+
+    @contextmanager
+    def _exclusive(self) -> Iterator[None]:
+        """Hold the exclusive advisory lock on the sibling ``<store>.lock`` (a no-op
+        where ``fcntl`` is absent). :meth:`_transaction` and :meth:`migrate_to_v2` both
+        run under it, so they serialize against each other."""
         os.makedirs(self.path.parent, exist_ok=True)
         # os.open + flock go INSIDE the try so a flock failure (e.g. ENOLCK on a
         # lock-less FS) can't leak the lock fd: the finally's None-guard covers
@@ -846,15 +920,7 @@ class SporeStore:
                 lock_path = self.path.with_name(self.path.name + ".lock")
                 lock_fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o644)
                 fcntl.flock(lock_fd, fcntl.LOCK_EX)
-            data = self._load()
-            loaded = json.dumps(data, sort_keys=True)
-            n = self._backfill_origin_keys(data)
-            if backfilled is not None:
-                backfilled.append(n)
-            yield data
-            # A body that changed nothing (a retried create, a no-op) writes nothing.
-            if json.dumps(data, sort_keys=True) != loaded:
-                self._save(data)
+            yield
         finally:
             if lock_fd is not None:
                 os.close(lock_fd)
@@ -879,7 +945,7 @@ class SporeStore:
         invents one. A ``SporeError`` (an unreadable document) propagates
         (design r6 §11.2, §12.4)."""
         data = self._load()
-        if not any(self._needs_key(i) for i in data.get("spores", []) + data.get("resolved", [])):
+        if not any(self._needs_key(i) for i in data.get(OPEN_KEY, []) + data.get("resolved", [])):
             return data
         try:
             if hasattr(os, "geteuid") and os.stat(self.path).st_uid != os.geteuid():
@@ -899,7 +965,7 @@ class SporeStore:
         fresh one. Runs inside each write transaction, so the first write after an
         upgrade persists them all; returns how many were assigned."""
         n = 0
-        for item in list(data.get("spores", [])) + list(data.get("resolved", [])):
+        for item in list(data.get(OPEN_KEY, [])) + list(data.get("resolved", [])):
             if SporeStore._needs_key(item):
                 item["origin_key"] = uuid.uuid4().hex
                 n += 1
@@ -913,6 +979,139 @@ class SporeStore:
             pass
         return backfilled[0]
 
+    # --- schema migration ---------------------------------------------------
+
+    def migrate_to_v2(
+        self, *, backup_dir: str | os.PathLike[str] | None = None, dry_run: bool = False
+    ) -> dict[str, Any]:
+        """Convert a schema v1 store (open rows under ``'spores'``) to schema v2
+        (under ``'intentions'``), once, in place. The only way a v1 file is ever read.
+
+        Under the same exclusive lock every write takes: the v1 document is read as
+        raw JSON, copied byte for byte to a backup (``<name>.v1-<UTC stamp>.bak``,
+        in ``backup_dir`` or beside the file; fsynced and read back before anything
+        changes), then rewritten atomically with ``'spores'`` renamed to
+        ``'intentions'`` in the same position, ``schema_version`` set to 2 and every
+        other key and row untouched. The result is reloaded through :meth:`_load` and
+        compared with the v1 document before the lock is released. Nothing about a
+        row changes, so the ids, ``origin_key`` s and ``version`` s a caller holds
+        stay valid.
+
+        A store that is already v2 returns ``status == "already-current"`` and
+        writes nothing. A document that is neither (both keys, a row that is not an
+        object, a schema this version does not know) raises :class:`SporeError`
+        and is left as it was. ``dry_run`` reports what would change and writes
+        nothing (no backup, no lock file, no directory). Where there is no file lock (Windows, which is
+        single-writer) it runs unlocked, like every other write there.
+
+        Returns ``{"status": "migrated" | "would-migrate" | "already-current",
+        "path", "schema_version", "open", "resolved", "deleted", "backup"}``."""
+        if not self.path.is_file():     # before the lock: a mistyped path plants no directory and no lock file
+            raise SporeError(f"{self.path} does not exist; nothing to migrate.")
+        # a dry run reads like every lock-free reader does (the file is replaced atomically) and takes no lock
+        with (contextlib.nullcontext() if dry_run else self._exclusive()):
+            try:
+                raw = self.path.read_bytes()
+            except FileNotFoundError as e:
+                raise SporeError(f"{self.path} does not exist; nothing to migrate.") from e
+            except OSError as e:
+                raise SporeError(f"{self.path} cannot be read ({e}); nothing was changed.") from e
+            try:
+                data = json.loads(raw.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError) as e:
+                raise SporeError(
+                    f"{self.path} is not readable JSON ({e}); refusing to migrate it "
+                    f"— inspect it by hand."
+                ) from e
+            if not isinstance(data, dict):
+                raise SporeError(
+                    f"{self.path} must contain a JSON object, got {type(data).__name__}.")
+            if not _is_convertible_v1(data):
+                loaded = self._load()   # a current document answers already-current; anything else refuses in its own words
+                return self._migration_summary(
+                    "already-current", loaded, loaded[OPEN_KEY], None)
+            if dry_run:
+                return self._migration_summary(
+                    "would-migrate", data, data[LEGACY_OPEN_KEY], None)
+            backup = self._write_migration_backup(raw, backup_dir)
+            converted: dict[str, Any] = {}
+            for key, value in data.items():
+                if key == LEGACY_OPEN_KEY:
+                    converted[OPEN_KEY] = value
+                elif key == "schema_version":
+                    converted[key] = SPORE_SCHEMA_VERSION
+                else:
+                    converted[key] = value
+            converted["schema_version"] = SPORE_SCHEMA_VERSION
+            try:
+                self._save(converted)
+                after = self._load()
+            except (OSError, SporeError) as exc:
+                raise SporeError(
+                    f"writing or reading back the converted {self.path} failed ({exc}); the "
+                    f"byte-for-byte backup is {backup}; the store is untouched or already "
+                    f"converted, so restore the backup over it if in doubt."
+                ) from exc
+            expected = {**{k: v for k, v in data.items() if k != LEGACY_OPEN_KEY},
+                        OPEN_KEY: data[LEGACY_OPEN_KEY],
+                        "schema_version": SPORE_SCHEMA_VERSION}
+            expected.setdefault("resolved", [])
+            if json.dumps(after, sort_keys=True) != json.dumps(expected, sort_keys=True):
+                raise SporeError(
+                    f"the converted {self.path} does not match the v1 document it came "
+                    f"from; the byte-for-byte backup is {backup} — restore it over "
+                    f"{self.path} and report this.")
+            return self._migration_summary("migrated", after, after[OPEN_KEY], backup)
+
+    def _migration_summary(
+        self, status: str, doc: dict, open_rows: list, backup: Path | None
+    ) -> dict[str, Any]:
+        deleted = doc.get("deleted")
+        return {
+            "status": status,
+            "path": str(self.path),
+            "schema_version": SPORE_SCHEMA_VERSION if status != "would-migrate" else 1,
+            "open": len(open_rows),
+            "resolved": len(doc.get("resolved", [])),
+            "deleted": len(deleted) if isinstance(deleted, list) else 0,
+            "backup": str(backup) if backup is not None else None,
+        }
+
+    def _write_migration_backup(
+        self, raw: bytes, backup_dir: str | os.PathLike[str] | None
+    ) -> Path:
+        """Write ``raw`` (the v1 file's exact bytes) to a new backup file and read it back.
+        A name that exists is never overwritten: a retry in the same second takes the next
+        ``-N`` name. Any failure is a :class:`SporeError` and nothing has been changed."""
+        target_dir = Path(backup_dir) if backup_dir is not None else self.path.parent
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        try:
+            os.makedirs(target_dir, exist_ok=True)
+            for n in range(1000):
+                backup = target_dir / (
+                    f"{self.path.name}.v1-{stamp}.bak" if n == 0 else f"{self.path.name}.v1-{stamp}-{n}.bak")
+                try:
+                    fd = os.open(backup, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                except FileExistsError:
+                    continue
+                try:
+                    with os.fdopen(fd, "wb") as f:      # fdopen takes the fd over; if it fails the unlink below still runs
+                        f.write(raw)
+                        f.flush()
+                        _full_fsync(f.fileno())
+                    if backup.read_bytes() != raw:
+                        raise SporeError(
+                            f"the backup {backup} does not match {self.path}; nothing was changed.")
+                    _flush_dir(_open_dir(target_dir))    # the new directory entry is on disk before the source is replaced
+                except BaseException:
+                    with contextlib.suppress(OSError):
+                        backup.unlink()                  # a backup that did not complete is not a recovery artifact
+                    raise
+                return backup
+        except OSError as exc:
+            raise SporeError(f"could not write the backup in {target_dir} ({exc}); nothing was changed.") from exc
+        raise SporeError(f"no free backup name in {target_dir}; nothing was changed.")
+
     # --- internal lookups ---------------------------------------------------
 
     def _next_id(self, data: dict) -> str:
@@ -920,7 +1119,7 @@ class SporeStore:
         spores (of either prefix) so an id is never reused after a spore resolves
         or is deleted."""
         max_num = 0
-        rows = list(data.get("spores", [])) + list(data.get("resolved", []))
+        rows = list(data.get(OPEN_KEY, [])) + list(data.get("resolved", []))
         for item in rows + SporeStore._deleted(data):
             try:
                 num = int(str(item["id"]).split("-")[1])
@@ -937,7 +1136,7 @@ class SporeStore:
         lookup every id-addressed mutator goes through. An id that is open and
         also resolved is refused the same way."""
         spore_id = _effective_id(data, spore_id)
-        matches = [item for item in data.get("spores", []) if item.get("id") == spore_id]
+        matches = [item for item in data.get(OPEN_KEY, []) if item.get("id") == spore_id]
         if len(matches) > 1:
             raise SporeError(
                 f"{len(matches)} open spores share id {spore_id!r}; refusing to "
@@ -952,7 +1151,7 @@ class SporeStore:
 
     @staticmethod
     def _find_by_origin_key(data: dict, origin_key: str) -> SporeDict | None:
-        for item in list(data.get("spores", [])) + list(data.get("resolved", [])):
+        for item in list(data.get(OPEN_KEY, [])) + list(data.get("resolved", [])):
             key = item.get("origin_key") if isinstance(item, dict) else None
             if _is_valid_origin_key(key) and key == origin_key:
                 return cast("SporeDict", item)
@@ -1023,7 +1222,7 @@ class SporeStore:
         registry = self._deleted(data)
         # By identity, never by id: under id drift another spore can share the id
         # (L3 r1 codex HIGH).
-        data["spores"] = [r for r in data["spores"] if r is not item]
+        data[OPEN_KEY] = [r for r in data[OPEN_KEY] if r is not item]
         data["resolved"] = [r for r in data["resolved"] if r is not item]
         registry.append({
             "id": spore_id,
@@ -1271,7 +1470,7 @@ class SporeStore:
             extra = set(res) - {"direction", "kind", "ref", "on", "at"} if isinstance(res, dict) else {"<not an object>"}
             if extra:
                 failed.append(f"resolution carries unexpected keys {sorted(extra)}")
-            if any(r.get("id") == spore_id for r in data.get("spores", [])):
+            if any(r.get("id") == spore_id for r in data.get(OPEN_KEY, [])):
                 failed.append("the resolved spore is still in the open set")
         self._raise_failed(after, failed)
         return SporeApplyResult("applied", spore_id, after, version(after))
@@ -1432,7 +1631,7 @@ class SporeStore:
         for name, value in fields["opaque"].items():
             if value:
                 cast("dict[str, object]", item)[name] = value
-        data["spores"].append(item)
+        data[OPEN_KEY].append(item)
         return item
 
     # --- public API: read ---------------------------------------------------
@@ -1442,7 +1641,7 @@ class SporeStore:
         set (open takes precedence if an id somehow appears in both), or None."""
         data = self._load_keyed()
         spore_id = _effective_id(data, spore_id)
-        for item in data.get("spores", []) + data.get("resolved", []):
+        for item in data.get(OPEN_KEY, []) + data.get("resolved", []):
             if item.get("id") == spore_id:
                 return cast("SporeDict", item)
         return None
@@ -1473,7 +1672,7 @@ class SporeStore:
         if now is None and today is None:
             now = datetime.now()  # one reading for the filter and rank passes
         now = _local_clock(now)
-        items = list(self._load_keyed().get("spores", []))
+        items = list(self._load_keyed().get(OPEN_KEY, []))
         if type is not None:
             items = [s for s in items if s.get("type") == type]
         if tier is not None:
@@ -1516,7 +1715,7 @@ class SporeStore:
         if now is None and today is None:
             now = datetime.now()
         now = _local_clock(now)
-        open_items = list(self._load_keyed().get("spores", []))
+        open_items = list(self._load_keyed().get(OPEN_KEY, []))
         if top_of_mind:
             pool = [
                 s for s in open_items
@@ -1878,7 +2077,7 @@ class SporeStore:
         spore_id = item["id"]
         # Defence in depth: every public caller already passed _find_open, which
         # refuses both drift shapes below; kept for any future direct caller.
-        matches = [s for s in data["spores"] if s.get("id") == spore_id]
+        matches = [s for s in data[OPEN_KEY] if s.get("id") == spore_id]
         if len(matches) != 1:
             raise SporeError(
                 f"{len(matches)} open spores share id {spore_id!r}; refusing to "
@@ -1901,7 +2100,7 @@ class SporeStore:
             "on": (today or date.today()).isoformat(),
             "at": (now or datetime.now(timezone.utc)).isoformat(timespec="seconds"),
         }
-        data["spores"] = [s for s in data["spores"] if s.get("id") != spore_id]
+        data[OPEN_KEY] = [s for s in data[OPEN_KEY] if s.get("id") != spore_id]
         data["resolved"].append(item)
 
 

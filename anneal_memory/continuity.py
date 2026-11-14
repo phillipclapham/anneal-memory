@@ -2136,7 +2136,7 @@ def prepare_wrap(
           - ``assoc_context`` (None): always ``None`` since 1.0.2. It
             carried association-link context to the composer; no recall
             path read those links, and a save no longer forms them. The
-            key stays for existing readers and is removed in 2.0
+            key stays for existing readers and is removed no earlier than 2.0
           - ``wrap_token`` (str | None): session-handshake token for
             the pending wrap when ``status == "ready"``, ``None`` on
             the empty path. Transports should round-trip this back to
@@ -4416,7 +4416,7 @@ def validated_save_continuity(
             "affective_state is deprecated and ignored since anneal-memory 1.0.2: "
             "it weighted association links, which a save no longer forms. Stop "
             "passing it (CLI --affect-tag; MCP \"affective_state\"); it is removed "
-            "in 2.0."
+            "no earlier than 2.0."
         )
     if allow_unlinked is True:
         # After the commit, like every save warning: emitted before it, an
@@ -4565,7 +4565,7 @@ def validated_save_continuity(
         carried_forward=carried_forward_payload,
         uncorroborated=[asdict(u) for u in grad_result.uncorroborated],
         pattern_trust=dict(grad_result.pattern_trust),
-        # Kept for existing readers until 2.0; a save forms no link since 1.0.2,
+        # Kept for existing readers until a later MAJOR release removes it; a save forms no link since 1.0.2,
         # so all three are 0.
         associations_formed=0,
         associations_strengthened=0,

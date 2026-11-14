@@ -2543,6 +2543,73 @@
       "subcommands": {},
       "subparsers": null
      },
+     "migrate-key": {
+      "defaults": {
+       "func": "anneal_memory.cli.cmd_spore_migrate_key",
+       "id_prefix": "intention"
+      },
+      "exclusive_groups": [],
+      "options": [
+       {
+        "action": "_StoreAction",
+        "choices": null,
+        "const": null,
+        "default": null,
+        "dest": "backup_dir",
+        "flags": [
+         "--backup-dir"
+        ],
+        "metavar": null,
+        "nargs": null,
+        "required": false,
+        "type": null
+       },
+       {
+        "action": "_StoreTrueAction",
+        "choices": null,
+        "const": true,
+        "default": false,
+        "dest": "dry_run",
+        "flags": [
+         "--dry-run"
+        ],
+        "metavar": null,
+        "nargs": 0,
+        "required": false,
+        "type": null
+       },
+       {
+        "action": "_StoreAction",
+        "choices": null,
+        "const": null,
+        "default": null,
+        "dest": "file",
+        "flags": [
+         "--file"
+        ],
+        "metavar": null,
+        "nargs": null,
+        "required": false,
+        "type": null
+       },
+       {
+        "action": "_StoreTrueAction",
+        "choices": null,
+        "const": true,
+        "default": "==SUPPRESS==",
+        "dest": "json",
+        "flags": [
+         "--json"
+        ],
+        "metavar": null,
+        "nargs": 0,
+        "required": false,
+        "type": null
+       }
+      ],
+      "subcommands": {},
+      "subparsers": null
+     },
      "promote": {
       "defaults": {
        "func": "anneal_memory.cli.cmd_spore_ascend",
@@ -4649,6 +4716,73 @@
       "subcommands": {},
       "subparsers": null
      },
+     "migrate-key": {
+      "defaults": {
+       "func": "anneal_memory.cli.cmd_spore_migrate_key",
+       "id_prefix": "spore"
+      },
+      "exclusive_groups": [],
+      "options": [
+       {
+        "action": "_StoreAction",
+        "choices": null,
+        "const": null,
+        "default": null,
+        "dest": "backup_dir",
+        "flags": [
+         "--backup-dir"
+        ],
+        "metavar": null,
+        "nargs": null,
+        "required": false,
+        "type": null
+       },
+       {
+        "action": "_StoreTrueAction",
+        "choices": null,
+        "const": true,
+        "default": false,
+        "dest": "dry_run",
+        "flags": [
+         "--dry-run"
+        ],
+        "metavar": null,
+        "nargs": 0,
+        "required": false,
+        "type": null
+       },
+       {
+        "action": "_StoreAction",
+        "choices": null,
+        "const": null,
+        "default": null,
+        "dest": "file",
+        "flags": [
+         "--file"
+        ],
+        "metavar": null,
+        "nargs": null,
+        "required": false,
+        "type": null
+       },
+       {
+        "action": "_StoreTrueAction",
+        "choices": null,
+        "const": true,
+        "default": "==SUPPRESS==",
+        "dest": "json",
+        "flags": [
+         "--json"
+        ],
+        "metavar": null,
+        "nargs": 0,
+        "required": false,
+        "type": null
+       }
+      ],
+      "subcommands": {},
+      "subparsers": null
+     },
      "surface": {
       "defaults": {
        "func": "anneal_memory.cli.cmd_spore_surface",
@@ -6334,6 +6468,10 @@
      "kind": "method",
      "signature": "(self, *, type: 'SporeType | None' = None, tier: 'Tier | None' = None, domain: 'str | None' = None, germination: 'Germination | None' = None, today: 'date | None' = None, now: 'datetime | None' = None) -> 'list[SporeDict]'"
     },
+    "migrate_to_v2": {
+     "kind": "method",
+     "signature": "(self, *, backup_dir: 'str | os.PathLike[str] | None' = None, dry_run: 'bool' = False) -> 'dict[str, Any]'"
+    },
     "surface": {
      "kind": "method",
      "signature": "(self, *, top_of_mind: 'bool' = False, today: 'date | None' = None, now: 'datetime | None' = None) -> 'list[SporeDict]'"
@@ -6521,7 +6659,7 @@
       "GEMINI.md"
      ],
      "suggested_edit": "Remove any instruction to pass an affective state or affect tag at the wrap, any step that reads an \"Association Context\" from `prepare_wrap`, and any statement that co-citing episodes forms or strengthens links. Keep instructions to cite every episode that genuinely supports a pattern: the immune system's citation checks are unchanged.",
-     "summary": "anneal-memory 1.0.2 stops forming association links. A save forms and decays no link in either the episode graph or the pattern graph, and the affect input no longer weights anything: recall never read the episode links, and the pattern graph was shadow-only. The first 1.0.2 save records this on the store (`Store.association_formation()`). Links formed earlier stay readable through 1.x. `prepare_wrap` no longer returns association context (`assoc_context` is always `None`), and the `affective_state` argument, the MCP `affective_state` property and the CLI `--affect-tag` / `--affect-intensity` flags are accepted and ignored until 2.0. AM-WARN Signal B is retired. The 0.9.26 entry's line that co-citation still forms Hebbian links no longer holds.",
+     "summary": "anneal-memory 1.0.2 stops forming association links. A save forms and decays no link in either the episode graph or the pattern graph, and the affect input no longer weights anything: recall never read the episode links, and the pattern graph was shadow-only. The first 1.0.2 save records this on the store (`Store.association_formation()`). Links formed earlier stay readable until a later MAJOR release removes them. `prepare_wrap` no longer returns association context (`assoc_context` is always `None`), and the `affective_state` argument, the MCP `affective_state` property and the CLI `--affect-tag` / `--affect-intensity` flags are accepted and ignored until a later MAJOR release removes it (no earlier than 2.0). AM-WARN Signal B is retired. The 0.9.26 entry's line that co-citation still forms Hebbian links no longer holds.",
      "version": "1.0.2"
     }
    ]
@@ -7245,6 +7383,10 @@
      "kind": "method",
      "signature": "(self, *, type: 'SporeType | None' = None, tier: 'Tier | None' = None, domain: 'str | None' = None, germination: 'Germination | None' = None, today: 'date | None' = None, now: 'datetime | None' = None) -> 'list[SporeDict]'"
     },
+    "migrate_to_v2": {
+     "kind": "method",
+     "signature": "(self, *, backup_dir: 'str | os.PathLike[str] | None' = None, dry_run: 'bool' = False) -> 'dict[str, Any]'"
+    },
     "surface": {
      "kind": "method",
      "signature": "(self, *, top_of_mind: 'bool' = False, today: 'date | None' = None, now: 'datetime | None' = None) -> 'list[SporeDict]'"
@@ -7940,7 +8082,7 @@
      "inputSchema": {
       "properties": {
        "affective_state": {
-        "description": "DEPRECATED and ignored: omit it. It weighted association links, which a save no longer forms; it is accepted so older clients keep working, and removed in 2.0.",
+        "description": "DEPRECATED and ignored: omit it. It weighted association links, which a save no longer forms; it is accepted so older clients keep working, and removed no earlier than 2.0.",
         "properties": {
          "intensity": {
           "description": "How strongly you felt this state (0.0-1.0).",
@@ -9688,7 +9830,7 @@
   "save_continuity": {
    "properties": {
     "affective_state": {
-     "description": "DEPRECATED and ignored: omit it. It weighted association links, which a save no longer forms; it is accepted so older clients keep working, and removed in 2.0.",
+     "description": "DEPRECATED and ignored: omit it. It weighted association links, which a save no longer forms; it is accepted so older clients keep working, and removed no earlier than 2.0.",
      "properties": {
       "intensity": {
        "description": "How strongly you felt this state (0.0-1.0).",

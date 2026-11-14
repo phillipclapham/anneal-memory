@@ -145,7 +145,7 @@ else:
 
 ## Associations (read-only since 1.0.2)
 
-A save forms and decays no association link since 1.0.2, and the affect input (`affective_state`) is accepted and ignored until 2.0. Links formed by earlier versions stay readable through 1.x, and `Store.association_formation()` reports whether formation is off on a store (`mode`, `off_at_wrap`, `off_by_version`).
+A save forms and decays no association link since 1.0.2, and the affect input (`affective_state`) is accepted and ignored until a later MAJOR release removes it (no earlier than 2.0). Links formed by earlier versions stay readable until a later MAJOR release removes them, and `Store.association_formation()` reports whether formation is off on a store (`mode`, `off_at_wrap`, `off_by_version`).
 
 ```python
 # Statistics for links formed before 1.0.2

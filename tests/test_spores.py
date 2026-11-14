@@ -38,7 +38,7 @@ def _concurrent_add_worker(path_str: str, barrier, idx: int, count: int) -> None
 def _hold_lock_and_edit(path_str: str, held, release) -> None:
     store = SporeStore(path_str)
     with store._transaction() as data:
-        data["spores"][0]["text"] = "edited by the other writer"
+        data["intentions"][0]["text"] = "edited by the other writer"
         held.set()
         release.wait(timeout=30)
 
@@ -333,7 +333,7 @@ class TestUpdate:
     def test_add_note_repairs_corrupt_notes(self, store):
         store.add(type="task", text="a", today=T0)
         data = json.loads(store.path.read_text())
-        data["spores"][0]["notes"] = None  # corrupt: notes not a list
+        data["intentions"][0]["notes"] = None  # corrupt: notes not a list
         store.path.write_text(json.dumps(data))
         s = store.update("spore-001", add_note="hi", today=date(2026, 1, 9))
         assert s["notes"] == ["[2026-01-09] hi"]
@@ -405,8 +405,8 @@ class TestResolve:
         # hand-craft store drift: two open spores share an id
         store.add(type="task", text="a", today=T0)
         data = json.loads(store.path.read_text())
-        dup = dict(data["spores"][0])
-        data["spores"].append(dup)
+        dup = dict(data["intentions"][0])
+        data["intentions"].append(dup)
         store.path.write_text(json.dumps(data))
         with pytest.raises(SporeError, match="ambiguous"):
             store.descend("spore-001", kind="done", today=T0)
@@ -415,7 +415,7 @@ class TestResolve:
         # drift: a resolved-status spore left in the open list must not re-resolve
         store.add(type="task", text="a", today=T0)
         data = json.loads(store.path.read_text())
-        data["spores"][0]["status"] = "resolved"
+        data["intentions"][0]["status"] = "resolved"
         store.path.write_text(json.dumps(data))
         with pytest.raises(SporeError, match="store drift"):
             store.touch("spore-001", today=T0)
@@ -446,7 +446,7 @@ class TestResolve:
         # drift: the same id present in BOTH the open and resolved lists
         store.add(type="task", text="a", today=T0)
         data = json.loads(store.path.read_text())
-        data["resolved"].append(dict(data["spores"][0], status="resolved"))
+        data["resolved"].append(dict(data["intentions"][0], status="resolved"))
         store.path.write_text(json.dumps(data))
         with pytest.raises(SporeError, match="both open and resolved"):
             store.descend("spore-001", kind="done", today=T0)
@@ -474,31 +474,31 @@ class TestStoreIO:
 
     def test_non_list_containers_refuse(self, store):
         # corrupt: spores is an object, not a list — setdefault won't fix it
-        store.path.write_text(json.dumps({"spores": {}, "resolved": []}))
+        store.path.write_text(json.dumps({"intentions": {}, "resolved": []}))
         with pytest.raises(SporeError, match="must be lists"):
             store.list_open(today=T0)
 
     def test_newer_schema_version_refuses(self, store):
         store.path.write_text(
-            json.dumps({"spores": [], "resolved": [], "schema_version": 999})
+            json.dumps({"intentions": [], "resolved": [], "schema_version": 999})
         )
         with pytest.raises(SporeError, match="newer spore schema"):
             store.list_open(today=T0)
 
     def test_non_dict_rows_refuse(self, store):
-        store.path.write_text(json.dumps({"spores": ["x"], "resolved": []}))
+        store.path.write_text(json.dumps({"intentions": ["x"], "resolved": []}))
         with pytest.raises(SporeError, match="non-object rows"):
             store.list_open(today=T0)
 
     def test_non_integer_schema_version_refuses(self, store):
         store.path.write_text(
-            json.dumps({"spores": [], "resolved": [], "schema_version": "999"})
+            json.dumps({"intentions": [], "resolved": [], "schema_version": "999"})
         )
         with pytest.raises(SporeError, match="non-integer schema_version"):
             store.list_open(today=T0)
 
     def test_forward_compat_defaults_missing_keys(self, store):
-        store.path.write_text(json.dumps({"spores": []}))  # no resolved/schema_version
+        store.path.write_text(json.dumps({"intentions": []}))  # no resolved/schema_version
         # should not crash; resolved + schema_version defaulted on load
         store.add(type="task", text="a", today=T0)
         data = json.loads(store.path.read_text())
@@ -559,7 +559,7 @@ class TestConcurrency:
         self._run_writers(str(path), n, count)
 
         data = json.loads(path.read_text())
-        spores = data["spores"]
+        spores = data["intentions"]
         # No lost updates: every write landed.
         assert len(spores) == n * count
         # No id collisions: reload-inside-lock makes _next_id see committed state.
@@ -1034,14 +1034,14 @@ class TestOriginKey:
         store.add(type="task", text="b", today=T0)
         store.descend("spore-002", kind="done", today=T0)
         data = json.loads(store.path.read_text())
-        for item in data["spores"] + data["resolved"]:
+        for item in data["intentions"] + data["resolved"]:
             del item["origin_key"]
         store.path.write_text(json.dumps(data))
-        before = spore_version(data["spores"][0])
+        before = spore_version(data["intentions"][0])
         # A read meeting keyless rows keys them and persists that (design r6 §11.2).
         assert store.get_by_origin_key("anything") is None
         on_disk = json.loads(store.path.read_text())
-        assert all(i.get("origin_key") for i in on_disk["spores"] + on_disk["resolved"])
+        assert all(i.get("origin_key") for i in on_disk["intentions"] + on_disk["resolved"])
         assert store.backfill_origin_keys() == 0
         a, b = store.get("spore-001"), store.get("spore-002")
         assert a["origin_key"] and b["origin_key"] and a["origin_key"] != b["origin_key"]
@@ -1054,21 +1054,21 @@ class TestOriginKey:
                      lambda: store.surface(), lambda: store.get_by_origin_key("x")):
             data = json.loads(store.path.read_text())
             # 0.9.42's add: a raw dict appended with no key, the others kept.
-            data["spores"].append({**data["spores"][0], "id": "spore-002"})
-            del data["spores"][-1]["origin_key"]
+            data["intentions"].append({**data["intentions"][0], "id": "spore-002"})
+            del data["intentions"][-1]["origin_key"]
             store.path.write_text(json.dumps(data))
             read()
             on_disk = json.loads(store.path.read_text())
-            assert all(i.get("origin_key") for i in on_disk["spores"])
-            assert len({i["origin_key"] for i in on_disk["spores"]}) == len(on_disk["spores"])
-            on_disk["spores"] = on_disk["spores"][:1]
+            assert all(i.get("origin_key") for i in on_disk["intentions"])
+            assert len({i["origin_key"] for i in on_disk["intentions"]}) == len(on_disk["intentions"])
+            on_disk["intentions"] = on_disk["intentions"][:1]
             store.path.write_text(json.dumps(on_disk))
 
     @pytest.mark.skipif(os.name != "posix" or os.geteuid() == 0, reason="needs POSIX permissions")
     def test_a_read_only_directory_returns_rows_unkeyed(self, store):
         store.add(type="task", text="a", today=T0)
         data = json.loads(store.path.read_text())
-        del data["spores"][0]["origin_key"]
+        del data["intentions"][0]["origin_key"]
         store.path.write_text(json.dumps(data))
         # The lock file exists, so the lock is taken; the save's mkstemp then
         # fails in the read-only directory (codex r5 MED 2).
@@ -1085,7 +1085,7 @@ class TestOriginKey:
         import uuid as _uuid
         store.add(type="task", text="a", today=T0)
         data = json.loads(store.path.read_text())
-        data["spores"][0]["origin_key"] = "hello world"  # accepted by 0.9.42's rule
+        data["intentions"][0]["origin_key"] = "hello world"  # accepted by 0.9.42's rule
         store.path.write_text(json.dumps(data))
         assert store.get_by_origin_key("hello world")["id"] == "spore-001"
         assert store.add(type="task", text="retry", origin_key="hello world", today=T0)["id"] == "spore-001"
@@ -1097,15 +1097,15 @@ class TestOriginKey:
     def test_a_read_returns_what_it_keyed_not_a_reload(self, store, monkeypatch):
         store.add(type="task", text="a", today=T0)
         data = json.loads(store.path.read_text())
-        del data["spores"][0]["origin_key"]
+        del data["intentions"][0]["origin_key"]
         store.path.write_text(json.dumps(data))
         real_save = type(store)._save
 
         def save_then_older_writer_appends(self_, doc):
             real_save(self_, doc)  # an older anneal's add lands right after the release
             on_disk = json.loads(self_.path.read_text())
-            on_disk["spores"].append({**on_disk["spores"][0], "id": "spore-009"})
-            del on_disk["spores"][-1]["origin_key"]
+            on_disk["intentions"].append({**on_disk["intentions"][0], "id": "spore-009"})
+            del on_disk["intentions"][-1]["origin_key"]
             self_.path.write_text(json.dumps(on_disk))
 
         monkeypatch.setattr(type(store), "_save", save_then_older_writer_appends)
@@ -1117,7 +1117,7 @@ class TestOriginKey:
         import errno as _errno
         store.add(type="task", text="a", today=T0)
         data = json.loads(store.path.read_text())
-        del data["spores"][0]["origin_key"]
+        del data["intentions"][0]["origin_key"]
         store.path.write_text(json.dumps(data))
         before = store.path.read_bytes()
         if hasattr(os, "geteuid"):  # L2 #1: the file belongs to someone else
@@ -1137,7 +1137,7 @@ class TestOriginKey:
     def test_any_write_backfills(self, store):
         store.add(type="task", text="a", today=T0)
         data = json.loads(store.path.read_text())
-        del data["spores"][0]["origin_key"]
+        del data["intentions"][0]["origin_key"]
         store.path.write_text(json.dumps(data))
         store.add(type="task", text="b", today=T0)
         assert store.get("spore-001")["origin_key"]
@@ -1153,7 +1153,7 @@ class TestOriginKey:
     def test_a_keyless_legacy_spore_is_never_found_by_a_missing_key(self, store):
         store.add(type="task", text="a", today=T0)
         data = json.loads(store.path.read_text())
-        del data["spores"][0]["origin_key"]
+        del data["intentions"][0]["origin_key"]
         store.path.write_text(json.dumps(data))
         with pytest.raises(ValueError):
             store.get_by_origin_key(None)  # type: ignore[arg-type]
@@ -1169,7 +1169,7 @@ class TestOriginKey:
     def test_a_backfill_count_is_per_call(self, store, monkeypatch):
         store.add(type="task", text="a", today=T0)
         data = json.loads(store.path.read_text())
-        del data["spores"][0]["origin_key"]
+        del data["intentions"][0]["origin_key"]
         store.path.write_text(json.dumps(data))
         assert not hasattr(store, "_last_backfill")
         assert store.backfill_origin_keys() == 1
@@ -1247,16 +1247,16 @@ class TestOriginR2:
     def test_a_type_only_change_is_still_saved(self, store):
         store.add(type="task", text="a", today=T0)
         data = json.loads(store.path.read_text())
-        data["spores"][0]["salience"] = True
+        data["intentions"][0]["salience"] = True
         store.path.write_text(json.dumps(data))
         store.update("spore-001", salience=1)
-        assert json.loads(store.path.read_text())["spores"][0]["salience"] == 1
-        assert json.loads(store.path.read_text())["spores"][0]["salience"] is not True
+        assert json.loads(store.path.read_text())["intentions"][0]["salience"] == 1
+        assert json.loads(store.path.read_text())["intentions"][0]["salience"] is not True
 
     def test_a_present_string_key_is_never_replaced(self, store):
         store.add(type="task", text="a", today=T0)
         data = json.loads(store.path.read_text())
-        data["spores"][0]["origin_key"] = "hand\tedited"
+        data["intentions"][0]["origin_key"] = "hand\tedited"
         store.path.write_text(json.dumps(data))
         assert store.backfill_origin_keys() == 0
         assert store.get("spore-001")["origin_key"] == "hand\tedited"
@@ -1265,7 +1265,7 @@ class TestOriginR2:
     def test_a_missing_or_non_string_key_is_replaced_by_the_backfill(self, store, bad):
         store.add(type="task", text="a", today=T0)
         data = json.loads(store.path.read_text())
-        data["spores"][0]["origin_key"] = bad
+        data["intentions"][0]["origin_key"] = bad
         store.path.write_text(json.dumps(data))
         assert store.backfill_origin_keys() == 1
         key = store.get("spore-001")["origin_key"]
@@ -1279,10 +1279,10 @@ class TestDuplicateOpenId:
     def _drifted(self, store):
         store.add(type="task", text="first", today=T0)
         data = json.loads(store.path.read_text())
-        dup = dict(data["spores"][0])
+        dup = dict(data["intentions"][0])
         dup["text"] = "second copy"
         dup["origin_key"] = "f" * 32
-        data["spores"].append(dup)
+        data["intentions"].append(dup)
         store.path.write_text(json.dumps(data))
         return SporeStore(store.path), data
 
@@ -1290,7 +1290,7 @@ class TestDuplicateOpenId:
     def test_a_guarded_update_matching_one_copy_is_refused(self, store):
         s, data = self._drifted(store)
         before = store.path.read_text()
-        for copy in data["spores"]:
+        for copy in data["intentions"]:
             with pytest.raises(SporeError, match="ambiguous"):
                 s.update("spore-001", text="edited", expected_version=spore_version(copy))
         assert store.path.read_text() == before
@@ -1316,7 +1316,7 @@ class TestDuplicateOpenId:
     def test_a_unique_id_in_a_drifted_store_still_writes(self, store):
         s, _ = self._drifted(store)
         s.add(type="task", text="other", today=T0)
-        other = [x for x in json.loads(store.path.read_text())["spores"] if x["text"] == "other"][0]
+        other = [x for x in json.loads(store.path.read_text())["intentions"] if x["text"] == "other"][0]
         s.update(other["id"], text="other edited")
         assert SporeStore(store.path).get(other["id"])["text"] == "other edited"
 
@@ -1324,7 +1324,7 @@ class TestDuplicateOpenId:
     def test_an_id_both_open_and_resolved_is_refused(self, store, call):
         store.add(type="task", text="a", today=T0)
         data = json.loads(store.path.read_text())
-        gone = dict(data["spores"][0])
+        gone = dict(data["intentions"][0])
         gone["origin_key"] = "e" * 32
         gone["status"] = "resolved"
         gone["resolution"] = {"direction": "descend", "kind": "done", "ref": None, "on": "2026-01-01", "at": "2026-01-01T00:00:00+00:00"}
@@ -1350,7 +1350,7 @@ class TestOpaqueAgendaKeys:
         other fields: the store carries what it does not model."""
         store.add(type="thought", text="x", disposition="agenda", today=T0)
         raw = json.loads(store.path.read_text(encoding="utf-8"))
-        raw["spores"][0]["some_future_key"] = {"a": 1}
+        raw["intentions"][0]["some_future_key"] = {"a": 1}
         store.path.write_text(json.dumps(raw), encoding="utf-8")
         store.update("spore-001", tier="hot", target="board")
         kept = SporeStore(store.path).get("spore-001")

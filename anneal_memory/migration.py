@@ -442,11 +442,11 @@ MIGRATION_MANIFEST: list[MigrationEntry] = [
             "and the affect input no longer weights anything: recall never read "
             "the episode links, and the pattern graph was shadow-only. The first "
             "1.0.2 save records this on the store (`Store.association_formation()`). "
-            "Links formed earlier stay readable through 1.x. `prepare_wrap` no "
+            "Links formed earlier stay readable until a later MAJOR release removes them. `prepare_wrap` no "
             "longer returns association context (`assoc_context` is always "
             "`None`), and the `affective_state` argument, the MCP "
             "`affective_state` property and the CLI `--affect-tag` / "
-            "`--affect-intensity` flags are accepted and ignored until 2.0. "
+            "`--affect-intensity` flags are accepted and ignored until a later MAJOR release removes it (no earlier than 2.0). "
             "AM-WARN Signal B is retired. The 0.9.26 entry's line that "
             "co-citation still forms Hebbian links no longer holds."
         ),

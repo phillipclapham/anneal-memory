@@ -896,7 +896,7 @@ class SaveContinuityResult(_SaveContinuityOptional):
     # grounded its graduation this wrap.
     pattern_trust: dict[str, str]
     # Always 0 since 1.0.2, when a save stopped forming association links;
-    # kept for existing readers until 2.0.
+    # kept for existing readers until a later MAJOR release removes it.
     associations_formed: int
     associations_strengthened: int
     associations_decayed: int

@@ -44,6 +44,7 @@ This section states what 1.0 promises. It holds from schema generation 2, which 
 - The migration is forward-only, additive and idempotent, and it copies the database before changing it.
 - An older release refuses a store that 1.x has migrated (the first write-capable open under 1.x migrates it) and writes nothing to it. The refusal is deliberate: it keeps an older release from writing into a store whose format it does not know.
 - The sidecar files and the per-record formats (the audit log, the outcome log) are versioned. A record written by one release stays readable by every later release.
+- The spore/intention store (`<stem>.spores.json`) is a public document too. Since 2.0.0 it keeps its open rows under `intentions` with `"schema_version": 2`; releases up to 1.0.7 kept them under `spores`, and 2.0.0 refuses that spelling until `anneal-memory intention migrate-key` converts the file once.
 - A program that writes to a store with plain `sqlite3` calls `anneal_memory.register_writer_schema(conn)` on its connection first. That connection needs `PRAGMA trusted_schema=ON` (SQLite's default); with it OFF the call raises `sqlite3.NotSupportedError` and leaves the setting alone. Reading needs nothing.
 
 The mechanism of the migration is described in the CHANGELOG entry for the release that ships it.

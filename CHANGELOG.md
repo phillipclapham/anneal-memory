@@ -22,7 +22,6 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
 
 ### Fixed
 - **The CLI reads a timed `next` by the minute, and a zone-aware `now` dates `seen` by the local clock.** Against 1.0.4: `spore list` and `spore surface` read a `next` of `YYYY-MM-DDTHH:MM` by its day, so it counted as due from midnight of that day rather than at its minute (`touch` and the MCP server already read it by the minute). A zone-aware `now` is converted to local time once per call, so `germination_tier`'s seen age and the `seen` that `touch` stamps use the local date (1.0.4 used the zone's date).
-- **`allow_unlinked` is a 0.9.26 deprecation, not a 1.0.2 one.** The [2.0.0] bullet that begins "The 1.0.2 deprecations are NOT removed in 2.0.0" and the `AM-SPORE-SCHEMA-V2` migration entry both listed it among the 1.0.2 deprecations; it was deprecated (a no-op) in 0.9.26, and the entry now says so. The shipped [2.0.0] text is unchanged.
 
 ### Experimental (not part of the frozen public surface)
 - `anneal_memory/remote.py` gains an optional one-user OAuth 2.1 front (`serve --oauth-issuer https://host`, module `anneal_memory/remote_oauth.py`) for MCP clients that accept only OAuth, such as the Gemini app's custom apps. It can hand out only a token the server's token file already holds; the first exchanged code pins its redirect URI.
@@ -31,6 +30,19 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
 - `remote.py` reads a chunked request body (exactly `Transfer-Encoding: chunked`, no `Content-Length` beside it), under the same size cap and deadline as a sized one; a proxy forwards an HTTP/2 request with no length that way.
 - `remote.py`'s `read_continuity` starts with a one-line replica age when a `replica.json` manifest sits beside the served db: when the operator's machine last confirmed the copy current (its `verified_at`), and `STALE` past an hour. A db with no manifest answers as before.
 - `remote.py` logs one line per response it sends (status, method, a known path or its length, Host, User-Agent), and `/token` logs the shape of the grant; no query, token, code, verifier or secret is logged.
+
+## [2.0.1] — 2026-11-15
+
+A patch release: manifest text, one docstring and documentation. No behaviour, file format or function signature changes. One visible effect: `anneal-memory migrate check` (and `pending_migrations`) now reports one new proposal, `AM-SPORE-SCHEMA-V2`, to a store acknowledged at 2.0.0 or earlier.
+
+### Fixed
+- **The migration manifest's 1.0.2 entry is restored to its shipped text, and the 2.0 notice is a new entry.** 2.0.0 rewrote the published `AM-FORMATION-OFF` (1.0.2) entry in place to carry the corrected removal timeline and the `migrate-key` notice, which hid both from an adopter who had acknowledged 1.0.2 and mis-stated what 1.0.2 had said. The entry is restored to its shipped text, and a new entry, `AM-SPORE-SCHEMA-V2`, keyed 2.0.1 (the first release that carries it; an adopter who acknowledged under 2.0.0 sees it too), says the open rows now live under `intentions`, how `anneal-memory intention migrate-key` converts a store once, and that the 1.0.2 deprecations are removed no earlier than a later MAJOR release. `pending_migrations("1.0.7")` returns it.
+- **`allow_unlinked` is a 0.9.26 deprecation, not a 1.0.2 one.** The [2.0.0] bullet below that begins "The 1.0.2 deprecations are NOT removed in 2.0.0" lists it among the 1.0.2 deprecations; it was deprecated (a no-op) in 0.9.26, and the `AM-SPORE-SCHEMA-V2` entry says so. The [2.0.0] section below is left as it shipped.
+- The `validated_save_continuity` docstring said `affective_state` is "Removed in 2.0"; it now says it is removed no earlier than a later MAJOR release, as the 2.0.0 CHANGELOG states.
+
+### Docs
+- `docs/stability.md`, On-disk format: names `<stem>.spores.json` and its `intentions` key (schema 2) as a public document, which the [2.0.0] section cites it for.
+
 ## [2.0.0] — 2026-11-12
 
 **Action required: run `anneal-memory intention migrate-key` once on every spore/intention store before using 2.0.0.** A schema-1 store (open rows under `spores`) is refused by 2.0.0 with the command that converts it; the command copies the file byte-for-byte first, converts it in place under the store's own lock, and verifies the result. Use `--dry-run` to see what it would do. This is a MAJOR because the stored document is public (see `docs/stability.md`, "The files on disk"), and refusing the old key is an incompatible change to it.

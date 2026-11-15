@@ -471,14 +471,16 @@ MIGRATION_MANIFEST: list[MigrationEntry] = [
             "is refused until `anneal-memory intention migrate-key` converts it once "
             "(it copies the file first; `--dry-run` shows what it would do). It also "
             "corrects the 1.0.2 entry's timeline: the 1.0.2 deprecations "
-            "(`allow_unlinked`, `affective_state`, `--affect-tag`, `--affect-intensity`, "
-            "the legacy association APIs, and the links formed earlier) are NOT removed "
-            "in 2.0; a later MAJOR release removes them."
+            "(`affective_state`, `--affect-tag`, `--affect-intensity`, "
+            "the legacy association APIs, and the links formed earlier) and the 0.9.26 "
+            "deprecation of `allow_unlinked` are NOT removed in 2.0; a later MAJOR "
+            "release removes them."
         ),
         "suggested_edit": (
             "Run `anneal-memory intention migrate-key` once on every spore/intention "
             "store before using 2.0 or later, and change any instruction that says those "
-            "1.0.2 items are removed in 2.0 to say a later MAJOR release removes them."
+            "1.0.2 items, or `allow_unlinked` (deprecated in 0.9.26), are removed in 2.0 "
+            "to say a later MAJOR release removes them."
         ),
         "files": list(CORE_FILES),
     },

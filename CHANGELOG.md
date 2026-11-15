@@ -22,6 +22,7 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
 
 ### Fixed
 - **The CLI reads a timed `next` by the minute, and a zone-aware `now` dates `seen` by the local clock.** Against 1.0.4: `spore list` and `spore surface` read a `next` of `YYYY-MM-DDTHH:MM` by its day, so it counted as due from midnight of that day rather than at its minute (`touch` and the MCP server already read it by the minute). A zone-aware `now` is converted to local time once per call, so `germination_tier`'s seen age and the `seen` that `touch` stamps use the local date (1.0.4 used the zone's date).
+- **`allow_unlinked` is a 0.9.26 deprecation, not a 1.0.2 one.** The [2.0.0] bullet that begins "The 1.0.2 deprecations are NOT removed in 2.0.0" and the `AM-SPORE-SCHEMA-V2` migration entry both listed it among the 1.0.2 deprecations; it was deprecated (a no-op) in 0.9.26, and the entry now says so. The shipped [2.0.0] text is unchanged.
 
 ### Experimental (not part of the frozen public surface)
 - `anneal_memory/remote.py` gains an optional one-user OAuth 2.1 front (`serve --oauth-issuer https://host`, module `anneal_memory/remote_oauth.py`) for MCP clients that accept only OAuth, such as the Gemini app's custom apps. It can hand out only a token the server's token file already holds; the first exchanged code pins its redirect URI.

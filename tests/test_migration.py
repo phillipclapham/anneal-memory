@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -133,6 +134,24 @@ def test_shipped_formation_off_entry_is_not_rewritten() -> None:
     for acked in ("1.0.7", "2.0.0"):
         got = [e["feature"] for e in pending_migrations(acked, current_version="2.0.1")]
         assert got == ["AM-SPORE-SCHEMA-V2"]
+
+
+def test_allow_unlinked_is_a_0_9_26_deprecation_not_a_1_0_2_one() -> None:
+    # 0.9.26 deprecated `allow_unlinked` (its entry says so). The appended
+    # AM-SPORE-SCHEMA-V2 entry must not file it under the 1.0.2 deprecations, in
+    # its summary or in the edit it tells an adopter to make.
+    [v0926] = [
+        e
+        for e in MIGRATION_MANIFEST
+        if e["version"] == "0.9.26" and "`allow_unlinked`" in e["summary"]
+    ]
+    assert "`allow_unlinked` is a deprecated" in v0926["summary"]
+    [new] = [e for e in MIGRATION_MANIFEST if e["feature"] == "AM-SPORE-SCHEMA-V2"]
+    listed = re.search(r"1\.0\.2 deprecations \(([^)]*)\)", new["summary"])
+    assert listed is not None
+    assert "allow_unlinked" not in listed.group(1)
+    assert "0.9.26 deprecation of `allow_unlinked`" in new["summary"]
+    assert "`allow_unlinked` (deprecated in 0.9.26)" in new["suggested_edit"]
 
 
 # -- AM-WRAP-GENERATED: the first file-RETIREMENT entry (spore-217) --

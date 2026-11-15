@@ -2,6 +2,18 @@
 
 All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project uses [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [2.0.1] — 2026-11-15
+
+A patch release: manifest text, one docstring and documentation. No behaviour, file format or function signature changes. One visible effect: `anneal-memory migrate check` (and `pending_migrations`) now reports one new proposal, `AM-SPORE-SCHEMA-V2`, to a store acknowledged at 2.0.0 or earlier.
+
+### Fixed
+- **The migration manifest's 1.0.2 entry is restored to its shipped text, and the 2.0 notice is a new entry.** 2.0.0 rewrote the published `AM-FORMATION-OFF` (1.0.2) entry in place to carry the corrected removal timeline and the `migrate-key` notice, which hid both from an adopter who had acknowledged 1.0.2 and mis-stated what 1.0.2 had said. The entry is restored to its shipped text, and a new entry, `AM-SPORE-SCHEMA-V2`, keyed 2.0.1 (the first release that carries it; an adopter who acknowledged under 2.0.0 sees it too), says the open rows now live under `intentions`, how `anneal-memory intention migrate-key` converts a store once, and that the 1.0.2 deprecations are removed no earlier than a later MAJOR release. `pending_migrations("1.0.7")` returns it.
+- **`allow_unlinked` is a 0.9.26 deprecation, not a 1.0.2 one.** The [2.0.0] bullet below that begins "The 1.0.2 deprecations are NOT removed in 2.0.0" lists it among the 1.0.2 deprecations; it was deprecated (a no-op) in 0.9.26, and the `AM-SPORE-SCHEMA-V2` entry says so. The [2.0.0] section below is left as it shipped.
+- The `validated_save_continuity` docstring said `affective_state` is "Removed in 2.0"; it now says it is removed no earlier than a later MAJOR release, as the 2.0.0 CHANGELOG states.
+
+### Docs
+- `docs/stability.md`, On-disk format: names `<stem>.spores.json` and its `intentions` key (schema 2) as a public document, which the [2.0.0] section cites it for.
+
 ## [2.0.0] — 2026-11-12
 
 **Action required: run `anneal-memory intention migrate-key` once on every spore/intention store before using 2.0.0.** A schema-1 store (open rows under `spores`) is refused by 2.0.0 with the command that converts it; the command copies the file byte-for-byte first, converts it in place under the store's own lock, and verifies the result. Use `--dry-run` to see what it would do. This is a MAJOR because the stored document is public (see `docs/stability.md`, "The files on disk"), and refusing the old key is an incompatible change to it.

@@ -29,7 +29,16 @@ def served_outbox(tmp_path: Path):
     yield from _serve(tmp_path, outbox=tmp_path / "outbox" / "outbox.jsonl")
 
 
-def _serve(tmp_path: Path, outbox: Path | None = None):
+@pytest.fixture
+def served_seeds(tmp_path: Path):
+    seeds = tmp_path / "seeds"
+    seeds.mkdir()
+    (seeds / "me.md").write_text("# Who the user is\nprefers short replies\n")
+    (seeds / "house.md").write_text("house rules: say what happened\n")
+    yield from _serve(tmp_path, seeds=[seeds / "me.md", seeds / "house.md"])
+
+
+def _serve(tmp_path: Path, outbox: Path | None = None, seeds=()):
     if outbox is not None:
         outbox.parent.mkdir()
     db = tmp_path / "memory.db"
@@ -42,7 +51,7 @@ def _serve(tmp_path: Path, outbox: Path | None = None):
     tokens = tmp_path / "tokens"
     a = remote.token_add(tokens, "claude-ai")
     b = remote.token_add(tokens, "other")
-    httpd = remote.make_server(db, tokens, port=0, outbox=outbox)
+    httpd = remote.make_server(db, tokens, port=0, outbox=outbox, seeds=seeds)
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
     base = f"http://127.0.0.1:{httpd.server_address[1]}"
 
@@ -340,3 +349,87 @@ def test_read_continuity_reports_a_pushed_replicas_age(served, monkeypatch):
         manifest.write_text(bad)
         first = _text(call("/mcp", _tool("read_continuity"), f"Bearer {a}")[1]).split("\n\n", 1)[0]
         assert first == "[replica] Age unknown: the replica manifest is malformed."
+
+
+def test_orient_returns_continuity_then_each_seed(served_seeds):
+    call, a, _b, _t, path = served_seeds
+    _s, r = call(f"/mcp/{a}", {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}})
+    assert r["result"]["instructions"].startswith("Call orient first in a new chat")
+    _s, r = call(f"/mcp/{a}", _LIST)
+    orient = {t["name"]: t for t in r["result"]["tools"]}["orient"]
+    assert "first in a new chat" in orient["description"]
+    assert orient["annotations"]["readOnlyHint"] is True
+    seeds = {p: p.read_bytes() for p in (path / "seeds").iterdir()}
+    _s, r = call(f"/mcp/{a}", _tool("orient"))
+    text = _text(r)
+    assert r["result"].get("isError") is not True
+    cont, me, house = (text.index(s) for s in ("=== continuity ===", "=== seed: me.md ===",
+                                               "=== seed: house.md ==="))
+    assert cont < me < house  # continuity first, then the seeds in the order given
+    assert "remote test state" in text[cont:me] and "prefers short replies" in text[me:house]
+    assert "say what happened" in text[house:]
+    # An edit shows at the next call; serving never writes a seed.
+    (path / "seeds" / "house.md").write_text("house rules v2\n")
+    assert "house rules v2" in _text(call(f"/mcp/{a}", _tool("orient"))[1])
+    seeds[path / "seeds" / "house.md"] = b"house rules v2\n"
+    assert {p: p.read_bytes() for p in (path / "seeds").iterdir()} == seeds
+    # Without seeds, orient is the continuity file alone.
+    plain = remote.RemoteSession(path / "memory.db")
+    assert _text(plain.handle(_tool("orient"), "x")).startswith("=== continuity ===")
+    assert "=== seed:" not in _text(plain.handle(_tool("orient"), "x"))
+    # The seed caps leave half the reply cap for the continuity file.
+    assert remote.MAX_SEEDS * remote.MAX_SEED_BYTES <= remote.MAX_REPLY_BYTES // 2
+
+
+def test_a_missing_or_oversized_seed_is_refused_by_name(served_seeds, tmp_path):
+    call, a, _b, tokens, path = served_seeds
+    db, seeds = path / "memory.db", path / "seeds"
+    big = tmp_path / "big.md"
+    big.write_bytes(b"x" * (remote.MAX_SEED_BYTES + 1))
+    bad = tmp_path / "bad.md"
+    bad.write_bytes(b"\xff\xfe")
+    other = tmp_path / "other"
+    other.mkdir()
+    (other / "me.md").write_text("a second me.md")
+    # At startup: the server does not start.
+    for args, why in (([tmp_path / "absent.md"], "absent.md: cannot be opened"),
+                      ([big], "big.md: over the"), ([bad], "bad.md: not UTF-8"),
+                      ([tmp_path], "not a regular file"),
+                      ([seeds / "me.md", other / "me.md"], "share a file name"),
+                      ([seeds / "me.md"] * (remote.MAX_SEEDS + 1), "at most")):
+        with pytest.raises(ValueError, match=why):
+            remote.make_server(db, tokens, port=0, seeds=args)
+    assert remote.main(["serve", "--db", str(db), "--token-file", str(tokens),
+                        "--port", "0", "--seed", str(big)]) == 2
+    # After startup: the call fails, naming the seed and not its directory.
+    (seeds / "house.md").write_bytes(b"x" * (remote.MAX_SEED_BYTES + 1))
+    _s, r = call(f"/mcp/{a}", _tool("orient"))
+    assert r["result"]["isError"] is True
+    assert "seed house.md: over the" in _text(r) and str(seeds) not in _text(r)
+    (seeds / "house.md").unlink()
+    _s, r = call(f"/mcp/{a}", _tool("orient"))
+    assert r["result"]["isError"] is True and "seed house.md: cannot be opened" in _text(r)
+    assert "remote test state" in _text(call(f"/mcp/{a}", _tool("read_continuity"))[1])
+
+
+def test_capture_records_the_authenticated_connector_per_token(served_outbox):
+    call, a, b, _t, path = served_outbox
+    outbox = path / "outbox" / "outbox.jsonl"
+    for token in (a, b):
+        call(f"/mcp/{token}", _tool("capture", {"content": "who wrote me",
+                                               "episode_type": "observation"}))
+    assert [json.loads(ln)["connector"] for ln in outbox.read_text().splitlines()] == [
+        "claude-ai", "other"]
+
+
+def test_a_model_supplied_attribution_field_is_refused(served_outbox):
+    call, a, _b, _t, path = served_outbox
+    _s, r = call(f"/mcp/{a}", _LIST)
+    schema = {t["name"]: t for t in r["result"]["tools"]}["capture"]["inputSchema"]
+    assert schema["additionalProperties"] is False
+    assert set(schema["properties"]) == {"content", "episode_type"}
+    for field in ("connector", "client", "source", "agent"):
+        _s, r = call(f"/mcp/{a}", _tool("capture", {"content": "forged", "episode_type": "decision",
+                                                    field: "someone-else"}))
+        assert r["result"]["isError"] is True, field
+    assert not (path / "outbox" / "outbox.jsonl").exists()

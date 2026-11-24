@@ -15,6 +15,13 @@ What keeps the store read-only is structure, not a check:
   argument, method name or path can route to one.
 - ``resources/*`` is not offered.
 
+``orient`` is the tool a new chat calls first: the continuity file, then each
+file given with ``serve --seed PATH`` (operator-written standing context, such
+as who the user is), under its file name. Seeds are opened read-only on every
+call, so an edit shows at the next one; a seed that is missing, over its cap or
+not UTF-8 refuses the server's start, and fails the call by name if it goes bad
+later.
+
 The one exception to "reads only" is ``capture``, and only when ``serve
 --outbox PATH`` is given: it appends one JSON line per episode to that outbox
 file (and its ``.lock``), separate files the store never reads, and it does not
@@ -62,7 +69,7 @@ Usage::
     python -m anneal_memory.remote token-add claude-ai --token-file tokens
     python -m anneal_memory.remote token-revoke claude-ai --token-file tokens
     python -m anneal_memory.remote serve --db memory.db --token-file tokens \\
-        [--host 127.0.0.1] [--port 8765] [--outbox outbox.jsonl]
+        [--host 127.0.0.1] [--port 8765] [--outbox outbox.jsonl] [--seed me.md ...]
 
 Bind to loopback and put a TLS-terminating proxy in front (Tailscale Funnel,
 ``tailscale funnel --bg 8765``); this server speaks plain HTTP.
@@ -168,14 +175,77 @@ _READ_ONLY_ANNOTATIONS = {"readOnlyHint": True, "destructiveHint": False,
                           "idempotentHint": True, "openWorldHint": False}
 
 
+ORIENT_TOOL: dict[str, Any] = {
+    "name": "orient",
+    "description": (
+        "Call this first in a new chat, before answering the user: it returns the "
+        "compressed long-term memory (the continuity file) and the operator's seed "
+        "files (standing context about the user and how to work with them). Read-only."
+    ),
+    "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
+}
+
+# A seed is operator-written standing context served whole by ``orient``. The caps
+# keep MAX_SEEDS * MAX_SEED_BYTES at half of MAX_REPLY_BYTES, leaving the rest for
+# the continuity file.
+MAX_SEED_BYTES = 256 * 1024
+MAX_SEEDS = 8
+
+
+def read_seed(path: str | Path) -> str:
+    """The text of one seed file, opened read-only. Raises ValueError naming the
+    file (its name only, never its directory) when it cannot be opened, is not a
+    regular file, is over :data:`MAX_SEED_BYTES`, or is not UTF-8."""
+    path = Path(path)
+    try:
+        # O_NONBLOCK: a FIFO would otherwise block the open before the check below.
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0))
+    except OSError as e:
+        raise ValueError(f"seed {path.name}: cannot be opened ({type(e).__name__})") from None
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise ValueError(f"seed {path.name}: not a regular file")
+        with os.fdopen(fd, "rb", closefd=False) as f:
+            data = f.read(MAX_SEED_BYTES + 1)
+    except OSError as e:
+        raise ValueError(f"seed {path.name}: cannot be read ({type(e).__name__})") from None
+    finally:
+        os.close(fd)
+    if len(data) > MAX_SEED_BYTES:
+        raise ValueError(f"seed {path.name}: over the {MAX_SEED_BYTES}-byte cap")
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError:
+        raise ValueError(f"seed {path.name}: not UTF-8") from None
+
+
+def check_seeds(seeds: list[str | Path] | tuple[str | Path, ...]) -> tuple[Path, ...]:
+    """The seed paths anchored to absolute ones, each read once. Raises ValueError
+    for more than :data:`MAX_SEEDS`, two seeds with one file name (``orient``
+    labels each by name), or any seed :func:`read_seed` refuses."""
+    if len(seeds) > MAX_SEEDS:
+        raise ValueError(f"at most {MAX_SEEDS} seed files")
+    paths = tuple(Path(p).parent.resolve() / Path(p).name for p in seeds)
+    names = [p.name for p in paths]
+    if len(set(names)) != len(names):
+        raise ValueError("two seed files share a file name")
+    for p in paths:
+        try:
+            read_seed(p)
+        except ValueError as e:
+            raise ValueError(f"{e} ({p})") from None
+    return paths
+
+
 def _remote_tool_defs() -> list[dict[str, Any]]:
     """The tool definitions served remotely: the stdio definitions of the
-    allowlisted read tools plus ``read_continuity``, each a copy carrying
-    the read-only annotations."""
+    allowlisted read tools plus ``read_continuity`` and ``orient``, each a copy
+    carrying the read-only annotations."""
     from .integrity import TOOLS
 
     by_name = {t["name"]: t for t in TOOLS}
-    defs = [by_name[name] for name in _SERVER_READ_TOOLS] + [READ_CONTINUITY_TOOL]
+    defs = ([ORIENT_TOOL] + [by_name[name] for name in _SERVER_READ_TOOLS]
+            + [READ_CONTINUITY_TOOL])
     return [{**d, "annotations": {**d.get("annotations", {}), **_READ_ONLY_ANNOTATIONS}}
             for d in defs]
 
@@ -312,7 +382,7 @@ def _pending_block(recs: list[dict[str, Any]], args: dict[str, Any]) -> str:
 # implements it in :meth:`RemoteSession._bind`; the only other tool is ``capture``
 # (outbox only, never the store), and only with ``--outbox``.
 _SERVER_READ_TOOLS = ("recall", "crystal_recall", "crystal_index")
-REMOTE_TOOLS = (*_SERVER_READ_TOOLS, "read_continuity")
+REMOTE_TOOLS = ("orient", *_SERVER_READ_TOOLS, "read_continuity")
 
 
 # -- Tokens --
@@ -536,9 +606,11 @@ class RemoteSession:
     a replica swapped underneath is picked up by the next call, and threads
     never share a connection (Store is single-thread)."""
 
-    def __init__(self, db_path: str | Path, outbox: str | Path | None = None) -> None:
+    def __init__(self, db_path: str | Path, outbox: str | Path | None = None,
+                 seeds: tuple[Path, ...] = ()) -> None:
         self._db_path = Path(db_path)
         self._outbox = Path(outbox) if outbox is not None else None
+        self._seeds = seeds
         self._rate_lock = threading.Lock()
         self._append_lock = threading.Lock()
         self._recent: dict[str, list[float]] = {}
@@ -705,14 +777,31 @@ class RemoteSession:
 
     def _bind(self, server: Server, store: Store,
               db: Path) -> dict[str, Callable[[dict[str, Any]], Any]]:
-        def read_continuity(_args: dict[str, Any]) -> dict[str, Any]:
+        def continuity_text() -> str:
             text = store.load_continuity() or "(No continuity file yet.)"
             # ``db`` is the request's resolved path, so the stamp comes from the
             # same generation as the text.
             age = replica_age_line(db)
-            return _tool_result(f"{age}\n\n{text}" if age else text)
+            return f"{age}\n\n{text}" if age else text
+
+        def read_continuity(_args: dict[str, Any]) -> dict[str, Any]:
+            return _tool_result(continuity_text())
+
+        def orient(_args: dict[str, Any]) -> dict[str, Any]:
+            # Seeds are read before anything is answered: one that has gone missing or
+            # grown past the cap since startup fails the whole call, by name, rather
+            # than orient the chat on part of its context.
+            try:
+                seeds = [(p.name, read_seed(p)) for p in self._seeds]
+            except ValueError as e:
+                return _tool_result(f"Error: {e}. read_continuity still answers.",
+                                    is_error=True)
+            parts = [f"=== continuity ===\n\n{continuity_text()}"]
+            parts += [f"=== seed: {name} ===\n\n{text}" for name, text in seeds]
+            return _tool_result("\n\n".join(parts))
 
         return {
+            "orient": orient,
             "recall": server._tool_recall,
             "crystal_recall": server._tool_crystal_recall,
             "crystal_index": server._tool_crystal_index,
@@ -740,6 +829,8 @@ class RemoteSession:
                 "capabilities": {"tools": {}},
                 "serverInfo": {"name": "anneal-memory-remote", "version": __version__},
                 "instructions": (
+                    "Call orient first in a new chat: it returns the memory and the "
+                    "operator's standing context. "
                     "Read access to an anneal-memory store. read_continuity "
                     "returns the compressed long-term memory; recall searches "
                     "episodes; crystal_recall/crystal_index read crystallized patterns."
@@ -1221,13 +1312,17 @@ class _BoundedServer(ThreadingHTTPServer):
 def make_server(db_path: str | Path, tokens_path: str | Path,
                 host: str = "127.0.0.1", port: int = 8765,
                 outbox: str | Path | None = None,
-                oauth_issuer: str | None = None) -> ThreadingHTTPServer:
+                oauth_issuer: str | None = None,
+                seeds: list[str | Path] | tuple[str | Path, ...] = ()) -> ThreadingHTTPServer:
     """A ready (not yet serving) HTTP server. Fails fast on a bad token file, a
     store that cannot be opened read-only, an outbox whose directory is missing,
-    or an OAuth issuer that is not a bare https origin. With ``oauth_issuer`` the
-    OAuth endpoints of :mod:`anneal_memory.remote_oauth` are served; they can only
-    hand out tokens this ``tokens_path`` already holds."""
+    an OAuth issuer that is not a bare https origin, or a seed file
+    :func:`check_seeds` refuses. With ``oauth_issuer`` the OAuth endpoints of
+    :mod:`anneal_memory.remote_oauth` are served; they can only hand out tokens
+    this ``tokens_path`` already holds. ``seeds`` are files ``orient`` returns
+    after the continuity file, read on each call, never written."""
     load_tokens(tokens_path)
+    seed_paths = check_seeds(seeds)
     # The redirect pin and the sign-in window live beside the token file they
     # guard, so neither can be left out, and each tenant has its own.
     oauth = (OAuth(oauth_issuer, oauth_pin_path(tokens_path), oauth_window_path(tokens_path))
@@ -1246,7 +1341,7 @@ def make_server(db_path: str | Path, tokens_path: str | Path,
         pass
     handler = type("Handler", (_Handler,), {
         "tokens_path": Path(tokens_path),
-        "session": RemoteSession(db_path, outbox),
+        "session": RemoteSession(db_path, outbox, seed_paths),
         "slots": threading.BoundedSemaphore(MAX_CONCURRENT),
         "oauth": oauth,
     })
@@ -1267,6 +1362,10 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--oauth-issuer", default=None,
                    help="serve a one-user OAuth sign-in at this public https origin "
                         "(for clients that require OAuth); it issues only tokens in --token-file")
+    s.add_argument("--seed", action="append", default=[], metavar="PATH",
+                   help="a file the orient tool returns after the continuity file "
+                        f"(repeatable, at most {MAX_SEEDS}, each at most {MAX_SEED_BYTES} bytes, "
+                        "UTF-8); read on each call, never written")
     for cmd in ("token-add", "token-revoke"):
         t = sub.add_parser(cmd)
         t.add_argument("name")
@@ -1306,7 +1405,7 @@ def main(argv: list[str] | None = None) -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     try:
         httpd = make_server(args.db, args.token_file, args.host, args.port, args.outbox,
-                            args.oauth_issuer)
+                            args.oauth_issuer, args.seed)
     except ValueError as e:
         print(f"error: {e}", file=sys.stderr)
         return 2

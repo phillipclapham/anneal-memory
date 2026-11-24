@@ -52,3 +52,5 @@ The mechanism of the migration is described in the CHANGELOG entry for the relea
 ## MCP surface
 
 The MCP tool names and input schemas are frozen on the same terms as the Python API: a new optional argument or a new tool is a MINOR change, and removing or retyping an argument, or removing a tool, is a MAJOR change.
+
+The remote server (`python -m anneal_memory.remote`, with `anneal_memory/remote_oauth.py`) is experimental and outside this promise: its tools (`orient` and `capture` among them), its `serve` flags (`--seed`, `--outbox` and `--oauth-issuer` among them), its token and OAuth files and its capture outbox line format can change in any release. Each change is listed in the CHANGELOG under "Experimental".

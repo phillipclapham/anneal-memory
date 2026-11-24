@@ -34,6 +34,14 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
 - `remote.py` refuses a request whose JSON-RPC `id`, as JSON, is longer than `MAX_ID_BYTES` (400, `-32600` "Invalid request: id too long", with a null id). Every reply echoes the id, so an unbounded one could put any reply, an error included, over `MAX_REPLY_BYTES`.
 - `capture`'s attribution is unchanged and now pinned by tests: each outbox line's `connector` is the name of the token that authenticated the request, and a `capture` call carrying any argument besides `content` and `episode_type` (a `connector`, `client`, `source` or `agent` among them) is refused with nothing written.
 
+## [2.1.1] — 2026-11-24
+
+A patch release of the experimental remote server only: `orient`'s reply changes. The library, the CLI, the stdio MCP server and the on-disk format are those of 2.1.0.
+
+### Experimental (not part of the frozen public surface)
+- `orient`'s reply now opens with a framing paragraph (`ORIENT_FRAMING`): the memory is its owner's and its agent's, a first person inside it is that agent's voice, and the reader is its own mind. The `Sections below start with a line ending [TAG] ===` line, which 2.1.0 had first, is now the third line (after the framing and a blank line).
+- After the continuity, `orient` adds a section `=== crystal index [TAG] ===`: one `name: clause` line per live crystal, the `crystal_index` tool's rows, so a chat can `crystal_recall` by name. The section is cut by whole lines to the room the reply cap leaves after the continuity and seeds, and to `MAX_CRYSTAL_INDEX_ENCODED`, with a last line saying how many were left out; the continuity and seeds are never cut. A store with no crystals has no section; one whose crystal store cannot be read has a one-line section saying so, and `orient` still answers. The continuity file is followed by this section, then the seeds.
+
 ## [2.0.1] — 2026-11-15
 
 A patch release: manifest text, one docstring and documentation. No behaviour, file format or function signature changes. One visible effect: `anneal-memory migrate check` (and `pending_migrations`) now reports one new proposal, `AM-SPORE-SCHEMA-V2`, to a store acknowledged at 2.0.0 or earlier.

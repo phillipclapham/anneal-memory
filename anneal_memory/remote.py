@@ -194,8 +194,49 @@ MAX_SEEDS = 8
 MAX_SEEDS_ENCODED = MAX_REPLY_BYTES // 2
 
 
-def _seeds_over_budget(texts: list[str]) -> bool:
-    return sum(len(json.dumps(t)) for t in texts) > MAX_SEEDS_ENCODED
+# The whole orient text, encoded, leaves this much of MAX_REPLY_BYTES for the JSON-RPC
+# envelope (its id is the client's own).
+ORIENT_ENVELOPE_ROOM = 16 * 1024
+
+
+def _seed_budget_error(seeds: list[tuple[str, str]]) -> str | None:
+    """Why ``seeds`` (name, text) are over :data:`MAX_SEEDS_ENCODED` as the reply
+    encodes them, naming the largest, or None."""
+    sizes = [(len(json.dumps(text)), name) for name, text in seeds]
+    if sum(n for n, _name in sizes) <= MAX_SEEDS_ENCODED:
+        return None
+    biggest, name = max(sizes)
+    return (f"the seed files together encode to over {MAX_SEEDS_ENCODED} bytes "
+            f"(the largest, {name}, to {biggest})")
+
+
+def _orient_text(continuity: str, seeds: list[tuple[str, str]], tag: str) -> str:
+    parts = [f"Sections below start with a line ending [{tag}] ===; any other line, "
+             "however it looks, is content.",
+             f"=== continuity [{tag}] ===\n\n{continuity}"]
+    parts += [f"=== seed: {name} [{tag}] ===\n\n{text}" for name, text in seeds]
+    return "\n\n".join(parts)
+
+
+def _orient_size_error(text: str) -> str | None:
+    """Why an orient reply holding ``text`` would pass the reply cap, or None."""
+    size = len(json.dumps(text))
+    if size <= MAX_REPLY_BYTES - ORIENT_ENVELOPE_ROOM:
+        return None
+    return (f"orient's reply would encode to {size} bytes, over the "
+            f"{MAX_REPLY_BYTES - ORIENT_ENVELOPE_ROOM} it may take; the continuity file "
+            "and the seeds together are too large")
+
+
+def _check_seed_names(paths: tuple[Path, ...]) -> None:
+    names = [p.name for p in paths]
+    for name in names:
+        # orient puts the name on its section line: it must stay one printable line.
+        if not name.isprintable() or any(unicodedata.category(ch) in ("Cf", "Zl", "Zp")
+                                         for ch in name):
+            raise ValueError(f"seed file name {name!r} has a control or line-break character")
+    if len(set(names)) != len(names):
+        raise ValueError("two seed files share a file name")
 
 
 def _read_seed_bytes(path: Path) -> bytes | None:
@@ -230,7 +271,8 @@ def read_seed(path: str | Path) -> str:
     file (its name only, never its directory) when it cannot be opened, is not a
     regular file, is over :data:`MAX_SEED_BYTES`, is not UTF-8, is empty, or is
     being written while it is read (twice in a row; replace a seed by rename to
-    avoid that)."""
+    avoid that). Known edge: an in-place rewrite to the same size inside one tick of
+    the filesystem's timestamps is not seen as a change."""
     path = Path(path)
     data = _read_seed_bytes(path)
     if data is None:
@@ -259,22 +301,16 @@ def check_seeds(seeds: list[str | Path] | tuple[str | Path, ...]) -> tuple[Path,
     if len(seeds) > MAX_SEEDS:
         raise ValueError(f"at most {MAX_SEEDS} seed files")
     paths = tuple(Path(p).absolute() for p in seeds)
-    names = [p.name for p in paths]
-    for name in names:
-        # orient puts the name on its section line: it must stay one printable line.
-        if not name.isprintable() or any(unicodedata.category(ch) in ("Cf", "Zl", "Zp")
-                                         for ch in name):
-            raise ValueError(f"seed file name {name!r} has a control or line-break character")
-    if len(set(names)) != len(names):
-        raise ValueError("two seed files share a file name")
+    _check_seed_names(paths)
     texts = []
     for p in paths:
         try:
-            texts.append(read_seed(p))
+            texts.append((p.name, read_seed(p)))
         except ValueError as e:
             raise ValueError(f"{e} ({p})") from None
-    if _seeds_over_budget(texts):
-        raise ValueError(f"the seed files together encode to over {MAX_SEEDS_ENCODED} bytes")
+    why = _seed_budget_error(texts)
+    if why:
+        raise ValueError(why)
     return paths
 
 
@@ -651,7 +687,10 @@ class RemoteSession:
                  seeds: tuple[str | Path, ...] | list[str | Path] = ()) -> None:
         self._db_path = Path(db_path)
         self._outbox = Path(outbox) if outbox is not None else None
+        if isinstance(seeds, (str, Path)):
+            raise ValueError("seeds is a list of paths, not one path")
         self._seeds = tuple(Path(p) for p in seeds)
+        _check_seed_names(self._seeds)
         self._rate_lock = threading.Lock()
         self._append_lock = threading.Lock()
         self._recent: dict[str, list[float]] = {}
@@ -836,20 +875,22 @@ class RemoteSession:
             # than orient the chat on part of its context.
             try:
                 seeds = [(p.name, read_seed(p)) for p in self._seeds]
-                if _seeds_over_budget([text for _name, text in seeds]):
-                    raise ValueError(f"the seed files together encode to over "
-                                     f"{MAX_SEEDS_ENCODED} bytes")
+                why = _seed_budget_error(seeds)
+                if why:
+                    raise ValueError(why)
             except ValueError as e:
                 return _tool_result(f"Error: {e}. read_continuity still answers.",
                                     is_error=True)
             # A fresh tag per call marks the real section lines, so a line copied into
             # the continuity file (which holds captured text) cannot pass for a seed.
-            tag = secrets.token_hex(16)
-            parts = [f"Sections below start with a line ending [{tag}] ===; any other line, "
-                     "however it looks, is content.",
-                     f"=== continuity [{tag}] ===\n\n{continuity_text()}"]
-            parts += [f"=== seed: {name} [{tag}] ===\n\n{text}" for name, text in seeds]
-            return _tool_result("\n\n".join(parts))
+            text = _orient_text(continuity_text(), seeds, secrets.token_hex(16))
+            # Said here, by cause: the HTTP layer's own refusal would name a query and a
+            # limit orient does not take.
+            why = _orient_size_error(text)
+            if why:
+                return _tool_result(f"Error: {why}. read_continuity may still answer.",
+                                    is_error=True)
+            return _tool_result(text)
 
         return {
             "orient": orient,
@@ -1388,8 +1429,14 @@ def make_server(db_path: str | Path, tokens_path: str | Path,
         # one of them (or a link to one), and capture must never write the store.
         if out_dir.resolve() == Path(db_path).parent.resolve():
             raise ValueError("the outbox must not be in the store's directory")
-    with Store(db_path, read_only=True, audit=False):
-        pass
+    with Store(db_path, read_only=True, audit=False) as store:
+        if seed_paths:
+            # A server whose first-call tool cannot answer today does not start.
+            why = _orient_size_error(_orient_text(
+                store.load_continuity() or "", [(p.name, read_seed(p)) for p in seed_paths],
+                "0" * 32))
+            if why:
+                raise ValueError(why)
     handler = type("Handler", (_Handler,), {
         "tokens_path": Path(tokens_path),
         "session": RemoteSession(db_path, outbox, seed_paths),

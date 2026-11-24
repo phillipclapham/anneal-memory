@@ -401,7 +401,7 @@ def test_the_seed_budget_counts_the_encoded_reply(served_seeds, tmp_path, monkey
     wide.write_text("\u00e9" * 1000, encoding="utf-8")  # 2000 bytes on disk, 6000 escaped in the reply
     monkeypatch.setattr(remote, "MAX_SEEDS_ENCODED", 5000)
     assert wide.stat().st_size < remote.MAX_SEEDS_ENCODED
-    with pytest.raises(ValueError, match="encode to over 5000"):
+    with pytest.raises(ValueError, match=r"encode to over 5000 bytes \(the largest, wide.md, to 6002\)"):
         remote.make_server(path / "memory.db", tokens, port=0, seeds=[wide])
     monkeypatch.setattr(remote, "MAX_SEEDS_ENCODED", 40)  # the started server's seeds outgrow it
     _s, r = call(f"/mcp/{a}", _tool("orient"))
@@ -487,10 +487,13 @@ def test_orient_refuses_arguments_odd_seed_names_and_a_torn_read(served_seeds, t
     _s, r = call(f"/mcp/{a}", _tool("orient", {"unexpected": True}))
     assert r["result"]["isError"] is True and "takes no arguments" in _text(r)
     for name in ("rules\nprivate.md", "a\u2028b.md", "z\u200bw.md"):
-        odd = tmp_path / name
-        odd.write_text("x\n", encoding="utf-8")
+        # Names are checked before any file is opened, so none is created.
         with pytest.raises(ValueError, match="control or line-break"):
-            remote.make_server(path / "memory.db", tokens, port=0, seeds=[odd])
+            remote.check_seeds([tmp_path / name])
+        with pytest.raises(ValueError, match="control or line-break"):
+            remote.RemoteSession(path / "memory.db", seeds=[tmp_path / name])
+    with pytest.raises(ValueError, match="not one path"):
+        remote.RemoteSession(path / "memory.db", seeds="me.md")
     # A seed whose stat moves during the read is refused, not served torn.
     seed = path / "seeds" / "me.md"
     real_fstat, n = remote.os.fstat, []
@@ -505,3 +508,17 @@ def test_orient_refuses_arguments_odd_seed_names_and_a_torn_read(served_seeds, t
     assert len(n) == 4  # read twice before giving up
     monkeypatch.setattr(remote.os, "fstat", real_fstat)
     assert remote.read_seed(seed).startswith("# Who the user is")
+
+
+def test_orient_too_large_for_one_reply_is_refused_by_cause(served_seeds, monkeypatch):
+    call, a, _b, tokens, path = served_seeds
+    with Store(path / "memory.db") as s:
+        s.save_continuity("# Agent\n" + "continuity line\n" * 400)
+    room = remote.ORIENT_ENVELOPE_ROOM
+    monkeypatch.setattr(remote, "MAX_REPLY_BYTES", room + 2000)  # the continuity alone is ~6.5 KB
+    with pytest.raises(ValueError, match="orient's reply would encode to"):
+        remote.make_server(path / "memory.db", tokens, port=0, seeds=[path / "seeds" / "me.md"])
+    _s, r = call(f"/mcp/{a}", _tool("orient"))
+    assert r["result"]["isError"] is True and "orient's reply would encode to" in _text(r)
+    # Without seeds the server starts as before, whatever the continuity's size.
+    remote.make_server(path / "memory.db", tokens, port=0).server_close()

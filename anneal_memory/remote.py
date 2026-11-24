@@ -194,8 +194,9 @@ MAX_SEEDS = 8
 MAX_SEEDS_ENCODED = MAX_REPLY_BYTES // 2
 
 
-# The whole orient text, encoded, leaves this much of MAX_REPLY_BYTES for the JSON-RPC
-# envelope (its id is the client's own).
+# At server start the client's JSON-RPC id is unknown: the orient text, encoded, must
+# then leave this much of MAX_REPLY_BYTES for the envelope. Each call measures its own
+# whole envelope instead (RemoteSession.handle).
 ORIENT_ENVELOPE_ROOM = 16 * 1024
 
 
@@ -218,14 +219,20 @@ def _orient_text(continuity: str, seeds: list[tuple[str, str]], tag: str) -> str
     return "\n\n".join(parts)
 
 
-def _orient_size_error(text: str) -> str | None:
-    """Why an orient reply holding ``text`` would pass the reply cap, or None."""
-    size = len(json.dumps(text))
-    if size <= MAX_REPLY_BYTES - ORIENT_ENVELOPE_ROOM:
+def _orient_size_error(size: int, limit: int) -> str | None:
+    """Why an orient reply of ``size`` encoded bytes is over ``limit``, or None."""
+    if size <= limit:
         return None
-    return (f"orient's reply would encode to {size} bytes, over the "
-            f"{MAX_REPLY_BYTES - ORIENT_ENVELOPE_ROOM} it may take; the continuity file "
-            "and the seeds together are too large")
+    return (f"orient's reply would encode to {size} bytes, over the {limit} it may take; "
+            "the continuity file and the seeds together are too large")
+
+
+def _render_continuity(store: Store, db: Path) -> str:
+    """The continuity text as read_continuity and orient serve it: the replica age
+    line first when there is one, and a placeholder for a store with none."""
+    text = store.load_continuity() or "(No continuity file yet.)"
+    age = replica_age_line(db)
+    return f"{age}\n\n{text}" if age else text
 
 
 def _check_seed_names(paths: tuple[Path, ...]) -> None:
@@ -858,11 +865,9 @@ class RemoteSession:
     def _bind(self, server: Server, store: Store,
               db: Path) -> dict[str, Callable[[dict[str, Any]], Any]]:
         def continuity_text() -> str:
-            text = store.load_continuity() or "(No continuity file yet.)"
             # ``db`` is the request's resolved path, so the stamp comes from the
             # same generation as the text.
-            age = replica_age_line(db)
-            return f"{age}\n\n{text}" if age else text
+            return _render_continuity(store, db)
 
         def read_continuity(_args: dict[str, Any]) -> dict[str, Any]:
             return _tool_result(continuity_text())
@@ -884,12 +889,6 @@ class RemoteSession:
             # A fresh tag per call marks the real section lines, so a line copied into
             # the continuity file (which holds captured text) cannot pass for a seed.
             text = _orient_text(continuity_text(), seeds, secrets.token_hex(16))
-            # Said here, by cause: the HTTP layer's own refusal would name a query and a
-            # limit orient does not take.
-            why = _orient_size_error(text)
-            if why:
-                return _tool_result(f"Error: {why}. read_continuity may still answer.",
-                                    is_error=True)
             return _tool_result(text)
 
         return {
@@ -980,6 +979,15 @@ class RemoteSession:
                 with Store(db, read_only=True, audit=False) as store:
                     server = Server(store)
                     result = self._bind(server, store, db)[name](arguments)
+                    if name == "orient" and not result.get("isError"):
+                        # Measured as the HTTP layer measures it, the caller's id
+                        # included, so an orient too large is refused by its cause and
+                        # not by the generic reply-size refusal.
+                        size = len(json.dumps(_rpc_result(msg_id, result)).encode("utf-8"))
+                        why = _orient_size_error(size, MAX_REPLY_BYTES)
+                        if why:
+                            result = _tool_result(f"Error: {why}. read_continuity may "
+                                                  "still answer.", is_error=True)
             except Exception as e:  # a tool error is a result, not a transport error
                 # Class only: the message can carry paths or query text.
                 logger.error("tool %s failed: %s", name, type(e).__name__)
@@ -1432,9 +1440,11 @@ def make_server(db_path: str | Path, tokens_path: str | Path,
     with Store(db_path, read_only=True, audit=False) as store:
         if seed_paths:
             # A server whose first-call tool cannot answer today does not start.
-            why = _orient_size_error(_orient_text(
-                store.load_continuity() or "", [(p.name, read_seed(p)) for p in seed_paths],
-                "0" * 32))
+            text = _orient_text(
+                _render_continuity(store, Path(db_path).parent.resolve() / Path(db_path).name),
+                [(p.name, read_seed(p)) for p in seed_paths], "0" * 32)
+            why = _orient_size_error(len(json.dumps(text)),
+                                     MAX_REPLY_BYTES - ORIENT_ENVELOPE_ROOM)
             if why:
                 raise ValueError(why)
     handler = type("Handler", (_Handler,), {

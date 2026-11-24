@@ -518,7 +518,39 @@ def test_orient_too_large_for_one_reply_is_refused_by_cause(served_seeds, monkey
     monkeypatch.setattr(remote, "MAX_REPLY_BYTES", room + 2000)  # the continuity alone is ~6.5 KB
     with pytest.raises(ValueError, match="orient's reply would encode to"):
         remote.make_server(path / "memory.db", tokens, port=0, seeds=[path / "seeds" / "me.md"])
+    # A call measures its own whole reply against the full cap.
+    monkeypatch.setattr(remote, "MAX_REPLY_BYTES", 2000)
     _s, r = call(f"/mcp/{a}", _tool("orient"))
     assert r["result"]["isError"] is True and "orient's reply would encode to" in _text(r)
     # Without seeds the server starts as before, whatever the continuity's size.
     remote.make_server(path / "memory.db", tokens, port=0).server_close()
+
+
+def test_orient_measures_the_whole_envelope_with_the_callers_id(served_seeds, monkeypatch):
+    call, a, _b, _t, path = served_seeds
+    ok = call(f"/mcp/{a}", _tool("orient"))[1]
+    size = len(json.dumps(ok).encode("utf-8"))
+    monkeypatch.setattr(remote, "MAX_REPLY_BYTES", size + 500)
+    assert call(f"/mcp/{a}", _tool("orient"))[1]["result"].get("isError") is not True
+    long_id = {**_tool("orient"), "id": "i" * 600}  # the same reply, 600 bytes more
+    _s, r = call(f"/mcp/{a}", long_id)
+    assert r["result"]["isError"] is True and "orient's reply would encode to" in _text(r)
+    assert r["id"] == "i" * 600
+
+
+def test_the_start_check_sizes_the_continuity_as_a_call_serves_it(tmp_path, monkeypatch):
+    db = tmp_path / "memory.db"
+    with Store(db):
+        pass  # no continuity file: a call serves the placeholder
+    seed = tmp_path / "me.md"
+    seed.write_text("seed\n")
+    tokens = tmp_path / "tokens"
+    remote.token_add(tokens, "c")
+    session = remote.RemoteSession(db, seeds=[seed])
+    served = _text(session.handle(_tool("orient"), "c"))
+    assert "(No continuity file yet.)" in served
+    # A limit the served text just misses: the start check must miss it too.
+    need = len(json.dumps(served))
+    monkeypatch.setattr(remote, "MAX_REPLY_BYTES", remote.ORIENT_ENVELOPE_ROOM + need - 1)
+    with pytest.raises(ValueError, match="orient's reply would encode to"):
+        remote.make_server(db, tokens, port=0, seeds=[seed])

@@ -373,7 +373,7 @@ def test_orient_returns_continuity_then_each_seed(served_seeds):
     assert "remote test state" in text[cont:me] and "prefers short replies" in text[me:house]
     assert "say what happened" in text[house:]
     # An edit shows at the next call, under a fresh tag; serving never writes a seed.
-    (path / "seeds" / "house.md").write_text("house rules v2\n")
+    (path / "seeds" / "house.md").write_bytes(b"house rules v2\n")  # exact bytes on Windows too
     again = _text(call(f"/mcp/{a}", _tool("orient"))[1])
     assert "house rules v2" in again and f"[{tag}]" not in again
     seeds[path / "seeds" / "house.md"] = b"house rules v2\n"
@@ -423,7 +423,8 @@ def test_a_missing_or_oversized_seed_is_refused_by_name(served_seeds, tmp_path):
     # At startup: the server does not start.
     for args, why in (([tmp_path / "absent.md"], "absent.md: cannot be opened"),
                       ([big], "big.md: over the"), ([bad], "bad.md: not UTF-8"),
-                      ([tmp_path], "not a regular file"),
+                      # Windows refuses to open a directory at all (PermissionError).
+                      ([tmp_path], "not a regular file|cannot be opened"),
                       ([seeds / "me.md", other / "me.md"], "share a file name"),
                       ([seeds / "me.md"] * (remote.MAX_SEEDS + 1), "at most"),
                       ([empty], "empty.md: empty"), (str(seeds / "me.md"), "not one path")):

@@ -15,6 +15,13 @@ What keeps the store read-only is structure, not a check:
   argument, method name or path can route to one.
 - ``resources/*`` is not offered.
 
+``orient`` is the tool a new chat calls first: the continuity file, then each
+file given with ``serve --seed PATH`` (operator-written standing context, such
+as who the user is), under its file name. Seeds are opened read-only on every
+call, so an edit shows at the next one; a seed that is missing, over its cap or
+not UTF-8 refuses the server's start, and fails the call by name if it goes bad
+later.
+
 The one exception to "reads only" is ``capture``, and only when ``serve
 --outbox PATH`` is given: it appends one JSON line per episode to that outbox
 file (and its ``.lock``), separate files the store never reads, and it does not
@@ -30,6 +37,12 @@ unverified, never mixed into it. A puller that keeps the pulling file until the
 store is swapped means a capture is always in one of the three places; read in
 that order, a line moving on between reads is seen in the later one, at worst
 twice.
+
+A db published by a pusher that writes ``replica.json`` beside it (see
+:func:`replica_age_line`) gets a one-line freshness note at the top of
+``read_continuity``, so a reader can tell an aging copy from a current one.
+Its known edge: a replica whose manifest was deleted reads as a db that is not
+a replica (no line), since the server cannot tell the two apart.
 
 Known edges of ``--outbox`` (the operator's own configuration reaches them;
 nothing a client sends does): a hardlink to the db placed outside the db's
@@ -56,7 +69,7 @@ Usage::
     python -m anneal_memory.remote token-add claude-ai --token-file tokens
     python -m anneal_memory.remote token-revoke claude-ai --token-file tokens
     python -m anneal_memory.remote serve --db memory.db --token-file tokens \\
-        [--host 127.0.0.1] [--port 8765] [--outbox outbox.jsonl]
+        [--host 127.0.0.1] [--port 8765] [--outbox outbox.jsonl] [--seed me.md ...]
 
 Bind to loopback and put a TLS-terminating proxy in front (Tailscale Funnel,
 ``tailscale funnel --bg 8765``); this server speaks plain HTTP.
@@ -65,6 +78,7 @@ Bind to loopback and put a TLS-terminating proxy in front (Tailscale Funnel,
 from __future__ import annotations
 
 import argparse
+import calendar
 import contextlib
 import hashlib
 import hmac
@@ -87,6 +101,8 @@ from . import __version__
 from ._fsdir import _fsync_dir
 from .origin import strip_hidden_controls
 from .server import _RELAYED_LABEL, Server, _tool_result
+from .remote_oauth import (MAX_FORM_BYTES, MAX_REGISTER_BYTES, MAX_WINDOW_S, PAGE_HEADERS,
+                           UNAVAILABLE, OAuth, path_for_log)
 from .store import Store
 from .types import EpisodeType
 
@@ -105,12 +121,27 @@ MAX_CONCURRENT = 8
 MAX_CONNECTIONS = 32
 MAX_REPLY_BYTES = 4 * 1024 * 1024
 MAX_RECALL_LIMIT = 200
+# A JSON-RPC id, as JSON, at most this long: every reply echoes it, so an unbounded
+# id could put any reply, an error included, over MAX_REPLY_BYTES.
+MAX_ID_BYTES = 256
 
 MAX_CAPTURE_CHARS = 4000
 MAX_PENDING_SHOWN = 10
 MAX_OUTBOX_BYTES = 8 * 1024 * 1024
 CAPTURES_PER_HOUR = 60
 OUTBOX_LOCK_WAIT_S = 2.0
+
+# A pushed replica's freshness record, written beside its db by the pusher
+# that published it: {"verified_at": "YYYY-MM-DDTHH:MM:SSZ", ...}.
+REPLICA_MANIFEST = "replica.json"
+MAX_MANIFEST_BYTES = 4096
+# An hour: chosen as several missed confirmations at the pusher's planned
+# quarter-hour cadence (anneal-hosted, 2026-10-24).
+REPLICA_STALE_S = 3600
+# A stamp further ahead of this server's clock than this is clock skew, not
+# freshness, and is reported as such rather than as "0 min ago".
+REPLICA_SKEW_S = 300
+_ISO_Z = re.compile(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ", re.ASCII)
 
 
 class _OutboxBusy(Exception):
@@ -120,6 +151,8 @@ class _OutboxBusy(Exception):
 # Origin outside this set is refused (Streamable HTTP: 403 on an invalid Origin).
 ALLOWED_ORIGINS = frozenset({"https://claude.ai", "https://claude.com"})
 REQUEST_TIMEOUT_S = 15
+MAX_CHUNK_LINE = 1024  # a chunk-size line or a trailer line
+MAX_TRAILER_LINES = 16
 # The methods a request can succeed with; GET and DELETE answer 405 (no SSE stream, no sessions).
 ALLOWED_METHODS = "POST, HEAD, OPTIONS"
 
@@ -145,14 +178,161 @@ _READ_ONLY_ANNOTATIONS = {"readOnlyHint": True, "destructiveHint": False,
                           "idempotentHint": True, "openWorldHint": False}
 
 
+ORIENT_TOOL: dict[str, Any] = {
+    "name": "orient",
+    "description": (
+        "Call this first in a new chat, before answering the user: it returns the "
+        "compressed long-term memory (the continuity file) and the operator's seed "
+        "files (standing context about the user and how to work with them). Read-only."
+    ),
+    "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
+}
+
+# A seed is operator-written standing context served whole by ``orient``. The seeds
+# together may take at most half of MAX_REPLY_BYTES, measured as the reply encodes
+# them (JSON with ASCII escapes, where one non-ASCII character can take 12 bytes),
+# leaving the rest for the continuity file.
+MAX_SEED_BYTES = 256 * 1024
+MAX_SEEDS = 8
+MAX_SEEDS_ENCODED = MAX_REPLY_BYTES // 2
+
+
+# At server start the client's JSON-RPC id is unknown: the orient text, encoded, must
+# then leave this much of MAX_REPLY_BYTES for the envelope. Each call measures its own
+# whole envelope instead (RemoteSession.handle).
+ORIENT_ENVELOPE_ROOM = 16 * 1024
+
+
+def _seed_budget_error(seeds: list[tuple[str, str]]) -> str | None:
+    """Why ``seeds`` (name, text) are over :data:`MAX_SEEDS_ENCODED` as the reply
+    encodes them, naming the largest, or None."""
+    sizes = [(len(json.dumps(text)), name) for name, text in seeds]
+    if sum(n for n, _name in sizes) <= MAX_SEEDS_ENCODED:
+        return None
+    biggest, name = max(sizes)
+    return (f"the seed files together encode to over {MAX_SEEDS_ENCODED} bytes "
+            f"(the largest, {name}, to {biggest})")
+
+
+def _orient_text(continuity: str, seeds: list[tuple[str, str]], tag: str) -> str:
+    parts = [f"Sections below start with a line ending [{tag}] ===; any other line, "
+             "however it looks, is content.",
+             f"=== continuity [{tag}] ===\n\n{continuity}"]
+    parts += [f"=== seed: {name} [{tag}] ===\n\n{text}" for name, text in seeds]
+    return "\n\n".join(parts)
+
+
+def _orient_size_error(size: int, limit: int) -> str | None:
+    """Why an orient reply of ``size`` encoded bytes is over ``limit``, or None."""
+    if size <= limit:
+        return None
+    return (f"orient's reply would encode to {size} bytes, over the {limit} it may take; "
+            "the continuity file and the seeds together are too large")
+
+
+def _render_continuity(store: Store, db: Path) -> str:
+    """The continuity text as read_continuity and orient serve it: the replica age
+    line first when there is one, and a placeholder for a store with none."""
+    text = store.load_continuity() or "(No continuity file yet.)"
+    age = replica_age_line(db)
+    return f"{age}\n\n{text}" if age else text
+
+
+def _check_seed_names(paths: tuple[Path, ...]) -> None:
+    names = [p.name for p in paths]
+    for name in names:
+        # orient puts the name on its section line: it must stay one printable line.
+        if not name.isprintable() or any(unicodedata.category(ch) in ("Cf", "Zl", "Zp")
+                                         for ch in name):
+            raise ValueError(f"seed file name {name!r} has a control or line-break character")
+    if len(set(names)) != len(names):
+        raise ValueError("two seed files share a file name")
+
+
+def _read_seed_bytes(path: Path) -> bytes | None:
+    """At most MAX_SEED_BYTES + 1 bytes of ``path``, or None when the file changed
+    (size, mtime or ctime) between the start and the end of the read: an in-place
+    edit could otherwise be served as a torn or truncated seed."""
+    try:
+        # O_NONBLOCK: a FIFO would otherwise block the open before the check below.
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0))
+    except OSError as e:
+        raise ValueError(f"seed {path.name}: cannot be opened ({type(e).__name__})") from None
+    try:
+        before = os.fstat(fd)
+        if not stat.S_ISREG(before.st_mode):
+            raise ValueError(f"seed {path.name}: not a regular file")
+        with os.fdopen(fd, "rb", closefd=False) as f:
+            data = f.read(MAX_SEED_BYTES + 1)
+        after = os.fstat(fd)
+    except OSError as e:
+        raise ValueError(f"seed {path.name}: cannot be read ({type(e).__name__})") from None
+    finally:
+        os.close(fd)
+    stamp = lambda st: (st.st_size, st.st_mtime_ns, st.st_ctime_ns)  # noqa: E731
+    if stamp(before) != stamp(after) or (len(data) <= MAX_SEED_BYTES
+                                         and len(data) != after.st_size):
+        return None
+    return data
+
+
+def read_seed(path: str | Path) -> str:
+    """The text of one seed file, opened read-only. Raises ValueError naming the
+    file (its name only, never its directory) when it cannot be opened, is not a
+    regular file, is over :data:`MAX_SEED_BYTES`, is not UTF-8, is empty, or is
+    being written while it is read (twice in a row; replace a seed by rename to
+    avoid that). Known edge: an in-place rewrite to the same size inside one tick of
+    the filesystem's timestamps is not seen as a change."""
+    path = Path(path)
+    data = _read_seed_bytes(path)
+    if data is None:
+        data = _read_seed_bytes(path)
+    if data is None:
+        raise ValueError(f"seed {path.name}: changed while being read")
+    if len(data) > MAX_SEED_BYTES:
+        raise ValueError(f"seed {path.name}: over the {MAX_SEED_BYTES}-byte cap")
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError:
+        raise ValueError(f"seed {path.name}: not UTF-8") from None
+    if not text.strip():
+        raise ValueError(f"seed {path.name}: empty")
+    return text
+
+
+def check_seeds(seeds: list[str | Path] | tuple[str | Path, ...]) -> tuple[Path, ...]:
+    """The seed paths made absolute (against the current directory, links left
+    unresolved, so each open follows them as they are then), each read once.
+    Raises ValueError for more than :data:`MAX_SEEDS`, two seeds with one file
+    name (``orient`` labels each by name), any seed :func:`read_seed` refuses, or
+    seeds that together encode past :data:`MAX_SEEDS_ENCODED`."""
+    if isinstance(seeds, (str, Path)):
+        raise ValueError("seeds is a list of paths, not one path")
+    if len(seeds) > MAX_SEEDS:
+        raise ValueError(f"at most {MAX_SEEDS} seed files")
+    paths = tuple(Path(p).absolute() for p in seeds)
+    _check_seed_names(paths)
+    texts = []
+    for p in paths:
+        try:
+            texts.append((p.name, read_seed(p)))
+        except ValueError as e:
+            raise ValueError(f"{e} ({p})") from None
+    why = _seed_budget_error(texts)
+    if why:
+        raise ValueError(why)
+    return paths
+
+
 def _remote_tool_defs() -> list[dict[str, Any]]:
     """The tool definitions served remotely: the stdio definitions of the
-    allowlisted read tools plus ``read_continuity``, each a copy carrying
-    the read-only annotations."""
+    allowlisted read tools plus ``read_continuity`` and ``orient``, each a copy
+    carrying the read-only annotations."""
     from .integrity import TOOLS
 
     by_name = {t["name"]: t for t in TOOLS}
-    defs = [by_name[name] for name in _SERVER_READ_TOOLS] + [READ_CONTINUITY_TOOL]
+    defs = ([ORIENT_TOOL] + [by_name[name] for name in _SERVER_READ_TOOLS]
+            + [READ_CONTINUITY_TOOL])
     return [{**d, "annotations": {**d.get("annotations", {}), **_READ_ONLY_ANNOTATIONS}}
             for d in defs]
 
@@ -289,7 +469,7 @@ def _pending_block(recs: list[dict[str, Any]], args: dict[str, Any]) -> str:
 # implements it in :meth:`RemoteSession._bind`; the only other tool is ``capture``
 # (outbox only, never the store), and only with ``--outbox``.
 _SERVER_READ_TOOLS = ("recall", "crystal_recall", "crystal_index")
-REMOTE_TOOLS = (*_SERVER_READ_TOOLS, "read_continuity")
+REMOTE_TOOLS = ("orient", *_SERVER_READ_TOOLS, "read_continuity")
 
 
 # -- Tokens --
@@ -383,6 +563,68 @@ def token_revoke(path: str | Path, name: str) -> None:
         del tokens[name]
 
 
+# -- the OAuth files beside the token file they guard (so neither can be left out) --
+
+def oauth_pin_path(token_file: str | Path) -> Path:
+    return Path(token_file).with_name(Path(token_file).name + ".oauth-redirect")
+
+
+def oauth_window_path(token_file: str | Path) -> Path:
+    return Path(token_file).with_name(Path(token_file).name + ".oauth-window")
+
+
+def oauth_window_open(token_file: str | Path, minutes: int = 10) -> int:
+    """Open OAuth sign-in for ``minutes`` (1-60): write the window file atomically
+    (mode 0600) and return its expiry, a UTC epoch. The first completed sign-in
+    closes it."""
+    if isinstance(minutes, bool) or not isinstance(minutes, int) or \
+            not 1 <= minutes <= MAX_WINDOW_S // 60:
+        raise ValueError(f"--minutes must be 1 to {MAX_WINDOW_S // 60}")
+    if not Path(token_file).is_file():
+        raise ValueError(f"no token file at {token_file}")
+    path = oauth_window_path(token_file)
+    expiry = int(time.time()) + minutes * 60
+    # mkstemp creates the file 0600, and os.replace keeps that mode.
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=path.name + ".", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="ascii") as f:
+            f.write(f"{expiry}\n")
+            f.flush()
+            if hasattr(os, "geteuid") and hasattr(os, "fchown") and os.geteuid() == 0:
+                # Run as root, the window would be root's 0600 file and the server
+                # user could not read it: hand it to the token file's owner, with
+                # the token file's own mode capped at owner rw + group r (a
+                # group-readable token file gives a group-readable window).
+                st = os.stat(token_file)
+                os.fchown(f.fileno(), st.st_uid, st.st_gid)
+                os.fchmod(f.fileno(), (st.st_mode & 0o640) | 0o600)
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        Path(tmp).unlink(missing_ok=True)
+        raise
+    # The window is already open: a failed directory sync must not report failure.
+    try:
+        _fsync_dir(path.parent)
+    except OSError as e:
+        print(f"warning: window is open but its durability is unconfirmed ({type(e).__name__})",
+              file=sys.stderr)
+    return expiry
+
+
+def oauth_window_close(token_file: str | Path) -> bool:
+    """Close OAuth sign-in; True when a window file was there."""
+    if not Path(token_file).is_file():
+        raise ValueError(f"no token file at {token_file}")
+    path = oauth_window_path(token_file)
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        return False
+    _fsync_dir(path.parent)
+    return True
+
+
 # -- JSON-RPC over one request --
 
 
@@ -394,6 +636,56 @@ def _rpc_error(msg_id: Any, code: int, message: str) -> dict[str, Any]:
     return {"jsonrpc": "2.0", "id": msg_id, "error": {"code": code, "message": message}}
 
 
+def replica_age_line(db_path: str | Path, now: float | None = None) -> str | None:
+    """One line saying how fresh a pushed replica is, or None when ``db_path`` is
+    not a pushed replica (no :data:`REPLICA_MANIFEST` beside it).
+
+    The pusher writes the manifest into the directory it publishes the db in and
+    rewrites ``verified_at`` each time it confirms the copy still matches its
+    store, even when it skips an unchanged upload; so the age is "since the
+    operator's machine last vouched for this copy", not "since the db changed".
+    A reader on a phone during an outage at home sees the replica's age instead
+    of taking it for current. Never raises: an unreadable manifest says so.
+    Known edge: a FIFO put in the manifest's place by the operator blocks the
+    open (only the operator's own pusher writes that directory)."""
+    try:
+        manifest = Path(db_path).parent.resolve() / REPLICA_MANIFEST
+        with manifest.open("rb") as f:
+            raw = f.read(MAX_MANIFEST_BYTES + 1)
+    except FileNotFoundError:
+        return None
+    except (OSError, RuntimeError):
+        return "[replica] Age unknown: the replica manifest could not be read."
+    try:
+        if len(raw) > MAX_MANIFEST_BYTES:
+            raise ValueError("manifest too large")
+        doc = json.loads(raw)
+        stamp = doc["verified_at"]
+        if not isinstance(stamp, str) or not _ISO_Z.fullmatch(stamp):
+            raise ValueError(stamp)
+        then = calendar.timegm(time.strptime(stamp, "%Y-%m-%dT%H:%M:%SZ"))
+    # RecursionError: deep nesting under the size cap raises it on Python 3.10/3.11.
+    except (ValueError, KeyError, TypeError, OverflowError, RecursionError):
+        return "[replica] Age unknown: the replica manifest is malformed."
+    age = int((time.time() if now is None else now) - then)
+    if age < -REPLICA_SKEW_S:
+        return ("[replica] Age unknown: the replica's stamp is ahead of this server's "
+                "clock (clock skew).")
+    age = max(0, age)
+    if age < 3600:
+        ago = f"{age // 60} min ago"
+    elif age < 172800:
+        ago = f"{age // 3600} h {age % 3600 // 60} min ago"
+    else:
+        ago = f"{age // 86400} days ago"
+    line = (f"[replica] A copy of the operator's memory, last confirmed current by their "
+            f"machine at {stamp} ({ago}).")
+    if age > REPLICA_STALE_S:
+        line += (" STALE: their machine has not confirmed it since, so it may be off or "
+                 "offline and newer memory may exist there.")
+    return line
+
+
 class RemoteSession:
     """Answers one JSON-RPC message against a read-only open of ``db_path``.
 
@@ -401,9 +693,14 @@ class RemoteSession:
     a replica swapped underneath is picked up by the next call, and threads
     never share a connection (Store is single-thread)."""
 
-    def __init__(self, db_path: str | Path, outbox: str | Path | None = None) -> None:
+    def __init__(self, db_path: str | Path, outbox: str | Path | None = None,
+                 seeds: tuple[str | Path, ...] | list[str | Path] = ()) -> None:
         self._db_path = Path(db_path)
         self._outbox = Path(outbox) if outbox is not None else None
+        if isinstance(seeds, (str, Path)):
+            raise ValueError("seeds is a list of paths, not one path")
+        self._seeds = tuple(Path(p) for p in seeds)
+        _check_seed_names(self._seeds)
         self._rate_lock = threading.Lock()
         self._append_lock = threading.Lock()
         self._recent: dict[str, list[float]] = {}
@@ -568,12 +865,37 @@ class RemoteSession:
             self._pending_cache[str(path)] = (key, recs)
         return recs
 
-    def _bind(self, server: Server, store: Store) -> dict[str, Callable[[dict[str, Any]], Any]]:
+    def _bind(self, server: Server, store: Store,
+              db: Path) -> dict[str, Callable[[dict[str, Any]], Any]]:
+        def continuity_text() -> str:
+            # ``db`` is the request's resolved path, so the stamp comes from the
+            # same generation as the text.
+            return _render_continuity(store, db)
+
         def read_continuity(_args: dict[str, Any]) -> dict[str, Any]:
-            text = store.load_continuity()
-            return _tool_result(text or "(No continuity file yet.)")
+            return _tool_result(continuity_text())
+
+        def orient(args: dict[str, Any]) -> dict[str, Any]:
+            if args:
+                return _tool_result("Error: orient takes no arguments", is_error=True)
+            # Seeds are read before anything is answered: one that has gone missing or
+            # grown past the cap since startup fails the whole call, by name, rather
+            # than orient the chat on part of its context.
+            try:
+                seeds = [(p.name, read_seed(p)) for p in self._seeds]
+                why = _seed_budget_error(seeds)
+                if why:
+                    raise ValueError(why)
+            except ValueError as e:
+                return _tool_result(f"Error: {e}. read_continuity still answers.",
+                                    is_error=True)
+            # A fresh tag per call marks the real section lines, so a line copied into
+            # the continuity file (which holds captured text) cannot pass for a seed.
+            text = _orient_text(continuity_text(), seeds, secrets.token_hex(16))
+            return _tool_result(text)
 
         return {
+            "orient": orient,
             "recall": server._tool_recall,
             "crystal_recall": server._tool_crystal_recall,
             "crystal_index": server._tool_crystal_index,
@@ -601,6 +923,8 @@ class RemoteSession:
                 "capabilities": {"tools": {}},
                 "serverInfo": {"name": "anneal-memory-remote", "version": __version__},
                 "instructions": (
+                    "Call orient first in a new chat: it returns the memory and the "
+                    "operator's standing context. "
                     "Read access to an anneal-memory store. read_continuity "
                     "returns the compressed long-term memory; recall searches "
                     "episodes; crystal_recall/crystal_index read crystallized patterns."
@@ -657,7 +981,16 @@ class RemoteSession:
                 db = self._db_path.parent.resolve() / self._db_path.name
                 with Store(db, read_only=True, audit=False) as store:
                     server = Server(store)
-                    result = self._bind(server, store)[name](arguments)
+                    result = self._bind(server, store, db)[name](arguments)
+                    if name == "orient" and not result.get("isError"):
+                        # Measured as the HTTP layer measures it, the caller's id
+                        # included, so an orient too large is refused by its cause and
+                        # not by the generic reply-size refusal.
+                        size = len(json.dumps(_rpc_result(msg_id, result)).encode("utf-8"))
+                        why = _orient_size_error(size, MAX_REPLY_BYTES)
+                        if why:
+                            result = _tool_result(f"Error: {why}. read_continuity may "
+                                                  "still answer.", is_error=True)
             except Exception as e:  # a tool error is a result, not a transport error
                 # Class only: the message can carry paths or query text.
                 logger.error("tool %s failed: %s", name, type(e).__name__)
@@ -695,6 +1028,7 @@ class _Handler(BaseHTTPRequestHandler):
     tokens_path: Path
     session: RemoteSession
     slots: threading.BoundedSemaphore
+    oauth: OAuth | None = None
 
     def log_message(self, format: str, *args: Any) -> None:
         # The default line carries the request path, which may be the token.
@@ -707,8 +1041,12 @@ class _Handler(BaseHTTPRequestHandler):
         # as the next request (L1/L2 1024+9: request smuggling through the
         # proxy's connection pool), and no early return can forget this.
         self.close_connection = True
-        if status >= 400:
-            logger.info("refused %d %s", status, self.command)
+        # One line for every response sent through here, so a client that stops (the
+        # Gemini app after its token, 10-24) shows where it went; never a query or a
+        # token. The stdlib's own parse errors (send_error) and silent closes bypass it.
+        logger.info("%s %d %s %s host=%s ua=%s", "refused" if status >= 400 else "answered",
+                    status, self.command, self._path_for_log(),
+                    self._header_for_log("Host", 80), self._header_for_log("User-Agent", 120))
         self.send_response(status)
         self.send_header("Connection", "close")
         if ctype:
@@ -721,6 +1059,14 @@ class _Handler(BaseHTTPRequestHandler):
         self.end_headers()
         if body and self.command != "HEAD":  # a HEAD reply never carries a body, refusals included
             self.wfile.write(body)
+
+    def _path_for_log(self) -> str:
+        return path_for_log(self.path)
+
+    def _header_for_log(self, name: str, limit: int) -> str:
+        headers = getattr(self, "headers", None)
+        value = headers.get(name) if headers is not None else None
+        return "-" if value is None else ascii(value[:limit])[1:-1]
 
     def _send_json(self, status: int, obj: Any) -> None:
         self._send(status, json.dumps(obj).encode("utf-8"), "application/json")
@@ -751,8 +1097,10 @@ class _Handler(BaseHTTPRequestHandler):
             return None
         name = match_token(tokens, presented)
         if name is None:
+            challenge = (self.oauth.challenge_header() if self.oauth is not None
+                         else 'Bearer realm="anneal-memory"')
             self._send(401, b'{"error":"unauthorized"}', "application/json",
-                       {"WWW-Authenticate": 'Bearer realm="anneal-memory"'})
+                       {"WWW-Authenticate": challenge})
             return None
         return name
 
@@ -783,7 +1131,12 @@ class _Handler(BaseHTTPRequestHandler):
         return b"".join(chunks)
 
     def do_GET(self) -> None:
-        self._get()
+        try:
+            self._get()
+        except Exception as e:  # never a dropped connection with no answer
+            logger.error("request failed: %s", type(e).__name__)
+            with contextlib.suppress(OSError):
+                self._send(500)
 
     def do_DELETE(self) -> None:
         self._get()
@@ -802,6 +1155,8 @@ class _Handler(BaseHTTPRequestHandler):
         self._send(204, extra={"Allow": ALLOWED_METHODS})
 
     def _get(self) -> None:
+        if self.command == "GET" and self._oauth_route():
+            return
         if self._authorize() is None:
             return
         # No server-initiated SSE stream and no sessions to end.
@@ -817,22 +1172,168 @@ class _Handler(BaseHTTPRequestHandler):
             except OSError:
                 pass
 
+    def _body(self, limit: int) -> bytes | None:
+        """The request body under ``limit`` bytes, or None after a refusal.
+        RFC 9112 §6: a sized body, a chunked one (what Funnel forwards for an
+        HTTP/2 request that carries no length: the Gemini app's tool calls,
+        10-24), or, with neither header, no body."""
+        te = self.headers.get_all("Transfer-Encoding") or []
+        values = self.headers.get_all("Content-Length") or []
+        if te:
+            # Exactly one "chunked" and no Content-Length beside it: anything
+            # else is the shape request smuggling is made of.
+            if len(te) != 1 or te[0].strip().lower() != "chunked" or values:
+                logger.info("body refused: transfer-encoding %s with %d content-length",
+                            ascii(",".join(te)[:40]), len(values))
+                self._send(411)
+                return None
+            return self._read_chunked(limit)
+        if not values:
+            return b""
+        # Digits only, exactly one header: int() also takes "+5", " 5", "1_0".
+        if len(values) != 1 or not (values[0].isascii() and values[0].isdigit()):
+            logger.info("body refused: %d content-length headers or not digits", len(values))
+            self._send(411)
+            return None
+        if len(values[0]) > 8 or int(values[0]) > limit:
+            self._send(413)
+            return None
+        return self._read_body(int(values[0]))
+
+    def _read_chunked(self, limit: int) -> bytes | None:
+        """A chunked body of at most ``limit`` bytes within one deadline for the
+        whole body, or None after a refusal. Every receive re-arms the socket
+        timeout to what is left of that deadline, so neither a slow line nor a
+        slow chunk outlives it (L3 1024+22: a per-line timeout let a 1-byte
+        trickle hold a thread for hours, before any auth on the OAuth routes).
+        Chunk extensions and trailers are read and dropped; bytes after the
+        body are never read as another request, since every response closes."""
+        deadline = time.monotonic() + REQUEST_TIMEOUT_S
+        buf = bytearray()
+        body = bytearray()
+
+        def fill() -> None:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError
+            self.connection.settimeout(remaining)
+            got = self.rfile.read1(65536)
+            if not got:
+                raise ValueError("body cut short")
+            buf.extend(got)
+
+        def line() -> bytes:
+            while True:
+                end = buf.find(b"\n")
+                if end >= 0:
+                    if end >= MAX_CHUNK_LINE:
+                        raise ValueError("chunk line too long")
+                    out = bytes(buf[:end + 1])
+                    del buf[:end + 1]
+                    return out
+                if len(buf) >= MAX_CHUNK_LINE:
+                    raise ValueError("chunk line too long")
+                fill()
+
+        try:
+            while True:
+                size_field = line().split(b";", 1)[0].strip()
+                if not 0 < len(size_field) <= 8 or \
+                        any(c not in b"0123456789abcdefABCDEF" for c in size_field):
+                    raise ValueError("bad chunk size")
+                size = int(size_field, 16)
+                if size == 0:
+                    break
+                if len(body) + size > limit:
+                    self._send(413)
+                    return None
+                while size:
+                    if not buf:
+                        fill()
+                    take = min(size, len(buf))
+                    body += buf[:take]
+                    del buf[:take]
+                    size -= take
+                if line() not in (b"\r\n", b"\n"):
+                    raise ValueError("no line end after a chunk")
+            fields = 0
+            while line() not in (b"\r\n", b"\n"):
+                fields += 1
+                if fields > MAX_TRAILER_LINES:
+                    raise ValueError("too many trailer lines")
+        except ValueError as e:
+            logger.info("chunked body refused: %s", e)
+            self._send_json(400, _rpc_error(None, -32700, "Malformed chunked body"))
+            return None
+        except TimeoutError:
+            with contextlib.suppress(OSError):
+                self._send(408)
+            return None
+        except OSError:
+            self.close_connection = True
+            return None
+        self.connection.settimeout(REQUEST_TIMEOUT_S)
+        return bytes(body)
+
+    def _oauth_route(self) -> bool:
+        """Answer an OAuth endpoint (only with ``--oauth-issuer``); False when the
+        path is not one, so the MCP routes handle it. These routes take no bearer:
+        each is what a client calls to obtain one."""
+        oauth = self.oauth
+        if oauth is None:
+            return False
+        path, _, query = self.path.partition("?")
+        if self.command == "GET":
+            if path in ("/.well-known/oauth-protected-resource",
+                        "/.well-known/oauth-protected-resource/mcp"):
+                self._send_json(200, oauth.protected_resource())
+            elif path == "/.well-known/oauth-authorization-server":
+                self._send_json(200, oauth.server_metadata())
+            elif path == "/authorize":
+                status, page = oauth.authorize_page(query)
+                self._send(status, page.encode("utf-8"), "text/html; charset=utf-8",
+                           PAGE_HEADERS)
+            else:
+                return False
+            return True
+        if self.command != "POST" or path not in ("/register", "/authorize", "/token"):
+            return False
+        body = self._body(MAX_REGISTER_BYTES if path == "/register" else MAX_FORM_BYTES)
+        if body is None:
+            return True
+        if path == "/register":
+            status, obj = oauth.register(body)
+            self._send_json(status, obj)
+        elif path == "/authorize":
+            status, page = oauth.authorize_submit(body, self._check_token)
+            self._send(status, page.encode("utf-8"), "text/html; charset=utf-8", PAGE_HEADERS)
+        else:
+            auth = self.headers.get("Authorization", "")
+            scheme, _, value = auth.partition(" ")
+            basic = value.strip() if scheme.lower() == "basic" else None
+            status, obj = oauth.token(body, basic, self._check_token)
+            extra = {"Pragma": "no-cache"}
+            if status == 401:  # RFC 6749 §5.2
+                extra["WWW-Authenticate"] = 'Basic realm="anneal-memory"'
+            self._send(status, json.dumps(obj).encode("utf-8"), "application/json", extra)
+        return True
+
+    def _check_token(self, token: str) -> object:
+        """The connector name ``token`` belongs to in this server's token file, None
+        when it holds no such token, UNAVAILABLE when the file cannot be read."""
+        try:
+            return match_token(load_tokens(self.tokens_path), token)
+        except (OSError, ValueError):
+            logger.exception("token file unreadable; refusing")
+            return UNAVAILABLE
+
     def _post(self) -> None:
+        if self._oauth_route():
+            return
         connector = self._authorize()
         if connector is None:
             return
-        if self.headers.get("Transfer-Encoding"):
-            self._send(411)
-            return
-        values = self.headers.get_all("Content-Length") or []
-        # Digits only, exactly one header: int() also takes "+5", " 5", "1_0".
-        if len(values) != 1 or not (values[0].isascii() and values[0].isdigit()):
-            self._send(411)
-            return
-        if len(values[0]) > 8 or int(values[0]) > MAX_BODY_BYTES:
-            self._send(413)
-            return
-        raw = self._read_body(int(values[0]))
+        raw = self._body(MAX_BODY_BYTES)
         if raw is None:
             return
         try:
@@ -843,6 +1344,9 @@ class _Handler(BaseHTTPRequestHandler):
         if not isinstance(msg, dict):
             # Batches were removed from the protocol in 2025-06-18.
             self._send_json(400, _rpc_error(None, -32600, "Invalid request"))
+            return
+        if len(json.dumps(msg.get("id"))) > MAX_ID_BYTES:
+            self._send_json(400, _rpc_error(None, -32600, "Invalid request: id too long"))
             return
         if "method" not in msg:
             if "result" in msg or "error" in msg:
@@ -913,10 +1417,22 @@ class _BoundedServer(ThreadingHTTPServer):
 
 def make_server(db_path: str | Path, tokens_path: str | Path,
                 host: str = "127.0.0.1", port: int = 8765,
-                outbox: str | Path | None = None) -> ThreadingHTTPServer:
+                outbox: str | Path | None = None,
+                oauth_issuer: str | None = None,
+                seeds: list[str | Path] | tuple[str | Path, ...] = ()) -> ThreadingHTTPServer:
     """A ready (not yet serving) HTTP server. Fails fast on a bad token file, a
-    store that cannot be opened read-only, or an outbox whose directory is missing."""
+    store that cannot be opened read-only, an outbox whose directory is missing,
+    an OAuth issuer that is not a bare https origin, or a seed file
+    :func:`check_seeds` refuses. With ``oauth_issuer`` the OAuth endpoints of
+    :mod:`anneal_memory.remote_oauth` are served; they can only hand out tokens
+    this ``tokens_path`` already holds. ``seeds`` are files ``orient`` returns
+    after the continuity file, read on each call, never written."""
     load_tokens(tokens_path)
+    seed_paths = check_seeds(seeds)
+    # The redirect pin and the sign-in window live beside the token file they
+    # guard, so neither can be left out, and each tenant has its own.
+    oauth = (OAuth(oauth_issuer, oauth_pin_path(tokens_path), oauth_window_path(tokens_path))
+             if oauth_issuer is not None else None)
     if outbox is not None:
         # Anchored once, so a later chdir cannot move it off the checked directory.
         outbox = Path(outbox).parent.resolve() / Path(outbox).name
@@ -927,12 +1443,21 @@ def make_server(db_path: str | Path, tokens_path: str | Path,
         # one of them (or a link to one), and capture must never write the store.
         if out_dir.resolve() == Path(db_path).parent.resolve():
             raise ValueError("the outbox must not be in the store's directory")
-    with Store(db_path, read_only=True, audit=False):
-        pass
+    with Store(db_path, read_only=True, audit=False) as store:
+        if seed_paths:
+            # A server whose first-call tool cannot answer today does not start.
+            text = _orient_text(
+                _render_continuity(store, Path(db_path).parent.resolve() / Path(db_path).name),
+                [(p.name, read_seed(p)) for p in seed_paths], "0" * 32)
+            why = _orient_size_error(len(json.dumps(text)),
+                                     MAX_REPLY_BYTES - ORIENT_ENVELOPE_ROOM)
+            if why:
+                raise ValueError(why)
     handler = type("Handler", (_Handler,), {
         "tokens_path": Path(tokens_path),
-        "session": RemoteSession(db_path, outbox),
+        "session": RemoteSession(db_path, outbox, seed_paths),
         "slots": threading.BoundedSemaphore(MAX_CONCURRENT),
+        "oauth": oauth,
     })
     return _BoundedServer((host, port), handler)
 
@@ -948,13 +1473,36 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--port", type=int, default=8765)
     s.add_argument("--outbox", default=None,
                    help="enable the append-only capture tool, writing to this file")
+    s.add_argument("--oauth-issuer", default=None,
+                   help="serve a one-user OAuth sign-in at this public https origin "
+                        "(for clients that require OAuth); it issues only tokens in --token-file")
+    s.add_argument("--seed", action="append", default=[], metavar="PATH",
+                   help="a file the orient tool returns after the continuity file "
+                        f"(repeatable, at most {MAX_SEEDS}, each at most {MAX_SEED_BYTES} bytes, "
+                        "UTF-8); read on each call, never written")
     for cmd in ("token-add", "token-revoke"):
         t = sub.add_parser(cmd)
         t.add_argument("name")
         t.add_argument("--token-file", required=True)
+    w = sub.add_parser("oauth-window",
+                       help="open OAuth sign-in for a few minutes (one sign-in), or --close it")
+    w.add_argument("--token-file", required=True)
+    wg = w.add_mutually_exclusive_group()
+    wg.add_argument("--minutes", type=int, default=10,
+                    help=f"how long sign-in stays open, 1 to {MAX_WINDOW_S // 60} (default 10)")
+    wg.add_argument("--close", action="store_true", help="close sign-in now")
     args = parser.parse_args(argv)
 
     try:
+        if args.cmd == "oauth-window":
+            if args.close:
+                was = oauth_window_close(args.token_file)
+                print("sign-in closed" if was else "sign-in was not open")
+                return 0
+            expiry = oauth_window_open(args.token_file, args.minutes)
+            when = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(expiry))
+            print(f"sign-in open until {when} (one sign-in)")
+            return 0
         if args.cmd == "token-add":
             print(token_add(args.token_file, args.name))
             return 0
@@ -964,11 +1512,19 @@ def main(argv: list[str] | None = None) -> int:
     except ValueError as e:
         print(f"error: {e}", file=sys.stderr)
         return 2
+    except OSError as e:  # e.g. the window file's directory is not writable
+        print(f"error: {e}", file=sys.stderr)
+        return 2
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-    httpd = make_server(args.db, args.token_file, args.host, args.port, args.outbox)
-    logger.info("serving on http://%s:%d/mcp (capture %s)", args.host, args.port,
-                "on" if args.outbox else "off")
+    try:
+        httpd = make_server(args.db, args.token_file, args.host, args.port, args.outbox,
+                            args.oauth_issuer, args.seed)
+    except ValueError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
+    logger.info("serving on http://%s:%d/mcp (capture %s, oauth %s)", args.host, args.port,
+                "on" if args.outbox else "off", "on" if args.oauth_issuer else "off")
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:

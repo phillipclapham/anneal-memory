@@ -530,12 +530,12 @@ def test_orient_measures_the_whole_envelope_with_the_callers_id(served_seeds, mo
     call, a, _b, _t, path = served_seeds
     ok = call(f"/mcp/{a}", _tool("orient"))[1]
     size = len(json.dumps(ok).encode("utf-8"))
-    monkeypatch.setattr(remote, "MAX_REPLY_BYTES", size + 500)
+    monkeypatch.setattr(remote, "MAX_REPLY_BYTES", size + 100)
     assert call(f"/mcp/{a}", _tool("orient"))[1]["result"].get("isError") is not True
-    long_id = {**_tool("orient"), "id": "i" * 600}  # the same reply, 600 bytes more
+    long_id = {**_tool("orient"), "id": "i" * 200}  # the same reply, 199 bytes more
     _s, r = call(f"/mcp/{a}", long_id)
     assert r["result"]["isError"] is True and "orient's reply would encode to" in _text(r)
-    assert r["id"] == "i" * 600
+    assert r["id"] == "i" * 200
 
 
 def test_the_start_check_sizes_the_continuity_as_a_call_serves_it(tmp_path, monkeypatch):
@@ -554,3 +554,12 @@ def test_the_start_check_sizes_the_continuity_as_a_call_serves_it(tmp_path, monk
     monkeypatch.setattr(remote, "MAX_REPLY_BYTES", remote.ORIENT_ENVELOPE_ROOM + need - 1)
     with pytest.raises(ValueError, match="orient's reply would encode to"):
         remote.make_server(db, tokens, port=0, seeds=[seed])
+
+
+def test_a_request_id_too_long_to_echo_is_refused(served):
+    call, a, _b, _t, _p = served
+    for long_id in ("i" * remote.MAX_ID_BYTES, "\x7f" * 60):  # 258 and 362 bytes as JSON
+        assert call(f"/mcp/{a}", {**_tool("read_continuity"), "id": long_id})[0] == 400
+    fits = "i" * (remote.MAX_ID_BYTES - 2)
+    _s, r = call(f"/mcp/{a}", {**_tool("read_continuity"), "id": fits})
+    assert r["id"] == fits and "remote test state" in _text(r)

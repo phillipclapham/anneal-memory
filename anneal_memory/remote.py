@@ -121,6 +121,9 @@ MAX_CONCURRENT = 8
 MAX_CONNECTIONS = 32
 MAX_REPLY_BYTES = 4 * 1024 * 1024
 MAX_RECALL_LIMIT = 200
+# A JSON-RPC id, as JSON, at most this long: every reply echoes it, so an unbounded
+# id could put any reply, an error included, over MAX_REPLY_BYTES.
+MAX_ID_BYTES = 256
 
 MAX_CAPTURE_CHARS = 4000
 MAX_PENDING_SHOWN = 10
@@ -1341,6 +1344,9 @@ class _Handler(BaseHTTPRequestHandler):
         if not isinstance(msg, dict):
             # Batches were removed from the protocol in 2025-06-18.
             self._send_json(400, _rpc_error(None, -32600, "Invalid request"))
+            return
+        if len(json.dumps(msg.get("id"))) > MAX_ID_BYTES:
+            self._send_json(400, _rpc_error(None, -32600, "Invalid request: id too long"))
             return
         if "method" not in msg:
             if "result" in msg or "error" in msg:

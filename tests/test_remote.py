@@ -415,6 +415,18 @@ def test_orient_lists_the_crystals_cut_to_the_room_never_the_continuity(served_s
     section = cut.split("=== crystal index [")[1].split("] ===")[1].split("=== seed:")[0]
     assert re.search(r"\(index truncated: \d+ of 41 shown; call crystal_index for all\)", section)
     assert "remote test state" in cut and "prefers short replies" in cut  # nothing else cut
+    assert len(json.dumps(section)) <= 1500 + 200  # the cap plus the section's own header
+    # The room under the reply cap bounds it too: no room left, no index, nothing else cut.
+    monkeypatch.setattr(remote, "MAX_CRYSTAL_INDEX_ENCODED", 16 * 1024)
+    plain = _text(call(f"/mcp/{a}", _tool("orient"))[1])
+    monkeypatch.setattr(remote, "MAX_REPLY_BYTES", len(json.dumps(plain)) + remote.ORIENT_ENVELOPE_ROOM - 4000)
+    squeezed = _text(call(f"/mcp/{a}", _tool("orient"))[1])
+    assert len(json.dumps(squeezed)) <= len(json.dumps(plain)) - 1000  # the index gave way
+    assert "remote test state" in squeezed and "prefers short replies" in squeezed
+    # A crystal store that cannot be read leaves one line saying so; orient still answers.
+    (path / "memory.crystal.json").write_text("{not json")
+    broken = _text(call(f"/mcp/{a}", _tool("orient"))[1])
+    assert "(crystal index unavailable" in broken and "remote test state" in broken
 
 
 def test_the_seed_budget_counts_the_encoded_reply(served_seeds, tmp_path, monkeypatch):

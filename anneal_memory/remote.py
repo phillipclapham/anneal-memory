@@ -182,8 +182,9 @@ ORIENT_TOOL: dict[str, Any] = {
     "name": "orient",
     "description": (
         "Call this first in a new chat, before answering the user: it returns the "
-        "compressed long-term memory (the continuity file) and the operator's seed "
-        "files (standing context about the user and how to work with them). Read-only."
+        "compressed long-term memory (the continuity file), an index of its crystallized "
+        "patterns (read one with crystal_recall) and the operator's seed files (standing "
+        "context about the user and how to work with them). Read-only."
     ),
     "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
 }
@@ -191,7 +192,7 @@ ORIENT_TOOL: dict[str, Any] = {
 # A seed is operator-written standing context served whole by ``orient``. The seeds
 # together may take at most half of MAX_REPLY_BYTES, measured as the reply encodes
 # them (JSON with ASCII escapes, where one non-ASCII character can take 12 bytes),
-# leaving the rest for the continuity file.
+# leaving the rest for the continuity file and the crystal index.
 MAX_SEED_BYTES = 256 * 1024
 MAX_SEEDS = 8
 MAX_SEEDS_ENCODED = MAX_REPLY_BYTES // 2
@@ -224,13 +225,14 @@ ORIENT_FRAMING = (
 # The crystal index takes at most this much of an orient reply (encoded bytes), and
 # never more than the room the continuity and seeds leave under the reply cap.
 MAX_CRYSTAL_INDEX_ENCODED = 16 * 1024
+_CRYSTAL_INDEX_UNAVAILABLE = "(crystal index unavailable; crystal_index may still answer)"
 
 
 def _crystal_index_section(index: str, room: int) -> str | None:
     """The crystal index text cut to whole lines that encode within ``room`` bytes,
     with a closing line saying how many were left out, or None when not even one line
     and the note fit. ``index`` is the crystal_index tool's text, one crystal a line."""
-    lines = index.splitlines()
+    lines = index.split("\n")  # the tool joins its rows with \n, so only \n ends one
     room = min(room, MAX_CRYSTAL_INDEX_ENCODED)
     if len(json.dumps(index)) <= room:
         return index
@@ -936,17 +938,26 @@ class RemoteSession:
             text = _orient_text(continuity, seeds, tag)
             # The index goes in only as far as the room the whole-reply cap leaves
             # after the continuity and seeds; it is cut, they never are. A store with
-            # no crystals, or a crystal store that cannot be read, leaves it out.
-            idx = server._tool_crystal_index({})
-            if not idx.get("isError"):
-                index = idx["content"][0]["text"]
-                if index != "No crystallized patterns.":
+            # no crystals leaves it out; one that cannot be read leaves a line saying
+            # so, and never costs the continuity and seeds.
+            try:
+                idx = server._tool_crystal_index({})
+                if idx.get("isError"):
+                    section = _CRYSTAL_INDEX_UNAVAILABLE
+                else:
+                    section = idx["content"][0]["text"]
+                    if section == "No crystallized patterns.":
+                        section = None
+                if section is not None:
                     # The section's own header costs bytes too: measure with it on.
                     room = (MAX_REPLY_BYTES - ORIENT_ENVELOPE_ROOM
                             - len(json.dumps(_orient_text(continuity, seeds, tag, "x"))))
-                    section = _crystal_index_section(index, room)
-                    if section:
-                        text = _orient_text(continuity, seeds, tag, section)
+                    section = _crystal_index_section(section, room)
+            except Exception as e:  # class only: the message can carry paths
+                logger.error("crystal index failed: %s", type(e).__name__)
+                section = _CRYSTAL_INDEX_UNAVAILABLE
+            if section:
+                text = _orient_text(continuity, seeds, tag, section)
             return _tool_result(text)
 
         return {

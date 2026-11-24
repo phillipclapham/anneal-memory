@@ -2,6 +2,14 @@
 
 All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project uses [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.1] — 2026-11-24
+
+A patch release of the experimental remote server only: `orient`'s reply changes. The library, the CLI, the stdio MCP server and the on-disk format are those of 2.1.0.
+
+### Experimental (not part of the frozen public surface)
+- `orient`'s reply now opens with a framing paragraph (`ORIENT_FRAMING`): the memory is its owner's and its agent's, a first person inside it is that agent's voice, and the reader is its own mind. The `Sections below start with a line ending [TAG] ===` line, which 2.1.0 had first, is now the third line (after the framing and a blank line).
+- After the continuity, `orient` adds a section `=== crystal index [TAG] ===`: one `name: clause` line per live crystal, the `crystal_index` tool's rows, so a chat can `crystal_recall` by name. The section is cut by whole lines to the room the reply cap leaves after the continuity and seeds, and to `MAX_CRYSTAL_INDEX_ENCODED`, with a last line saying how many were left out; the continuity and seeds are never cut. A store with no crystals has no section; one whose crystal store cannot be read has a one-line section saying so, and `orient` still answers. The continuity file is followed by this section, then the seeds (the 2.1.0 entry below says seeds come straight after the continuity).
+
 ## [2.1.0] — 2026-11-24
 
 A minor release of the experimental remote server only: `anneal_memory/remote.py` and `anneal_memory/remote_oauth.py` as they stand on main, plus `orient`. The library, the CLI, the stdio MCP server and the on-disk format are those of 2.0.1. Cut from a branch off v2.0.1, not from main: main's other unreleased work (the generation-3 audit outbox, `Store.revert_wrap`, `Store.outbox_requeue`, relevance-ranked recall, the timed-`next` CLI fix and the store format change they bring) is NOT in this release and stays under [Unreleased] on main.

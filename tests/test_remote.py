@@ -419,12 +419,18 @@ def test_orient_lists_the_crystals_cut_to_the_room_never_the_continuity(served_s
     # The room under the reply cap bounds it too: no room left, no index, nothing else cut.
     monkeypatch.setattr(remote, "MAX_CRYSTAL_INDEX_ENCODED", 16 * 1024)
     plain = _text(call(f"/mcp/{a}", _tool("orient"))[1])
+    full_cap = remote.MAX_REPLY_BYTES
     monkeypatch.setattr(remote, "MAX_REPLY_BYTES", len(json.dumps(plain)) + remote.ORIENT_ENVELOPE_ROOM - 4000)
     squeezed = _text(call(f"/mcp/{a}", _tool("orient"))[1])
     assert len(json.dumps(squeezed)) <= len(json.dumps(plain)) - 1000  # the index gave way
     assert "remote test state" in squeezed and "prefers short replies" in squeezed
+    monkeypatch.setattr(remote, "MAX_REPLY_BYTES", full_cap)
     # A crystal store that cannot be read leaves one line saying so; orient still answers.
-    (path / "memory.crystal.json").write_text("{not json")
+    # (forced: a deeply nested file raises RecursionError, and newer stores recover a corrupt
+    # file from a sidecar, so the fault is injected rather than written to disk)
+    def _boom(self, args):
+        raise RecursionError
+    monkeypatch.setattr(remote.Server, "_tool_crystal_index", _boom)
     broken = _text(call(f"/mcp/{a}", _tool("orient"))[1])
     assert "(crystal index unavailable" in broken and "remote test state" in broken
     # With no room at all, even that line gives way and orient still answers.

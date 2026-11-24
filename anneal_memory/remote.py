@@ -940,22 +940,22 @@ class RemoteSession:
             # after the continuity and seeds; it is cut, they never are. A store with
             # no crystals leaves it out; one that cannot be read leaves a line saying
             # so, and never costs the continuity and seeds.
+            section: str | None
             try:
                 idx = server._tool_crystal_index({})
-                if idx.get("isError"):
-                    section = _CRYSTAL_INDEX_UNAVAILABLE
-                else:
-                    section = idx["content"][0]["text"]
-                    if section == "No crystallized patterns.":
-                        section = None
-                if section is not None:
-                    # The section's own header costs bytes too: measure with it on.
-                    room = (MAX_REPLY_BYTES - ORIENT_ENVELOPE_ROOM
-                            - len(json.dumps(_orient_text(continuity, seeds, tag, "x"))))
-                    section = _crystal_index_section(section, room)
+                section = (_CRYSTAL_INDEX_UNAVAILABLE if idx.get("isError")
+                           else idx["content"][0]["text"])
+                if section == "No crystallized patterns.":
+                    section = None
             except Exception as e:  # class only: the message can carry paths
                 logger.error("crystal index failed: %s", type(e).__name__)
                 section = _CRYSTAL_INDEX_UNAVAILABLE
+            if section is not None:
+                # The section's own header costs bytes too: measure with it on. The
+                # unavailable line goes through the same room as the index.
+                room = (MAX_REPLY_BYTES - ORIENT_ENVELOPE_ROOM
+                        - len(json.dumps(_orient_text(continuity, seeds, tag, "x"))))
+                section = _crystal_index_section(section, room)
             if section:
                 text = _orient_text(continuity, seeds, tag, section)
             return _tool_result(text)

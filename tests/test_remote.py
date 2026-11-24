@@ -427,6 +427,10 @@ def test_orient_lists_the_crystals_cut_to_the_room_never_the_continuity(served_s
     (path / "memory.crystal.json").write_text("{not json")
     broken = _text(call(f"/mcp/{a}", _tool("orient"))[1])
     assert "(crystal index unavailable" in broken and "remote test state" in broken
+    # With no room at all, even that line gives way and orient still answers.
+    monkeypatch.setattr(remote, "MAX_CRYSTAL_INDEX_ENCODED", 0)
+    none = _text(call(f"/mcp/{a}", _tool("orient"))[1])
+    assert "crystal index" not in none and "remote test state" in none
 
 
 def test_the_seed_budget_counts_the_encoded_reply(served_seeds, tmp_path, monkeypatch):

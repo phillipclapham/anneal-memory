@@ -5,7 +5,10 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
 ## [Unreleased]
 
 ### Added
-- **The migration notice for the generation-3 store upgrade (`AM-GEN3-STORE`).** `MIGRATION_MANIFEST` gains an entry keyed 3.0.0, so `anneal-memory migrate check` names the upgrade-together step to an adopter whose acknowledged version is below it. The 3.0.0 wheel on PyPI does not carry this entry, so `migrate check` shows it only from a release that does.
+- **The migration notice for the generation-3 store upgrade (`AM-GEN3-STORE`).** `MIGRATION_MANIFEST` gains an entry keyed 3.0.1, the release that first carries it, so `anneal-memory migrate check` names the install-everywhere-first step to an adopter whose acknowledged version is below it. The 3.0.0 wheel on PyPI does not carry this entry, so `migrate check` shows it only from a release that does.
+
+### Fixed
+- The 3.0.0 section says every release through 2.2.0 refuses a generation-3 store. The refusal first appears at 0.9.10; releases before it have no schema check, so the notice tells adopters to upgrade them on the same rule.
 
 ## [3.0.0] — 2026-11-25
 

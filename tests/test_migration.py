@@ -154,20 +154,23 @@ def test_allow_unlinked_is_a_0_9_26_deprecation_not_a_1_0_2_one() -> None:
     assert "`allow_unlinked` (deprecated in 0.9.26)" in new["suggested_edit"]
 
 
-def test_gen3_store_entry_reaches_an_adopter_below_3_0_0() -> None:
-    # AM-GEN3-STORE tells an AI adopter to upgrade every process that touches a
-    # store together. It is pending for an adopter acknowledged below 3.0.0 and
-    # withheld from an installed release older than 3.0.0.
+def test_gen3_store_entry_reaches_an_adopter_acked_at_3_0_0() -> None:
+    # AM-GEN3-STORE tells an AI adopter to install the new release on every
+    # process that touches a store before any of them runs. It is keyed 3.0.1, so
+    # an adopter who acknowledged under 3.0.0 still sees it once 3.0.1 is
+    # installed, and no installed release below 3.0.1 shows it.
     [entry] = [e for e in MIGRATION_MANIFEST if e["feature"] == "AM-GEN3-STORE"]
-    assert entry["version"] == "3.0.0"
-    assert "upgrade every process" in entry["suggested_edit"]
-    assert "refuses the migrated store" in entry["summary"]
+    assert entry["version"] == "3.0.1"
+    assert "Install the new release on every process" in entry["suggested_edit"]
+    assert "Do not restore the `.bak` copy on your own" in entry["suggested_edit"]
+    assert "refuse the migrated store" in entry["summary"]
     assert "`read_only=True` opens never migrate" in entry["summary"]
-    for acked in ("2.0.1", "2.2.0"):
-        got = [e["feature"] for e in pending_migrations(acked, current_version="3.0.0")]
+    for acked in ("2.2.0", "3.0.0"):
+        got = [e["feature"] for e in pending_migrations(acked, current_version="3.0.1")]
         assert "AM-GEN3-STORE" in got
-    got = [e["feature"] for e in pending_migrations("2.2.0", current_version="2.2.0")]
-    assert "AM-GEN3-STORE" not in got
+    for installed in ("2.2.0", "3.0.0"):
+        got = [e["feature"] for e in pending_migrations("2.2.0", current_version=installed)]
+        assert "AM-GEN3-STORE" not in got
 
 
 # -- AM-WRAP-GENERATED: the first file-RETIREMENT entry (spore-217) --

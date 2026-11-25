@@ -4,11 +4,14 @@ to a newer schema generation and lock an older process out of it (the 3.0.0 rele
 from __future__ import annotations
 
 import hashlib
+import os
 import sqlite3
 import subprocess
 import sys
 
 import pytest
+
+from pathlib import Path
 
 from anneal_memory import Store
 from anneal_memory.store import register_writer_schema
@@ -19,9 +22,13 @@ def _fingerprint(directory) -> dict[str, str]:
     return {p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in sorted(directory.iterdir()) if p.is_file()}
 
 
+_REPO = Path(__file__).resolve().parent.parent
+
+
 def _cli(db, *argv):
+    env = dict(os.environ, PYTHONPATH=str(_REPO))      # this checkout's package, whatever the cwd or an installed copy
     return subprocess.run([sys.executable, "-m", "anneal_memory.cli", "--db", str(db), *argv],
-                          capture_output=True, text=True, timeout=120)
+                          capture_output=True, text=True, timeout=120, env=env)
 
 
 @pytest.fixture
@@ -30,7 +37,10 @@ def populated(tmp_path):
     with Store(db, project_name="t") as store:
         ep = store.record("a decision about the outbox", "decision", source="test")
     # Mark it one generation behind: a write-capable open migrates it forward (the marker goes back to 3); a read-only
-    # open leaves it alone. Without this the files are byte-equal either way and the test could not fail.
+    # open leaves it alone. Without this the files are byte-equal either way and the test could not fail. The store
+    # keeps its generation-3 tables, so this proves the OPEN MODE, not that each command survives a store that lacks
+    # them; that was run by hand on 2026-11-25 against a store built by v2.2.0's own code, every command exit-clean and
+    # every file byte-equal.
     conn = sqlite3.connect(db)
     register_writer_schema(conn)
     conn.execute("UPDATE metadata SET value = '2' WHERE key = 'format_version'")
@@ -47,25 +57,26 @@ def _marker(db) -> str:
         conn.close()
 
 
+# (argv, exit code on this one-episode store with no wrap): `continuity` has none yet and exits 1.
 READ_ONLY = (
-    ("episodes",),
-    ("search", "outbox"),
-    ("continuity",),
-    ("associations", "--stats"),
-    ("pattern-associations", "--stats"),
-    ("diff",),
-    ("stats",),
-    ("history",),
-    ("graph", "--format", "json"),
+    (("episodes",), 0),
+    (("search", "outbox"), 0),
+    (("continuity",), 1),
+    (("associations", "--stats"), 0),
+    (("pattern-associations", "--stats"), 0),
+    (("diff",), 0),
+    (("stats",), 0),
+    (("history",), 0),
+    (("graph", "--format", "json"), 0),
 )
 
 
-@pytest.mark.parametrize("argv", READ_ONLY, ids=[a[0] for a in READ_ONLY])
-def test_a_read_only_command_leaves_every_file_byte_equal(populated, argv):
+@pytest.mark.parametrize("argv,code", READ_ONLY, ids=[a[0] for a, _ in READ_ONLY])
+def test_a_read_only_command_leaves_every_file_byte_equal(populated, argv, code):
     db, _ = populated
     before = _fingerprint(db.parent)
     r = _cli(db, *argv)
-    assert r.returncode in (0, 1), r.stderr[-400:]           # 1: "nothing to show" on an empty store is not a write
+    assert r.returncode == code, r.stderr[-400:]
     assert "Traceback" not in r.stderr, r.stderr[-400:]
     assert _fingerprint(db.parent) == before
     assert _marker(db) == "2"

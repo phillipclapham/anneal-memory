@@ -631,7 +631,8 @@ def _origin_counts_str(counts: dict[str, int]) -> str:
 
 def cmd_status(args: argparse.Namespace) -> None:
     """Show store status."""
-    with _open_store(args) as store:      # write-capable on purpose: the audit block below needs the audit trail open
+    # Write-capable on purpose: the audit block below reports the audit trail, which a read-only open does not open.
+    with _open_store(args) as store:
         status = store.status()
         # AM-INITSCHEMA: surface the persisted schema so a migration is
         # verifiable (the felt-gate on/off hinges on it) — name + headings, with

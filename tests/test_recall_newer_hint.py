@@ -115,3 +115,29 @@ def test_a_run_of_newer_relayed_episodes_past_the_scan_says_so_and_names_none(st
     hint = text[text.index("Hint: "):]
     assert "recorded from tools or outside sources" in hint and "(" not in hint.split(".")[0][-40:]
     assert 'order "newest"' in hint
+
+
+def test_an_unparseable_timestamp_is_never_later_than_a_real_one():
+    from anneal_memory.server import _is_later
+    assert not _is_later("unknown", "2026-11-19T12:00:00Z")
+    assert _is_later("2026-11-20T00:00:00Z", "unknown")
+    assert not _is_later("2026-11-19T12:00:00Z", "2026-11-19T12:00:00+00:00")  # one instant
+
+
+def test_the_word_path_bounds_its_trust_lookups_and_says_when_it_ran_out(store):
+    """Many newer relayed candidates and no trusted one: a bounded number of lookups,
+    and the exhausted line, not silence."""
+    top = store.record(OLD, "observation", timestamp="2026-11-19T11:18:00Z")
+    for i in range(60):
+        store.record(f"The export job page said {i}.", "observation",
+                     timestamp=f"2026-11-19T13:{i:02d}:00Z", trust="external")
+    eps = store.recall(keyword="export job", limit=100, order="newest").episodes
+    shown = [e for e in eps if e.id == top.id]
+    cands = [e for e in eps if e.id != top.id]
+    calls = []
+    srv = Server(store)
+    real = srv._relayed_ids
+    srv._relayed_ids = lambda ids, **kw: (calls.append(len(ids)), real(ids, **kw))[1]
+    hint = srv._newer_match_hint({}, shown, cands)
+    assert "was among the 40 newest read" in hint
+    assert len(calls) <= 1 + 8  # the shown row, then at most the scan's bound in chunks

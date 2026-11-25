@@ -187,3 +187,15 @@ def test_the_prior_size_is_recorded_under_today_even_when_the_log_already_holds_
     log = C._updated_mass_log(old, big, _doc(2400), FLOW_SCHEMA, None, "2026-11-01")
     today = [e for e in log if e["d"] == "2026-11-01"]
     assert today and today[0]["m"]["narrative-timeless"] == _masses(big)["narrative-timeless"]
+
+
+def test_one_calendar_date_is_one_entry_whatever_spelling_the_log_or_the_caller_uses():
+    from datetime import date
+    try:
+        date.fromisoformat("20261101")
+    except ValueError:
+        pytest.skip("this Python reads only YYYY-MM-DD")
+    big = _doc(3000)
+    log = [{"d": "20261101", "m": _masses(big)}]
+    kept = C._updated_mass_log(log, big, _doc(2400), FLOW_SCHEMA, None, "2026-11-01")
+    assert [e["d"] for e in kept] == ["2026-11-01"]

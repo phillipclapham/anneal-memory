@@ -368,10 +368,10 @@ def _parsed_mass_log(log: object) -> list[tuple[str, dict[str, int], dict[str, i
         if not isinstance(entry, dict) or not isinstance(entry.get("d"), str):
             continue
         try:
-            date.fromisoformat(entry["d"])
+            day = date.fromisoformat(entry["d"]).isoformat()  # one spelling per date
         except ValueError:
             continue
-        out.append((entry["d"], _ints(entry.get("m")), _ints(entry.get("c"))))
+        out.append((day, _ints(entry.get("m")), _ints(entry.get("c"))))
     return out
 
 
@@ -500,10 +500,10 @@ def _updated_mass_log(
     for d, m, c in _parsed_mass_log(log):
         _add(d, _without(m), _without(c))
     try:
-        date.fromisoformat(today)
+        today = date.fromisoformat(today).isoformat()
     except (TypeError, ValueError):
         # A date nothing can be counted from (a caller-pinned ``today`` that is not
-        # YYYY-MM-DD): keep what is there, bounded, and add nothing.
+        # an ISO date): keep what is there, bounded, and add nothing.
         return _done()
     prior_all = _floor_role_masses(prior_text or "", schema)
     # The prior continuity is today's state of the layer, whatever the log says: it

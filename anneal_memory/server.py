@@ -173,7 +173,9 @@ def _is_later(a: object, b: object) -> bool:
     parse (so ``Z``, ``+00:00`` and an offset compare as what they are), as text
     otherwise. Equal is not later: an id never makes an episode newer."""
     x, y = _instant(a), _instant(b)
-    return x > y if x is not None and y is not None else str(a) > str(b)
+    if x is None:
+        return y is None and str(a) > str(b)  # text order only when neither is a time
+    return True if y is None else x > y
 
 
 # -- JSON-RPC Error Codes --
@@ -706,7 +708,9 @@ class Server:
         carries no episode text, so no relayed content rides on it, and an episode
         recorded from a tool or an outside source is never the one named (the
         :meth:`_label_relayed` test). "Newer" is strictly later by instant
-        (:func:`_is_later`). ``shown`` are the page's episodes in listed order;
+        (:func:`_is_later`); the exact path pages the store's newest-first order, which
+        is text order, so a store mixing UTC offsets can end the scan before a later
+        instant is reached: that can only drop the hint, never name a wrong episode. ``shown`` are the page's episodes in listed order;
         ``candidates`` are the matches to pick the newer one from (the exact path reads
         the newest first, a page at a time; the word path passes the matches it
         already has). Superseded episodes are not candidates unless the call asked for
@@ -719,22 +723,24 @@ class Server:
         if top is None:
             return ""
 
-        def newest_trusted(eps: list[Any]) -> Any | None:
-            """The newest of ``eps`` that is newer than the top row and not relayed,
-            read in small chunks, newest first, so a long run of relayed ones costs
-            what it holds and nothing is bound all at once."""
+        def newest_trusted(eps: list[Any]) -> tuple[Any | None, bool]:
+            """``(the newest of eps that is newer than the top row and not relayed,
+            whether the look stopped at its bound with nothing found)``: read in small
+            chunks, newest first, at most ``_NEWER_HINT_PAGES`` of them, so a long run
+            of relayed ones costs a bounded number of reads."""
             order = sorted(
                 (e for e in eps if _is_later(e.timestamp, top.timestamp)),
                 key=lambda e: (_instant(e.timestamp) or datetime.min.replace(tzinfo=timezone.utc),
                                e.timestamp, e.id),
                 reverse=True)
-            for start in range(0, len(order), _NEWER_HINT_SCAN):
+            bound = _NEWER_HINT_PAGES * _NEWER_HINT_SCAN
+            for start in range(0, min(len(order), bound), _NEWER_HINT_SCAN):
                 chunk = order[start:start + _NEWER_HINT_SCAN]
                 bad = self._relayed_ids([e.id for e in chunk])
                 found = next((e for e in chunk if e.id not in bad), None)
                 if found is not None:
-                    return found
-            return None
+                    return found, False
+            return None, len(order) > bound
 
         exhausted = False
         if candidates is None:
@@ -753,19 +759,21 @@ class Server:
                 ).episodes
                 if not got:
                     break
-                head = newest_trusted(got)
+                head, _ = newest_trusted(got)
                 if head is not None or not _is_later(got[-1].timestamp, top.timestamp):
                     break
                 exhausted = page == _NEWER_HINT_PAGES - 1
         else:
-            head = newest_trusted(candidates)
+            head, exhausted = newest_trusted(candidates)
         read = (f'This list is ranked by relevance, not by time; for something that '
                 f'changes (a status, a state), read the newest match first (recall with '
                 f'order "newest").')
         if head is None:
+            bound = _NEWER_HINT_PAGES * _NEWER_HINT_SCAN
             return (
                 "Hint: many newer episodes recorded from tools or outside sources also "
-                f"match this query, and none from the agent was found among them. {read}"
+                f"match this query, and none from the agent was among the {bound} newest "
+                f"read. {read}"
             ) if exhausted else ""
         kind = getattr(head.type, "value", head.type)
         where = "listed here" if head.id in {e.id for e in shown} else "not on this page"

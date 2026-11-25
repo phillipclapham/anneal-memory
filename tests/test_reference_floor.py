@@ -124,8 +124,10 @@ def test_a_layer_that_shrank_to_under_the_size_floor_is_still_checked():
 
 
 def test_a_pattern_crystallized_out_since_is_not_counted_against_the_floor():
-    """The reference counts only what should still be here: identity that moved to
-    the crystal store since the largest entry leaves the reference."""
+    """A forward guard, not a path a save reaches today: the felt layer earns no
+    crystallize-out credit (only ``graduating`` does, and it is not floored). If a
+    crystallizing role joins ``_REFERENCE_FLOOR_ROLES``, what moved to the crystal
+    store since the largest entry must leave the reference."""
     log = [
         {"d": "2026-11-01", "m": {"narrative-timeless": 3000}},
         {"d": "2026-11-10", "m": {"narrative-timeless": 2400}, "c": {"narrative-timeless": 600}},
@@ -153,7 +155,8 @@ def test_a_future_dated_entry_is_not_a_reference_and_a_bad_today_keeps_the_log()
 
 
 def test_a_save_that_crystallizes_out_the_same_day_does_not_leave_the_old_peak_standing():
-    """Two saves on one date, the second moving 1000 characters to the crystal store:
+    """A forward guard (see the test above: no floored role earns credit today).
+    Two saves on one date, the second moving 1000 characters to the crystal store:
     the day's entry must not count them, or the next unchanged save is refused."""
     log = C._updated_mass_log(None, None, _doc(3000), FLOW_SCHEMA, None, "2026-11-01")
     before = _masses(_doc(3000))["narrative-timeless"]
@@ -199,3 +202,18 @@ def test_one_calendar_date_is_one_entry_whatever_spelling_the_log_or_the_caller_
     log = [{"d": "20261101", "m": _masses(big)}]
     kept = C._updated_mass_log(log, big, _doc(2400), FLOW_SCHEMA, None, "2026-11-01")
     assert [e["d"] for e in kept] == ["2026-11-01"]
+
+
+def test_the_refusal_footer_states_the_window_the_constant_holds(monkeypatch):
+    """The footer and the offender line both name the window; changing the constant
+    must change both, or one message states two windows."""
+    monkeypatch.setattr(C, "_REFERENCE_WINDOW_DAYS", 45)
+    log = [{"d": "2026-11-01", "m": {"narrative-timeless": 3000}}]
+    prior, new = _doc(450), _doc(300)
+    with pytest.raises(ValueError, match="reference floor") as exc:
+        C._check_no_catastrophic_shrink(
+            prior, new, FLOW_SCHEMA, allow_shrink=False,
+            mass_log=log, today="2026-11-20")
+    msg = str(exc.value)
+    assert "the last 45 days, not only with the save before this one" in msg
+    assert "30 days" not in msg

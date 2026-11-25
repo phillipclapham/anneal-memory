@@ -318,10 +318,11 @@ _DOC_SHRINK_RETAIN_FRACTION = 0.25
 REFERENCE_FLOOR_PERCENT = 70
 _REFERENCE_WINDOW_DAYS = 30
 # Where the masses are kept: a key of the continuity meta, written in the save's
-# own transaction (so a reverted wrap puts the log back with the meta). Bounded
-# twice: entries older than the window are dropped at each save, and at most
-# ``_MASS_LOG_MAX_ENTRIES`` are kept (the oldest go first, which can only lower a
-# reference, never raise one).
+# own transaction (so a reverted wrap puts the log back with the meta). Bounded by
+# count only: at most ``_MASS_LOG_MAX_ENTRIES`` are kept (the oldest go first,
+# which can only lower a reference, never raise one). Nothing is deleted by date;
+# the window is applied when the log is read (:func:`_mass_log_entries`), so a
+# clock that jumped forward cannot erase the record.
 _MASS_LOG_KEY = "section_mass_log"
 _MASS_LOG_MAX_ENTRIES = 60
 _MASS_LOG_MAX_MASS = 10**9  # a recorded size above this is not a size; the entry's role is skipped
@@ -415,7 +416,14 @@ def _reference_mass(
     of the entries after it and this wrap's own ``credit_now``. The prior
     continuity is always one more entry (the newest), so a store with no log yet
     is still checked against the save before this one. Returns ``(chars, date of
-    the largest)``; the date is None when the prior is the largest."""
+    the largest)``; the date is None when the prior is the largest.
+
+    Today the credit is always zero for the one role the floor guards: the felt
+    layer (``narrative-timeless``) earns none, because the only credit
+    :func:`_crystallization_credit` produces is for ``graduating``, which
+    ``_REFERENCE_FLOOR_ROLES`` does not floor, and a production save never writes
+    a ``c`` field. The subtraction does anything only if a crystallizing role is
+    added to ``_REFERENCE_FLOOR_ROLES``."""
     entries = _mass_log_entries(log, today)
     best, best_date = prior_mass - credit_now, None
     credit_after = 0
@@ -681,7 +689,8 @@ def _check_no_catastrophic_shrink(
     neocortex, unless ``allow_shrink`` is set.
 
     ``mass_log`` and ``today`` (the reference floor): a protected role must also
-    hold ``REFERENCE_FLOOR_PERCENT`` of the largest it was in the last 30 days
+    hold ``REFERENCE_FLOOR_PERCENT`` of the largest it was in the last
+    ``_REFERENCE_WINDOW_DAYS`` days
     (:func:`_reference_mass`), which catches a slow shrink that passes every
     save-to-save comparison. ``allow_shrink`` lifts it with the rest.
 
@@ -843,7 +852,7 @@ def _check_no_catastrophic_shrink(
         + "\n".join(offenders)
         + (
             "\n\nThe reference floor compares a layer with the largest it was in "
-            "the last 30 days, not only with the save before this one."
+            f"the last {_REFERENCE_WINDOW_DAYS} days, not only with the save before this one."
             if floor_hit else ""
         )
         + "\n\nThe narrative-timeless (felt) and graduating (identity) layers "

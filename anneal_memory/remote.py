@@ -15,9 +15,11 @@ What keeps the store read-only is structure, not a check:
   argument, method name or path can route to one.
 - ``resources/*`` is not offered.
 
-``orient`` is the tool a new chat calls first: the continuity file, then each
-file given with ``serve --seed PATH`` (operator-written standing context, such
-as who the user is), under its file name. Seeds are opened read-only on every
+``orient`` is the tool a new chat calls first: a framing paragraph
+(``ORIENT_FRAMING``), the continuity file, a ``crystal index`` section (one line
+per live crystal, when the store has any), then each file given with
+``serve --seed PATH`` (operator-written standing context, such as who the user
+is), under its file name. Seeds are opened read-only on every
 call, so an edit shows at the next one; a seed that is missing, over its cap or
 not UTF-8 refuses the server's start, and fails the call by name if it goes bad
 later.

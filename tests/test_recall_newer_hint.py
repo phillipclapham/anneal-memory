@@ -141,3 +141,13 @@ def test_the_word_path_bounds_its_trust_lookups_and_says_when_it_ran_out(store):
     hint = srv._newer_match_hint({}, shown, cands)
     assert "was among the 40 newest read" in hint
     assert len(calls) <= 1 + 8  # the shown row, then at most the scan's bound in chunks
+
+
+def test_a_run_of_newer_relayed_episodes_inside_the_scan_is_silent_not_exhausted(store):
+    """The scan read everything there was and found nothing trusted: no hint, and no
+    claim that the scan ran out."""
+    store.record(OLD, "observation", timestamp="2026-11-19T11:18:00Z")
+    for i in range(38):   # the last scan page is reached, with 3 of its 5 rows
+        store.record(f"The export job page said {i}.", "observation",
+                     timestamp=f"2026-11-19T13:{i:02d}:00Z", trust="external")
+    assert "Hint:" not in _text(store, keyword="export job")

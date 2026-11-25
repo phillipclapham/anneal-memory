@@ -170,8 +170,10 @@ def _instant(ts: object) -> datetime | None:
 
 def _is_later(a: object, b: object) -> bool:
     """Whether timestamp ``a`` is STRICTLY later than ``b``: as instants when both
-    parse (so ``Z``, ``+00:00`` and an offset compare as what they are), as text
-    otherwise. Equal is not later: an id never makes an episode newer."""
+    parse (so ``Z``, ``+00:00`` and an offset compare as what they are). Text order
+    is used only when NEITHER parses; a real instant is later than one that does not
+    parse, never the other way. Equal is not later: an id never makes an episode
+    newer."""
     x, y = _instant(a), _instant(b)
     if x is None:
         return y is None and str(a) > str(b)  # text order only when neither is a time
@@ -762,6 +764,10 @@ class Server:
                 head, _ = newest_trusted(got)
                 if head is not None or not _is_later(got[-1].timestamp, top.timestamp):
                     break
+                # Reached only when this page is full and wholly newer than the top
+                # row (the top row matches too, so a page that ends the matches holds
+                # it and the loop has already stopped): the 40 read were all there is
+                # of what the bound allows, not of what exists.
                 exhausted = page == _NEWER_HINT_PAGES - 1
         else:
             head, exhausted = newest_trusted(candidates)

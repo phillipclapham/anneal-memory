@@ -1237,7 +1237,8 @@ class Server:
         for ren in result.get("renamed", []):
             lines.append(f"Pattern renamed: {ren['old']} -> {ren['new']} (earned level kept)")
         for rej in result.get("renames_rejected", []):
-            lines.append(f"Rename rejected ({rej['old']} -> {rej['new']}): {rej['reason']}")
+            names = f" ({rej['old']} -> {rej['new']})" if rej["old"] else ""
+            lines.append(f"Rename rejected{names}: {rej['reason']}")
 
         if result["association_warning"]:
             # A post-commit UserWarning never reaches an MCP client, so the

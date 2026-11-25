@@ -3000,14 +3000,28 @@ def _record_wrap_supersessions(
 _RENAME_NAME = r"[A-Za-z][A-Za-z0-9_.\-]*"
 # A marker is a line of its own: one inside an evidence quote or other prose is
 # quoted content, never the composer's rename (L2 1125-38, run).
+# Read only at column 0 and outside fenced code (L3 r1 1125-38, codex): a marker in
+# an indented or fenced code example is an example, never a rename.
 _RENAMED_RE = re.compile(
-    rf"^[ \t]*\[(?i:renamed):[ \t]*({_RENAME_NAME})[ \t]*->[ \t]*({_RENAME_NAME})"
-    rf"[ \t]*\][ \t]*$", re.MULTILINE,
+    rf"\[(?i:renamed):[ \t]*({_RENAME_NAME})[ \t]*->[ \t]*({_RENAME_NAME})[ \t]*\][ \t]*"
 )
 # A line that LOOKS like the marker (the tag then a colon, or an arrow before the
 # bracket closes); prose such as "[renamed the repo]" is not one.
-_RENAMED_LOOSE_RE = re.compile(
-    r"^[ \t]*\[\s*renamed\s*(?::|[^\]\n]*->)[^\n]*", re.IGNORECASE | re.MULTILINE)
+_RENAMED_LOOSE_RE = re.compile(r"\[[ \t]*renamed[ \t]*(?::|[^\]]*->)", re.IGNORECASE)
+
+
+def _rename_marker_lines(text: str) -> list[str]:
+    """The lines of ``text`` outside a fenced code block (``` or ~~~). Both marker
+    patterns are matched from column 0, so an indented line is never read."""
+    lines: list[str] = []
+    fenced = False
+    for line in text.split("\n"):
+        if line.lstrip().startswith(("```", "~~~")):
+            fenced = not fenced
+            continue
+        if not fenced:
+            lines.append(line)
+    return lines
 
 
 def _wrap_renames(
@@ -3025,9 +3039,10 @@ def _wrap_renames(
     section of ``text`` and OLD is not, neither is composted by this save, and
     neither name is in another accepted rename. A marker whose rename is already
     on record (OLD has no prior, NEW has one) is skipped silently, so a marker
-    carried into later wraps is idempotent; that test runs first, so a mistyped
-    OLD beside a NEW that has a level is skipped too. A refused rename never fails
-    the save.
+    carried into the next wraps is skipped; that test runs first, so a mistyped
+    OLD beside a NEW that has a level is skipped too. Once a later rename moves NEW
+    on, the old marker is refused, harmlessly. A refused rename never fails the
+    save.
     """
     from .graduation import _prior_base
 
@@ -3043,16 +3058,18 @@ def _wrap_renames(
     accepted: list[tuple[str, str]] = []
     rejected: list[dict[str, str]] = []
     taken: set[str] = set()
-    parsed_at = {m.start() for m in _RENAMED_RE.finditer(text)}
-    for loose in _RENAMED_LOOSE_RE.finditer(text):
-        if loose.start() not in parsed_at:
+    markers: list[tuple[str, str]] = []
+    for line in _rename_marker_lines(text):
+        strict = _RENAMED_RE.fullmatch(line)
+        if strict:
+            markers.append((strict.group(1), strict.group(2)))
+        elif _RENAMED_LOOSE_RE.match(line):
             rejected.append({
                 "old": "", "new": "",
-                "reason": f"unparsed marker {loose.group(0)!r}; the form is "
-                          f"[renamed: <old pattern name> -> <new pattern name>]",
+                "reason": f"unparsed marker {line[:120]!r}; the form is a line of its "
+                          f"own: [renamed: <old pattern name> -> <new pattern name>]",
             })
-    for m in _RENAMED_RE.finditer(text):
-        old, new = m.group(1), m.group(2)
+    for old, new in markers:
         if (old, new) in accepted:
             continue
         reason = None
@@ -3072,7 +3089,7 @@ def _wrap_renames(
             reason = f"{old} has no earned level to carry"
         elif old not in named_before:
             reason = f"{old} is not a pattern line of the memory this wrap replaces"
-        elif has_prior(new):
+        elif has_prior(new) or new in named_before:
             reason = f"{new} already has its own level; a rename never merges two records"
         elif new in has_grounding:
             reason = (f"{new} already has a grounding record of its own; a rename never "
@@ -4302,6 +4319,17 @@ def validated_save_continuity(
         # AM-PATTERN-ALIAS: the accepted renames move OLD's level record, grounding
         # and edges to NEW (the same move as rename_pattern_association), and copy
         # its history row to NEW, so the record below writes NEW from OLD's prior.
+        # The renames were judged on grounding read before the lock: a NEW that
+        # gained grounding since would have its record merged and, on a revert,
+        # deleted (L3 r1 1125-38, deepseek). Refuse, like the level re-read above.
+        if renames:
+            _grounded_now = store.pattern_grounding()
+            if any(new in _grounded_now for _, new in renames):
+                raise ValueError(
+                    "validated_save_continuity: a renamed pattern's new name gained a "
+                    "grounding record while this save ran. Nothing was saved and the "
+                    "wrap is still open; save again."
+                )
         for old, new in renames:
             store._wrap_undo_grounding_moved(snapshot["token"][:12], new)
             store.rename_pattern_association(old, new, today=today_str)

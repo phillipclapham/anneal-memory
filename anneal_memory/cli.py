@@ -1852,7 +1852,8 @@ def cmd_save_continuity(args: argparse.Namespace) -> None:
         for ren in result.get("renamed", []):
             print(f"Pattern renamed: {ren['old']} -> {ren['new']} (earned level kept)")
         for rej in result.get("renames_rejected", []):
-            print(f"Rename rejected ({rej['old']} -> {rej['new']}): {rej['reason']}")
+            names = f" ({rej['old']} -> {rej['new']})" if rej["old"] else ""
+            print(f"Rename rejected{names}: {rej['reason']}")
 
         if result["graduations_validated"]:
             print(f"Citations validated: {result['graduations_validated']}")

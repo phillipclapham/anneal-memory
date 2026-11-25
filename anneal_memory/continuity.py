@@ -33,7 +33,7 @@ import uuid
 import logging
 import warnings
 from dataclasses import asdict
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -307,6 +307,212 @@ _SHRINK_RETAIN_FRACTION: dict[str, float] = {
 }
 _DOC_SHRINK_RETAIN_FRACTION = 0.25
 
+# The reference floor: the per-save gate above compares a save with the one before
+# it, so a protected layer can shrink by a third each night and pass every check.
+# This floor compares it with the largest the layer was in the last
+# ``_REFERENCE_WINDOW_DAYS`` days. ONE number, and it is a placeholder: the right
+# percentage is not settled, so nothing else in the code may restate it.
+# ``allow_shrink`` lifts the floor, as it lifts the gate it sits in.
+REFERENCE_FLOOR_PERCENT = 70
+_REFERENCE_WINDOW_DAYS = 30
+# Where the masses are kept: a key of the continuity meta, written in the save's
+# own transaction (so a save that fails writes neither). Bounded
+# twice: entries older than the window are dropped at each save, and at most
+# ``_MASS_LOG_MAX_ENTRIES`` are kept (the oldest go first, which can only lower a
+# reference, never raise one).
+_MASS_LOG_KEY = "section_mass_log"
+_MASS_LOG_MAX_ENTRIES = 60
+_MASS_LOG_MAX_MASS = 10**9  # a recorded size above this is not a size; the entry's role is skipped
+# The roles the floor guards: the felt layer only. The identity layer
+# (``graduating``) is pruned by design (graduation, composting, crystallizing
+# out) and measured to fall below the floor on a quarter of nights on a real store
+# even with crystallization left uncounted, so it keeps the save-to-save check
+# alone. The record and the rebase follow this tuple; adding a role here guards it.
+_REFERENCE_FLOOR_ROLES: tuple[str, ...] = ("narrative-timeless",)
+
+
+def _floor_role_masses(text: str, schema: list[SectionSpec]) -> dict[str, int]:
+    """Characters per floor role (``_REFERENCE_FLOOR_ROLES``, those the schema
+    declares), each role's headings summed as the gate sums them."""
+    masses = _schema_section_masses(text, schema)
+    out: dict[str, int] = {}
+    for role in _REFERENCE_FLOOR_ROLES:
+        heads = [s["heading"].lower() for s in schema if s["role"] == role]
+        if heads:
+            out[role] = sum(masses.get(h, 0) for h in heads)
+    return out
+
+
+def _parsed_mass_log(log: object) -> list[tuple[str, dict[str, int], dict[str, int]]]:
+    """The well-formed entries of a stored log, oldest first, as ``(date, masses,
+    credit)``: at most the last ``_MASS_LOG_MAX_ENTRIES`` are read, only the floor
+    roles are kept, and a mass over ``_MASS_LOG_MAX_MASS`` is dropped. The log is
+    meta a person can hand-edit (and any writer can put anything under a meta key),
+    so what is not a list of ``{"d": ISO date, "m": {role: int}}`` is skipped, never
+    trusted and never raised on, and neither its length nor its width costs more
+    than that bound."""
+    if not isinstance(log, list):
+        return []
+
+    def _ints(raw: object) -> dict[str, int]:
+        if not isinstance(raw, dict):
+            return {}
+        return {r: raw[r] for r in _REFERENCE_FLOOR_ROLES
+                if isinstance(raw.get(r), int) and not isinstance(raw[r], bool)
+                and 0 <= raw[r] <= _MASS_LOG_MAX_MASS}
+
+    out: list[tuple[str, dict[str, int], dict[str, int]]] = []
+    for entry in log[-_MASS_LOG_MAX_ENTRIES:]:
+        if not isinstance(entry, dict) or not isinstance(entry.get("d"), str):
+            continue
+        try:
+            day = date.fromisoformat(entry["d"]).isoformat()  # one spelling per date
+        except ValueError:
+            continue
+        out.append((day, _ints(entry.get("m")), _ints(entry.get("c"))))
+    return out
+
+
+def _mass_log_entries(
+    log: object, today: str | None
+) -> list[tuple[str, dict[str, int], dict[str, int]]]:
+    """The entries of :func:`_parsed_mass_log` inside the window: the last
+    ``_REFERENCE_WINDOW_DAYS`` calendar dates up to ``today``. A future date is not a
+    record of the past 30 days. With no usable ``today`` nothing is inside a window,
+    so the log contributes no entry (the prior continuity still does, in
+    :func:`_reference_mass`)."""
+    try:
+        now = date.fromisoformat(str(today)) if today else None
+        cutoff = now - timedelta(days=_REFERENCE_WINDOW_DAYS - 1) if now else None
+    except (ValueError, OverflowError):
+        return []
+    if cutoff is None or now is None:
+        return []
+    return [(d, m, c) for d, m, c in _parsed_mass_log(log)
+            if cutoff <= date.fromisoformat(d) <= now]
+
+
+def _below_floor(new_mass: int, reference: int) -> bool:
+    """Whether a new size breaks the floor against a reference: the one test the
+    gate and the ``allow_shrink`` reset both use."""
+    return (reference >= _SHRINK_GATE_MIN_PRIOR_CHARS
+            and new_mass * 100 < reference * REFERENCE_FLOOR_PERCENT)
+
+
+def _reference_mass(
+    log: object,
+    role: str,
+    today: str | None,
+    prior_mass: int,
+    credit_now: int,
+) -> tuple[int, str | None]:
+    """The reference for one protected role: the largest mass it had in the window,
+    counting only what should still be HERE. A pattern that crystallized out
+    since (recoverable from the crystal store) is subtracted, so a normal
+    crystallization never trips the floor: each entry's mass loses the credits
+    of the entries after it and this wrap's own ``credit_now``. The prior
+    continuity is always one more entry (the newest), so a store with no log yet
+    is still checked against the save before this one. Returns ``(chars, date of
+    the largest)``; the date is None when the prior is the largest."""
+    entries = _mass_log_entries(log, today)
+    best, best_date = prior_mass - credit_now, None
+    credit_after = 0
+    for d, masses, credit in reversed(entries):
+        if role in masses:
+            remaining = masses[role] - credit_after - credit_now
+            if remaining > best:
+                best, best_date = remaining, d
+        credit_after += credit.get(role, 0)
+    return max(best, 0), best_date
+
+
+def _roles_below_reference(
+    log: object,
+    prior_text: str | None,
+    text: str,
+    schema: list[SectionSpec],
+    credit: dict[str, int] | None,
+    today: str,
+) -> frozenset[str]:
+    """The floor roles whose new size is below ``REFERENCE_FLOOR_PERCENT`` of their
+    reference: the sections an ``allow_shrink`` save is letting shrink."""
+    prior_masses = _floor_role_masses(prior_text or "", schema)
+    below = set()
+    for role, new_mass in _floor_role_masses(text, schema).items():
+        prior_mass = prior_masses.get(role, 0)
+        role_credit = min(max((credit or {}).get(role, 0), 0), prior_mass)
+        ref, _ = _reference_mass(log, role, today, prior_mass, role_credit)
+        if _below_floor(new_mass, ref):
+            below.add(role)
+    return frozenset(below)
+
+
+def _updated_mass_log(
+    log: object,
+    prior_text: str | None,
+    text: str,
+    schema: list[SectionSpec],
+    credit: dict[str, int] | None,
+    today: str,
+    *,
+    rebase_roles: frozenset[str] | set[str] = frozenset(),
+) -> list[dict[str, Any]]:
+    """The log with this save's floor-role masses recorded, ONE ENTRY PER CALENDAR DATE
+    (the day's largest mass and the day's crystallize-out credits summed), so a burst
+    of saves cannot push the history out of the count bound; at most
+    ``_MASS_LOG_MAX_ENTRIES`` are kept. Nothing is pruned by date here (a clock that
+    jumped forward must not erase the record; the window is applied when it is read).
+    The prior continuity's masses always go in first, under today (a store's first
+    save has no log, and a raw save or ``replace_section`` changes the continuity
+    without writing one, so the size the layer HAD must reach the log or the largest
+    is lost). ``rebase_roles`` (the roles a save's
+    ``allow_shrink`` let below the floor, see :func:`_roles_below_reference`) start
+    again from this save: a deliberate diet moves that section's reference down, or
+    every later save would be refused against the pre-diet size for 30 days. Other
+    roles keep their history."""
+    def _without(raw: dict[str, int]) -> dict[str, int]:
+        return {r: n for r, n in raw.items() if r not in rebase_roles}
+
+    by_date: dict[str, dict[str, Any]] = {}
+
+    def _add(d: str, m: dict[str, int], c: dict[str, int]) -> None:
+        if not m:
+            return  # an entry holding only rebased roles has nothing left to say
+        cur = by_date.get(d)
+        if cur is None:
+            by_date[d] = {"d": d, "m": dict(m), **({"c": dict(c)} if c else {})}
+            return
+        # What ``c`` took out of the layer left after ``cur``'s sizes were recorded,
+        # so it comes off them before the larger of the two stands: otherwise the
+        # day's entry would count characters that already moved to the crystal store.
+        cur["m"] = {r: max(max(cur["m"].get(r, 0) - c.get(r, 0), 0), m.get(r, 0))
+                    for r in {*cur["m"], *m}}
+        merged = {r: cur.get("c", {}).get(r, 0) + c.get(r, 0)
+                  for r in {*cur.get("c", {}), *c}}
+        if merged:
+            cur["c"] = merged
+
+    def _done() -> list[dict[str, Any]]:
+        return [by_date[d] for d in sorted(by_date)][-_MASS_LOG_MAX_ENTRIES:]
+
+    for d, m, c in _parsed_mass_log(log):
+        _add(d, _without(m), _without(c))
+    try:
+        today = date.fromisoformat(today).isoformat()
+    except (TypeError, ValueError):
+        # A date nothing can be counted from (a caller-pinned ``today`` that is not
+        # an ISO date): keep what is there, bounded, and add nothing.
+        return _done()
+    prior_all = _floor_role_masses(prior_text or "", schema)
+    # The prior continuity is today's state of the layer, whatever the log says: it
+    # goes in under today and the merge keeps the larger.
+    _add(today, _without(prior_all), {})
+    _add(today, _floor_role_masses(text, schema),
+         {r: min(n, prior_all.get(r, 0)) for r, n in (credit or {}).items()
+          if r in _REFERENCE_FLOOR_ROLES and isinstance(n, int)
+          and not isinstance(n, bool) and n > 0 and prior_all.get(r, 0) > 0})
+    return _done()
+
 
 def _schema_section_masses(text: str, schema: list[SectionSpec]) -> dict[str, int]:
     """Character count per schema section, keyed by lowercased schema heading.
@@ -466,9 +672,16 @@ def _check_no_catastrophic_shrink(
     *,
     allow_shrink: bool,
     crystallized_credit: dict[str, int] | None = None,
+    mass_log: object = None,
+    today: str | None = None,
 ) -> None:
     """Refuse a wrap that collapses a protected-role section or the whole
     neocortex, unless ``allow_shrink`` is set.
+
+    ``mass_log`` and ``today`` (the reference floor): a protected role must also
+    hold ``REFERENCE_FLOOR_PERCENT`` of the largest it was in the last 30 days
+    (:func:`_reference_mass`), which catches a slow shrink that passes every
+    save-to-save comparison. ``allow_shrink`` lifts it with the rest.
 
     The structural backstop for the felt / identity layers: a recency-trapped
     or stateless-reset wrap silently guts the timeless ``narrative-timeless``
@@ -489,9 +702,11 @@ def _check_no_catastrophic_shrink(
     of it was legitimate crystallization. The gate stays ON (no blanket
     ``allow_shrink``). ``None`` ⇒ no credit ⇒ byte-identical to pre-AM-CRYSTAL.
 
-    No-ops when there is no prior continuity (first wrap) or the relevant prior
-    side is below :data:`_SHRINK_GATE_MIN_PRIOR_CHARS` (nothing meaningful to
-    collapse).
+    No-ops when there is no prior continuity (first wrap). The save-to-save and
+    whole-document checks skip a side whose prior is below
+    :data:`_SHRINK_GATE_MIN_PRIOR_CHARS` (nothing meaningful to collapse); the
+    reference floor does not skip on the prior, since a layer that shrank slowly to
+    under that size is its case, and skips only a reference below it.
     """
     # Strict override: a safety gate must be fail-closed. Only a literal True
     # bypasses — a stray ``allow_shrink="false"`` / ``1`` from a loosely-typed
@@ -533,6 +748,7 @@ def _check_no_catastrophic_shrink(
             )
 
     offenders: list[str] = []
+    floor_hit = False
     for role, heading_lowers in headings_by_role.items():
         retain = _SHRINK_RETAIN_FRACTION[role]
         prior_mass = sum(prior_masses.get(h, 0) for h in heading_lowers)
@@ -544,12 +760,16 @@ def _check_no_catastrophic_shrink(
         # of it was legitimate crystallization. Credit is bounded to [0, prior_mass].
         role_credit = min(max(credit.get(role, 0), 0), prior_mass)
         effective_prior = prior_mass - role_credit
-        if effective_prior < _SHRINK_GATE_MIN_PRIOR_CHARS:
-            continue  # the non-crystallized remainder is sub-floor — nothing meaningful to collapse
         new_mass = sum(new_masses.get(h, 0) for h in heading_lowers)
-        if new_mass < effective_prior * retain:
+        label = " + ".join(f"'{display_by_lower[h]}'" for h in heading_lowers)
+        # The non-crystallized remainder below the floor: nothing meaningful to
+        # collapse save-to-save. The reference floor below is judged on its own
+        # (a layer that shrank slowly to under the floor is exactly its case).
+        if (
+            effective_prior >= _SHRINK_GATE_MIN_PRIOR_CHARS
+            and new_mass < effective_prior * retain
+        ):
             pct = round(100 * (1 - new_mass / effective_prior))
-            label = " + ".join(f"'{display_by_lower[h]}'" for h in heading_lowers)
             credited = (
                 f" ({role_credit} chars crystallized out → recoverable; "
                 f"{effective_prior} should remain)"
@@ -560,6 +780,23 @@ def _check_no_catastrophic_shrink(
                 f"{prior_mass} -> {new_mass} chars{credited} "
                 f"({pct}% smaller vs the non-crystallized baseline; "
                 f"must retain >={int(retain * 100)}%)"
+            )
+            continue  # one collapse is named once
+        # The reference floor (see ``mass_log``), on the floor roles only.
+        if role not in _REFERENCE_FLOOR_ROLES:
+            continue
+        ref_mass, ref_date = _reference_mass(
+            mass_log, role, today, prior_mass, role_credit)
+        if _below_floor(new_mass, ref_mass):
+            since = f"recorded {ref_date}" if ref_date else "at the last save"
+            floor_hit = True
+            offenders.append(
+                f"  - {label} ({role}): {new_mass} chars, but it was {ref_mass} "
+                f"({since}; the largest in the last {_REFERENCE_WINDOW_DAYS} days, "
+                f"counting only what should still be here); it must hold "
+                f">={REFERENCE_FLOOR_PERCENT}% of that "
+                f"({-(-ref_mass * REFERENCE_FLOOR_PERCENT // 100)})"
+                + (". A shrink spread over several saves is still a shrink" if ref_date else "")
             )
 
     # Whole-document backstop — computed EXCLUDING the graduating section. The
@@ -602,6 +839,11 @@ def _check_no_catastrophic_shrink(
         "session compressed over the accumulated identity), not a deliberate "
         "edit:\n"
         + "\n".join(offenders)
+        + (
+            "\n\nThe reference floor compares a layer with the largest it was in "
+            "the last 30 days, not only with the save before this one."
+            if floor_hit else ""
+        )
         + "\n\nThe narrative-timeless (felt) and graduating (identity) layers "
         "carry the continuity that makes you yourself across sessions — they "
         "evolve, they do not reset. Re-wrap preserving them: carry the prior "
@@ -3196,9 +3438,17 @@ def validated_save_continuity(
     crystallized_credit = _crystallization_credit(
         prior_continuity, text, section_schema, crystal_store
     )
+    # Caller may pin ``today`` for deterministic test runs; default is
+    # wall-clock. Same pattern _build_wrap_package already uses. Read here, ahead of
+    # the gate, because the reference floor's 30-day window is counted from it.
+    today_str = today if today is not None else (store.wrap_today() or _wrap_local_date(store))
+    # The reference floor's record (REFERENCE_FLOOR_PERCENT): only a store with a
+    # felt layer is gated, so only such a store keeps or reads the log.
+    _gated_store = any(s["role"] == "narrative-timeless" for s in section_schema)
+    _mass_log = store.load_meta().get(_MASS_LOG_KEY) if _gated_store else None
     _check_no_catastrophic_shrink(
         prior_continuity, text, section_schema, allow_shrink=allow_shrink,
-        crystallized_credit=crystallized_credit,
+        crystallized_credit=crystallized_credit, mass_log=_mass_log, today=today_str,
     )
     # KL-14 (2026-10-07): an override must leave a trace. When the operator passes
     # allow_shrink, run the same check without it and record in the audit whether
@@ -3211,11 +3461,18 @@ def validated_save_continuity(
             _check_no_catastrophic_shrink(
                 prior_continuity, text, section_schema, allow_shrink=False,
                 crystallized_credit=crystallized_credit,
+                mass_log=_mass_log, today=today_str,
             )
             shrink_override["refusal_suppressed"] = False
         except ValueError as exc:
             shrink_override["refusal_suppressed"] = True
             shrink_override["refusal"] = str(exc)[:2000]
+    _rebase_roles = (
+        _roles_below_reference(
+            _mass_log, prior_continuity, text, section_schema, crystallized_credit,
+            today_str)
+        if allow_shrink is True and _gated_store else frozenset()
+    )
 
     # Get current session's episodes for citation validation.
     # Re-fetch the full post-last-wrap set and filter down to exactly
@@ -3279,10 +3536,8 @@ def validated_save_continuity(
     meta = store.load_meta()
     citations_seen = meta.get("citations_seen", False)
 
-    # Validate graduations (demotes bad citations in-place).
-    # Caller may pin ``today`` for deterministic test runs; default is
-    # wall-clock. Same pattern _build_wrap_package already uses.
-    today_str = today if today is not None else (store.wrap_today() or _wrap_local_date(store))
+    # Validate graduations (demotes bad citations in-place). ``today_str`` was
+    # read ahead of the shrink gate above.
     # The bound's prior: the store's own record of the levels it last saved.
     # ⛔ NO CRYSTAL SEED (L3 r4, 1008+3, DELETED): a crystal level seeded the
     # first bounded save and was defeated a new way three rounds running (a
@@ -3502,6 +3757,14 @@ def validated_save_continuity(
             if grad_result.validated > 0 or grad_result.citation_counts:
                 meta["citations_seen"] = True
             meta["sessions_produced"] = meta.get("sessions_produced", 0) + 1
+            if _gated_store:
+                # A section the override let below its reference is a deliberate diet:
+                # its record restarts from this save (see _updated_mass_log).
+                meta[_MASS_LOG_KEY] = _updated_mass_log(
+                    meta.get(_MASS_LOG_KEY), prior_continuity, grad_result.text,
+                    section_schema, crystallized_credit, today_str,
+                    rebase_roles=_rebase_roles,
+                )
 
             # Write meta tmp inside the batch window — not a DB op,
             # but scoped here so a failure rolls back the DB alongside

@@ -20,6 +20,7 @@ import os
 import sys
 from pathlib import Path
 from collections.abc import Callable
+from datetime import datetime, timezone
 from typing import Any, TypeVar, cast
 
 from . import __version__
@@ -155,6 +156,24 @@ def _truncate(text: str, max_len: int = 100) -> str:
     if len(text) <= max_len:
         return text
     return text[: max_len - 3] + "..."
+
+
+def _instant(ts: object) -> datetime | None:
+    """A stored timestamp as an aware UTC instant, or None when it is not ISO 8601
+    (``Z`` read as UTC; a naive one read as UTC)."""
+    try:
+        parsed = datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+
+def _is_later(a: object, b: object) -> bool:
+    """Whether timestamp ``a`` is STRICTLY later than ``b``: as instants when both
+    parse (so ``Z``, ``+00:00`` and an offset compare as what they are), as text
+    otherwise. Equal is not later: an id never makes an episode newer."""
+    x, y = _instant(a), _instant(b)
+    return x > y if x is not None and y is not None else str(a) > str(b)
 
 
 # -- JSON-RPC Error Codes --
@@ -686,24 +705,42 @@ class Server:
         the newest match (and whether it is on this page) and says how to read it. It
         carries no episode text, so no relayed content rides on it, and an episode
         recorded from a tool or an outside source is never the one named (the
-        :meth:`_label_relayed` test). ``shown`` are the page's episodes in listed
-        order; ``candidates`` are the matches to pick the newer one from (the exact
-        path reads the newest few; the word path passes the matches it already has).
-        Superseded episodes are not candidates unless the call asked for them."""
+        :meth:`_label_relayed` test). "Newer" is strictly later by instant
+        (:func:`_is_later`). ``shown`` are the page's episodes in listed order;
+        ``candidates`` are the matches to pick the newer one from (the exact path reads
+        the newest first, a page at a time; the word path passes the matches it
+        already has). Superseded episodes are not candidates unless the call asked for
+        them. When the scan reaches its page bound with only relayed episodes newer
+        than the top row, the line says that much and names none."""
         if not shown:
             return ""
-
-        def when(e: Any) -> tuple[str, str]:
-            return (e.timestamp, e.id)
-
         relayed = self._relayed_ids([e.id for e in shown])
         top = next((e for e in shown if e.id not in relayed), None)
         if top is None:
             return ""
+
+        def newest_trusted(eps: list[Any]) -> Any | None:
+            """The newest of ``eps`` that is newer than the top row and not relayed,
+            read in small chunks, newest first, so a long run of relayed ones costs
+            what it holds and nothing is bound all at once."""
+            order = sorted(
+                (e for e in eps if _is_later(e.timestamp, top.timestamp)),
+                key=lambda e: (_instant(e.timestamp) or datetime.min.replace(tzinfo=timezone.utc),
+                               e.timestamp, e.id),
+                reverse=True)
+            for start in range(0, len(order), _NEWER_HINT_SCAN):
+                chunk = order[start:start + _NEWER_HINT_SCAN]
+                bad = self._relayed_ids([e.id for e in chunk])
+                found = next((e for e in chunk if e.id not in bad), None)
+                if found is not None:
+                    return found
+            return None
+
+        exhausted = False
         if candidates is None:
-            # Newest first, a page at a time, until a match that is not relayed (the
-            # newest such is the one to name) or nothing newer than the top row is
-            # left: a run of newer relayed episodes must not hide a real one.
+            # Newest first, a page at a time, until a match that is not relayed or
+            # nothing newer than the top row is left: a run of newer relayed
+            # episodes must not hide a real one.
             head = None
             for page in range(_NEWER_HINT_PAGES):
                 got = self._store.recall(
@@ -716,24 +753,25 @@ class Server:
                 ).episodes
                 if not got:
                     break
-                bad = self._relayed_ids([c.id for c in got])
-                head = next((c for c in got if c.id not in bad), None)
-                if head is not None or when(got[-1]) <= when(top):
+                head = newest_trusted(got)
+                if head is not None or not _is_later(got[-1].timestamp, top.timestamp):
                     break
-            newer = [head] if head is not None and when(head) > when(top) else []
+                exhausted = page == _NEWER_HINT_PAGES - 1
         else:
-            relayed |= self._relayed_ids([c.id for c in candidates])
-            newer = [c for c in candidates if c.id not in relayed and when(c) > when(top)]
-        if not newer:
-            return ""
-        head = max(newer, key=when)
+            head = newest_trusted(candidates)
+        read = (f'This list is ranked by relevance, not by time; for something that '
+                f'changes (a status, a state), read the newest match first (recall with '
+                f'order "newest").')
+        if head is None:
+            return (
+                "Hint: many newer episodes recorded from tools or outside sources also "
+                f"match this query, and none from the agent was found among them. {read}"
+            ) if exhausted else ""
         kind = getattr(head.type, "value", head.type)
         where = "listed here" if head.id in {e.id for e in shown} else "not on this page"
         return (
             f"Hint: a newer episode also matches this query: ({head.id}) [{kind}] "
-            f"{head.timestamp} ({where}). This list is ranked by relevance, not by time; "
-            "for something that changes (a status, a state), read the newest match "
-            'first (recall with order "newest").'
+            f"{head.timestamp} ({where}). {read}"
         )
 
     def _label_relayed(
@@ -943,7 +981,7 @@ class Server:
             # one-word match is nearly always newer, and naming it would be noise.
             # Not "as many as the top row": the newer episode that restates a state
             # usually shares fewer words with the query than the older one.
-            floor = min(len(shown[0].matched), max(2, -(-len(words) // 2)))
+            floor = max(2, -(-len(words) // 2))
             hint = self._newer_match_hint(
                 args, [m.episode for m in shown],
                 [m.episode for m in matches if len(m.matched) >= floor])

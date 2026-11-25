@@ -89,3 +89,29 @@ def test_newer_relayed_episodes_cannot_push_a_real_newer_match_out_of_the_scan(s
                      timestamp=f"2026-11-19T13:{i:02d}:00Z", trust="external")
     text = _text(store, keyword="export job")
     assert HINT in text and f"({real.id})" in text[text.index(HINT):]
+
+
+def test_an_episode_at_the_same_instant_is_not_newer_whatever_its_id(store):
+    """Newer means strictly later: the id never breaks a tie into 'newer'."""
+    for i in range(6):
+        store.record(f"{OLD} variant {i}", "observation", timestamp="2026-11-19T12:00:00Z")
+    assert HINT not in _text(store, keyword="export job")
+
+
+def test_timestamps_are_compared_as_instants_not_as_text(store):
+    """'+05:00' sorts after 'Z' as text; as instants it is the EARLIER one."""
+    store.record(OLD, "observation", timestamp="2026-11-19T12:00:00Z")
+    store.record("The export job is live now.", "observation",
+                 timestamp="2026-11-19T15:00:00+05:00")   # 10:00Z, older than the top row
+    assert HINT not in _text(store, keyword="export job")
+
+
+def test_a_run_of_newer_relayed_episodes_past_the_scan_says_so_and_names_none(store):
+    store.record(OLD, "observation", timestamp="2026-11-19T11:18:00Z")
+    for i in range(45):
+        store.record(f"The export job page said {i}.", "observation",
+                     timestamp=f"2026-11-19T13:{i:02d}:00Z", trust="external")
+    text = _text(store, keyword="export job")
+    hint = text[text.index("Hint: "):]
+    assert "recorded from tools or outside sources" in hint and "(" not in hint.split(".")[0][-40:]
+    assert 'order "newest"' in hint

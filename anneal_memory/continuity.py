@@ -464,10 +464,10 @@ def _updated_mass_log(
     of saves cannot push the history out of the count bound; at most
     ``_MASS_LOG_MAX_ENTRIES`` are kept. Nothing is pruned by date here (a clock that
     jumped forward must not erase the record; the window is applied when it is read).
-    The prior continuity's masses go in first when the newest entry is not already
-    them: a store's first save has no log, and a raw save or ``replace_section``
-    changes the continuity without writing one, so the size the layer HAD must reach
-    the log or the largest is lost. ``rebase_roles`` (the roles a save's
+    The prior continuity's masses always go in first, under today (a store's first
+    save has no log, and a raw save or ``replace_section`` changes the continuity
+    without writing one, so the size the layer HAD must reach the log or the largest
+    is lost). ``rebase_roles`` (the roles a save's
     ``allow_shrink`` let below the floor, see :func:`_roles_below_reference`) start
     again from this save: a deliberate diet moves that section's reference down, or
     every later save would be refused against the pre-diet size for 30 days. Other
@@ -475,19 +475,27 @@ def _updated_mass_log(
     def _without(raw: dict[str, int]) -> dict[str, int]:
         return {r: n for r, n in raw.items() if r not in rebase_roles}
 
-    kept: list[dict[str, Any]] = []
+    by_date: dict[str, dict[str, Any]] = {}
 
     def _add(d: str, m: dict[str, int], c: dict[str, int]) -> None:
         if not m:
             return  # an entry holding only rebased roles has nothing left to say
-        if kept and kept[-1]["d"] == d:
-            last = kept[-1]
-            last["m"] = {r: max(last["m"].get(r, 0), m.get(r, 0)) for r in {*last["m"], *m}}
-            merged = {r: last.get("c", {}).get(r, 0) + c.get(r, 0) for r in {*last.get("c", {}), *c}}
-            if merged:
-                last["c"] = merged
-        else:
-            kept.append({"d": d, "m": dict(m), **({"c": dict(c)} if c else {})})
+        cur = by_date.get(d)
+        if cur is None:
+            by_date[d] = {"d": d, "m": dict(m), **({"c": dict(c)} if c else {})}
+            return
+        # What ``c`` took out of the layer left after ``cur``'s sizes were recorded,
+        # so it comes off them before the larger of the two stands: otherwise the
+        # day's entry would count characters that already moved to the crystal store.
+        cur["m"] = {r: max(max(cur["m"].get(r, 0) - c.get(r, 0), 0), m.get(r, 0))
+                    for r in {*cur["m"], *m}}
+        merged = {r: cur.get("c", {}).get(r, 0) + c.get(r, 0)
+                  for r in {*cur.get("c", {}), *c}}
+        if merged:
+            cur["c"] = merged
+
+    def _done() -> list[dict[str, Any]]:
+        return [by_date[d] for d in sorted(by_date)][-_MASS_LOG_MAX_ENTRIES:]
 
     for d, m, c in _parsed_mass_log(log):
         _add(d, _without(m), _without(c))
@@ -496,15 +504,16 @@ def _updated_mass_log(
     except (TypeError, ValueError):
         # A date nothing can be counted from (a caller-pinned ``today`` that is not
         # YYYY-MM-DD): keep what is there, bounded, and add nothing.
-        return kept[-_MASS_LOG_MAX_ENTRIES:]
-    if prior_text and prior_text.strip():
-        prior_masses = _without(_floor_role_masses(prior_text, schema))
-        if prior_masses and (not kept or kept[-1]["m"] != prior_masses):
-            _add(today, prior_masses, {})
+        return _done()
+    prior_all = _floor_role_masses(prior_text or "", schema)
+    # The prior continuity is today's state of the layer, whatever the log says: it
+    # goes in under today and the merge keeps the larger.
+    _add(today, _without(prior_all), {})
     _add(today, _floor_role_masses(text, schema),
-         {r: n for r, n in (credit or {}).items()
-          if r in _REFERENCE_FLOOR_ROLES and isinstance(n, int) and n > 0})
-    return kept[-_MASS_LOG_MAX_ENTRIES:]
+         {r: min(n, prior_all.get(r, 0)) for r, n in (credit or {}).items()
+          if r in _REFERENCE_FLOOR_ROLES and isinstance(n, int)
+          and not isinstance(n, bool) and n > 0 and prior_all.get(r, 0) > 0})
+    return _done()
 
 
 def _schema_section_masses(text: str, schema: list[SectionSpec]) -> dict[str, int]:

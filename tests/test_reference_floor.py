@@ -92,10 +92,12 @@ def test_the_mass_log_is_bounded_and_a_burst_of_saves_cannot_flush_it():
     assert C._reference_mass(log, "narrative-timeless", "2026-11-03",
                              _masses(small)["narrative-timeless"], 0)[0] >= 3000
     many: object = None
-    for day in range(C._MASS_LOG_MAX_ENTRIES * 2):
-        many = C._updated_mass_log(many, big, big, FLOW_SCHEMA, None,
-                                   f"2026-{1 + day // 28:02d}-{1 + day % 28:02d}")
+    days = [f"2026-{1 + day // 28:02d}-{1 + day % 28:02d}"
+            for day in range(C._MASS_LOG_MAX_ENTRIES * 2)]
+    for d in days:
+        many = C._updated_mass_log(many, big, big, FLOW_SCHEMA, None, d)
     assert len(many) <= C._MASS_LOG_MAX_ENTRIES
+    assert many[-1]["d"] == days[-1] and days[0] not in {e["d"] for e in many}  # the oldest go
 
 
 def test_a_hostile_stored_log_is_read_and_rewritten_within_bounds():
@@ -148,3 +150,40 @@ def test_a_future_dated_entry_is_not_a_reference_and_a_bad_today_keeps_the_log()
     kept = C._updated_mass_log(log, None, _doc(3000), FLOW_SCHEMA, None,
                                "2026-11-24T10:00")
     assert kept == log
+
+
+def test_a_save_that_crystallizes_out_the_same_day_does_not_leave_the_old_peak_standing():
+    """Two saves on one date, the second moving 1000 characters to the crystal store:
+    the day's entry must not count them, or the next unchanged save is refused."""
+    log = C._updated_mass_log(None, None, _doc(3000), FLOW_SCHEMA, None, "2026-11-01")
+    before = _masses(_doc(3000))["narrative-timeless"]
+    after = _masses(_doc(2000))["narrative-timeless"]
+    log = C._updated_mass_log(
+        log, _doc(3000), _doc(2000), FLOW_SCHEMA,
+        {"narrative-timeless": before - after}, "2026-11-01")
+    ref, _ = C._reference_mass(log, "narrative-timeless", "2026-11-02", after, 0)
+    assert ref == after and not C._below_floor(after, ref)
+
+
+def test_saves_on_alternating_dates_cannot_evict_the_maximum():
+    """A pinned or backward clock alternating between two dates must leave ONE entry
+    per date: the original maximum stays, so a later cut is still checked."""
+    big, small = _doc(3000), _doc(2400)
+    log: object = C._updated_mass_log(None, None, big, FLOW_SCHEMA, None, "2026-11-01")
+    for i in range(C._MASS_LOG_MAX_ENTRIES * 2):
+        log = C._updated_mass_log(log, small, small, FLOW_SCHEMA, None,
+                                  "2026-11-02" if i % 2 else "2026-11-03")
+    assert len({e["d"] for e in log}) == len(log)
+    ref, _ = C._reference_mass(log, "narrative-timeless", "2026-11-04",
+                               _masses(small)["narrative-timeless"], 0)
+    assert ref >= _masses(big)["narrative-timeless"]
+
+
+def test_the_prior_size_is_recorded_under_today_even_when_the_log_already_holds_that_mass():
+    """A log holding this exact mass from an expired date must not stop today's prior
+    from being recorded: the window would otherwise lose the layer's real maximum."""
+    big = _doc(3000)
+    old = [{"d": "2026-09-01", "m": _masses(big)}]
+    log = C._updated_mass_log(old, big, _doc(2400), FLOW_SCHEMA, None, "2026-11-01")
+    today = [e for e in log if e["d"] == "2026-11-01"]
+    assert today and today[0]["m"]["narrative-timeless"] == _masses(big)["narrative-timeless"]

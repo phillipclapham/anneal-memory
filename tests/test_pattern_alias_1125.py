@@ -43,13 +43,17 @@ def test_a_declared_rename_keeps_level_history_and_reverts(tmp_path):
         assert ("name", "new_name") not in levels
         assert store.get_pattern_history("new_name")["max_level_reached"] == 9
 
-        # Renamed again, the marker carried into the next wrap is a no-op, also
-        # beside a new rename of the renamed pattern (L1: it was reported refused).
+        # Renamed again, the marker carried alone into the next wrap is a no-op.
         _wrap(store, f"- new_name | 4x ({YESTERDAY})\n[renamed: old_name -> new_name]")
-        r2 = _wrap(store, f"- third_name | 4x ({YESTERDAY})\n[renamed: new_name -> third_name]\n"
+        r2 = _wrap(store, f"- new_name | 4x ({YESTERDAY})\n[renamed: old_name -> new_name]")
+        assert "renames_rejected" not in r2
+        # Beside a later rename of the same name it is a chain, refused whole (L3 r4,
+        # codex); with the old marker dropped, the rename goes through.
+        r3 = _wrap(store, f"- new_name | 4x ({YESTERDAY})\n[renamed: new_name -> third_name]\n"
                           "[renamed: old_name -> new_name]")
-        assert r2["renamed"] == [{"old": "new_name", "new": "third_name"}]
-        assert r2["renames_rejected"] == []
+        assert r3["renamed"] == [] and len(r3["renames_rejected"]) == 2
+        r3 = _wrap(store, f"- third_name | 4x ({YESTERDAY})\n[renamed: new_name -> third_name]")
+        assert r3["renamed"] == [{"old": "new_name", "new": "third_name"}]
         assert _level(store.load_continuity(), "third_name") == 4
     finally:
         store.close()

@@ -3017,7 +3017,7 @@ def _rename_marker_lines(text: str) -> list[str]:
     fence = ""  # the open fence's run, as CommonMark closes it (same char, as long)
     for line in text.split("\n"):
         if not fence:
-            opening = re.match(r"[ \t]*(`{3,}|~{3,})", line)
+            opening = re.match(r" {0,3}(`{3,}|~{3,})", line)  # 4+ spaces: indented code
             if opening:
                 fence = opening.group(1)
                 continue
@@ -3045,10 +3045,9 @@ def _wrap_renames(
     section of ``text`` and OLD is not, neither is composted by this save, and
     neither name is in another accepted rename. A marker whose rename is already
     on record (OLD has no prior, NEW has one) is skipped silently, so a marker
-    carried into the next wraps is skipped; that test runs first, so a mistyped
-    OLD beside a NEW that has a level is skipped too. Once a later rename moves NEW
-    on, the old marker is refused, harmlessly. A refused rename never fails the
-    save.
+    carried alone into the next wraps is skipped, so a mistyped OLD beside a NEW
+    that has a level is skipped too. A name in two distinct markers refuses all of
+    them, a carried one included. A refused rename never fails the save.
     """
     from .graduation import _prior_base
 
@@ -3074,26 +3073,24 @@ def _wrap_renames(
                 "reason": f"unparsed marker {line[:120]!r}; the form is a line of its "
                           f"own: [renamed: <old pattern name> -> <new pattern name>]",
             })
-    # A name in two live markers makes both ambiguous: refuse every one of them,
-    # never apply the first (L3 r3 1125-38, codex). A marker already on record and
-    # an exact repeat are not live.
-    live: list[tuple[str, str]] = []
-    for old, new in markers:
-        if (old, new) in live:
-            continue
-        if old != new and not has_prior(old) and has_prior(new):
-            continue  # already renamed by an earlier save
-        live.append((old, new))
+    # A name in two distinct markers makes all of them ambiguous: refuse every
+    # one, never apply the first (L3 r3/r4 1125-38, codex): this counts markers
+    # already on record too, since their shape alone cannot tell a carried marker
+    # from a chain link. Only an exact repeat is not counted twice.
+    distinct: list[tuple[str, str]] = list(dict.fromkeys(markers))
     uses: dict[str, int] = {}
-    for old, new in live:
+    for old, new in distinct:
         for name in {old, new}:
             uses[name] = uses.get(name, 0) + 1
-    for old, new in live:
+    for old, new in distinct:
         reason = None
         if old == new:
             reason = "the two names are the same"
         elif uses[old] > 1 or uses[new] > 1:
-            reason = "a name used by more than one rename in this text"
+            reason = ("a name used by more than one rename in this text; keep one "
+                      "marker per name (drop a marker once it has been applied)")
+        elif not has_prior(old) and has_prior(new):
+            continue  # already renamed by an earlier save
         elif old in composting or new in composting:
             reason = "this save composts one of the two names"
         elif old in named_now:

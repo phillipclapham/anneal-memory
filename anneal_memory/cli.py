@@ -402,15 +402,25 @@ def _existing_db_path(args: argparse.Namespace, *, require_file: bool = False) -
     return db_path
 
 
-def _open_store(args: argparse.Namespace, *, trust_ceiling: str = DEFAULT_TRUST) -> Store:
+def _open_store(
+    args: argparse.Namespace, *, trust_ceiling: str = DEFAULT_TRUST, read_only: bool = False
+) -> Store:
     """Open a Store from CLI args. ``trust_ceiling`` is ``"operator"`` only for a
-    command whose operator gate (:func:`_operator_ok`) said yes (CAP-08)."""
+    command whose operator gate (:func:`_operator_ok`) said yes (CAP-08).
+
+    ``read_only=True`` is for the commands that only read (episodes, get,
+    continuity, search, associations, pattern-associations, diff, graph, stats,
+    history). A read-only open never migrates a store to a newer schema generation
+    and writes no audit entry, so these commands cannot lock an older process out
+    of the store. ``status`` is not one of them: it reports the audit trail, which a
+    read-only open does not open."""
     db_path = _existing_db_path(args)
     try:
         return Store(
             path=db_path,
             project_name=getattr(args, "project_name", "Agent"),
-            audit=True,
+            audit=not read_only,
+            read_only=read_only,
             trust_ceiling=trust_ceiling,
         )
     except StoreDatabaseError as exc:
@@ -621,7 +631,7 @@ def _origin_counts_str(counts: dict[str, int]) -> str:
 
 def cmd_status(args: argparse.Namespace) -> None:
     """Show store status."""
-    with _open_store(args) as store:
+    with _open_store(args) as store:      # write-capable on purpose: the audit block below needs the audit trail open
         status = store.status()
         # AM-INITSCHEMA: surface the persisted schema so a migration is
         # verifiable (the felt-gate on/off hinges on it) — name + headings, with
@@ -752,7 +762,7 @@ def cmd_status(args: argparse.Namespace) -> None:
 
 def cmd_episodes(args: argparse.Namespace) -> None:
     """List and filter episodes."""
-    with _open_store(args) as store:
+    with _open_store(args, read_only=True) as store:
         since = parse_duration(args.since) if args.since else None
         until = parse_duration(args.until) if args.until else None
         ep_type = args.type if args.type else None
@@ -794,7 +804,7 @@ def cmd_episodes(args: argparse.Namespace) -> None:
 
 def cmd_get(args: argparse.Namespace) -> None:
     """Show a single episode by ID."""
-    with _open_store(args) as store:
+    with _open_store(args, read_only=True) as store:
         episode = store.get(args.episode_id)
         if episode is None:
             print(f"Episode {args.episode_id} not found.", file=sys.stderr)
@@ -832,7 +842,7 @@ def _load_meta_or_exit(store: Store) -> dict:
 
 def cmd_continuity(args: argparse.Namespace) -> None:
     """Print the current continuity file."""
-    with _open_store(args) as store:
+    with _open_store(args, read_only=True) as store:
         text = store.load_continuity()
         if text is None:
             print("No continuity file yet. Run a wrap first.", file=sys.stderr)
@@ -1073,7 +1083,7 @@ def cmd_trust(args: argparse.Namespace) -> None:
 
 def cmd_search(args: argparse.Namespace) -> None:
     """Search episodes by keyword."""
-    with _open_store(args) as store:
+    with _open_store(args, read_only=True) as store:
         since = parse_duration(args.since) if args.since else None
         ep_type = args.type if args.type else None
 
@@ -1267,7 +1277,7 @@ def cmd_pattern_associations(args: argparse.Namespace) -> None:
     graph health (effective strengths after calendar decay; the ``concentration``
     field is the echo-chamber canary); ``--name`` lists the edges incident to a
     pattern, ranked by effective strength."""
-    with _open_store(args) as store:
+    with _open_store(args, read_only=True) as store:
         if args.name:
             pairs = store.get_pattern_associations(
                 names=[args.name], min_strength=args.min_strength, limit=args.limit
@@ -1335,7 +1345,7 @@ def cmd_pattern_associations(args: argparse.Namespace) -> None:
 
 def cmd_associations(args: argparse.Namespace) -> None:
     """Query Hebbian associations."""
-    with _open_store(args) as store:
+    with _open_store(args, read_only=True) as store:
         if args.stats:
             stats = store.association_stats()
             if args.json:
@@ -3386,7 +3396,7 @@ def cmd_audit(args: argparse.Namespace) -> None:
 
 def cmd_diff(args: argparse.Namespace) -> None:
     """Show wrap-over-wrap metric changes."""
-    with _open_store(args) as store:
+    with _open_store(args, read_only=True) as store:
         wraps = store.get_wrap_history()
 
         if not wraps:
@@ -3453,7 +3463,7 @@ def cmd_diff(args: argparse.Namespace) -> None:
 
 def cmd_graph(args: argparse.Namespace) -> None:
     """Export association graph."""
-    with _open_store(args) as store:
+    with _open_store(args, read_only=True) as store:
         # Get all episodes to build node list
         result = store.recall(limit=100000, include_superseded=True)
         all_ids = [ep.id for ep in result.episodes]
@@ -3565,7 +3575,7 @@ def cmd_graph(args: argparse.Namespace) -> None:
 
 def cmd_stats(args: argparse.Namespace) -> None:
     """Show detailed store statistics."""
-    with _open_store(args) as store:
+    with _open_store(args, read_only=True) as store:
         status = store.status()
         wraps = store.get_wrap_history()
 
@@ -3697,7 +3707,7 @@ def cmd_stats(args: argparse.Namespace) -> None:
 
 def cmd_history(args: argparse.Namespace) -> None:
     """Show wrap history."""
-    with _open_store(args) as store:
+    with _open_store(args, read_only=True) as store:
         wraps = store.get_wrap_history()
 
         if not wraps:

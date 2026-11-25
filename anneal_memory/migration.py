@@ -484,6 +484,30 @@ MIGRATION_MANIFEST: list[MigrationEntry] = [
         ),
         "files": list(CORE_FILES),
     },
+    {
+        "version": "3.0.0",
+        "feature": "AM-GEN3-STORE",
+        "summary": (
+            "anneal-memory 3.0.0 is the first release of store schema generation 3. "
+            "The first write-capable open by 3.0.0 migrates a generation-2 store to "
+            "generation 3 in place, after copying the whole store to "
+            "`<db>.gen2-<UTC>.bak`. `read_only=True` opens never migrate. Every "
+            "release through 2.2.0 then refuses the migrated store, for a read-only "
+            "open as well as a write-capable one, and writes nothing, so a process "
+            "still on an older release fails at its next open until it is upgraded. "
+            "Some CLI commands that look read-only are write-capable, `status` among "
+            "them, and so migrate the store; the CHANGELOG 3.0.0 section lists them."
+        ),
+        "suggested_edit": (
+            "Where your instruction files describe upgrading anneal-memory, add one "
+            "instruction: upgrade every process that touches an anneal-memory store "
+            "together, before running any of them on the new version (a hook, a "
+            "second venv, an MCP config and a read-only replica server included). Do "
+            "not copy the migration rules into your files; the CHANGELOG 3.0.0 "
+            "section carries them, and a static copy goes stale."
+        ),
+        "files": list(CORE_FILES),
+    },
 ]
 
 

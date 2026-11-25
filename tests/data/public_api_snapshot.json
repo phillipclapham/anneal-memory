@@ -6672,6 +6672,17 @@
      "suggested_edit": "Run `anneal-memory intention migrate-key` once on every spore/intention store before using 2.0 or later, and change any instruction that says those 1.0.2 items, or `allow_unlinked` (deprecated in 0.9.26), are removed in 2.0 to say a later MAJOR release removes them.",
      "summary": "anneal-memory 2.0 keeps the spore/intention store's open rows under `intentions` (schema 2), not `spores`; a store written by 1.0.7 or earlier is refused until `anneal-memory intention migrate-key` converts it once (it copies the file first; `--dry-run` shows what it would do). It also corrects the 1.0.2 entry's timeline: the 1.0.2 deprecations (`affective_state`, `--affect-tag`, `--affect-intensity`, the legacy association APIs, and the links formed earlier) and the 0.9.26 deprecation of `allow_unlinked` are NOT removed in 2.0; a later MAJOR release removes them.",
      "version": "2.0.1"
+    },
+    {
+     "feature": "AM-GEN3-STORE",
+     "files": [
+      "CLAUDE.md",
+      "AGENTS.md",
+      "GEMINI.md"
+     ],
+     "suggested_edit": "Where your instruction files describe upgrading anneal-memory, add one instruction: upgrade every process that touches an anneal-memory store together, before running any of them on the new version (a hook, a second venv, an MCP config and a read-only replica server included). Do not copy the migration rules into your files; the CHANGELOG 3.0.0 section carries them, and a static copy goes stale.",
+     "summary": "anneal-memory 3.0.0 is the first release of store schema generation 3. The first write-capable open by 3.0.0 migrates a generation-2 store to generation 3 in place, after copying the whole store to `<db>.gen2-<UTC>.bak`. `read_only=True` opens never migrate. Every release through 2.2.0 then refuses the migrated store, for a read-only open as well as a write-capable one, and writes nothing, so a process still on an older release fails at its next open until it is upgraded. Some CLI commands that look read-only are write-capable, `status` among them, and so migrate the store; the CHANGELOG 3.0.0 section lists them.",
+     "version": "3.0.0"
     }
    ]
   },

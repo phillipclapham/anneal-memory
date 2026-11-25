@@ -381,7 +381,7 @@ def _mass_log_entries(
 ) -> list[tuple[str, dict[str, int], dict[str, int]]]:
     """The entries of :func:`_parsed_mass_log` inside the window: the last
     ``_REFERENCE_WINDOW_DAYS`` calendar dates up to ``today``. A future date is not a
-    record of the past 30 days. With no usable ``today`` nothing is inside a window,
+    record of the window. With no usable ``today`` nothing is inside a window,
     so the log contributes no entry (the prior continuity still does, in
     :func:`_reference_mass`)."""
     try:
@@ -478,7 +478,7 @@ def _updated_mass_log(
     is lost). ``rebase_roles`` (the roles a save's
     ``allow_shrink`` let below the floor, see :func:`_roles_below_reference`) start
     again from this save: a deliberate diet moves that section's reference down, or
-    every later save would be refused against the pre-diet size for 30 days. Other
+    every later save would be refused against the pre-diet size for the whole window. Other
     roles keep their history."""
     def _without(raw: dict[str, int]) -> dict[str, int]:
         return {r: n for r, n in raw.items() if r not in rebase_roles}

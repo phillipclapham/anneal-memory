@@ -22,6 +22,7 @@ from anneal_memory.cli import build_parser, cmd_migrate_ack, cmd_migrate_check
 from anneal_memory.migration import (
     MIGRATION_MANIFEST,
     MigrationEntry,
+    _ack_key,
     _version_tuple,
     marker_path_for,
     pending_migrations,
@@ -190,6 +191,22 @@ def test_dev_acknowledgement_does_not_hide_its_release_entry() -> None:
     assert [e["feature"] for e in got] == ["SYNTHETIC-3-0-1"]
     got = pending_migrations("3.0.1", current_version="3.0.1.dev0", manifest=manifest)
     assert got == []
+    got = pending_migrations("3.0.1.post1", current_version="3.0.1", manifest=manifest)
+    assert got == []
+
+
+def test_ack_refuses_a_final_version_ahead_of_a_dev_install(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # 3.0.1 is ahead of 3.0.1.dev0: a dev build cannot acknowledge the release it
+    # is building, since that would hide entries added before the release ships.
+    import anneal_memory.cli as cli_module
+
+    monkeypatch.setattr(cli_module, "__version__", "3.0.1.dev0")
+    db = tmp_path / "memory.db"
+    with pytest.raises(SystemExit):
+        cmd_migrate_ack(_args(db, version="3.0.1"))
+    assert not marker_path_for(db).exists()
 
 
 # -- AM-WRAP-GENERATED: the first file-RETIREMENT entry (spore-217) --
@@ -345,6 +362,20 @@ def _args(db: Path, *, json_out: bool = False, version: str | None = None) -> ar
     return argparse.Namespace(db=str(db), json=json_out, version=version)
 
 
+def _top_ack_for_installed() -> str:
+    # The highest manifest version at or below the installed one, in _ack_key order.
+    installed = _ack_key(__version__)
+    return max(
+        (e["version"] for e in MIGRATION_MANIFEST if _ack_key(e["version"]) <= installed),
+        key=_version_tuple,
+    )
+
+
+def _ahead_of_installed() -> list[str]:
+    installed = _ack_key(__version__)
+    return [e["feature"] for e in MIGRATION_MANIFEST if _ack_key(e["version"]) > installed]
+
+
 class TestMigrateCLI:
     def test_check_no_marker_lists_pending(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
         cmd_migrate_check(_args(tmp_path / "memory.db"))
@@ -362,14 +393,19 @@ class TestMigrateCLI:
         assert data["pending"][0]["feature"]
 
     def test_ack_then_check_clean(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-        # Ack the manifest's top version, not __version__: a dev build's ack sorts
-        # below the release its own entries are keyed to (see _ack_key).
-        top = max((e["version"] for e in MIGRATION_MANIFEST), key=_version_tuple)
+        # Ack the highest entry at or below the installed version. Afterwards the
+        # check lists exactly the entries ahead of it: none on a release build; on
+        # a dev build, its own release's entries (see _ack_key).
         db = tmp_path / "memory.db"
-        cmd_migrate_ack(_args(db, version=top))
+        cmd_migrate_ack(_args(db, version=_top_ack_for_installed()))
         capsys.readouterr()
         cmd_migrate_check(_args(db))
-        assert "up to date" in capsys.readouterr().out.lower()
+        out = capsys.readouterr().out
+        ahead = _ahead_of_installed()
+        if ahead:
+            assert all(feature in out for feature in ahead)
+        else:
+            assert "up to date" in out.lower()
 
     def test_ack_writes_marker_at_current(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
         db = tmp_path / "memory.db"
@@ -471,11 +507,10 @@ class TestMigrateSubprocess:
         assert check.returncode == 0
         assert "AM-SPORES-BOUNDARY" in check.stdout
 
-        # The manifest's top version, not __version__ (a dev build's ack sorts
-        # below its own release; see _ack_key).
-        top = max((e["version"] for e in MIGRATION_MANIFEST), key=_version_tuple)
+        # The highest entry at or below the installed version (see _ack_key).
         ack = subprocess.run(
-            [sys.executable, "-m", "anneal_memory.cli", "migrate", "ack", top],
+            [sys.executable, "-m", "anneal_memory.cli", "migrate", "ack",
+             _top_ack_for_installed()],
             capture_output=True, text=True, env=env,
         )
         assert ack.returncode == 0
@@ -485,7 +520,11 @@ class TestMigrateSubprocess:
             capture_output=True, text=True, env=env,
         )
         assert check2.returncode == 0
-        assert "up to date" in check2.stdout.lower()
+        ahead = _ahead_of_installed()
+        if ahead:
+            assert all(feature in check2.stdout for feature in ahead)
+        else:
+            assert "up to date" in check2.stdout.lower()
 
 
 # -- AM-DURABLE-FACTS (B1) --

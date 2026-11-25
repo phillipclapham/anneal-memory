@@ -95,6 +95,7 @@ from .continuity import (
     validated_save_continuity as _lib_validated_save_continuity,
 )
 from .migration import (
+    _ack_key,
     _version_tuple,
     marker_path_for,
     pending_migrations,
@@ -5197,7 +5198,7 @@ def cmd_migrate_ack(args: argparse.Namespace) -> None:
     if not parsed:
         print(f"Error: {version!r} is not a parseable version.", file=sys.stderr)
         sys.exit(1)
-    if parsed > _version_tuple(__version__):
+    if _ack_key(version) > _ack_key(__version__):
         print(f"Error: refusing to acknowledge {version} — it is ahead of the "
               f"installed version {__version__}. Acknowledge what you've "
               f"actually reconciled (omit the argument to use the installed "

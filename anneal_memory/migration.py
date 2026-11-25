@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import tempfile
 from pathlib import Path
 from typing import TYPE_CHECKING, TypedDict
@@ -559,15 +560,20 @@ def _version_tuple(version: str) -> tuple[int, ...]:
     return tuple(parts)
 
 
+_POST_OR_LOCAL = re.compile(r"(?:\.post\d+)?(?:\+[0-9A-Za-z.]+)?$")
+
+
 def _ack_key(version: str) -> tuple[tuple[int, ...], int]:
     """Order a version the way PEP 440 orders its release, for acknowledgement.
 
     ``_version_tuple`` drops a ``.devN`` or pre-release suffix, so
     ``3.0.1.dev0`` and ``3.0.1`` compare equal there. ``migrate ack`` writes
     ``__version__`` verbatim, so a dev build's acknowledgement must sort below
-    its release, or it would hide that release's entries.
+    its release, or it would hide that release's entries. A ``.postN`` or local
+    suffix is the release itself.
     """
-    final = version.strip().replace(".", "").isdigit()
+    core = _POST_OR_LOCAL.sub("", version.strip())
+    final = bool(core) and core.replace(".", "").isdigit()
     return (_version_tuple(version), 1 if final else 0)
 
 

@@ -1830,6 +1830,8 @@ def cmd_save_continuity(args: argparse.Namespace) -> None:
                 "sections": {name: c for name, c in sorted(sections.items())},
                 "stale_state": result.get("stale_state", []),
                 "level_capped": result.get("level_capped", []),
+                "renamed": result.get("renamed", []),
+                "renames_rejected": result.get("renames_rejected", []),
             })
             return
 
@@ -1847,6 +1849,10 @@ def cmd_save_continuity(args: argparse.Namespace) -> None:
             print(f"Supersessions recorded: {result['supersessions_recorded']}")
         for rej in result["supersessions_rejected"]:
             print(f"Supersession rejected ({rej['old_id']} by {rej['new_id']}): {rej['reason']}")
+        for ren in result.get("renamed", []):
+            print(f"Pattern renamed: {ren['old']} -> {ren['new']} (earned level kept)")
+        for rej in result.get("renames_rejected", []):
+            print(f"Rename rejected ({rej['old']} -> {rej['new']}): {rej['reason']}")
 
         if result["graduations_validated"]:
             print(f"Citations validated: {result['graduations_validated']}")

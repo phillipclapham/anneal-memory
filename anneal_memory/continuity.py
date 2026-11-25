@@ -30,7 +30,7 @@ import sqlite3
 import uuid
 import logging
 import warnings
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import asdict
 from datetime import date, datetime, timedelta
 from typing import TYPE_CHECKING, Any, cast, overload
@@ -1677,6 +1677,15 @@ quarter of the shorter one's meaningful words. Recall then hides the old episode
 deleted). A rejected link does not fail the save; it is reported back. Only link a
 real replacement, never two facts that merely sit side by side.
 
+### Renamed patterns
+When a pattern keeps its meaning under a better name, write the line under the new
+name only and add `[renamed: <old_name> -> <new_name>]` as a line of its own (a
+marker inside other text is not read). The new name
+starts from the old one's earned level (and may climb one rung if validated, as
+usual); without the marker it is a new pattern at 1x. The old name must be gone
+from the text and the new name must not already have a level of its own. A refused
+rename does not fail the save; it is reported back.
+
 ### Decisions (use in ## Decisions)
 Use `[decided(rationale: "why", on: "date")] choice` markers.
 - A `[decided]` line carries the decider's own words, quoted, in its rationale. A
@@ -2985,6 +2994,120 @@ def _record_wrap_supersessions(
     return recorded, rejected
 
 
+# AM-PATTERN-ALIAS: ``[renamed: old_name -> new_name]`` carries a pattern's earned
+# level, grounding and history to a new name. The names use the operator-name
+# grammar of ``_NAMED_PATTERN_RE``; the tag is case-blind, the names are not.
+_RENAME_NAME = r"[A-Za-z][A-Za-z0-9_.\-]*"
+# A marker is a line of its own: one inside an evidence quote or other prose is
+# quoted content, never the composer's rename (L2 1125-38, run).
+_RENAMED_RE = re.compile(
+    rf"^[ \t]*\[(?i:renamed):[ \t]*({_RENAME_NAME})[ \t]*->[ \t]*({_RENAME_NAME})"
+    rf"[ \t]*\][ \t]*$", re.MULTILINE,
+)
+# A line that LOOKS like the marker (the tag then a colon, or an arrow before the
+# bracket closes); prose such as "[renamed the repo]" is not one.
+_RENAMED_LOOSE_RE = re.compile(
+    r"^[ \t]*\[\s*renamed\s*(?::|[^\]\n]*->)[^\n]*", re.IGNORECASE | re.MULTILINE)
+
+
+def _wrap_renames(
+    text: str, prior_text: str, saved_levels: dict[tuple[str, str], int] | None,
+    grad_headings: frozenset[str], compost: Iterable[str] = (),
+    grounded: Iterable[str] = (),
+) -> tuple[list[tuple[str, str]], list[dict[str, str]]]:
+    """The ``[renamed: OLD -> NEW]`` markers in ``text`` this save accepts, in
+    document order, and each refused one with its reason.
+
+    A rename is accepted when OLD has a prior level (the one the graduation bound
+    would start it from) and is a pattern line of the prior text (so the line it
+    replaces is one the omission audit would otherwise report), NEW has no level and no grounding record of its own
+    (``grounded``: the names with one), NEW is named in a graduating
+    section of ``text`` and OLD is not, neither is composted by this save, and
+    neither name is in another accepted rename. A marker whose rename is already
+    on record (OLD has no prior, NEW has one) is skipped silently, so a marker
+    carried into later wraps is idempotent; that test runs first, so a mistyped
+    OLD beside a NEW that has a level is skipped too. A refused rename never fails
+    the save.
+    """
+    from .graduation import _prior_base
+
+    file_levels = pattern_line_levels(prior_text, grad_headings)
+    named_before = {k for kind, k in file_levels if kind == "name"}
+    named_now = {k for kind, k in pattern_line_levels(text, grad_headings) if kind == "name"}
+
+    def has_prior(name: str) -> bool:
+        return _prior_base(("name", name), file_levels, saved_levels) is not None
+
+    composting = set(compost)
+    has_grounding = set(grounded)
+    accepted: list[tuple[str, str]] = []
+    rejected: list[dict[str, str]] = []
+    taken: set[str] = set()
+    parsed_at = {m.start() for m in _RENAMED_RE.finditer(text)}
+    for loose in _RENAMED_LOOSE_RE.finditer(text):
+        if loose.start() not in parsed_at:
+            rejected.append({
+                "old": "", "new": "",
+                "reason": f"unparsed marker {loose.group(0)!r}; the form is "
+                          f"[renamed: <old pattern name> -> <new pattern name>]",
+            })
+    for m in _RENAMED_RE.finditer(text):
+        old, new = m.group(1), m.group(2)
+        if (old, new) in accepted:
+            continue
+        reason = None
+        if old == new:
+            reason = "the two names are the same"
+        elif not has_prior(old) and has_prior(new):
+            continue  # already renamed by an earlier save
+        elif old in composting or new in composting:
+            reason = "this save composts one of the two names"
+        elif old in taken or new in taken:
+            reason = "a name already used by another rename in this text"
+        elif old in named_now:
+            reason = f"{old} is still named in this text; a rename leaves the old name out"
+        elif new not in named_now:
+            reason = f"{new} is not named in a graduating section of this text"
+        elif not has_prior(old):
+            reason = f"{old} has no earned level to carry"
+        elif old not in named_before:
+            reason = f"{old} is not a pattern line of the memory this wrap replaces"
+        elif has_prior(new):
+            reason = f"{new} already has its own level; a rename never merges two records"
+        elif new in has_grounding:
+            reason = (f"{new} already has a grounding record of its own; a rename never "
+                      f"merges two records")
+        if reason is not None:
+            rejected.append({"old": old, "new": new, "reason": reason})
+            continue
+        accepted.append((old, new))
+        taken.update((old, new))
+    return accepted, rejected
+
+
+def _renamed_prior_text(
+    prior_text: str, renames: list[tuple[str, str]], grad_headings: frozenset[str],
+) -> str:
+    """``prior_text`` with each renamed pattern's name rewritten on its graduating
+    lines, so every reader of the prior (the bound, the hold, the omission and
+    declaration audits) sees the old line under its new name. Unchanged when there
+    are no renames."""
+    if not renames:
+        return prior_text
+    to_new = dict(renames)
+    out: list[str] = []
+    inside = False
+    for line in canonical_continuity_text(prior_text).split("\n"):
+        if line.startswith("## "):
+            inside = _is_graduating_heading(line, grad_headings)
+        elif inside:
+            m = _NAMED_PATTERN_RE.match(line)
+            if m and m.group(1) in to_new:
+                line = line[:m.start(1)] + to_new[m.group(1)] + line[m.end(1):]
+        out.append(line)
+    return "\n".join(out)
+
+
 def _durable_cue_state(
     store: Store, schema: list[SectionSpec], saved_text: str
 ) -> tuple[str | None, list[str]]:
@@ -3939,6 +4062,32 @@ def validated_save_continuity(
     revoked_levels = revoked_pattern_levels(
         grounding, lambda cid: window_trust.get(cid, DEFAULT_TRUST)
     )
+    # AM-PATTERN-ALIAS: an accepted [renamed: OLD -> NEW] is the same concept under
+    # a new name, so every reader of the prior sees OLD's record under NEW. The
+    # store's own record moves in the save's batch (rename_pattern_association);
+    # ``saved_levels`` stays the unaliased read the lock-time re-read compares.
+    renames, renames_rejected = _wrap_renames(
+        text, prior_continuity or "", saved_levels, grad_headings, compost_names or (),
+        grounded=grounding)
+    prior_for_levels = _renamed_prior_text(prior_continuity or "", renames, grad_headings)
+    bound_levels = saved_levels
+    to_old = {new: old for old, new in renames}
+
+    def history_lookup(name: str) -> dict[str, Any] | None:
+        # A renamed NEW's history is OLD's; a row NEW has is a composted homonym's.
+        return store.get_pattern_history(to_old.get(name, name))
+
+    if renames:
+        if saved_levels is not None:
+            olds = {old for old, _ in renames}
+            bound_levels = {key: v for key, v in saved_levels.items()
+                            if not (key[0] == "name" and key[1] in olds)}
+            for old, new in renames:
+                if ("name", old) in saved_levels:
+                    bound_levels[("name", new)] = saved_levels[("name", old)]
+        for old, new in renames:
+            if old in revoked_levels and new not in revoked_levels:
+                revoked_levels[new] = revoked_levels[old]
     grad_result = validate_graduations(
         text=text,
         valid_ids=citable_ids,
@@ -3952,7 +4101,7 @@ def validated_save_continuity(
         # against the stored prior explanation and demotes graduations
         # that share too many meaningful words (sycophantic vocabulary
         # reuse rather than independent evidence).
-        pattern_history_lookup=store.get_pattern_history,
+        pattern_history_lookup=history_lookup,
         graduating_headings=grad_headings,
         # AM-CARRYFORWARD (v0.4.6): hold a load-bearing pattern at its level
         # instead of ratcheting it down when THIS wrap's citation fails to
@@ -3962,13 +4111,13 @@ def validated_save_continuity(
         carryforward_cold_days=carryforward_cold_days,
         # L3 1007 (complement, codex): a held line's level is derived, never taken
         # from the composer (see _prior_levels).
-        prior_levels=_prior_levels(prior_continuity, section_schema, saved_levels, store),
+        prior_levels=_prior_levels(prior_for_levels, section_schema, bound_levels, store),
         # The prior-state bound (1007+29): every line is cut to the level the
         # STORED prior continuity entitles it to (new -> 1x, validated -> +1),
         # whatever date, level or tag shape the composer wrote. "" = no prior
         # file, so every line is new.
-        prior_text=prior_continuity or "",
-        saved_levels=saved_levels,
+        prior_text=prior_for_levels,
+        saved_levels=bound_levels,
         trust_of=lambda cid: window_trust.get(cid, DEFAULT_TRUST),
         revoked_levels=revoked_levels,
     )
@@ -3997,7 +4146,8 @@ def validated_save_continuity(
     # prior continuity file exists — coerce to empty string so
     # detect_pattern_omissions returns an empty list on the first
     # wrap (correct behavior: no prior patterns means no omissions).
-    prior_text_for_omission_audit = prior_continuity or ""
+    # A renamed pattern is neither omitted (its old name) nor new (its new one).
+    prior_text_for_omission_audit = prior_for_levels
     grad_result.omitted_patterns = detect_pattern_omissions(
         prior_text=prior_text_for_omission_audit,
         new_text=grad_result.text,
@@ -4146,7 +4296,16 @@ def validated_save_continuity(
         # What the revert of this wrap puts back: the levels table and the
         # grounding a compost deletes, kept before the compost touches them.
         store._wrap_undo_levels(snapshot["token"][:12])
-        store._wrap_undo_grounding(snapshot["token"][:12], compost_names or ())
+        store._wrap_undo_grounding(
+            snapshot["token"][:12],
+            [*(compost_names or ()), *(old for old, _ in renames)])
+        # AM-PATTERN-ALIAS: the accepted renames move OLD's level record, grounding
+        # and edges to NEW (the same move as rename_pattern_association), and copy
+        # its history row to NEW, so the record below writes NEW from OLD's prior.
+        for old, new in renames:
+            store._wrap_undo_grounding_moved(snapshot["token"][:12], new)
+            store.rename_pattern_association(old, new, today=today_str)
+            store._carry_pattern_history(old, new, undo_token=snapshot["token"][:12])
         # Compost severance, in THIS transaction so it commits or rolls
         # back with the wrap row below. Inside the batch the Store method
         # defers its commit and queues its audit event until the commit.
@@ -4216,7 +4375,7 @@ def validated_save_continuity(
             grad_result.pattern_grounding, today_str, wrap_id=snapshot["token"])
         # A composted name's level row was deleted with its edges above; the
         # first save's tombstone seed must not bring it back (codex L3 r1 HIGH 2).
-        _prior_line_levels = pattern_line_levels(prior_continuity or "", grad_headings)
+        _prior_line_levels = pattern_line_levels(prior_for_levels, grad_headings)
         store._record_pattern_levels(
             pattern_line_levels(grad_result.text, grad_headings), today_str,
             lower_to=_prior_line_levels,
@@ -4440,6 +4599,9 @@ def validated_save_continuity(
                     audit_payload["level_capped"] = [
                         asdict(cap) for cap in grad_result.level_capped
                     ]
+                if renames:
+                    audit_payload["renamed"] = [
+                        {"old": old, "new": new} for old, new in renames]
                 if grad_result.omitted_patterns:
                     audit_payload["omitted_patterns"] = [
                         {"name": op.name, "prior_level": op.prior_level}
@@ -4871,6 +5033,9 @@ def validated_save_continuity(
         result["durable_warnings"] = durable_messages
     if grad_result.level_capped:
         result["level_capped"] = [asdict(cap) for cap in grad_result.level_capped]
+    if renames or renames_rejected:
+        result["renamed"] = [{"old": old, "new": new} for old, new in renames]
+        result["renames_rejected"] = renames_rejected
     if stale_state:
         result["stale_state"] = stale_state
         _warn_after_commit("State lines that do not hold at save: " + "; ".join(stale_state))

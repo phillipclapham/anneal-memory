@@ -1234,6 +1234,10 @@ class Server:
             lines.append(
                 f"Supersession rejected ({rej['old_id']} by {rej['new_id']}): {rej['reason']}"
             )
+        for ren in result.get("renamed", []):
+            lines.append(f"Pattern renamed: {ren['old']} -> {ren['new']} (earned level kept)")
+        for rej in result.get("renames_rejected", []):
+            lines.append(f"Rename rejected ({rej['old']} -> {rej['new']}): {rej['reason']}")
 
         if result["association_warning"]:
             # A post-commit UserWarning never reaches an MCP client, so the

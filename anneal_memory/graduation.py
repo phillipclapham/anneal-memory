@@ -688,10 +688,10 @@ class OmittedPattern:
     pattern across wraps surfaces an OmittedPattern entry for the old
     name. The library cannot distinguish "renamed pattern" from
     "silently dropped pattern" without semantic comparison, which the
-    no-LLM-as-judge axiom prohibits at the library layer. Operators
-    who rename patterns can safely ignore omission entries whose name
-    is structurally similar to a freshly-introduced pattern in the
-    same wrap; the audit chain has both records for post-hoc review.
+    no-LLM-as-judge axiom prohibits at the library layer, so the
+    composer declares it: a wrap that writes ``[renamed: OLD -> NEW]``
+    (AM-PATTERN-ALIAS) is audited against a prior that already carries
+    NEW, and OLD is not reported. An undeclared rename still is.
     """
 
     name: str  # Pattern identifier (operator-style name before the | marker)

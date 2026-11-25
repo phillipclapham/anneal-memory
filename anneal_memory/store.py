@@ -10009,6 +10009,13 @@ class Store:
                     f"VALUES ({', '.join('?' * len(cols))})",
                     [prior[c] for c in cols])
             out["pattern_history_exact"] += 1
+        # A wrap's [renamed:] moved grounding to a name that had none: take it off
+        # that name before the old name's rows are put back (AM-PATTERN-ALIAS).
+        for row in self._conn.execute(
+                "SELECT key FROM wrap_undo WHERE token12 = ? "
+                "AND kind = 'pattern_grounding_moved'", (token12,)).fetchall():
+            self._conn.execute(
+                "DELETE FROM pattern_grounding WHERE name = ?", (row["key"],))
         for row in self._conn.execute(
                 "SELECT prior_json FROM wrap_undo WHERE token12 = ? "
                 "AND kind = 'pattern_grounding'", (token12,)).fetchall():
@@ -10253,6 +10260,14 @@ class Store:
                     (token12, json.dumps([r[k] for k in
                                           ("name", "level", "earning", "rule", "episode_id")]),
                      json.dumps({k: r[k] for k in r.keys()}, sort_keys=True)))
+
+    def _wrap_undo_grounding_moved(self, token12: str, new_name: str) -> None:
+        """Note that the save moves grounding onto ``new_name`` (which had none), so
+        :meth:`revert_wrap` takes it off again. Inside the save's batch."""
+        if len(token12) == 12:
+            self._conn.execute(
+                "INSERT OR REPLACE INTO wrap_undo (token12, kind, key, prior_json) "
+                "VALUES (?, 'pattern_grounding_moved', ?, NULL)", (token12, new_name))
 
     def _wrap_undo_supersession(self, token12: str, old_id: str, new_id: str) -> None:
         """Note a supersession link the save just recorded, for :meth:`revert_wrap`."""
@@ -10514,6 +10529,46 @@ class Store:
             )
             if not self._defer_commit:
                 self._conn.commit()
+
+    def _carry_pattern_history(
+        self, old_name: str, new_name: str, *, undo_token: str | None = None,
+    ) -> bool:
+        """AM-PATTERN-ALIAS: copy ``old_name``'s ``pattern_history`` row to
+        ``new_name``, so the renamed pattern keeps its high-water mark, recency
+        and explanation corpus. A row ``new_name`` already has (a composted
+        homonym's: a compost keeps history) is another concept's: it is replaced,
+        or removed when ``old_name`` has none. The old row stays. ``undo_token``
+        records ``new_name``'s row as it was in ``wrap_undo``, as
+        :meth:`upsert_pattern_history` does, so a revert puts it back. Runs inside
+        the save's batch. Returns whether ``new_name``'s row changed."""
+        with self._db_boundary("upsert_pattern_history"):
+            row = self._conn.execute(
+                "SELECT * FROM pattern_history WHERE pattern_name = ?", (old_name,)
+            ).fetchone()
+            existing = self._conn.execute(
+                "SELECT * FROM pattern_history WHERE pattern_name = ?", (new_name,)
+            ).fetchone()
+            if row is None and existing is None:
+                return False
+            if undo_token:
+                self._conn.execute(
+                    "INSERT OR IGNORE INTO wrap_undo (token12, kind, key, prior_json) "
+                    "VALUES (?, 'pattern_history', ?, ?)",
+                    (undo_token, new_name,
+                     None if existing is None else json.dumps(
+                         {k: existing[k] for k in existing.keys()}, sort_keys=True)))
+            self._conn.execute(
+                "DELETE FROM pattern_history WHERE pattern_name = ?", (new_name,))
+            if row is not None:
+                copy = {k: row[k] for k in row.keys()}
+                copy["pattern_name"] = new_name
+                cols = sorted(copy)
+                self._conn.execute(
+                    f"INSERT INTO pattern_history ({', '.join(cols)}) "
+                    f"VALUES ({', '.join('?' * len(cols))})", [copy[c] for c in cols])
+            if not self._defer_commit:
+                self._conn.commit()
+            return True
 
     def seed_pattern_max_level(
         self,

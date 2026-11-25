@@ -778,6 +778,11 @@ class _SaveContinuityOptional(TypedDict, total=False):
     # ``{"name", "written_level", "capped_to", "prior_level", "validated"}`` per
     # line, also delivered as a UserWarning and recorded in the audit chain.
     level_capped: list[dict[str, Any]]
+    # Present ONLY when this save applied or refused a ``[renamed: OLD -> NEW]``
+    # marker: the renames applied (``{"old", "new"}``) and each refused one with
+    # its ``reason`` (the save still committed).
+    renamed: list[dict[str, str]]
+    renames_rejected: list[dict[str, str]]
 
 
 class SaveContinuityReplayResult(TypedDict):

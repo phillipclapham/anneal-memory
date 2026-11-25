@@ -3014,13 +3014,17 @@ def _rename_marker_lines(text: str) -> list[str]:
     """The lines of ``text`` outside a fenced code block (``` or ~~~). Both marker
     patterns are matched from column 0, so an indented line is never read."""
     lines: list[str] = []
-    fenced = False
+    fence = ""  # the open fence's run, as CommonMark closes it (same char, as long)
     for line in text.split("\n"):
-        if line.lstrip().startswith(("```", "~~~")):
-            fenced = not fenced
+        run = re.match(r"[ \t]*(`{3,}|~{3,})", line)
+        if run and not fence:
+            fence = run.group(1)
             continue
-        if not fenced:
-            lines.append(line)
+        if fence:
+            if run and run.group(1)[0] == fence[0] and len(run.group(1)) >= len(fence):
+                fence = ""
+            continue
+        lines.append(line)
     return lines
 
 

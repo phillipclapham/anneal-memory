@@ -82,7 +82,7 @@ def test_a_refused_rename_carries_nothing_and_says_why(tmp_path):
         assert "renamed" not in r and _level(store.load_continuity(), "sneaky") == 1
         # So is one in a code example, fenced or indented (L3 r1, codex).
         r = _wrap(store, f"- taken | 2x ({YESTERDAY})\n```\n[renamed: taken -> x]\n```\n"
-                         "    [renamed: taken -> y]")
+                         "    [renamed: taken -> y]\n````\n```\n[renamed: taken -> z]\n````")
         assert "renamed" not in r
         # A name left out of the memory earlier is not revived under a new one (L2).
         r = _wrap(store, f"- fresh_claim | 4x ({YESTERDAY})\n[renamed: old_name -> fresh_claim]")

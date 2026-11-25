@@ -88,5 +88,12 @@ def test_a_refused_rename_carries_nothing_and_says_why(tmp_path):
         r = _wrap(store, f"- fresh_claim | 4x ({YESTERDAY})\n[renamed: old_name -> fresh_claim]")
         assert "not a pattern line" in r["renames_rejected"][0]["reason"]
         assert _level(store.load_continuity(), "fresh_claim") == 1
+        # One name in two renames: both refused, neither applied (L3 r3, codex),
+        # and a fence opened with an info string is not closed by another one.
+        r = _wrap(store, f"- one | 2x ({YESTERDAY})\n- two | 2x ({YESTERDAY})\n"
+                         "````\n````python\n[renamed: taken -> one]\n````\n"
+                         "[renamed: taken -> one]\n[renamed: taken -> two]")
+        assert r["renamed"] == [] and len(r["renames_rejected"]) == 2
+        assert all("more than one" in rej["reason"] for rej in r["renames_rejected"])
     finally:
         store.close()

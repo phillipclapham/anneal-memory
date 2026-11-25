@@ -3016,15 +3016,17 @@ def _rename_marker_lines(text: str) -> list[str]:
     lines: list[str] = []
     fence = ""  # the open fence's run, as CommonMark closes it (same char, as long)
     for line in text.split("\n"):
-        run = re.match(r"[ \t]*(`{3,}|~{3,})", line)
-        if run and not fence:
-            fence = run.group(1)
+        if not fence:
+            opening = re.match(r"[ \t]*(`{3,}|~{3,})", line)
+            if opening:
+                fence = opening.group(1)
+                continue
+            lines.append(line)
             continue
-        if fence:
-            if run and run.group(1)[0] == fence[0] and len(run.group(1)) >= len(fence):
-                fence = ""
-            continue
-        lines.append(line)
+        # A closing fence is the run alone on its line (an info string opens one).
+        closing = re.fullmatch(r" {0,3}(`{3,}|~{3,})[ \t]*", line)
+        if closing and closing.group(1)[0] == fence[0] and len(closing.group(1)) >= len(fence):
+            fence = ""
     return lines
 
 
@@ -3061,7 +3063,6 @@ def _wrap_renames(
     has_grounding = set(grounded)
     accepted: list[tuple[str, str]] = []
     rejected: list[dict[str, str]] = []
-    taken: set[str] = set()
     markers: list[tuple[str, str]] = []
     for line in _rename_marker_lines(text):
         strict = _RENAMED_RE.fullmatch(line)
@@ -3073,18 +3074,28 @@ def _wrap_renames(
                 "reason": f"unparsed marker {line[:120]!r}; the form is a line of its "
                           f"own: [renamed: <old pattern name> -> <new pattern name>]",
             })
+    # A name in two live markers makes both ambiguous: refuse every one of them,
+    # never apply the first (L3 r3 1125-38, codex). A marker already on record and
+    # an exact repeat are not live.
+    live: list[tuple[str, str]] = []
     for old, new in markers:
-        if (old, new) in accepted:
+        if (old, new) in live:
             continue
+        if old != new and not has_prior(old) and has_prior(new):
+            continue  # already renamed by an earlier save
+        live.append((old, new))
+    uses: dict[str, int] = {}
+    for old, new in live:
+        for name in {old, new}:
+            uses[name] = uses.get(name, 0) + 1
+    for old, new in live:
         reason = None
         if old == new:
             reason = "the two names are the same"
-        elif not has_prior(old) and has_prior(new):
-            continue  # already renamed by an earlier save
+        elif uses[old] > 1 or uses[new] > 1:
+            reason = "a name used by more than one rename in this text"
         elif old in composting or new in composting:
             reason = "this save composts one of the two names"
-        elif old in taken or new in taken:
-            reason = "a name already used by another rename in this text"
         elif old in named_now:
             reason = f"{old} is still named in this text; a rename leaves the old name out"
         elif new not in named_now:
@@ -3102,7 +3113,6 @@ def _wrap_renames(
             rejected.append({"old": old, "new": new, "reason": reason})
             continue
         accepted.append((old, new))
-        taken.update((old, new))
     return accepted, rejected
 
 

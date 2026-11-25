@@ -512,8 +512,10 @@ MIGRATION_MANIFEST: list[MigrationEntry] = [
             "run `anneal-memory migrate check` before any other command, because the "
             "write-capable commands migrate the store. To find a process still on an "
             "older release, run `anneal-memory --version` in each venv, hook and "
-            "config; an older release refuses the migrated store with \"written by a "
-            "newer anneal-memory schema\". Do not restore the `.bak` copy on your own: "
+            "config, and upgrade each one that is not on 3.0.0 or later. A release from "
+            "0.9.10 through 2.2.0 refuses the migrated store with \"written by a newer "
+            "anneal-memory schema\"; a release before 0.9.10 does not refuse it at all, "
+            "so upgrade it on the same rule. Do not restore the `.bak` copy on your own: "
             "a restore goes back to generation 2, loses what was written after the "
             "migration, and does not roll back the audit log, the continuity and "
             "crystal files or the spore store. To get an old process working, upgrade "
@@ -557,6 +559,18 @@ def _version_tuple(version: str) -> tuple[int, ...]:
     return tuple(parts)
 
 
+def _ack_key(version: str) -> tuple[tuple[int, ...], int]:
+    """Order a version the way PEP 440 orders its release, for acknowledgement.
+
+    ``_version_tuple`` drops a ``.devN`` or pre-release suffix, so
+    ``3.0.1.dev0`` and ``3.0.1`` compare equal there. ``migrate ack`` writes
+    ``__version__`` verbatim, so a dev build's acknowledgement must sort below
+    its release, or it would hide that release's entries.
+    """
+    final = version.strip().replace(".", "").isdigit()
+    return (_version_tuple(version), 1 if final else 0)
+
+
 def pending_migrations(
     acknowledged_version: str | None,
     *,
@@ -573,13 +587,13 @@ def pending_migrations(
     have not installed (guards a stale-manifest/downgrade edge).
     """
     current = _version_tuple(current_version)
-    ack = _version_tuple(acknowledged_version) if acknowledged_version else None
+    ack = _ack_key(acknowledged_version) if acknowledged_version else None
     pending: list[MigrationEntry] = []
     for entry in manifest:
         entry_v = _version_tuple(entry["version"])
         if entry_v > current:
             continue  # feature not installed yet — nothing to migrate to
-        if ack is not None and entry_v <= ack:
+        if ack is not None and _ack_key(entry["version"]) <= ack:
             continue  # already acknowledged at or above this version
         pending.append(entry)
     return pending

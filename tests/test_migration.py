@@ -165,12 +165,31 @@ def test_gen3_store_entry_reaches_an_adopter_acked_at_3_0_0() -> None:
     assert "Do not restore the `.bak` copy on your own" in entry["suggested_edit"]
     assert "refuse the migrated store" in entry["summary"]
     assert "`read_only=True` opens never migrate" in entry["summary"]
-    for acked in ("2.2.0", "3.0.0"):
+    for acked in ("2.2.0", "3.0.0", "3.0.1.dev0"):
         got = [e["feature"] for e in pending_migrations(acked, current_version="3.0.1")]
         assert "AM-GEN3-STORE" in got
     for installed in ("2.2.0", "3.0.0"):
         got = [e["feature"] for e in pending_migrations("2.2.0", current_version=installed)]
         assert "AM-GEN3-STORE" not in got
+
+
+def test_dev_acknowledgement_does_not_hide_its_release_entry() -> None:
+    # `migrate ack` writes __version__ verbatim, so a dev build acks "3.0.1.dev0".
+    # That sorts below the 3.0.1 release: the 3.0.1 entry stays pending for it,
+    # and a final 3.0.1 acknowledgement hides it.
+    manifest: list[MigrationEntry] = [
+        {
+            "version": "3.0.1",
+            "feature": "SYNTHETIC-3-0-1",
+            "summary": "s",
+            "suggested_edit": "e",
+            "files": ["CLAUDE.md"],
+        },
+    ]
+    got = pending_migrations("3.0.1.dev0", current_version="3.0.1.dev0", manifest=manifest)
+    assert [e["feature"] for e in got] == ["SYNTHETIC-3-0-1"]
+    got = pending_migrations("3.0.1", current_version="3.0.1.dev0", manifest=manifest)
+    assert got == []
 
 
 # -- AM-WRAP-GENERATED: the first file-RETIREMENT entry (spore-217) --
@@ -343,8 +362,11 @@ class TestMigrateCLI:
         assert data["pending"][0]["feature"]
 
     def test_ack_then_check_clean(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+        # Ack the manifest's top version, not __version__: a dev build's ack sorts
+        # below the release its own entries are keyed to (see _ack_key).
+        top = max((e["version"] for e in MIGRATION_MANIFEST), key=_version_tuple)
         db = tmp_path / "memory.db"
-        cmd_migrate_ack(_args(db))
+        cmd_migrate_ack(_args(db, version=top))
         capsys.readouterr()
         cmd_migrate_check(_args(db))
         assert "up to date" in capsys.readouterr().out.lower()
@@ -449,8 +471,11 @@ class TestMigrateSubprocess:
         assert check.returncode == 0
         assert "AM-SPORES-BOUNDARY" in check.stdout
 
+        # The manifest's top version, not __version__ (a dev build's ack sorts
+        # below its own release; see _ack_key).
+        top = max((e["version"] for e in MIGRATION_MANIFEST), key=_version_tuple)
         ack = subprocess.run(
-            [sys.executable, "-m", "anneal_memory.cli", "migrate", "ack"],
+            [sys.executable, "-m", "anneal_memory.cli", "migrate", "ack", top],
             capture_output=True, text=True, env=env,
         )
         assert ack.returncode == 0

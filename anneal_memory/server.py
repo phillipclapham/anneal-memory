@@ -171,6 +171,8 @@ _EXACT_RESULTS_ENOUGH = 3    # an exact result this small is topped up with word
 _ALSO_MATCHING_MAX = 5       # how many word matches are appended to such a result
 _REPLACED_MAX = 5  # replacements listed by one keyword recall
 _REPLACED_OLDS_MAX = 5  # replaced matches named under each
+_NEWER_HINT_SCAN = 5  # newest matches a ranked recall reads per page to find a newer one than its top row
+_NEWER_HINT_PAGES = 8  # pages it reads at most, so a run of newer relayed episodes is looked past, bounded
 _RECALL_DEFAULT_LIMIT = 100  # MCP recall's ``limit`` when the caller passes none and
 # the recall is not ranked by relevance
 _RECALL_RANKED_DEFAULT_LIMIT = 20  # the same for a keyword recall ranked by relevance:
@@ -650,6 +652,90 @@ class Server:
             lines.append(f"- (+ {' and '.join(more)} not listed; narrow the keyword)")
         return "Replaced since (the current fact for an older match):\n" + "\n".join(lines)
 
+    def _relayed_ids(
+        self, ids: list[str], *, trust: dict[str, str] | None = None,
+    ) -> set[str]:
+        """The ids among ``ids`` whose effective trust OR origin is tool/external:
+        the test :meth:`_label_relayed` labels by, kept in one place so a line that
+        names an episode without quoting it (the newer-match hint) cannot nominate
+        one that line would label."""
+        if trust is None:
+            trust = self._store.effective_trust_map(ids)
+        origin = self._store.origin_map(ids)
+        low = trust_rank(DEFAULT_TRUST)
+        return {
+            ep_id for ep_id in ids
+            if trust_rank(trust.get(ep_id, DEFAULT_TRUST)) < low
+            or trust_rank(origin.get(ep_id, DEFAULT_TRUST)) < low
+        }
+
+    def _newer_match_hint(
+        self,
+        args: dict[str, Any],
+        shown: list[Any],
+        candidates: list[Any] | None = None,
+    ) -> str:
+        """One line on a ranked keyword recall when a NEWER episode also matches the
+        query than the one listed first, or "": a reader of a relevance-ordered list
+        takes its top row as the current state of something that has since changed
+        (measured 2026-11-19: an outside reader cited an episode saying a feature was
+        built and not merged as current, while a newer one in the same result said it
+        was live).
+
+        A hint, never a reorder and never a verdict: it names the id, type and time of
+        the newest match (and whether it is on this page) and says how to read it. It
+        carries no episode text, so no relayed content rides on it, and an episode
+        recorded from a tool or an outside source is never the one named (the
+        :meth:`_label_relayed` test). ``shown`` are the page's episodes in listed
+        order; ``candidates`` are the matches to pick the newer one from (the exact
+        path reads the newest few; the word path passes the matches it already has).
+        Superseded episodes are not candidates unless the call asked for them."""
+        if not shown:
+            return ""
+
+        def when(e: Any) -> tuple[str, str]:
+            return (e.timestamp, e.id)
+
+        relayed = self._relayed_ids([e.id for e in shown])
+        top = next((e for e in shown if e.id not in relayed), None)
+        if top is None:
+            return ""
+        if candidates is None:
+            # Newest first, a page at a time, until a match that is not relayed (the
+            # newest such is the one to name) or nothing newer than the top row is
+            # left: a run of newer relayed episodes must not hide a real one.
+            head = None
+            for page in range(_NEWER_HINT_PAGES):
+                got = self._store.recall(
+                    since=args.get("since"), until=args.get("until"),
+                    episode_type=args.get("episode_type"), source=args.get("source"),
+                    keyword=args.get("keyword"), limit=_NEWER_HINT_SCAN,
+                    offset=page * _NEWER_HINT_SCAN,
+                    include_superseded=args.get("include_superseded") is True,
+                    order="newest",
+                ).episodes
+                if not got:
+                    break
+                bad = self._relayed_ids([c.id for c in got])
+                head = next((c for c in got if c.id not in bad), None)
+                if head is not None or when(got[-1]) <= when(top):
+                    break
+            newer = [head] if head is not None and when(head) > when(top) else []
+        else:
+            relayed |= self._relayed_ids([c.id for c in candidates])
+            newer = [c for c in candidates if c.id not in relayed and when(c) > when(top)]
+        if not newer:
+            return ""
+        head = max(newer, key=when)
+        kind = getattr(head.type, "value", head.type)
+        where = "listed here" if head.id in {e.id for e in shown} else "not on this page"
+        return (
+            f"Hint: a newer episode also matches this query: ({head.id}) [{kind}] "
+            f"{head.timestamp} ({where}). This list is ranked by relevance, not by time; "
+            "for something that changes (a status, a state), read the newest match "
+            'first (recall with order "newest").'
+        )
+
     def _label_relayed(
         self, rows: list[tuple[str, str]], *, trust: dict[str, str] | None = None,
     ) -> list[str]:
@@ -662,16 +748,7 @@ class Server:
         rows were read with; without it, it is read now, so the caller holds the
         snapshot the rows came from. Origin is read now too: it is written once,
         so a later read differs only for an episode deleted in between."""
-        ids = [ep_id for ep_id, _ in rows]
-        if trust is None:
-            trust = self._store.effective_trust_map(ids)
-        origin = self._store.origin_map(ids)
-        low = trust_rank(DEFAULT_TRUST)
-        relayed = {
-            ep_id for ep_id in ids
-            if trust_rank(trust.get(ep_id, DEFAULT_TRUST)) < low
-            or trust_rank(origin.get(ep_id, DEFAULT_TRUST)) < low
-        }
+        relayed = self._relayed_ids([ep_id for ep_id, _ in rows], trust=trust)
         out = [line for ep_id, line in rows if ep_id not in relayed]
         moved = [line for ep_id, line in rows if ep_id in relayed]
         if moved:
@@ -777,6 +854,10 @@ class Server:
                         [(m.episode.id, _word_match_line(m, len(words))) for m in extra]
                     ))
 
+        if ranked and offset == 0 and isinstance(keyword, str):
+            hint = self._newer_match_hint(args, episodes)
+            if hint:
+                lines.extend(["", hint])
         return _tool_result("\n".join(lines))
 
     def _word_matches(
@@ -856,7 +937,19 @@ class Server:
         )
         if _RELAYED_LABEL in labelled:
             head += _RELAYED_AFTER_NOTE
-        return _tool_result("\n".join([head, *labelled]))
+        tail: list[str] = []
+        if not newest:
+            # Only a match that hit at least half the query's words (and two): a
+            # one-word match is nearly always newer, and naming it would be noise.
+            # Not "as many as the top row": the newer episode that restates a state
+            # usually shares fewer words with the query than the older one.
+            floor = min(len(shown[0].matched), max(2, -(-len(words) // 2)))
+            hint = self._newer_match_hint(
+                args, [m.episode for m in shown],
+                [m.episode for m in matches if len(m.matched) >= floor])
+            if hint:
+                tail = ["", hint]
+        return _tool_result("\n".join([head, *labelled, *tail]))
 
     def _crystal_store_for_wrap(self) -> CrystalStore | None:
         """AM-CRYSTAL-OPTIN: the crystal tier on the MCP wrap path is opt-in.

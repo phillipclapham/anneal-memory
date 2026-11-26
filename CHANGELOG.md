@@ -4,6 +4,9 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
 
 ## [Unreleased]
 
+### Fixed
+- `migrate ack` and `migrate check` read a local version whose segments separate with `-` or `_` (`3.0.1+ubuntu-1`, `3.0.1+ubuntu_1`) as the release itself, as they already did for `.`. Before, such an acknowledgement sorted below its release and left that release's entries pending. A separator-only or doubled-separator suffix (`3.0.1+_`, `3.0.1+ubuntu--1`) is not a local version and still does not acknowledge.
+
 ## [3.0.1] — 2026-11-25
 
 ### Added
@@ -12,7 +15,6 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
 ### Fixed
 - `migrate check` no longer lets a dev or pre-release acknowledgement hide the entry for its release. `migrate ack` on `3.0.1.dev0` leaves a `3.0.1` entry pending; before, the two compared equal.
 - `migrate ack` refuses a final version ahead of a dev install: on `3.0.1.dev0`, `migrate ack 3.0.1` exits 1 and writes nothing, because acknowledging the release would hide entries added before it ships. A dev build's `migrate check` lists its own release's entries until that release is installed.
-- `.postN` and local versions acknowledge their release: `3.0.1.post1` acknowledges the `3.0.1` entries.
 - The 3.0.0 section says every release through 2.2.0 refuses a generation-3 store. The refusal first appears at 0.9.10; releases before it do not refuse a newer schema, so the notice tells adopters to upgrade them on the same rule.
 
 ## [3.0.0] — 2026-11-25

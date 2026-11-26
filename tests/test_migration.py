@@ -193,6 +193,15 @@ def test_dev_acknowledgement_does_not_hide_its_release_entry() -> None:
     assert got == []
     got = pending_migrations("3.0.1.post1", current_version="3.0.1", manifest=manifest)
     assert got == []
+    # A local version segment may separate with '.', '-' or '_' (PEP 440).
+    for local in ("3.0.1+ubuntu.1", "3.0.1+ubuntu-1", "3.0.1+ubuntu_1", "3.0.1.post1+x_y"):
+        got = pending_migrations(local, current_version="3.0.1", manifest=manifest)
+        assert got == [], local
+    # Separator-only or doubled-separator suffixes are not local versions: they
+    # must not acknowledge the release.
+    for bad in ("3.0.1+_", "3.0.1+-", "3.0.1+ubuntu--1"):
+        got = pending_migrations(bad, current_version="3.0.1", manifest=manifest)
+        assert [e["feature"] for e in got] == ["SYNTHETIC-3-0-1"], bad
 
 
 def test_ack_refuses_a_final_version_ahead_of_a_dev_install(
@@ -204,8 +213,9 @@ def test_ack_refuses_a_final_version_ahead_of_a_dev_install(
 
     monkeypatch.setattr(cli_module, "__version__", "3.0.1.dev0")
     db = tmp_path / "memory.db"
-    with pytest.raises(SystemExit):
+    with pytest.raises(SystemExit) as exc:
         cmd_migrate_ack(_args(db, version="3.0.1"))
+    assert exc.value.code == 1
     assert not marker_path_for(db).exists()
 
 
@@ -372,8 +382,14 @@ def _top_ack_for_installed() -> str:
 
 
 def _ahead_of_installed() -> list[str]:
+    # Mirrors pending_migrations: an entry newer than the installed release (by
+    # _version_tuple) is withheld, so it is not "ahead" in the sense the check lists.
     installed = _ack_key(__version__)
-    return [e["feature"] for e in MIGRATION_MANIFEST if _ack_key(e["version"]) > installed]
+    return [
+        e["feature"] for e in MIGRATION_MANIFEST
+        if _version_tuple(e["version"]) <= _version_tuple(__version__)
+        and _ack_key(e["version"]) > installed
+    ]
 
 
 class TestMigrateCLI:
@@ -403,7 +419,9 @@ class TestMigrateCLI:
         out = capsys.readouterr().out
         ahead = _ahead_of_installed()
         if ahead:
-            assert all(feature in out for feature in ahead)
+            # Exactly the entries ahead, no other manifest entry.
+            listed = {e["feature"] for e in MIGRATION_MANIFEST if e["feature"] in out}
+            assert listed == set(ahead)
         else:
             assert "up to date" in out.lower()
 

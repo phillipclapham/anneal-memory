@@ -2359,7 +2359,8 @@ CREATE TABLE IF NOT EXISTS wrap_reverts (
 -- it back: pattern_levels as a whole table (one marker row, key '', plus a
 -- row per level), each pattern_history row the save touched as it was before
 -- (prior_json NULL = the row did not exist), the pattern_grounding rows a compost
--- deleted, and each supersession link the save recorded. A prune rewrites the
+-- deleted, each supersession link the save recorded, and each name a [renamed:]
+-- moved grounding onto (kind pattern_grounding_moved, prior_json NULL). A prune rewrites the
 -- pattern_grounding rows here for the episodes it deletes (``_mark_aged_out`` marks
 -- them aged out), so a revert after a prune restores that mark, and prior_json is
 -- not a byte-stable record of what the save wrote. kind has no CHECK on
@@ -9716,6 +9717,9 @@ class Store:
           wrote it (``undone["pattern_history_exact"]`` is 0 then), so a re-run
           of the same episodes with reworded evidence can be demoted as
           ``cross-session-overlap``;
+        - the ``pattern_grounding`` a ``[renamed:]`` moved onto a new name
+          (``pattern_grounding_moved`` rows), taken off that name before the
+          old name's rows are put back;
         - a save-idempotency record whose stored result names the wrap;
         - the identity: a new ``identity_versions`` row (source ``raw_save``)
           carries the text and meta of the version before the wrap's, and the files
@@ -9959,7 +9963,8 @@ class Store:
         """The part of :meth:`revert_wrap` that puts back what the wrap's save
         changed outside the identity, inside its transaction: ``pattern_levels``,
         the ``pattern_history`` rows it touched, the ``pattern_grounding`` rows a
-        compost deleted, and the supersession links it recorded. From the
+        compost deleted or a ``[renamed:]`` moved (``pattern_grounding_moved``),
+        and the supersession links it recorded. From the
         ``wrap_undo`` rows the save wrote when there are any (exact, bar the
         aged-out mark a prune puts on a restored ``pattern_grounding`` row; see
         the ``wrap_undo`` schema comment). Without them
@@ -11003,13 +11008,13 @@ class Store:
     ) -> int:
         """Rename a pattern, carrying its earned cortical edges to the new name
         (first-class alias — the SAME concept under a new name; edges merge if the
+        target pair exists). Returns edges re-keyed.
 
         Warns:
             UserWarning: if the audit event could not be written. The
                 operation still SUCCEEDED — the audit trail is missing
                 this event. Also counted on ``status().audit_write_failures``
-                and logged; see :meth:`_audit_log_after_commit`.
-        target pair exists). Returns edges re-keyed."""
+                and logged; see :meth:`_audit_log_after_commit`."""
         if old_name == new_name:
             # Nothing to re-key, and the record update below would delete the
             # name's own saved level (L3 r3, codex HIGH + complement, run).

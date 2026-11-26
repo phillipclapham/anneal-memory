@@ -560,7 +560,7 @@ def _version_tuple(version: str) -> tuple[int, ...]:
     return tuple(parts)
 
 
-_POST_OR_LOCAL = re.compile(r"(?:\.post\d+)?(?:\+[0-9A-Za-z.]+)?$")
+_POST_OR_LOCAL = re.compile(r"(?:\.post\d+)?(?:\+[0-9A-Za-z]+(?:[._-][0-9A-Za-z]+)*)?$")
 
 
 def _ack_key(version: str) -> tuple[tuple[int, ...], int]:

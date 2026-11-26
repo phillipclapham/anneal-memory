@@ -10535,6 +10535,7 @@ class TestKL24AppendLockHolders:
             f"        return n + timedelta(days=7) if os.path.exists({str(flag)!r}) else n\n"
             "A.datetime = C\n"
             f"t = A.AuditTrail({str(db)!r})\n"
+            f"Path({str(tmp_path)!r}, 'ready-' + sys.argv[1]).write_text('x')\n"
             f"while not Path({str(go)!r}).exists(): time.sleep(0.005)\n"
             "refused = 0\n"
             f"for i in range({n_each}):\n"
@@ -10543,17 +10544,39 @@ class TestKL24AppendLockHolders:
             "    except A._ManifestUnavailable as e:\n"
             "        assert 'is gone' in str(e), e\n"
             "        refused += 1\n"
+            "    if i == 0:\n"
+            f"        Path({str(tmp_path)!r}, 'wrote-' + sys.argv[1]).write_text('x')\n"
             "    time.sleep(0.003)\n"
             f"Path({str(tmp_path)!r}, 'refused-' + sys.argv[1]).write_text(str(refused))\n"
         )
         cwd = str(Path(audit_module.__file__).parent.parent)
         procs = [subprocess.Popen([sys.executable, "-c", script, str(w)], cwd=cwd)
                  for w in range(n_proc)]
-        go.write_text("x")
-        time.sleep(0.25)
-        flag.write_text("x")
-        for p in procs:
-            assert p.wait(timeout=120) == 0
+        def wait_for(prefix):
+            deadline = time.monotonic() + 60
+            while not all((tmp_path / f"{prefix}-{w}").exists() for w in range(n_proc)):
+                missing = [w for w in range(n_proc) if not (tmp_path / f"{prefix}-{w}").exists()]
+                if time.monotonic() >= deadline or any(procs[w].poll() is not None for w in missing):
+                    raise AssertionError(f"writers {missing} never reached {prefix!r}")
+                time.sleep(0.01)
+
+        # Two barriers, so the clock jump lands mid-run whatever the box's load:
+        # the writers start only once every child has imported (an import takes
+        # about as long as a fixed head start would, so a slow start put the
+        # child past FLAG before its first write), and FLAG is set only once
+        # every child has logged at least one entry before it.
+        try:
+            wait_for("ready")
+            go.write_text("x")
+            wait_for("wrote")
+            flag.write_text("x")
+            for p in procs:
+                assert p.wait(timeout=120) == 0
+        finally:
+            for p in procs:
+                if p.poll() is None:
+                    p.kill()
+                p.wait(timeout=20)
         # Ruled 10-08 (option (b)): a peer whose tip sat in the sealed file is
         # refused once, loudly, and never followed silently. One rotation, so
         # at most one refusal per process other than the one that rotated.

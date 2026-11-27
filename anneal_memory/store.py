@@ -2356,11 +2356,9 @@ CREATE TABLE IF NOT EXISTS wrap_reverts (
 );
 
 -- What the newest wrap's save overwrote or added, so Store.revert_wrap can put
--- it back: pattern_levels as a whole table (one marker row, key '', plus a
--- row per level), each pattern_history row the save touched as it was before
--- (prior_json NULL = the row did not exist), the pattern_grounding rows a compost
--- deleted, each supersession link the save recorded, and each name a [renamed:]
--- moved grounding onto (kind pattern_grounding_moved, prior_json NULL). A prune rewrites the
+-- it back. The kinds the save writes are decided by the Store._wrap_undo_* methods
+-- and Store.upsert_pattern_history; what a revert does with each is decided by
+-- Store._revert_wrap_derived. A prune rewrites the
 -- pattern_grounding rows here for the episodes it deletes (``_mark_aged_out`` marks
 -- them aged out), so a revert after a prune restores that mark, and prior_json is
 -- not a byte-stable record of what the save wrote. kind has no CHECK on
@@ -9709,27 +9707,17 @@ class Store:
         - the ``wraps`` row, and its ``wrap_graduations`` and ``drift_results``;
         - the ``pattern_grounding`` rungs the wrap earned (matched on the wrap
           token's first 12 characters, which the wraps row's ``pair_id`` keeps);
-        - ``pattern_levels`` and each ``pattern_history`` row the wrap's save
-          touched, put back exactly from the ``wrap_undo`` rows that save wrote.
-          A wrap saved before those rows existed, or one that is no longer the
-          newest wrap's save (a second revert in a row), gets ``pattern_levels``
-          adjusted from the two texts and ``pattern_history`` left as the wrap
-          wrote it (``undone["pattern_history_exact"]`` is 0 then), so a re-run
-          of the same episodes with reworded evidence can be demoted as
-          ``cross-session-overlap``;
-        - the ``pattern_grounding`` a ``[renamed:]`` moved onto a new name
-          (``pattern_grounding_moved`` rows), taken off that name before the
-          old name's rows are put back;
+        - the pattern state the wrap's save changed outside the identity, as
+          :meth:`_revert_wrap_derived` decides: exact from the ``wrap_undo``
+          rows the save wrote, or, without them, adjusted from the two texts
+          (``undone["pattern_history_exact"]`` is 0 then and the receipt's
+          ``pattern_state_exact`` is False);
         - a save-idempotency record whose stored result names the wrap;
         - the identity: a new ``identity_versions`` row (source ``raw_save``)
           carries the text and meta of the version before the wrap's, and the files
           are projected from it after the commit. The wrap's own version row stays
           (the chain is append-only). A store without that table has no identity
           to restore here; its caller restores the text.
-
-        The supersession links and the compost's grounding are undone only for a
-        wrap saved by a build that writes ``wrap_undo`` (the receipt's
-        ``pattern_state_exact`` is False for an older one).
 
         NOT undone, on purpose: Hebbian and pattern-association weights, the
         concept generation a compost bumped (``pattern_aliases``), crystal
@@ -9961,16 +9949,12 @@ class Store:
         self, token12: str, restored_text: str | None, reverted_text: str | None,
     ) -> dict[str, int]:
         """The part of :meth:`revert_wrap` that puts back what the wrap's save
-        changed outside the identity, inside its transaction: ``pattern_levels``,
-        the ``pattern_history`` rows it touched, the ``pattern_grounding`` rows a
-        compost deleted or a ``[renamed:]`` moved (``pattern_grounding_moved``),
-        and the supersession links it recorded. From the
-        ``wrap_undo`` rows the save wrote when there are any (exact, bar the
-        aged-out mark a prune puts on a restored ``pattern_grounding`` row; see
-        the ``wrap_undo`` schema comment). Without them
-        ``pattern_levels`` is adjusted from the two texts (a name the wrap added is
-        dropped, one it raised is lowered), ``pattern_history`` is left as the wrap
-        wrote it, and ``pattern_state_exact`` is 0."""
+        changed outside the identity, inside its transaction. What it restores is
+        what the code below does for each ``wrap_undo`` kind. It is exact when the
+        save wrote those rows (bar the aged-out mark a prune puts on a restored
+        ``pattern_grounding`` row; see the ``wrap_undo`` schema comment). Without
+        them ``pattern_levels`` is adjusted from the two texts, ``pattern_history``
+        is left as the wrap wrote it, and ``pattern_state_exact`` is 0."""
         from .continuity import _pattern_levels  # continuity imports store
 
         out = {"pattern_levels_exact": 0, "pattern_history_exact": 0,
@@ -10250,9 +10234,10 @@ class Store:
                  "SELECT kind, key, level, saved_at FROM pattern_levels").fetchall()])
 
     def _wrap_undo_grounding(self, token12: str, names: Iterable[str]) -> None:
-        """Keep the ``pattern_grounding`` rows of ``names`` (a compost deletes them
-        with the concept) under ``token12``, for :meth:`revert_wrap`. Inside the
-        save's batch, before the compost."""
+        """Keep the ``pattern_grounding`` rows of ``names`` under ``token12``, for
+        :meth:`revert_wrap`. Which names the save passes, and why, is decided by its
+        caller, ``validated_save_continuity`` (continuity.py). Inside the save's
+        batch, before it deletes or moves them."""
         names = list(names)
         if len(token12) != 12 or not names:
             return
@@ -11006,9 +10991,10 @@ class Store:
     def rename_pattern_association(
         self, old_name: str, new_name: str, today: str | None = None
     ) -> int:
-        """Rename a pattern, carrying its earned cortical edges to the new name
-        (first-class alias — the SAME concept under a new name; edges merge if the
-        target pair exists). Returns edges re-keyed.
+        """Rename a pattern: the SAME concept under a new name (first-class alias).
+        What it moves and what it leaves is what the body below does; a wrap's
+        ``[renamed:]`` marker makes the same move through
+        ``validated_save_continuity`` (continuity.py). Returns edges re-keyed.
 
         Warns:
             UserWarning: if the audit event could not be written. The

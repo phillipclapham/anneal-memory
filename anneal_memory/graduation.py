@@ -977,11 +977,12 @@ def validate_graduations(
             # ``explanation_valid``: the preservation and cross-session logic below read
             # the quote, and a failed suffix must not be reported as a sycophancy finding.
             # Like the explanation check it needs episode content, but it does not need a
-            # quote, so a bare citation followed by prose is checked too.
+            # quote, so a bare citation followed by prose is checked too. A citation that
+            # resolves to nothing grounds nothing, so the prose after it fails as well.
             suffix_ungrounded = False
             trailing = _trailing_prose(line, match)
-            if trailing and ids_valid and node_content_map:
-                suffix_ungrounded = _has_non_ascii_letter(trailing) or not any(
+            if trailing and node_content_map:
+                suffix_ungrounded = not ids_valid or _has_non_ascii_letter(trailing) or not any(
                     check_explanation_overlap(trailing, node_content_map.get(cid, ""))
                     for cid in cited_ids & valid_ids
                     if trust_of is None
@@ -1282,7 +1283,7 @@ def validate_graduations(
                 # The ungrounded text goes with the line's other ungrounded text: the
                 # tag is replaced below, and the prose after it is cut to its markers,
                 # so a demoted or held line does not keep it as its meaning.
-                line = line[:match.end()] + _kept_markers(line[match.end():])
+                line = _cut_tail(line, match)
 
             if (
                 ids_valid and explanation_valid and not cross_session_overlap_words
@@ -2261,56 +2262,88 @@ _STATE_PAREN_RE = re.compile(
     re.IGNORECASE,
 )
 
-
 # A marker after the evidence tag is a marker only when its body parses as that marker's
 # own grammar. The readers (the summary, the crystal explanation) take every other
-# character as meaning, so the check must too: a ``[contradicts: a sentence]`` or a
-# second ``[evidence: id "claim"]`` is prose, and its words are read.
-_TAIL_MARKER_RE = re.compile(
-    r"\[(?:no-contradicts|Proven|Developing|ungrounded|needs-evidence"
-    r"|cross-session-overlap|carried-forward|level-capped|uncorroborated)\]"
-    rf"|{_STATE_PAREN_RE.pattern}"
+# character as meaning, so the check must too: a ``[contradicts: a sentence]``, a second
+# ``[evidence: id "claim"]`` or a misplaced ``[renamed: ...]`` (that one is read only as a
+# line of its own) is prose, and its words are read. ASCII-only, so a look-alike
+# letter or space never makes a marker.
+_KEPT_MARKER_RE = re.compile(
+    r"\[no-contradicts\]"
     rf"|{_CONTRADICTS_RE.pattern}"
     rf"|{_PROVENANCE_RE.pattern}"
-    r"|\[supersedes:\s*[0-9A-Fa-f]{8}\s+by\s+[0-9A-Fa-f]{8}\s*\]"
-    r"|\[renamed:\s*[A-Za-z][A-Za-z0-9_.\-]*\s*->\s*[A-Za-z][A-Za-z0-9_.\-]*\s*\]"
     r"|\[\[[A-Za-z][A-Za-z0-9_.\-]*\]\]",  # a reference to a pattern name
-    re.IGNORECASE,
+    re.ASCII | re.IGNORECASE,
 )
+# The marker words the library itself writes. A tail that is cut keeps none of these:
+# a held or demoted line carries the one the pipeline put on it, never a second.
+_TAIL_MARKER_RE = re.compile(
+    rf"{_KEPT_MARKER_RE.pattern}"
+    r"|\[(?:Proven|Developing|ungrounded|needs-evidence|cross-session-overlap"
+    r"|carried-forward|level-capped|uncorroborated)\]"
+    rf"|{_STATE_PAREN_RE.pattern}",
+    re.ASCII | re.IGNORECASE,
+)
+# The name, with its bullet or marker prefix, of a second pattern marker that follows on
+# the same line: it sits just before that marker's ``|`` and is that marker's, not prose.
+_NEXT_MARKER_NAME_RE = re.compile(
+    r"(?:(?:[-*•>]|!+|\?|✓)[ \t]*)*[A-Za-z][A-Za-z0-9_.\-]*[ \t]*$"
+)
+
+
+def _split_tail(line: str, match: "re.Match[str]") -> tuple[str, str]:
+    """``(own, rest)`` for the text after the evidence tag of ``match``: ``own`` is
+    what this marker's tag can speak for, and ``rest`` is a second marker's name and
+    everything from its level token on, which belong to that marker."""
+    tail = line[match.end():]
+    cut = _next_level_token(tail)
+    own, rest = tail[:cut], tail[cut:]
+    if rest:
+        m = _NEXT_MARKER_NAME_RE.search(own)
+        if m:
+            own, rest = own[:m.start()], own[m.start():] + rest
+    return own, rest
 
 
 def _trailing_prose(line: str, match: "re.Match[str]") -> str:
     """The prose a pattern line carries AFTER its evidence tag, or ``""``.
 
-    ``match`` is the tag's own match on ``line``. What follows is cut down to words by
-    removing the markers that parse as their own grammar (:data:`_TAIL_MARKER_RE`) and
-    the separator characters, so ``(carried-forward)``, ``[no-contradicts]`` and a
-    trailing ``.`` are not prose and ``— a felt sentence`` is. A ``[[name]]`` reference
-    is a pattern name, which is composer text on every line already, so it is not read
-    as a claim.
+    ``match`` is the tag's own match on ``line``. What follows (up to a second marker's
+    name) is cut down to words by removing the markers that parse as their own grammar
+    (:data:`_TAIL_MARKER_RE`) and the separator characters, so ``(carried-forward)``,
+    ``[no-contradicts]`` and a trailing ``.`` are not prose and ``— a felt sentence``
+    is. A ``[[name]]`` reference is a pattern name, which is composer text on every
+    line already, so it is not read as a claim.
 
     Returns ``""`` when what is left cannot carry a claim the grounding rule could be
-    asked about: fewer than two words with an ASCII letter in them (the rule needs two
-    shared words, and a date or a version tag is not one) and no letter outside ASCII.
-    Text in another script is always returned, because the rule reads ASCII words only
-    and so could never ground it.
+    asked about: fewer than two words made of ASCII letters (the rule needs two shared
+    words, and a date or a version tag is not one) and no letter outside ASCII. Text in
+    another script is always returned, because the rule reads ASCII words only and so
+    could never ground it.
     """
-    tail = _TAIL_MARKER_RE.sub(" ", line[match.end():])
-    ascii_words = sum(1 for w in _meaningful_words(tail) if re.search("[a-z]", w))
-    if ascii_words < 2 and not _has_non_ascii_letter(tail):
+    tail = _TAIL_MARKER_RE.sub(" ", _split_tail(line, match)[0])
+    if len(re.findall("[A-Za-z]+", tail)) < 2 and not _has_non_ascii_letter(tail):
         return ""
     return re.sub(r"\s+", " ", tail).strip(" \t—–-:|")
 
 
 def _has_non_ascii_letter(text: str) -> bool:
-    return any(c.isalpha() and not c.isascii() for c in text)
+    """True when ``text`` holds a letter ASCII cannot spell. An accented Latin letter
+    folds to its base letter and is not one (``café``); another script, or a letter with
+    no ASCII base, is."""
+    return any(c.isalpha() and not c.isascii()
+               for c in unicodedata.normalize("NFKD", text))
 
 
-def _kept_markers(tail: str) -> str:
-    """``tail`` cut to its markers: the known tags and parentheticals, each kept as
-    written and joined by single spaces; every other character is dropped."""
-    found = [m.group(0) for m in _TAIL_MARKER_RE.finditer(tail)]
-    return (" " + " ".join(found)) if found else ""
+def _cut_tail(line: str, match: "re.Match[str]") -> str:
+    """``line`` with the prose after ``match``'s evidence tag removed: the declarative
+    markers stay, as written; a second marker's name and everything after it stay
+    untouched; every other character of the tail goes."""
+    own, rest = _split_tail(line, match)
+    found = [m.group(0) for m in _KEPT_MARKER_RE.finditer(own)]
+    kept = (" " + " ".join(found)) if found else ""
+    sep = " " if rest and not rest[0].isspace() and not kept.endswith(" ") else ""
+    return line[:match.end()] + kept + sep + rest
 
 
 class PatternSummary(NamedTuple):

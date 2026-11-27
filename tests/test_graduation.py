@@ -3615,7 +3615,7 @@ class TestLevelCapAM_LEVELCAP:
         )
 
     def _run(self, level):
-        ncm = {i: self.EXPL + " in the episode body" for i in self.IDS}
+        ncm = {i: self.EXPL + " in the episode body, felt prose" for i in self.IDS}
         return validate_graduations(
             self._line(level), set(self.IDS), "2026-08-13",
             node_content_map=ncm, citations_seen=True,
@@ -3790,7 +3790,7 @@ class TestTrailingProseIsGrounded:
 
     @pytest.mark.parametrize(
         "suffix",
-        [" — concurrency", " (2026-05-01)", " (v10)", " [supersedes: aaaaaaaa by bbbbbbbb]"],
+        [" — concurrency", " (2026-05-01)", " (v10)", " — see"],
     )
     def test_a_tail_too_short_to_ground_or_a_directive_is_not_a_claim(self, suffix):
         res = self._run(suffix)
@@ -3812,3 +3812,59 @@ class TestTrailingProseIsGrounded:
         res = self._run(suffix)
         assert (res.validated, res.demoted) == (0, 1), suffix
         assert "fridays" not in res.text and "团队" not in res.text
+
+    # -- L3 round 1 --
+
+    @pytest.mark.parametrize(
+        "suffix",
+        [
+            " — magic magic",
+            " — it is magic words",
+            " [renamed: lie -> truth]",
+            " [supersedes: aaaaaaaa by bbbbbbbb]",
+            " — [[ſecret_claim]]",
+        ],
+    )
+    def test_repeats_misplaced_directives_and_lookalike_letters_are_read(self, suffix):
+        res = self._run(suffix)
+        assert (res.validated, res.demoted) == (0, 1), suffix
+
+    def test_an_accented_word_does_not_fail_a_grounded_suffix(self):
+        res = self._run(" — café migration path rule stays hard")
+        assert (res.validated, res.demoted) == (1, 0)
+
+    def test_a_citation_that_resolves_to_nothing_loses_its_suffix_too(self):
+        text = (
+            "## State\nx.\n## Patterns\n"
+            '- alpha | 3x (2026-05-21) [evidence: deadbeef "concurrency safety invariant"]'
+            " — the team loved shipping on fridays\n## Decisions\n.\n## Context\n.\n"
+        )
+        res = validate_graduations(
+            text=text, valid_ids={"abc12345"}, today="2026-05-21",
+            node_content_map={"abc12345": self.EPISODE},
+        )
+        assert res.validated == 0 and "fridays" not in res.text
+
+    def test_the_cut_keeps_declarations_but_never_a_state_word_the_composer_wrote(self):
+        res = self._run(
+            " [no-contradicts] — we promised (carried-forward) on fridays [provenance: abc12345]"
+        )
+        assert "fridays" not in res.text
+        assert "[no-contradicts]" in res.text and "[provenance: abc12345]" in res.text
+        assert "(carried-forward)" not in res.text
+
+    def test_a_second_marker_on_the_same_line_is_judged_by_its_own_tag_and_left_whole(self):
+        text = (
+            "## State\nx.\n## Patterns\n"
+            '- alpha | 2x (2026-05-21) [evidence: abc12345 "concurrency safety invariant"]'
+            ' - beta | 2x (2026-05-21) [evidence: def67890 "we shipped it"]\n'
+            "## Decisions\n.\n## Context\n.\n"
+        )
+        res = validate_graduations(
+            text=text, valid_ids={"abc12345", "def67890"}, today="2026-05-21",
+            node_content_map={"abc12345": self.EPISODE, "def67890": "we shipped it"},
+        )
+        assert res.validated == 1
+        assert '- beta | 2x (2026-05-21) [evidence: def67890 "we shipped it"]' in res.text
+        res2 = self._run(" claim words here - beta | 2x (2026-05-21)")
+        assert "claim words" not in res2.text and "- beta | 2x (2026-05-21)" in res2.text

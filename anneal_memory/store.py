@@ -9712,9 +9712,8 @@ class Store:
           ``wrap_undo`` rows the save wrote (bar the aged-out mark a prune puts
           on a restored ``pattern_grounding`` row). A wrap saved before those
           rows existed, or one that is no longer the newest wrap's save (a
-          second revert in a row), has none: ``pattern_levels`` is then adjusted
-          from the two texts, ``pattern_history``, the supersession links and a
-          compost's grounding are left as they are
+          second revert in a row), has none: only ``pattern_levels`` is then
+          adjusted from the two texts and the rest is left as it is
           (``undone["pattern_history_exact"]`` is 0 and the receipt's
           ``pattern_state_exact`` is False);
         - a save-idempotency record whose stored result names the wrap;
@@ -10996,10 +10995,11 @@ class Store:
     def rename_pattern_association(
         self, old_name: str, new_name: str, today: str | None = None
     ) -> int:
-        """Rename a pattern: the SAME concept under a new name (first-class alias).
-        What it moves and what it leaves is what the body below does; the wrap
-        save's ``[renamed:]`` path (``validated_save_continuity`` in continuity.py)
-        is written to make the same move. Returns edges re-keyed.
+        """Rename a pattern: the SAME concept under a new name (first-class alias;
+        edges merge if the target pair exists). What else it moves and what it
+        leaves is what the body below does; the wrap save's ``[renamed:]`` path
+        (``validated_save_continuity`` in continuity.py) calls this method.
+        Returns edges re-keyed.
 
         Warns:
             UserWarning: if the audit event could not be written. The

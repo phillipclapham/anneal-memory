@@ -970,6 +970,24 @@ def validate_graduations(
                         explanation_valid = True
                         break
 
+            # The text AFTER the closing bracket is a second explanation the check above
+            # never read, and the pattern summary and the crystal explanation both prefer
+            # it. It must clear the same bar against the same cited episodes, and only an
+            # episode the trust policy admits can ground it. It has its own flag, never
+            # ``explanation_valid``: the preservation and cross-session logic below read
+            # the quote, and a failed suffix must not be reported as a sycophancy finding.
+            # Like the explanation check it needs episode content, but it does not need a
+            # quote, so a bare citation followed by prose is checked too.
+            suffix_ungrounded = False
+            trailing = _trailing_prose(line, match)
+            if trailing and ids_valid and node_content_map:
+                suffix_ungrounded = _has_non_ascii_letter(trailing) or not any(
+                    check_explanation_overlap(trailing, node_content_map.get(cid, ""))
+                    for cid in cited_ids & valid_ids
+                    if trust_of is None
+                    or trust_rank(trust_of(cid)) >= trust_rank(DEFAULT_TRUST)
+                )
+
             # Cross-session sycophantic-accumulation check (Phase 1b probe #1).
             # AM-XSESSION-LINKGATE (v0.4.3): computed whenever the citation
             # resolves (``ids_valid``) and the pattern has prior history —
@@ -1260,9 +1278,15 @@ def validate_graduations(
                 and trust_rank(grounding_trust) < trust_rank(DEFAULT_TRUST)
             )
 
+            if suffix_ungrounded:
+                # The ungrounded text goes with the line's other ungrounded text: the
+                # tag is replaced below, and the prose after it is cut to its markers,
+                # so a demoted or held line does not keep it as its meaning.
+                line = line[:match.end()] + _kept_markers(line[match.end():])
+
             if (
                 ids_valid and explanation_valid and not cross_session_overlap_words
-                and not uncorroborated_line
+                and not uncorroborated_line and not suffix_ungrounded
             ):
                 validated += 1
                 validated_lines[i] = match.start()
@@ -2236,6 +2260,57 @@ _STATE_PAREN_RE = re.compile(
     r"no-contradicts|level-capped|uncorroborated)\)",
     re.IGNORECASE,
 )
+
+
+# A marker after the evidence tag is a marker only when its body parses as that marker's
+# own grammar. The readers (the summary, the crystal explanation) take every other
+# character as meaning, so the check must too: a ``[contradicts: a sentence]`` or a
+# second ``[evidence: id "claim"]`` is prose, and its words are read.
+_TAIL_MARKER_RE = re.compile(
+    r"\[(?:no-contradicts|Proven|Developing|ungrounded|needs-evidence"
+    r"|cross-session-overlap|carried-forward|level-capped|uncorroborated)\]"
+    rf"|{_STATE_PAREN_RE.pattern}"
+    rf"|{_CONTRADICTS_RE.pattern}"
+    rf"|{_PROVENANCE_RE.pattern}"
+    r"|\[supersedes:\s*[0-9A-Fa-f]{8}\s+by\s+[0-9A-Fa-f]{8}\s*\]"
+    r"|\[renamed:\s*[A-Za-z][A-Za-z0-9_.\-]*\s*->\s*[A-Za-z][A-Za-z0-9_.\-]*\s*\]"
+    r"|\[\[[A-Za-z][A-Za-z0-9_.\-]*\]\]",  # a reference to a pattern name
+    re.IGNORECASE,
+)
+
+
+def _trailing_prose(line: str, match: "re.Match[str]") -> str:
+    """The prose a pattern line carries AFTER its evidence tag, or ``""``.
+
+    ``match`` is the tag's own match on ``line``. What follows is cut down to words by
+    removing the markers that parse as their own grammar (:data:`_TAIL_MARKER_RE`) and
+    the separator characters, so ``(carried-forward)``, ``[no-contradicts]`` and a
+    trailing ``.`` are not prose and ``— a felt sentence`` is. A ``[[name]]`` reference
+    is a pattern name, which is composer text on every line already, so it is not read
+    as a claim.
+
+    Returns ``""`` when what is left cannot carry a claim the grounding rule could be
+    asked about: fewer than two words with an ASCII letter in them (the rule needs two
+    shared words, and a date or a version tag is not one) and no letter outside ASCII.
+    Text in another script is always returned, because the rule reads ASCII words only
+    and so could never ground it.
+    """
+    tail = _TAIL_MARKER_RE.sub(" ", line[match.end():])
+    ascii_words = sum(1 for w in _meaningful_words(tail) if re.search("[a-z]", w))
+    if ascii_words < 2 and not _has_non_ascii_letter(tail):
+        return ""
+    return re.sub(r"\s+", " ", tail).strip(" \t—–-:|")
+
+
+def _has_non_ascii_letter(text: str) -> bool:
+    return any(c.isalpha() and not c.isascii() for c in text)
+
+
+def _kept_markers(tail: str) -> str:
+    """``tail`` cut to its markers: the known tags and parentheticals, each kept as
+    written and joined by single spaces; every other character is dropped."""
+    found = [m.group(0) for m in _TAIL_MARKER_RE.finditer(tail)]
+    return (" " + " ".join(found)) if found else ""
 
 
 class PatternSummary(NamedTuple):

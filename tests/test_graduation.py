@@ -21,6 +21,7 @@ from anneal_memory.graduation import (
     validate_graduations,
 )
 from anneal_memory.schema import FLOW_SCHEMA, graduating_headings
+from anneal_memory.types import DEFAULT_TRUST
 
 # -- Test fixtures --
 
@@ -3657,3 +3658,157 @@ class TestLevelCapAM_LEVELCAP:
             f"skipped_non_today={res.skipped_non_today} "
             f"carried={len(res.carried_forward)}"
         )
+
+
+class TestTrailingProseIsGrounded:
+    """Text after the evidence tag is read by the grounding check too.
+
+    Before: ``name | 2x (d) [evidence: id "grounded quote"] <anything>`` validated on the
+    quote alone, while the pattern summary and the crystal explanation took the suffix
+    as the line's meaning. The suffix now clears ``check_explanation_overlap`` against
+    the same cited episodes, or the line is treated as ungrounded.
+    """
+
+    EPISODE = "we made the concurrency safety invariant a hard rule for the migration path"
+
+    def _run(self, suffix: str):
+        text = (
+            "## State\nx.\n## Patterns\n"
+            f'- alpha | 2x (2026-05-21) [evidence: abc12345 "concurrency safety invariant"]{suffix}\n'
+            "## Decisions\n.\n## Context\n.\n"
+        )
+        return validate_graduations(
+            text=text,
+            valid_ids={"abc12345"},
+            today="2026-05-21",
+            node_content_map={"abc12345": self.EPISODE},
+        )
+
+    def test_a_suffix_with_no_grounding_demotes_the_line(self):
+        res = self._run(" — the team loved shipping on fridays")
+        assert (res.validated, res.demoted) == (0, 1)
+        assert "| 1x" in res.text and "(ungrounded)" in res.text
+
+    def test_a_suffix_that_grounds_in_a_cited_episode_validates(self):
+        res = self._run(" — migration path rule stays hard")
+        assert (res.validated, res.demoted) == (1, 0)
+
+    @pytest.mark.parametrize(
+        "suffix",
+        [
+            "",
+            ".",
+            " [no-contradicts]",
+            " [contradicts: beta, gamma]",
+            " [provenance: abc12345]",
+            " (carried-forward)",
+            " [[sibling_pattern]]",
+            " [no-contradicts] (cross-session-overlap)",
+        ],
+    )
+    def test_markers_and_punctuation_are_not_prose(self, suffix):
+        res = self._run(suffix)
+        assert (res.validated, res.demoted) == (1, 0), suffix
+
+    def test_a_bare_citation_with_ungrounded_prose_demotes(self):
+        text = (
+            "## State\nx.\n## Patterns\n"
+            "- alpha | 2x (2026-05-21) [evidence: abc12345] — unrelated cheerful commentary\n"
+            "## Decisions\n.\n## Context\n.\n"
+        )
+        res = validate_graduations(
+            text=text, valid_ids={"abc12345"}, today="2026-05-21",
+            node_content_map={"abc12345": self.EPISODE},
+        )
+        assert (res.validated, res.demoted) == (0, 1)
+
+    def test_no_episode_content_means_no_grounding_for_either_text(self):
+        text = (
+            "## State\nx.\n## Patterns\n"
+            '- alpha | 2x (2026-05-21) [evidence: abc12345 "whatever"] — anything at all\n'
+            "## Decisions\n.\n## Context\n.\n"
+        )
+        res = validate_graduations(text=text, valid_ids={"abc12345"}, today="2026-05-21")
+        assert (res.validated, res.demoted) == (1, 0)
+
+    def test_the_summary_no_longer_carries_an_unvalidated_suffix_as_a_validated_meaning(self):
+        # The demoted line keeps its text, but it is level 1 and marked ungrounded: the
+        # suffix is no longer the meaning of a graduated pattern.
+        res = self._run(" — the team loved shipping on fridays")
+        names = [s for s in extract_pattern_summaries(res.text) if s.level >= 2]
+        assert names == []
+
+    # -- L1 round 1: the findings that shaped the fix --
+
+    def _history(self, quote, max_level=3):
+        return lambda name: {
+            "max_level_reached": max_level,
+            "explanation_corpus": quote,
+            "last_seen_at": "2026-05-20T00:00:00Z",
+        }
+
+    def _warm_run(self, suffix, trust_of=None, content=None):
+        text = (
+            "## State\nx.\n## Patterns\n"
+            f'- alpha | 3x (2026-05-21) [evidence: abc12345 "concurrency safety invariant"]{suffix}\n'
+            "## Decisions\n.\n## Context\n.\n"
+        )
+        return validate_graduations(
+            text=text, valid_ids={"abc12345", "eeee0000"}, today="2026-05-21",
+            node_content_map=content or {"abc12345": self.EPISODE},
+            pattern_history_lookup=self._history("concurrency safety invariant"),
+            prior_levels={"alpha": 3}, trust_of=trust_of,
+        )
+
+    def test_a_preserved_warm_line_with_a_bad_suffix_is_held_not_called_sycophancy(self):
+        res = self._warm_run(" — the team loved shipping on fridays")
+        assert res.cross_session_collisions == []
+        assert res.validated == 0 and len(res.carried_forward) == 1
+
+    def test_a_held_or_demoted_line_does_not_keep_the_ungrounded_suffix(self):
+        res = self._warm_run(" [no-contradicts] — the team loved shipping on fridays")
+        assert "fridays" not in res.text
+        assert "[no-contradicts]" in res.text and "(carried-forward)" in res.text
+        assert [s.summary for s in extract_pattern_summaries(res.text)] == [""]
+        cold = self._run(" — the team loved shipping on fridays")
+        assert "fridays" not in cold.text
+
+    def test_an_external_episode_cannot_ground_the_suffix(self):
+        content = {"abc12345": self.EPISODE,
+                   "eeee0000": "the team loved shipping on fridays and said so"}
+        text = (
+            "## State\nx.\n## Patterns\n"
+            '- alpha | 2x (2026-05-21) [evidence: abc12345, eeee0000 "concurrency safety invariant"]'
+            " — the team loved shipping on fridays\n## Decisions\n.\n## Context\n.\n"
+        )
+        res = validate_graduations(
+            text=text, valid_ids={"abc12345", "eeee0000"}, today="2026-05-21",
+            node_content_map=content,
+            trust_of=lambda cid: "external" if cid == "eeee0000" else DEFAULT_TRUST,
+        )
+        assert res.validated == 0
+
+    @pytest.mark.parametrize(
+        "suffix",
+        [" — concurrency", " (2026-05-01)", " (v10)", " [supersedes: aaaaaaaa by bbbbbbbb]"],
+    )
+    def test_a_tail_too_short_to_ground_or_a_directive_is_not_a_claim(self, suffix):
+        res = self._run(suffix)
+        assert (res.validated, res.demoted) == (1, 0), suffix
+
+    # -- L2 round 1: a marker is a marker only when it parses as its own grammar --
+
+    @pytest.mark.parametrize(
+        "suffix",
+        [
+            " — 团队喜欢在周五发布",
+            " — [[the team loved shipping on fridays]]",
+            " — the claim [contradicts: the team loved shipping on fridays] stays",
+            ' [evidence: def67890 "the team loved shipping on fridays"]',
+            " [provenance: the team loved shipping on fridays]",
+        ],
+    )
+    def test_prose_dressed_as_a_marker_or_in_another_script_is_not_waved_through(self, suffix):
+        res = self._run(suffix)
+        assert (res.validated, res.demoted) == (0, 1), suffix
+        assert "fridays" not in res.text and "团队" not in res.text

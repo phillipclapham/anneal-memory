@@ -3819,7 +3819,7 @@ class TestTrailingProseIsGrounded:
         "suffix",
         [
             " — magic magic",
-            " — it is magic words",
+            " — it is magic",
             " [renamed: lie -> truth]",
             " [supersedes: aaaaaaaa by bbbbbbbb]",
             " — [[ſecret_claim]]",
@@ -3882,3 +3882,24 @@ class TestTrailingProseIsGrounded:
     def test_compat_letters_and_a_bare_level_token_in_prose_do_not_hide_a_claim(self, suffix):
         res = self._run(suffix)
         assert (res.validated, res.demoted) == (0, 1), suffix
+
+    def test_a_single_accented_word_is_one_word(self):
+        res = self._run(" — naïve")
+        assert (res.validated, res.demoted) == (1, 0)
+
+    def test_a_citation_to_nothing_loses_its_suffix_even_with_no_episode_content(self):
+        text = (
+            "## State\nx.\n## Patterns\n"
+            '- alpha | 3x (2026-05-21) [evidence: deadbeef "concurrency safety invariant"]'
+            " — the team loved shipping on fridays\n## Decisions\n.\n## Context\n.\n"
+        )
+        for content in (None, {}):
+            res = validate_graduations(
+                text=text, valid_ids=set(), today="2026-05-21", node_content_map=content,
+            )
+            assert "fridays" not in res.text, content
+
+    def test_the_second_markers_name_is_found_at_a_word_boundary(self):
+        res = self._run(" — bad claim! beta | 2x (2026-05-21)")
+        assert "(ungrounded) beta | 2x (2026-05-21)\n" in res.text
+        assert "claim" not in res.text and "!" not in res.text

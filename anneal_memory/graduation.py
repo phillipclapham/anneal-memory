@@ -981,9 +981,9 @@ def validate_graduations(
             # resolves to nothing grounds nothing, so the prose after it fails as well.
             suffix_ungrounded = False
             trailing = _trailing_prose(line, match)
-            if trailing and node_content_map:
+            if trailing and (node_content_map or not ids_valid):
                 suffix_ungrounded = not ids_valid or _has_non_ascii_letter(trailing) or not any(
-                    check_explanation_overlap(trailing, node_content_map.get(cid, ""))
+                    check_explanation_overlap(trailing, (node_content_map or {}).get(cid, ""))
                     for cid in cited_ids & valid_ids
                     if trust_of is None
                     or trust_rank(trust_of(cid)) >= trust_rank(DEFAULT_TRUST)
@@ -2288,7 +2288,7 @@ _TAIL_MARKER_RE = re.compile(
 # the same line: it sits just before that marker's ``|`` and is that marker's, not prose.
 _DATED_LEVEL_TOKEN_RE = re.compile(r"\|\s*\d+x\s*\(\d{4}-\d{2}-\d{2}\)")
 _NEXT_MARKER_NAME_RE = re.compile(
-    r"(?:(?:[-*•>]|!+|\?|✓)[ \t]*)*[A-Za-z][A-Za-z0-9_.\-]*[ \t]*$"
+    r"(?:^|(?<=[ \t]))(?:(?:[-*•>]|!+|\?|✓)[ \t]*)*[A-Za-z][A-Za-z0-9_.\-]*[ \t]*$"
 )
 
 

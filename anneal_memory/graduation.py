@@ -983,7 +983,8 @@ def validate_graduations(
             trailing = _trailing_prose(line, match)
             if trailing and (node_content_map or not ids_valid):
                 suffix_ungrounded = not ids_valid or _has_non_ascii_letter(trailing) or not any(
-                    check_explanation_overlap(trailing, (node_content_map or {}).get(cid, ""))
+                    check_explanation_overlap(
+                        trailing, _ascii_fold((node_content_map or {}).get(cid, "")))
                     for cid in cited_ids & valid_ids
                     if trust_of is None
                     or trust_rank(trust_of(cid)) >= trust_rank(DEFAULT_TRUST)
@@ -2286,9 +2287,12 @@ _TAIL_MARKER_RE = re.compile(
 )
 # The name, with its bullet or marker prefix, of a second pattern marker that follows on
 # the same line: it sits just before that marker's ``|`` and is that marker's, not prose.
-_DATED_LEVEL_TOKEN_RE = re.compile(r"\|\s*\d+x\s*\(\d{4}-\d{2}-\d{2}\)")
+_DATED_LEVEL_TOKEN_RE = re.compile(r"\|[ \t]*[0-9]+x[ \t]*\([0-9]{4}-[0-9]{2}-[0-9]{2}\)")
+# A second marker's name carries the bullet or FlowScript marker a pattern line needs
+# (``_NAMED_PATTERN_RE``), so a word in a sentence that happens to precede ``| 2x (date)``
+# is not one. One character class per step, so a run of ``!`` has one way to match.
 _NEXT_MARKER_NAME_RE = re.compile(
-    r"(?:^|(?<=[ \t]))(?:(?:[-*•>]|!+|\?|✓)[ \t]*)*[A-Za-z][A-Za-z0-9_.\-]*[ \t]*$"
+    r"(?:^|(?<=[ \t]))(?:[-*•>!?✓][ \t]*)+[A-Za-z][A-Za-z0-9_.\-]*[ \t]*$"
 )
 
 
@@ -2297,18 +2301,20 @@ def _split_tail(line: str, match: "re.Match[str]") -> tuple[str, str]:
     what this marker's tag can speak for, and ``rest`` is a second marker's name and
     everything from its level token on, which belong to that marker."""
     tail = line[match.end():]
-    # A second marker is a COMPLETE one: its level token carries a date. A bare
-    # ``| 2x`` in the middle of a sentence is prose, and the whole tail is read.
-    cut = _next_level_token(tail)
-    while cut < len(tail) and not _DATED_LEVEL_TOKEN_RE.match(tail, cut):
-        step = _next_level_token(tail[cut + 1:])
-        cut = len(tail) if step == len(tail[cut + 1:]) else cut + 1 + step
-    own, rest = tail[:cut], tail[cut:]
-    if rest:
-        m = _NEXT_MARKER_NAME_RE.search(own)
-        if m:
-            own, rest = own[:m.start()], own[m.start():] + rest
-    return own, rest
+    # A second marker is a COMPLETE one: a name with its bullet or marker, then a level
+    # token that carries a date. A bare ``| 2x``, or one that follows a plain word, in the
+    # middle of a sentence is prose, and the whole tail is read.
+    pos = 0
+    while True:
+        step = _next_level_token(tail[pos:])
+        cut = pos + step
+        if cut >= len(tail):
+            return tail, ""
+        if _DATED_LEVEL_TOKEN_RE.match(tail, cut):
+            m = _NEXT_MARKER_NAME_RE.search(tail[:cut])
+            if m:
+                return tail[:m.start()], tail[m.start():]
+        pos = cut + 1
 
 
 def _trailing_prose(line: str, match: "re.Match[str]") -> str:

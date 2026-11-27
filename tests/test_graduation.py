@@ -3900,6 +3900,31 @@ class TestTrailingProseIsGrounded:
             assert "fridays" not in res.text, content
 
     def test_the_second_markers_name_is_found_at_a_word_boundary(self):
-        res = self._run(" — bad claim! beta | 2x (2026-05-21)")
-        assert "(ungrounded) beta | 2x (2026-05-21)\n" in res.text
+        res = self._run(" — bad claim! - beta | 2x (2026-05-21)")
+        assert "(ungrounded) - beta | 2x (2026-05-21)\n" in res.text
         assert "claim" not in res.text and "!" not in res.text
+
+    # -- L3 round 3 --
+
+    def test_a_plain_word_before_a_dated_level_token_is_not_a_second_marker(self):
+        res = self._run(" — beta | 2x (2026-05-21) totally unsupported claim")
+        assert (res.validated, res.demoted) == (0, 1)
+        assert "unsupported" not in res.text
+
+    def test_accented_words_in_the_episode_ground_the_same_words_in_the_suffix(self):
+        text = (
+            "## State\nx.\n## Patterns\n"
+            '- alpha | 2x (2026-05-21) [evidence: abc12345 "concurrency fix"] — naïve résumé café\n'
+            "## Decisions\n.\n## Context\n.\n"
+        )
+        res = validate_graduations(
+            text=text, valid_ids={"abc12345"}, today="2026-05-21",
+            node_content_map={"abc12345": "the concurrency fix, a naïve résumé and a café"},
+        )
+        assert (res.validated, res.demoted) == (1, 0)
+
+    def test_a_run_of_bangs_before_a_dated_token_is_linear_time(self):
+        import time
+        t = time.perf_counter()
+        self._run(" " + "!" * 5000 + " | 2x (2026-05-21)")
+        assert time.perf_counter() - t < 5.0

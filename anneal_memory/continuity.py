@@ -1331,7 +1331,11 @@ def _build_wrap_instructions(
             how_lines.append(
                 f"- {h}: Extract principles, not facts. Group in `{{topic: ...}}` "
                 f"blocks. This is the section the immune system reads — follow the "
-                f"pattern-line format above."
+                f"pattern-line format above. Keep each operational lesson (something "
+                f"to act on later) as an instruction with its mechanism and its "
+                f"checking clause (what to do, why it holds, how to check it), "
+                f"saying only what the episodes show; never compress a lesson into "
+                f"only a dated record or a conclusion."
             )
         elif role == "decisions":
             how_lines.append(

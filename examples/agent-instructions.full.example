@@ -300,6 +300,10 @@ chain, and on Windows, which has no such lock, keep to one writer.
   include the marker reference and format requirements
 - Principles over facts: "We keep hitting X because Y" > "X happened"
 - One insightful line > three vague ones
+- Keep each operational lesson as an instruction with its mechanism and its
+  checking clause (what to do, why it holds, how to check it), saying only what
+  the episodes show; never compress a lesson into only a dated record or a
+  conclusion
 - Temporal graduation: new patterns start at 1x, validated patterns
   climb to 2x, 3x, 4x and onward — no ceiling — with evidence citations referencing episode IDs
 - If removing something wouldn't change your next decision, cut it

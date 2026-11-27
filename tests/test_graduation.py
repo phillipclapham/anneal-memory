@@ -1224,6 +1224,24 @@ class TestTeacherCoversReaderRange:
                 "instructions — an agent obeying them re-caps a library that does not"
             )
 
+    def test_lesson_instruction_sits_in_the_graduating_bullet_of_every_schema(self):
+        """The lesson-keeping instruction is part of the graduating section's own
+        how-to-compress bullet (not the document-wide Quality block, which reaches
+        derived-state and durable sections), for every named schema."""
+        from anneal_memory.continuity import _build_wrap_instructions
+        from anneal_memory.schema import SCHEMA_NAMES, schema_by_name
+
+        for name in SCHEMA_NAMES:
+            schema = schema_by_name(name)
+            delivered = _build_wrap_instructions("proj", None, "2026-08-31", schema)
+            for section in (s for s in schema if s["role"] == "graduating"):
+                start = delivered.index(f"- {section['heading']}: Extract principles")
+                bullet = delivered[start:].split("\n- ", 1)[0].split("\n\n", 1)[0]
+                assert "mechanism and its checking clause" in bullet, name
+                assert "never compress a lesson into only a dated record" in bullet, name
+            quality = delivered.split("**Quality:**", 1)[1]
+            assert "checking clause" not in quality, name
+
     def test_delivered_instructions_show_a_level_above_the_cap(self):
         import re as _re
 

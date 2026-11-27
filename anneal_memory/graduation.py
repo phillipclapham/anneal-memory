@@ -2286,6 +2286,7 @@ _TAIL_MARKER_RE = re.compile(
 )
 # The name, with its bullet or marker prefix, of a second pattern marker that follows on
 # the same line: it sits just before that marker's ``|`` and is that marker's, not prose.
+_DATED_LEVEL_TOKEN_RE = re.compile(r"\|\s*\d+x\s*\(\d{4}-\d{2}-\d{2}\)")
 _NEXT_MARKER_NAME_RE = re.compile(
     r"(?:(?:[-*•>]|!+|\?|✓)[ \t]*)*[A-Za-z][A-Za-z0-9_.\-]*[ \t]*$"
 )
@@ -2296,7 +2297,12 @@ def _split_tail(line: str, match: "re.Match[str]") -> tuple[str, str]:
     what this marker's tag can speak for, and ``rest`` is a second marker's name and
     everything from its level token on, which belong to that marker."""
     tail = line[match.end():]
+    # A second marker is a COMPLETE one: its level token carries a date. A bare
+    # ``| 2x`` in the middle of a sentence is prose, and the whole tail is read.
     cut = _next_level_token(tail)
+    while cut < len(tail) and not _DATED_LEVEL_TOKEN_RE.match(tail, cut):
+        step = _next_level_token(tail[cut + 1:])
+        cut = len(tail) if step == len(tail[cut + 1:]) else cut + 1 + step
     own, rest = tail[:cut], tail[cut:]
     if rest:
         m = _NEXT_MARKER_NAME_RE.search(own)
@@ -2321,18 +2327,27 @@ def _trailing_prose(line: str, match: "re.Match[str]") -> str:
     another script is always returned, because the rule reads ASCII words only and so
     could never ground it.
     """
-    tail = _TAIL_MARKER_RE.sub(" ", _split_tail(line, match)[0])
+    tail = _ascii_fold(_TAIL_MARKER_RE.sub(" ", _split_tail(line, match)[0]))
     if len(re.findall("[A-Za-z]+", tail)) < 2 and not _has_non_ascii_letter(tail):
         return ""
     return re.sub(r"\s+", " ", tail).strip(" \t—–-:|")
 
 
+def _ascii_fold(text: str) -> str:
+    """``text`` with each accent taken off its letter (canonical decomposition, the
+    combining marks dropped), so ``café`` reads ``cafe``. NOT a compatibility fold: a
+    fullwidth, mathematical or ligature letter keeps its form and stays non-ASCII, which
+    is what the grounding rule, that reads ASCII words only, needs it to be."""
+    return "".join(
+        c for c in unicodedata.normalize("NFD", text) if not unicodedata.combining(c)
+    )
+
+
 def _has_non_ascii_letter(text: str) -> bool:
-    """True when ``text`` holds a letter ASCII cannot spell. An accented Latin letter
-    folds to its base letter and is not one (``café``); another script, or a letter with
-    no ASCII base, is."""
-    return any(c.isalpha() and not c.isascii()
-               for c in unicodedata.normalize("NFKD", text))
+    """True when ``text`` holds a letter ASCII cannot spell. Pass the output of
+    :func:`_ascii_fold`: an accented Latin letter is then its base letter, and another
+    script, or a letter with no canonical ASCII base, is the non-ASCII one."""
+    return any(c.isalpha() and not c.isascii() for c in text)
 
 
 def _cut_tail(line: str, match: "re.Match[str]") -> str:

@@ -3868,3 +3868,17 @@ class TestTrailingProseIsGrounded:
         assert '- beta | 2x (2026-05-21) [evidence: def67890 "we shipped it"]' in res.text
         res2 = self._run(" claim words here - beta | 2x (2026-05-21)")
         assert "claim words" not in res2.text and "- beta | 2x (2026-05-21)" in res2.text
+
+    # -- L3 round 2 --
+
+    @pytest.mark.parametrize(
+        "suffix",
+        [
+            " — ＵＮＳＵＰＰＯＲＴＥＤ ＣＬＡＩＭ",
+            " — 𝐭𝐡𝐞 𝐭𝐞𝐚𝐦 𝐥𝐨𝐯𝐞𝐝",
+            " — beta | 2x totally unsupported claim",
+        ],
+    )
+    def test_compat_letters_and_a_bare_level_token_in_prose_do_not_hide_a_claim(self, suffix):
+        res = self._run(suffix)
+        assert (res.validated, res.demoted) == (0, 1), suffix

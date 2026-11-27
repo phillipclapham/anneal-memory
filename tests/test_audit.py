@@ -10546,6 +10546,7 @@ class TestKL24AppendLockHolders:
             "        refused += 1\n"
             "    if i == 0:\n"
             f"        Path({str(tmp_path)!r}, 'wrote-' + sys.argv[1]).write_text('x')\n"
+            f"        while not Path({str(flag)!r}).exists(): time.sleep(0.005)\n"
             "    time.sleep(0.003)\n"
             f"Path({str(tmp_path)!r}, 'refused-' + sys.argv[1]).write_text(str(refused))\n"
         )
@@ -10554,10 +10555,17 @@ class TestKL24AppendLockHolders:
                  for w in range(n_proc)]
         def wait_for(prefix):
             deadline = time.monotonic() + 60
-            while not all((tmp_path / f"{prefix}-{w}").exists() for w in range(n_proc)):
+            while True:
                 missing = [w for w in range(n_proc) if not (tmp_path / f"{prefix}-{w}").exists()]
-                if time.monotonic() >= deadline or any(procs[w].poll() is not None for w in missing):
-                    raise AssertionError(f"writers {missing} never reached {prefix!r}")
+                if not missing:
+                    return
+                # Re-check the marker after poll(): a child that exited can no
+                # longer write it, but one that wrote it and exited between the
+                # two reads above must not count as missing.
+                dead = [w for w in missing if procs[w].poll() is not None
+                        and not (tmp_path / f"{prefix}-{w}").exists()]
+                if dead or time.monotonic() >= deadline:
+                    raise AssertionError(f"writers {dead or missing} never reached {prefix!r}")
                 time.sleep(0.01)
 
         # Two barriers, so the clock jump lands mid-run whatever the box's load:
@@ -10576,6 +10584,7 @@ class TestKL24AppendLockHolders:
             for p in procs:
                 if p.poll() is None:
                     p.kill()
+            for p in procs:
                 p.wait(timeout=20)
         # Ruled 10-08 (option (b)): a peer whose tip sat in the sealed file is
         # refused once, loudly, and never followed silently. One rotation, so

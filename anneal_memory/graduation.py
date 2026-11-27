@@ -2287,6 +2287,8 @@ _TAIL_MARKER_RE = re.compile(
 )
 # The name, with its bullet or marker prefix, of a second pattern marker that follows on
 # the same line: it sits just before that marker's ``|`` and is that marker's, not prose.
+_MAX_MARKER_CANDIDATES = 64
+_MARKER_NAME_WINDOW = 256
 _DATED_LEVEL_TOKEN_RE = re.compile(r"\|[ \t]*[0-9]+x[ \t]*\([0-9]{4}-[0-9]{2}-[0-9]{2}\)")
 # A second marker's name carries the bullet or FlowScript marker a pattern line needs
 # (``_NAMED_PATTERN_RE``), so a word in a sentence that happens to precede ``| 2x (date)``
@@ -2297,34 +2299,40 @@ _NEXT_MARKER_NAME_RE = re.compile(
 
 
 def _split_tail(line: str, match: "re.Match[str]") -> tuple[str, str]:
-    """``(own, rest)`` for the text after the evidence tag of ``match``: ``own`` is
-    what this marker's tag can speak for, and ``rest`` is a second marker's name and
-    everything from its level token on, which belong to that marker."""
+    """``(own, rest)`` for the text after the evidence tag of ``match``, for the CUT
+    only: ``own`` is what a failed check removes, and ``rest`` is a second marker's
+    name and everything from its level token on, which the cut leaves whole. The check
+    never splits: it reads the entire tail, second marker included, so nothing placed
+    behind a fake second marker escapes it.
+
+    A second marker is a complete one: a name with its bullet or marker, then a level
+    token that carries a date. A bare ``| 2x``, or one after a plain word, is prose and
+    goes with ``own``. The candidates tried are bounded, and the name is looked for in
+    a bounded window before its token, so a hostile line costs a bounded scan."""
     tail = line[match.end():]
-    # A second marker is a COMPLETE one: a name with its bullet or marker, then a level
-    # token that carries a date. A bare ``| 2x``, or one that follows a plain word, in the
-    # middle of a sentence is prose, and the whole tail is read.
     pos = 0
-    while True:
-        step = _next_level_token(tail[pos:])
-        cut = pos + step
+    for _ in range(_MAX_MARKER_CANDIDATES):
+        cut = pos + _next_level_token(tail[pos:])
         if cut >= len(tail):
-            return tail, ""
+            break
         if _DATED_LEVEL_TOKEN_RE.match(tail, cut):
-            m = _NEXT_MARKER_NAME_RE.search(tail[:cut])
-            if m:
-                return tail[:m.start()], tail[m.start():]
+            lo = max(0, cut - _MARKER_NAME_WINDOW)
+            m = _NEXT_MARKER_NAME_RE.search(tail[lo:cut])
+            if m and (lo == 0 or m.start() > 0):
+                start = lo + m.start()
+                return tail[:start], tail[start:]
         pos = cut + 1
+    return tail, ""
 
 
 def _trailing_prose(line: str, match: "re.Match[str]") -> str:
     """The prose a pattern line carries AFTER its evidence tag, or ``""``.
 
-    ``match`` is the tag's own match on ``line``. What follows (up to a second marker's
-    name) is cut down to words by removing the markers that parse as their own grammar
+    ``match`` is the tag's own match on ``line``. Everything that follows is cut down to
+    words by removing the markers that parse as their own grammar
     (:data:`_TAIL_MARKER_RE`) and the separator characters, so ``(carried-forward)``,
     ``[no-contradicts]`` and a trailing ``.`` are not prose and ``— a felt sentence``
-    is. A ``[[name]]`` reference is a pattern name, which is composer text on every
+    is. A second pattern marker on the same line is read as prose too. A ``[[name]]`` reference is a pattern name, which is composer text on every
     line already, so it is not read as a claim.
 
     Returns ``""`` when what is left cannot carry a claim the grounding rule could be
@@ -2333,7 +2341,7 @@ def _trailing_prose(line: str, match: "re.Match[str]") -> str:
     another script is always returned, because the rule reads ASCII words only and so
     could never ground it.
     """
-    tail = _ascii_fold(_TAIL_MARKER_RE.sub(" ", _split_tail(line, match)[0]))
+    tail = _ascii_fold(_TAIL_MARKER_RE.sub(" ", line[match.end():]))
     if len(re.findall("[A-Za-z]+", tail)) < 2 and not _has_non_ascii_letter(tail):
         return ""
     return re.sub(r"\s+", " ", tail).strip(" \t—–-:|")

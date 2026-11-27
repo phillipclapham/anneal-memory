@@ -3853,7 +3853,7 @@ class TestTrailingProseIsGrounded:
         assert "[no-contradicts]" in res.text and "[provenance: abc12345]" in res.text
         assert "(carried-forward)" not in res.text
 
-    def test_a_second_marker_on_the_same_line_is_judged_by_its_own_tag_and_left_whole(self):
+    def test_a_second_marker_is_read_as_prose_by_the_check_and_left_whole_by_the_cut(self):
         text = (
             "## State\nx.\n## Patterns\n"
             '- alpha | 2x (2026-05-21) [evidence: abc12345 "concurrency safety invariant"]'
@@ -3864,7 +3864,7 @@ class TestTrailingProseIsGrounded:
             text=text, valid_ids={"abc12345", "def67890"}, today="2026-05-21",
             node_content_map={"abc12345": self.EPISODE, "def67890": "we shipped it"},
         )
-        assert res.validated == 1
+        assert (res.validated, res.demoted) == (0, 1)
         assert '- beta | 2x (2026-05-21) [evidence: def67890 "we shipped it"]' in res.text
         res2 = self._run(" claim words here - beta | 2x (2026-05-21)")
         assert "claim words" not in res2.text and "- beta | 2x (2026-05-21)" in res2.text
@@ -3928,3 +3928,16 @@ class TestTrailingProseIsGrounded:
         t = time.perf_counter()
         self._run(" " + "!" * 5000 + " | 2x (2026-05-21)")
         assert time.perf_counter() - t < 5.0
+
+    # -- L3 round 4 --
+
+    def test_a_fake_second_marker_hides_nothing(self):
+        res = self._run(" - x | 2x (2026-05-21) totally unsupported claim")
+        assert (res.validated, res.demoted) == (0, 1)
+
+    def test_many_level_tokens_in_a_failing_tail_cost_a_bounded_scan(self):
+        import time
+        t = time.perf_counter()
+        res = self._run(" ! " * 2000 + " | 2x (2026-05-21)" * 2000)
+        assert time.perf_counter() - t < 5.0
+        assert res.validated == 0

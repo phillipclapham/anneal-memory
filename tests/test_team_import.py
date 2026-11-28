@@ -307,14 +307,10 @@ def test_cli_roundtrip_and_exit_codes(tmp_path):
     assert r.returncode == 3 and json.loads(r.stdout)["chain_problems"]
 
 
-def test_project_schema_store_sees_imported_entries_in_the_wrap(tmp_path):
-    """Owner canon is served without an anneal change: a project-schema store
-    imports a team ledger and prepare_wrap puts the entries in the wrap window."""
-    from anneal_memory import continuity
-    from anneal_memory.schema import PROJECT_SCHEMA
-
+def test_store_sees_imported_entries_in_the_wrap(tmp_path):
+    """Owner canon is served without an anneal change: a store imports a team
+    ledger and the entries are in the wrap window."""
     s = Store(tmp_path / "p.db", project_name="proj", audit=False)
-    s.set_section_schema(PROJECT_SCHEMA)
     import_ledger(s, ledger("alice", [RULING]) + ledger("bob", [{"type": "tension",
                   "reason": "rounding vs billing parity", "paths": ["billing/round.py"]}]))
     window = s.episodes_since_wrap()

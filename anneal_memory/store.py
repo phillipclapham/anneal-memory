@@ -233,12 +233,10 @@ def _reject_reserved_audit_kwargs(kwargs: dict[str, Any]) -> dict[str, Any]:
 # entirely under ``-W error`` (measured: zero signal of any kind), so it
 # cannot be the only one.
 _LOG = logging.getLogger("anneal-memory")
-from .schema import DEFAULT_SCHEMA, SectionSpec, validate_schema
 from .types import (
     DEFAULT_TRUST,
     DeleteResult,
     OriginKeyStatus,
-    SectionWriteResult,
     TRUST_LEVELS,
     Episode,
     EpisodeType,
@@ -322,7 +320,6 @@ StoreOperation = Literal[
     "read_episode_versioned",
     "origin_key_status",
     "delete_by_origin_key",
-    "replace_section",
     # File-write + integrity surfaces (10.5c.3 / 10.5c.4 / 10.5c.5)
     "save_continuity",
     "save_meta",
@@ -388,9 +385,6 @@ StoreOperation = Literal[
     "outbox_requeue",
     "get_wrap_history",
     "wrap_identity_texts",
-    # Pluggable section schema (v0.3.4)
-    "section_schema",
-    "set_section_schema",
     # Generation 3: the fenced consolidation lease
     "lease_acquire",
     "lease_renew",
@@ -979,28 +973,10 @@ class WrapWindowMovedError(AnnealMemoryError):
         return (type(self), (self.expected, self.actual))
 
 
-class WrapSchemaMovedError(AnnealMemoryError):
-    """Raised by ``wrap_started(section_schema=...)`` when the store's live section
-    schema is no longer the one the caller read: a ``set_section_schema`` committed
-    between the caller's read and ``wrap_started``. Nothing is written;
-    :func:`~anneal_memory.prepare_wrap` turns it into a "retry" result.
-    """
-
-    def __init__(
-        self,
-        message: str = (
-            "wrap_started: the section schema changed since prepare_wrap read it. "
-            "Re-run prepare_wrap."
-        ),
-    ) -> None:
-        # The message is the only argument, so pickle and copy rebuild it.
-        super().__init__(message)
-
-
 class WrapContinuityMovedError(AnnealMemoryError):
     """Raised by ``wrap_started(expect_continuity_sha256=...)`` when the
     continuity file changed between ``prepare_wrap``'s read and the wrap's start
-    (a :meth:`Store.replace_section` landed in between). Nothing is written;
+    (a save landed in between). Nothing is written;
     :func:`~anneal_memory.prepare_wrap` turns it into a "retry" result."""
 
     def __init__(
@@ -1376,8 +1352,8 @@ class LeaseFencedError(AnnealMemoryError):
     ``prepare_wrap(lease_token=...)`` when the token holds no unexpired lease,
     and from ``prepare_wrap`` without one while an unexpired lease exists;
     from ``validated_save_continuity`` when the fence predicate fails; and from
-    every identity commit (``save_continuity``, ``save_meta``,
-    ``replace_section``, a wrap's save) on a store where an unexpired lease
+    every identity commit (``save_continuity``, ``save_meta``, a wrap's
+    save) on a store where an unexpired lease
     exists and the caller does not present its token; and from
     ``wrap_cancelled`` of a leased wrap under a live lease without a
     token that owns it. Nothing was written.
@@ -1559,20 +1535,6 @@ class LeaseGrant:
     epoch: int
     token: str = dataclasses.field(repr=False)
     expires_at: str
-
-
-class SectionError(AnnealMemoryError, ValueError):
-    """Raised by :meth:`Store.read_section` when the continuity file cannot be
-    read as one section under that heading: the heading is not in the schema,
-    two header lines claim it, or a header line is ambiguous between sections.
-    ``reason`` names which."""
-
-    def __init__(self, reason: str, message: str) -> None:
-        self.reason = reason
-        super().__init__(message)
-
-    def __reduce__(self) -> tuple:
-        return (type(self), (self.reason, str(self)))
 
 
 class SupersessionError(AnnealMemoryError, ValueError):
@@ -2623,11 +2585,6 @@ _AUDIT_LAST_FAILURE_KEY = "audit_last_failure"
 _DEFAULT_METADATA = {
     "format_version": str(_SCHEMA_VERSION),
     "project_name": "Agent",
-    # v0.3.4 pluggable continuity section schema. Default = the historical
-    # four-section model (State/Patterns/Decisions/Context) so every existing
-    # entity is byte-for-byte unaffected. Stored as a JSON-encoded list of
-    # {"heading", "role"} dicts; read back via the ``section_schema`` property.
-    "section_schema": json.dumps(DEFAULT_SCHEMA),
     # Wrap lifecycle state. ``wrap_started_at`` is the legacy
     # in-progress flag (ISO 8601 UTC timestamp when prepare_wrap ran,
     # empty when no wrap in progress). 10.5c.4 added two companions
@@ -2654,26 +2611,19 @@ _DEFAULT_METADATA = {
     # the snapshot filter. The canonical pipeline has exactly one
     # valid state machine.
     #
-    # ``wrap_section_schema`` (below, AM-SCHEMASNAPSHOT) is an ADDITIVE
-    # fourth lifecycle key and is deliberately NOT bound by that
-    # all-or-nothing invariant: it is empty when idle and populated for a
-    # canonical wrap, but the ONE tolerated divergence is a wrap that straddles
-    # a pre-AM-SCHEMASNAPSHOT upgrade (legacy three populated, frozen schema
-    # empty). That case is NOT silently tolerated — ``_load_frozen_wrap_schema``
-    # fails CLOSED on it (raising), forcing wrap-cancel + re-prepare, rather than
-    # reverting to the live schema and re-opening the split. It is cleared
-    # alongside the legacy three on every terminal path.
+    # ``wrap_section_schema`` (below) is a 3.x lifecycle key and is NOT bound by
+    # that all-or-nothing invariant. 4.0 never writes it; it stays in the
+    # defaults so ``wrap_cancelled`` / ``wrap_completed`` still clear it, on
+    # every terminal path, for a wrap that was opened on 3.x and is still open.
     "wrap_started_at": "",
     "wrap_token": "",
     "wrap_episode_ids": "",
-    # AM-SCHEMASNAPSHOT: the section schema FROZEN at wrap_started, JSON-encoded.
-    # Empty when no wrap is active. section_schema_for_wrap() returns this (not
-    # the live schema) during a wrap so prepare and save agree even if the live
-    # schema is changed mid-wrap; an active wrap missing it fails closed.
+    # 3.x lifecycle key (the section schema frozen at wrap_started). 4.0 never
+    # writes or reads it; it is cleared with the other wrap keys.
     "wrap_section_schema": "",
     # The session_id that prepared the current wrap under the consolidate gate,
     # or empty (idle, or an ungated prepare). Additive lifecycle key like
-    # wrap_section_schema: cleared on every terminal path, and a store that
+    # wrap_today: cleared on every terminal path, and a store that
     # predates it reads "" (ungated), so an in-flight wrap across an upgrade
     # keeps the old behaviour.
     "wrap_gated_session": "",
@@ -3267,7 +3217,6 @@ class Store:
         retention_days: int | None = None,
         keep_tombstones: bool = True,
         project_name: str | None = None,
-        section_schema: list[SectionSpec] | None = None,
         audit: bool = True,
         audit_retention_days: int | None = None,
         on_audit_event: Callable | None = None,
@@ -3308,14 +3257,6 @@ class Store:
         self._retention_days = retention_days
         self._keep_tombstones = keep_tombstones
         self._project_name = project_name or "Agent"
-        # v0.3.4: an explicit section schema provided at construction is
-        # validated eagerly (fail fast on a bad schema, before any DB work)
-        # and persisted by ``_init_schema`` below, overwriting the default or
-        # any previously-persisted value. ``None`` leaves whatever is persisted
-        # (DEFAULT_SCHEMA for fresh stores and for legacy pre-0.3.4 stores).
-        self._init_section_schema: list[SectionSpec] | None = (
-            validate_schema(section_schema) if section_schema is not None else None
-        )
 
         # Two-phase commit / batch mode (10.5c.5). When ``_defer_commit``
         # is True, write-path methods accumulate DML without calling
@@ -3913,33 +3854,6 @@ class Store:
         # true statement about a different question — the same error this stamp
         # exists to fix, one level up. Detecting a package downgrade needs its
         # own field (``last_writer_version``); it is NOT built.
-        # v0.3.4: if the caller passed an explicit section_schema, persist it
-        # with INSERT OR REPLACE so it wins over the INSERT-OR-IGNORE default
-        # above (and over any previously-persisted schema) — the explicit
-        # constructor argument is authoritative. Omitting the arg leaves the
-        # persisted value untouched (DEFAULT for fresh/legacy stores).
-        #
-        # Guard: never overwrite the schema mid-wrap. If this db already has a
-        # wrap in progress (wrap_started_at set on an existing store), changing
-        # the schema would let prepare and save disagree on routing — the same
-        # hazard set_section_schema raises on. Skip the overwrite + warn rather
-        # than raise (so a mid-wrap store stays constructible for reads).
-        if self._init_section_schema is not None:
-            wrap_row = self._conn.execute(
-                "SELECT value FROM metadata WHERE key = 'wrap_started_at'"
-            ).fetchone()
-            if wrap_row and wrap_row["value"]:
-                _warn_after_commit(
-                    "anneal-memory: section_schema constructor argument ignored "
-                    "because a wrap is in progress on this store; the schema is "
-                    "frozen for the wrap's duration. Set it before prepare_wrap.",
-                    stacklevel=3,
-                )
-            else:
-                self._conn.execute(
-                    "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
-                    ("section_schema", json.dumps(self._init_section_schema)),
-                )
         # No commit here — ``_init_schema`` owns it, so the writer lock is
         # held from the re-check above through to that single commit.
 
@@ -7125,64 +7039,6 @@ class Store:
             }, method="delete_by_origin_key", committed="the deletion")
         return result
 
-    def read_section(self, heading: str) -> tuple[str, str] | None:
-        """One continuity section's text, as :meth:`load_continuity` shows it,
-        and its ``section_version`` (SHA-256 of that text), or ``None`` when the
-        file or the section is absent. The text has its leading and trailing
-        blank lines removed. Pass the version to :meth:`replace_section`.
-
-        Raises:
-            SectionError: the heading is not in the store's schema, the file
-                does not hold exactly one unambiguous section under it, or the
-                file is not UTF-8 (``reason == "unreadable"``).
-        """
-        from .continuity import read_section as _read_section
-
-        return _read_section(self, heading)
-
-    def replace_section(
-        self, heading: str, body: str, *, expected_version: str,
-        lease_token: str | None = None,
-    ) -> SectionWriteResult:
-        """Replace one non-graduating continuity section if its version is still
-        ``expected_version`` (from :meth:`read_section`).
-
-        The body is stored as :func:`~anneal_memory.origin.canonical_section_markdown`
-        returns it; every line outside the section, the header line included,
-        is kept byte for byte. Refused while a wrap is open or a wrap's pipeline
-        tmp sits beside the file (a committed wrap not yet renamed). It cannot
-        run inside :meth:`_batch` or an open transaction (it raises
-        :class:`StoreError`); a write failure on the file raises
-        :class:`StoreError` and leaves the file unchanged. Holds
-        :meth:`continuity_lock` (``require=True``: it raises
-        :class:`ContinuityLockUnavailable` where no lock exists, as on Windows)
-        and the store's write lock across the read, the check and the replace.
-
-        ⚠ An anneal older than this one prepares a wrap with no check against
-        this edit: an edit landing in the few milliseconds between that wrap's
-        read and its start is overwritten by its save. Run every process that
-        wraps the store on this version before relying on this method.
-
-        ``lease_token``: the consolidation lease's fencing token, required while
-        an unexpired lease exists (generation 3); otherwise
-        :class:`LeaseFencedError` and nothing is written.
-        """
-        from .continuity import replace_section as _replace_section
-
-        if self._conn.in_transaction:
-            # Its lock order is the file lock, then the store's: inside a batch the
-            # store's lock is already held, so it cannot run there (L3 r1). Raised
-            # before _db_boundary, whose rollback would discard the caller's
-            # staged writes (L3 r2, codex).
-            raise StoreError(
-                "replace_section cannot run inside a batch or an open transaction",
-                operation="replace_section", path=str(self.continuity_path))
-        # SQLite failures inside reach the caller as StoreDatabaseError, like
-        # every other store operation.
-        with self._db_boundary("replace_section"):
-            return _replace_section(self, heading, body, expected_version=expected_version,
-                                    lease_token=lease_token)
-
     def recall(
         self,
         since: str | None = None,
@@ -7790,8 +7646,8 @@ class Store:
                 ``wrap_episode_ids`` metadata key.
             expect_continuity_sha256: SHA-256 of the continuity text the caller
                 composed from (:meth:`load_continuity`, ``""`` for no file).
-                Compared under this call's write lock, which
-                :meth:`replace_section` also holds while it writes, so an edit
+                Compared under this call's write lock, which every identity
+                write also holds, so an edit
                 that landed after the caller's read refuses the start
                 (:class:`WrapContinuityMovedError`). ``None`` skips the check.
             token_bound: The token was supplied by the caller
@@ -8414,9 +8270,8 @@ class Store:
                 "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
                 ("wrap_lease", ""),
             )
-            # AM-SCHEMASNAPSHOT: clear the frozen schema alongside the rest of
-            # the wrap-in-progress state so section_schema_for_wrap() falls back
-            # to the live schema once the wrap is abandoned.
+            # Clear the 3.x frozen schema key alongside the rest of the
+            # wrap-in-progress state (a wrap opened on 3.x may still be open).
             self._conn.execute(
                 "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
                 ("wrap_section_schema", ""),
@@ -9130,9 +8985,8 @@ class Store:
                 "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
                 ("wrap_lease", ""),
             )
-            # AM-SCHEMASNAPSHOT: clear the frozen wrap schema in the same
-            # transaction as the other wrap-in-progress clears, so a completed
-            # wrap leaves section_schema_for_wrap() reading the live schema again.
+            # Clear the 3.x frozen wrap schema key in the same transaction as
+            # the other wrap-in-progress clears.
             self._conn.execute(
                 "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
                 ("wrap_section_schema", ""),
@@ -10008,7 +9862,7 @@ class Store:
                 f"anneal-memory: {copy.name.split('.diverged-')[0]} differed from the "
                 f"store's identity (an edit outside anneal, or an older anneal); it was "
                 f"kept as {copy} and the file is projected from the database. Write "
-                "to the identity through replace_section or save_continuity (a wrap "
+                "to the identity through save_continuity (a wrap "
                 "through validated_save_continuity); the file is a projection.",
                 stacklevel=4,
             )
@@ -10406,8 +10260,8 @@ class Store:
     def _commit_meta(self, meta: dict, meta_json: str, lease_token: str | None) -> None:
         """:meth:`save_meta` on a generation-3 store. The row check and the
         write are one critical section (L3 r1 codex HIGH), under the
-        continuity lock and then the write lock (the order replace_section
-        takes them), so a first identity commit from another writer cannot
+        continuity lock and then the write lock (the order the identity writers
+        take them), so a first identity commit from another writer cannot
         land between them and leave this meta in a sidecar the DB overrides.
         With a row it adds a version carrying the latest text; with none it
         writes the sidecar inside the transaction.
@@ -10802,228 +10656,6 @@ class Store:
         if fence is None or fence.get("token_hash") is None:
             return None
         return {k: fence.get(k) for k in ("holder", "epoch", "identity_version")}
-
-    @property
-    def section_schema(self) -> list[SectionSpec]:
-        """The persisted continuity section schema (v0.3.4), read-lenient.
-
-        Persisted-authoritative: read from the metadata table so the schema
-        survives reconstruction (unlike :attr:`project_name`, which echoes the
-        constructor value). A store with no persisted schema — every store
-        created before 0.3.4 — falls back to ``DEFAULT_SCHEMA``, reproducing the
-        historical four-section behavior. A corrupt persisted value ALSO falls
-        back to ``DEFAULT_SCHEMA`` here rather than breaking every read path
-        (``continuity`` print, ``status``, display surfaces).
-
-        The wrap lifecycle does NOT use this lenient read — see
-        :meth:`section_schema_for_wrap`, which is fail-closed on a corrupt
-        value so a partnership store cannot silently mis-scope as an ops entity
-        and disable the catastrophic-shrink gate (v0.3.5).
-
-        Always returns a freshly-built list (never the module ``DEFAULT_SCHEMA``
-        singleton) so caller mutation cannot corrupt the shared default.
-        """
-        return self._load_section_schema(strict=False)
-
-    def section_schema_for_wrap(self) -> list[SectionSpec]:
-        """The persisted section schema, fail-closed on corruption (v0.3.5).
-
-        Identical to :attr:`section_schema` except a persisted value that is
-        present but unreadable raises :class:`StoreError` instead of silently
-        falling back to ``DEFAULT_SCHEMA``. The wrap lifecycle
-        (:func:`~anneal_memory.continuity.prepare_wrap`,
-        :func:`~anneal_memory.continuity.validated_save_continuity`) reads the
-        schema through this method: the lenient fallback would mis-scope a
-        partnership store whose schema metadata corrupted as an ops entity, and
-        the catastrophic-shrink gate — which fires only when a
-        ``narrative-timeless`` section is declared — would silently no-op,
-        dropping exactly the identity protection the gate exists to provide.
-        ``structural_invariants_beat_discipline``: fail closed at the gate, do
-        not trust the write paths to have kept the metadata intact.
-
-        An ABSENT schema (every pre-0.3.4 store) still falls back to
-        ``DEFAULT_SCHEMA`` — that is normal backward-compat, not corruption.
-
-        AM-SCHEMASNAPSHOT: during an ACTIVE wrap this returns the schema FROZEN
-        at ``wrap_started`` rather than the live persisted schema, so
-        ``prepare_wrap`` and ``validated_save_continuity`` agree even if a
-        concurrent ``set_section_schema`` changed the live schema mid-wrap. The
-        live schema is read only when NO wrap is active. An active wrap with no
-        frozen schema (a wrap straddling a pre-AM-SCHEMASNAPSHOT upgrade) fails
-        CLOSED — see :meth:`_load_frozen_wrap_schema`.
-        """
-        frozen = self._load_frozen_wrap_schema()
-        if frozen is not None:
-            return frozen
-        return self._load_section_schema(strict=True)
-
-    def _load_frozen_wrap_schema(self) -> list[SectionSpec] | None:
-        """The section schema frozen at ``wrap_started`` (AM-SCHEMASNAPSHOT), or
-        ``None`` when no wrap is active.
-
-        Returns ``None`` (→ caller reads the live schema) ONLY when
-        ``wrap_started_at`` is unset (no active wrap). During an ACTIVE wrap it
-        fails CLOSED — raising :class:`StoreError` — if the frozen schema is
-        empty (a wrap straddling a pre-AM-SCHEMASNAPSHOT upgrade) or
-        present-but-unreadable (corrupt): silently reverting to the live schema
-        in either case would re-open the prepare/save split this freeze closes.
-        Recovery is wrap-cancel + re-run ``prepare_wrap`` (lossless).
-        """
-        with self._db_boundary("section_schema"):
-            rows = self._conn.execute(
-                "SELECT key, value FROM metadata WHERE key IN (?, ?)",
-                ("wrap_started_at", "wrap_section_schema"),
-            ).fetchall()
-        meta = {row["key"]: row["value"] for row in rows}
-        if not meta.get("wrap_started_at"):
-            return None  # no active wrap → live schema
-        raw = meta.get("wrap_section_schema", "")
-        if not raw:
-            # Active wrap but nothing frozen: a wrap started by a binary that
-            # predates AM-SCHEMASNAPSHOT, straddling the upgrade. Falling back to
-            # the live schema here would silently re-open the prepare/save split
-            # this guard exists to close (the live schema is exactly what may have
-            # changed). Fail CLOSED instead — an invariant, not a discipline
-            # (structural_invariants_beat_discipline). Recovery is cheap and
-            # lossless: wrap-cancel + re-run prepare_wrap re-freezes a current
-            # schema; no episodes are dropped. (codex L3 LOW-1.)
-            raise StoreError(
-                "Wrap in progress predates AM-SCHEMASNAPSHOT (no frozen section "
-                "schema): refusing to fall back to the live schema, which would "
-                "re-open the prepare/save split this guard closes. Cancel it with "
-                "its token (wrap-cancel --wrap-token; a gated wrap refuses a plain "
-                "cancel) and re-run prepare_wrap to start a defended wrap.",
-                operation="section_schema",
-            )
-        try:
-            return validate_schema(json.loads(raw))
-        except (ValueError, TypeError, json.JSONDecodeError) as exc:
-            raise StoreError(
-                "Frozen wrap section_schema is present but unreadable (corrupt). "
-                "Refusing to fall back to the live schema mid-wrap — that would "
-                "re-open the prepare/save schema split AM-SCHEMASNAPSHOT closes. "
-                "Cancel it with its token (wrap-cancel --wrap-token; a gated wrap "
-                "refuses a plain cancel) and re-run prepare_wrap.",
-                operation="section_schema",
-            ) from exc
-
-    def _load_section_schema(self, *, strict: bool) -> list[SectionSpec]:
-        """Shared read backing :attr:`section_schema` / :meth:`section_schema_for_wrap`.
-
-        ``strict=False`` (lenient, read/display paths): a corrupt persisted
-        value falls back to ``DEFAULT_SCHEMA``. ``strict=True`` (wrap paths): a
-        corrupt persisted value raises :class:`StoreError`. An ABSENT value
-        falls back to ``DEFAULT_SCHEMA`` in both modes (legit pre-0.3.4
-        backward-compat — not corruption). A PRESENT-but-empty value is
-        corruption, NOT absence.
-        """
-        # Read the row directly rather than via _get_metadata, which collapses
-        # a missing row and a present-but-empty ('') value into the same '' —
-        # so the strict path could not tell "no schema ever set" (absent ->
-        # legit default) from "schema row present but empty/garbage" (corrupt
-        # -> must fail closed). An empty persisted value is corruption.
-        with self._db_boundary("section_schema"):
-            row = self._conn.execute(
-                "SELECT value FROM metadata WHERE key = ?", ("section_schema",)
-            ).fetchone()
-        if row is None:
-            # No persisted schema at all: every pre-0.3.4 store + ops entities.
-            return validate_schema(DEFAULT_SCHEMA)
-        raw = row["value"]
-        try:
-            return validate_schema(json.loads(raw))
-        except (ValueError, TypeError, json.JSONDecodeError) as exc:
-            if strict:
-                raise StoreError(
-                    "Persisted section_schema is present but unreadable "
-                    "(corrupt). Refusing the wrap: silently falling back to "
-                    "the ops DEFAULT_SCHEMA would disable the "
-                    "catastrophic-shrink gate for what may be a partnership "
-                    "entity. Repair or re-set the schema via "
-                    "set_section_schema() before wrapping.",
-                    operation="section_schema",
-                ) from exc
-            return validate_schema(DEFAULT_SCHEMA)
-
-    def set_section_schema(self, schema: list[SectionSpec]) -> list[SectionSpec]:
-        """Set (overwrite) this store's continuity section schema; persist it.
-
-        Validates via :func:`~anneal_memory.schema.validate_schema`, then writes
-        the normalized schema to the metadata table. The next
-        :attr:`section_schema` read reflects it. Use this to migrate an existing
-        store (e.g. promote a default-schema store to a partnership schema)
-        without reconstructing it.
-
-        This refuses a change once a wrap has **started**: if a wrap is in
-        progress (``prepare_wrap`` has run but ``validated_save_continuity`` /
-        ``wrap-cancel`` has not), this raises ``ValueError``. Set the schema
-        before ``prepare_wrap``.
-
-        The open-wrap check runs inside this method's write transaction, and
-        ``wrap_started`` compares the schema ``prepare_wrap`` read with the live
-        one inside its own, so the two serialise on the write lock: a change that
-        commits first makes the wrap refuse (``WrapSchemaMovedError``, which
-        ``prepare_wrap`` reports as a retry), and a wrap that starts first makes
-        this refuse.
-
-        Note: passing ``section_schema=`` to the ``Store`` constructor is also a
-        write and is *authoritative* — reconstructing a store with an explicit
-        schema overwrites any prior ``set_section_schema`` migration.
-
-        Args:
-            schema: The new section schema (a list of ``{"heading", "role"}``).
-
-        Returns:
-            The normalized schema that was persisted.
-
-        Warns:
-            UserWarning: if the audit event could not be written. The
-                operation still SUCCEEDED — the audit trail is missing
-                this event. Also counted on ``status().audit_write_failures``
-                and logged; see :meth:`_audit_log_after_commit`.
-        """
-        in_progress = (
-            "Cannot change the section schema while a wrap is in progress "
-            "(prepare_wrap has run but validated_save_continuity has not). "
-            "The schema is frozen for the wrap's duration so prepare and "
-            "save agree on routing. Complete or cancel the wrap first, or "
-            "set the schema before prepare_wrap."
-        )
-        if self.get_wrap_started_at():
-            raise ValueError(in_progress)
-        # The prior schema is captured for the audit record under the lock below —
-        # a schema migration changes which sections are required and whether the
-        # felt-layer gate fires, so it belongs in the audit chain (without this,
-        # a store that later fails to validate has no trail of when it flipped).
-        normalized = validate_schema(schema)
-        wrap_open = False
-        with self._db_boundary("set_section_schema"):
-            # The check above is a lock-free fast refusal; this one, under the
-            # write lock, is the one that decides.
-            self._conn.execute("BEGIN IMMEDIATE")
-            wrap_open = bool(self._get_metadata("wrap_started_at"))
-            old_headings = [s["heading"] for s in self._load_section_schema(strict=False)]
-            if not wrap_open:
-                self._conn.execute(
-                    "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
-                    ("section_schema", json.dumps(normalized)),
-                )
-            self._conn.commit()
-        if wrap_open:
-            raise ValueError(in_progress)
-        # ⛔ POST-COMMIT: the schema is persisted. This site had a bespoke guard
-        # that was narrower than the policy on BOTH axes — it caught only
-        # ``OSError`` (measured 2026-09-04: a RuntimeError from the sink
-        # propagated and failed a completed migration) and its ``warnings.warn``
-        # was not nested-guarded (under ``-W error`` the warning itself raised,
-        # recreating the very failure it existed to prevent). Routed through the
-        # shared helper so there is one policy, not a local approximation of it.
-        self._audit_log_after_commit("section_schema_set", {
-            "from": old_headings,
-            "to": [s["heading"] for s in normalized],
-        }, method="set_section_schema", committed="the schema migration",
-            batch_aware=False)
-        return normalized
 
     # -- Internal helpers --
 
@@ -12025,7 +11657,7 @@ class Store:
         if self._audit is None:
             return
         # ⚠ ``batch_aware=False`` for a site that commits or externalizes
-        # UNCONDITIONALLY (prune, save_continuity, set_section_schema — all
+        # UNCONDITIONALLY (prune, save_continuity — both
         # documented as not batch-safe). Queueing their events inverts audit
         # ordering against durability: MEASURED 2026-09-04, a save_continuity
         # inside a batch whose body then raised externalized the file and lost
@@ -12500,9 +12132,7 @@ class Store:
         ⛔ AND THAT FIX LEFT IT INCOMPLETE IN BOTH DIRECTIONS (Diogenes MED,
         2026-09-06). Two more were still missing — both guard with
         ``if not self._defer_commit`` and both were RUN-VERIFIED invisible to a
-        second connection until the batch commits — and
-        ``set_section_schema`` was in NEITHER list, against a sentence
-        worded as an exhaustive universal over the complement. Twice wrong in two days.
+        second connection until the batch commits. Twice wrong in two days.
         ⚖ SO THE LISTS ARE NO LONGER HAND-MAINTAINED ON TRUST. A roster of
         method names living beside the code it describes is the same shape as
         the name allowlist ``_is_write_lock_contention`` was rewritten to
@@ -12517,7 +12147,7 @@ class Store:
         inside a batch. Two groups, unsafe for DIFFERENT reasons — the split
         matters because only the first is mechanically derivable:
         - DB-COMMITTING (``prune``, ``wrap_started``, ``wrap_cancelled``,
-          ``revert_wrap``, ``set_section_schema``, ``lease_acquire``,
+          ``revert_wrap``, ``lease_acquire``,
           ``lease_renew``, ``lease_release``) — these call ``commit()`` unconditionally
           and would break the single-transaction invariant (the three lease
           methods refuse inside a batch or an open transaction).
@@ -12739,8 +12369,8 @@ class Store:
     ) -> bool:
         """One ``audit_outbox`` row in the caller's open transaction; False
         (nothing written) when the event is not JSON. The boxed sites are the
-        batched pipeline, the identity writers (``save_continuity``,
-        ``replace_section``), ``revert_wrap``, and a keyed ``record`` and
+        batched pipeline, the identity writers (``save_continuity``),
+        ``revert_wrap``, and a keyed ``record`` and
         ``wrap_started`` (integration L3 I3). Every other event fired outside a batch keeps the
         best-effort post-commit path: a loss there is counted, not prevented
         (spore-774: NOT EVERY LOSS IS RECORDED)."""

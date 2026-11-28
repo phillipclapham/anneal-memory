@@ -339,7 +339,7 @@ class TestANewerSchemaIsRefusedTheWayTheSidecarsRefuseIt:
         SAFETY CONTRACT: which write methods are batch-aware, and which commit
         immediately and must not be called inside a batch. It was hand-written
         beside the code it describes and was wrong TWICE IN TWO DAYS — five
-        names missing on 09-05, two more plus ``set_section_schema`` on 09-06.
+        names missing on 09-05, two more on 09-06.
 
         An omission in the first list is the dangerous direction: it reads as
         "not safe inside a batch" for a method that is, so a caller routes
@@ -2463,7 +2463,7 @@ class TestStoreError:
         assert Path(path).exists()
         # Review r1 F2: a save over a hand edit keeps the edit as a copy.
         Path(path).write_text("# hand edit\n", encoding="utf-8")
-        with pytest.warns(UserWarning, match="replace_section or save_continuity"):
+        with pytest.warns(UserWarning, match="through save_continuity"):
             store.save_continuity("# T — Memory (v1)\n\n## State\ny\n")
         kept = list(Path(path).parent.glob("*.continuity.md.diverged-*"))
         assert [k.read_text(encoding="utf-8") for k in kept] == ["# hand edit\n"]

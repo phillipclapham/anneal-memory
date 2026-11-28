@@ -2163,12 +2163,6 @@ class TestStoreIntegration:
 # method can quietly opt out.
 # ---------------------------------------------------------------------------
 
-SCHEMA_OK = [
-    {"heading": "State", "role": "live-state"},
-    {"heading": "Patterns", "role": "graduating"},
-]
-
-
 def _sink_that_fails(store, exc):
     """Replace the store's audit sink with one that raises ``exc``."""
     def boom(*args, **kwargs):
@@ -2232,11 +2226,6 @@ def _committed_op_cases(tmp_path_factory=None):
         return s, lambda: s.save_continuity("# hi\n"), \
             lambda: s.continuity_path.exists()
 
-    def c_set_section_schema(sub):
-        s = mk(sub)
-        return s, lambda: s.set_section_schema(SCHEMA_OK), \
-            lambda: [x["heading"] for x in s.section_schema] == ["State", "Patterns"]
-
     return [
         ("record", c_record),
         ("delete", c_delete),
@@ -2245,7 +2234,6 @@ def _committed_op_cases(tmp_path_factory=None):
         ("wrap_cancelled", c_wrap_cancelled),
         ("prune", c_prune),
         ("save_continuity", c_save_continuity),
-        ("set_section_schema", c_set_section_schema),
     ]
 
 
@@ -2264,9 +2252,9 @@ class TestAuditAfterCommitPolicy:
     def test_sink_failure_does_not_fail_committed_work(
         self, tmp_path, label, builder, exc
     ):
-        # ⚠ The non-OSError case is not decoration: ``set_section_schema``
-        # caught only OSError and propagated a RuntimeError from the sink,
-        # failing a completed migration (measured 2026-09-04).
+        # ⚠ The non-OSError case is not decoration: a site that caught only
+        # OSError propagated a RuntimeError from the sink, failing a completed
+        # migration (measured 2026-09-04).
         sub = tmp_path / f"{label}-{type(exc).__name__}"
         sub.mkdir()
         store, act, committed = builder(sub)
@@ -2558,7 +2546,7 @@ class TestSwallowedWriteIsStillVisible:
     def test_an_unconditional_commit_does_not_defer_its_audit(self, tmp_path):
         """⛔ AUDIT ORDERING MUST MATCH DURABILITY ORDERING, SITE BY SITE.
 
-        ``prune`` / ``save_continuity`` / ``set_section_schema`` /
+        ``prune`` / ``save_continuity`` /
         ``wrap_started`` / ``wrap_cancelled`` commit or externalize
         UNCONDITIONALLY — they carry no ``_defer_commit`` guard. Routing them
         through a batch-AWARE helper queued their events while their work

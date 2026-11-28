@@ -775,8 +775,7 @@ class AuditTrail:
                    Wrap lifecycle:
                      wrap_started, wrap_cancelled, wrap_completed, wrap_reverted
                    Continuity:
-                     continuity_saved, continuity_refused, section_schema_set,
-                     section_replaced
+                     continuity_saved, continuity_refused
                    Consolidate policy:
                      consolidate_policy_set
                    Outbox delivery:

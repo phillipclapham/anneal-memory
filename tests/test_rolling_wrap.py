@@ -169,3 +169,18 @@ def test_the_mcp_tools_are_capture_recall_read_wrap_and_prospective_memory(store
     read = server._handle_tools_call({"name": "read_continuity", "arguments": {}})
     assert "remembered" in read["content"][0]["text"]
     json.dumps(TOOLS)  # the manifest stays serialisable
+
+
+def test_a_wrap_left_open_by_3x_with_its_old_keys_cancels_and_a_new_prepare_opens(store):
+    """3.x wrote ``wrap_section_schema`` and ``wrap_derive_roots`` with an open wrap; 4.0
+    never writes them, but a cancel must still clear them so the wrap does not stick."""
+    _record_days(store, ["2026-03-01"])
+    assert prepare_wrap(store, tz="UTC")["status"] == "ready"
+    for key, value in (("wrap_section_schema", '[{"heading": "State", "role": "live-state"}]'),
+                       ("wrap_derive_roots", '{"a": "b"}')):
+        store._conn.execute("INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)", (key, value))
+    store._conn.commit()
+    store.wrap_cancelled()
+    for key in ("wrap_section_schema", "wrap_derive_roots", "wrap_started_at", "wrap_token"):
+        assert store._get_metadata(key) in ("", None), key
+    assert prepare_wrap(store, tz="UTC")["status"] == "ready"

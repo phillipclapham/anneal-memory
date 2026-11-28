@@ -31,6 +31,7 @@ the gate is gone and nothing will say so).
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
@@ -93,6 +94,8 @@ EXPECTED_SDIST_TOP_LEVEL = {
     # the description, the record, the licence
     "README.md",
     "CHANGELOG.md",
+    # the 3.x -> 4.0 guide the README, CHANGELOG and migrate-check text send upgraders to
+    "MIGRATING_TO_4.md",
     "LICENSE",
     # asserted on by tests/test_integrity.py
     "server.json",
@@ -131,6 +134,21 @@ class TestSdistShipsOnlyThePublishableSurface:
             "needs is a worse defect than the leak this allowlist was written to "
             "close. Check the `include` patterns in pyproject.toml."
         )
+
+    def test_every_top_level_markdown_file_the_readme_and_changelog_link_ships(self):
+        """A relative link to a root-level .md file is dead on PyPI and in the sdist
+        unless the file ships (MIGRATING_TO_4.md was linked and left out once)."""
+        _requires_source_tree()
+        published = {p.replace("\\", "/") for p in _sdist_distribution_paths()}
+        linked: set[str] = set()
+        for doc in ("README.md", "CHANGELOG.md"):
+            text = (REPO_ROOT / doc).read_text(encoding="utf-8")
+            for target in re.findall(r"\]\(([^)#\s]+\.md)(?:#[^)]*)?\)", text):
+                if "://" not in target and "/" not in target:
+                    linked.add(target)
+        assert "MIGRATING_TO_4.md" in linked  # the pattern still finds the link it exists for
+        missing = sorted(linked - published)
+        assert not missing, f"linked from the README or CHANGELOG but not in the sdist: {missing}"
 
     def test_no_internal_project_tracking_is_published(self):
         """The reported site, checked as a consequence rather than a premise.

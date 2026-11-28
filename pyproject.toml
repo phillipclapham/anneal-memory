@@ -141,6 +141,7 @@ include = [
     "/skill",
     "/README.md",
     "/CHANGELOG.md",
+    "/MIGRATING_TO_4.md",
     "/LICENSE",
     "/server.json",
     "/logo-400.png",

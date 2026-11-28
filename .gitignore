@@ -39,5 +39,5 @@ htmlcov/
 *.continuity.meta.json
 *.audit.jsonl
 
-# Project pickup memory (personal data — Phill 2026-09-27, spore trail in fanin_log)
+# Project pickup memory (personal data, never shipped)
 project_memory/

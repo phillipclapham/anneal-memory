@@ -83,7 +83,7 @@ jobs:
           pip install -e .
 
       - name: Install test dependencies
-        run: pip install pytest hatchling
+        run: pip install pytest hatchling tzdata
 
       - name: Run pytest
         run: pytest -q

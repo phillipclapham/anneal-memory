@@ -1394,7 +1394,8 @@ def _reconstruct_lease_fenced(
 
 
 # Lock order, one for every writer (integration L3 I2): the continuity flock
-# (``<stem>.continuity.md.lock``, :func:`continuity_lock`), then the SQLite
+# (``<stem>.continuity.md.lock``, :func:`continuity_lock`), then the baton lock
+# (``<stem>.continuity.md.baton.lock``, ``sessions._baton_lock``), then the SQLite
 # write lock (``BEGIN IMMEDIATE``). A writer takes only the locks it needs, but
 # never one earlier in this order while it holds a later one.
 
@@ -8425,9 +8426,11 @@ class Store:
         (:meth:`wrap_started` / :meth:`wrap_completed`) called directly, a
         caller that passes the holder's ``session_id`` as its own, and
         :meth:`set_consolidate_requires_baton` itself (ungated, audited).
-        A baton take that lands in the milliseconds between the save's
-        final authority check and its commit is not seen (the baton is a
-        sidecar file, outside the transaction).
+        A save that names a ``session_id`` holds the baton lock across its
+        commit, so a take or release waits for it. Two windows stay open:
+        where the platform or filesystem has no ``flock`` the lock is a no-op,
+        and a ``allow_sole_live`` save reads the session registry, which
+        registering a session does not lock.
 
         Fails CLOSED: a stored value other than ``"1"`` or ``"0"`` reads as
         required, so a corrupted policy row never silently drops the guard.
@@ -12023,8 +12026,13 @@ class Store:
                 pass
 
     @contextmanager
-    def _batch(self) -> Iterator[None]:
+    def _batch(self, *, after_commit: Callable[[], None] | None = None) -> Iterator[None]:
         """Suspend auto-commit + audit-firing for a multi-step pipeline.
+
+        ``after_commit`` runs once, straight after a successful commit and before the
+        deferred audit callbacks are replayed. A caller that holds a lock across the
+        batch releases it there, so a callback the replay runs never waits on it. It
+        cannot raise out of the batch: a failure is logged.
 
         The 10.5c.5 two-phase commit primitive. Write-path methods
         check ``self._defer_commit`` and skip their own ``commit()``
@@ -12276,6 +12284,19 @@ class Store:
             self._deferred_audits = []
             self._deferred_unboxed = []
             self._defer_commit = False
+
+        if commit_succeeded and after_commit is not None:
+            try:
+                after_commit()
+            except BaseException:
+                try:
+                    _LOG.warning(
+                        "the batch's after_commit hook failed after a successful commit; "
+                        "the DB is committed and the caller may proceed",
+                        exc_info=True,
+                    )
+                except Exception:
+                    pass
 
         # Commit succeeded. Flush deferred audits with exception
         # swallowing — the DB is already committed and the load-

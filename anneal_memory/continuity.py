@@ -863,10 +863,12 @@ def validated_save_continuity(
         if session_id is not None:
             # The baton is a file beside the memory file, and a claim or release takes
             # this lock (pinned by test_a_baton_take_waits_for_a_save_in_its_commit_window).
-            # Held from before the write lock to after the commit, so a take waits for the
-            # commit and the check below is true when the batch commits. Where the platform
-            # has no flock the lock is a no-op and the window stays open (see
-            # sessions._baton_lock). The order is this lock, then SQLite's.
+            # Held from before the write lock to the commit (the batch's after_commit
+            # releases it before any audit callback runs), so a take waits for the commit
+            # and the check below is true when the batch commits. Where the platform or the
+            # filesystem has no flock the lock is a no-op, and the sole-live path reads the
+            # session registry, which a registering session does not lock. The order is
+            # this lock, then SQLite's.
             try:
                 locks.enter_context(sessions._baton_lock(store.continuity_path))
             except OSError as exc:
@@ -875,7 +877,7 @@ def validated_save_continuity(
                     f"holder (the baton lock could not be taken: {exc}), so it may not "
                     f"commit this wrap. Nothing was written."
                 ) from None
-        with store._batch():
+        with store._batch(after_commit=locks.close):
             # First under the batch's write lock: a concurrent save with the same
             # idempotency key (its result is returned; nothing is written yet), then
             # the wrap this save validated against, then the lease fence.
@@ -891,11 +893,13 @@ def validated_save_continuity(
             if (
                 store.get_wrap_started_at() != started_at
                 or store.load_wrap_snapshot() != snapshot
+                or (store.wrap_max_chars() or rolling.DEFAULT_MAX_CHARS) != step_limit
+                or store.wrap_gated_session() != gated_by
             ):
                 raise ValueError(
                     f"validated_save_continuity: the wrap token '{wrap_token[:8]}…' now names "
                     f"a different wrap than the one this save checked its reply against (the "
-                    f"wrap was cancelled or completed and a new one prepared). Nothing was "
+                    f"wrap was cancelled, completed or prepared again). Nothing was "
                     f"saved. Re-run prepare_wrap and save its reply."
                 )
             lease_prepared = store._wrap_lease_prepared()

@@ -481,7 +481,10 @@ def _read_baton(continuity_path: PathLike) -> dict[str, Any] | None:
 def _baton_lock(continuity_path: PathLike) -> Iterator[bool]:
     """Serialize baton claims and releases across processes with an exclusive advisory
     ``flock`` on ``<continuity>.baton.lock``, so a release's check-then-unlink cannot delete a
-    baton that a concurrent take just wrote, and two takes cannot both report success.
+    baton that a concurrent take just wrote, and two takes cannot both report success. A
+    save (:func:`anneal_memory.continuity.validated_save_continuity`) that names a session
+    also holds it, from before its write lock until its commit, so a claim or release waits
+    for the save and not the reverse.
 
     Yields whether the lock is held. Like ``continuity_lock``, it degrades to a no-op
     (yielding ``False``) where ``fcntl`` is missing (Windows) or the filesystem refuses
@@ -510,7 +513,10 @@ def _baton_lock(continuity_path: PathLike) -> Iterator[bool]:
             yield acquired
         finally:
             if acquired:
-                fcntl.flock(fd, fcntl.LOCK_UN)
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_UN)
+                except OSError:
+                    pass  # closing the descriptor below drops the lock: an unlock never raises
     finally:
         os.close(fd)
 

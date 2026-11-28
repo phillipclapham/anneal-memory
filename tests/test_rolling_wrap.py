@@ -401,6 +401,32 @@ def test_a_keyed_save_replay_carries_the_pending_count_it_has_now(store):
     assert again["replayed"] is True and again["pending_count"] == 1
 
 
+def test_a_keyed_save_replay_survives_a_failed_count_and_reports_a_day_owed(store, monkeypatch):
+    from anneal_memory import StoreError
+
+    _record_days(store, ["2026-03-01"], per_day=1)
+    prep = prepare_wrap(store, tz="UTC")
+    validated_save_continuity(
+        store, "day one", wrap_token=prep["wrap_token"], idempotency_key="save-1")
+
+    def broken():
+        raise StoreError("read failed", operation="count_episodes_since_wrap", path="x")
+
+    monkeypatch.setattr(store, "count_episodes_since_wrap", broken)
+    again = validated_save_continuity(
+        store, "day one", wrap_token=prep["wrap_token"], idempotency_key="save-1")
+    assert again["replayed"] is True and again["pending_count"] == 1
+
+
+def test_every_retired_migration_name_is_a_real_manifest_feature():
+    from anneal_memory.migration import MIGRATION_MANIFEST, RETIRING_FEATURES
+
+    features = {e["feature"] for e in MIGRATION_MANIFEST}
+    for retirer, names in RETIRING_FEATURES.items():
+        assert retirer in features
+        assert names <= features, sorted(names - features)
+
+
 def test_a_replayed_prepare_meets_the_baton_gate_again(store):
     from anneal_memory import sessions
     _record_days(store, ["2026-03-01"])

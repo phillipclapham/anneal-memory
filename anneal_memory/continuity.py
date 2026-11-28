@@ -687,9 +687,17 @@ def _save_replay(store: Store, result_json: str | None) -> SaveContinuityReplayR
             "malformed, so the first call's result cannot be returned. Nothing "
             "was written.", operation="save_continuity", path=str(store.path),
             reason="malformed_row")
+    try:
+        pending = store.count_episodes_since_wrap()
+    except StoreError:
+        # The save committed on the first call, so a failed read here must not turn its
+        # replay into an error. An unknown count is reported as owed (1): the caller then
+        # prepares again, which answers "empty" when nothing is left. Reporting 0 would
+        # hide a day that is still owed.
+        pending = 1
     return cast(SaveContinuityReplayResult, {
         **{name: stored.get(name) for name in _SAVE_REPLAY_FIELDS},
-        "pending_count": store.count_episodes_since_wrap(), "replayed": True})
+        "pending_count": pending, "replayed": True})
 
 
 def validated_save_continuity(

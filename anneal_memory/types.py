@@ -693,239 +693,69 @@ class FeltCurrency(TypedDict):
     wrap_in_progress: bool
 
 
+class WrapStepDict(TypedDict):
+    """The step ``prepare_wrap`` opened: what to run and what follows it.
+
+    ``system`` and ``user`` are the two messages of the measured updater prompt, filled
+    with the current memory file and one day's log; ``prompt`` is the two as one text.
+    Run them in a fresh context, with nothing else. ``steps_remaining`` is how many steps
+    follow this one (a day each). ``chunk`` and ``chunks`` say which slice of a day this
+    is when a day's log was too long for one step."""
+
+    day: str
+    chunk: int
+    chunks: int
+    episodes: int
+    steps_remaining: int
+    max_chars: int
+    memory_chars: int
+    system: str
+    user: str
+    prompt: str
+
+
 class PrepareWrapResult(TypedDict):
     """Return shape of ``prepare_wrap``.
 
-    ``status`` is ``"empty"`` (no episodes to wrap; ``package`` and
-    ``assoc_context`` are ``None``), ``"ready"`` (package built, wrap
-    marked in progress on the store), or ``"downgraded"`` (the
-    consolidate-efferent gate auto-downgraded this session to
-    capture-only — a session that does not hold the consolidate baton
-    (or, under ``allow_sole_live``, is neither the sole live session nor
-    the baton-holder; or an empty-window call that may not cancel a
-    wrap prepared under the gate; or, transiently, one that lost a race to
-    another session's new wrap: retry); ``package``/``wrap_token`` ``None``,
-    the human-readable reason is in ``message``, the store left
-    untouched). The ``Literal`` discriminant
-    gives type checkers a switchable tag and lets IDE autocomplete
-    offer the valid status values; callers typoing
-    ``result["statuz"]`` or ``result["status"] == "reday"`` get a
-    mypy/pyright error instead of silent runtime coercion.
-
-    ``wrap_token`` is the session-handshake token minted by
-    :func:`prepare_wrap` when ``status == "ready"``. Transports that
-    round-trip it back to :func:`validated_save_continuity` get
-    explicit mismatch detection (stale/wrong wrap → ``ValueError``);
-    transports that don't still get frozen-snapshot semantics because
-    the snapshot is always consulted when present. ``None`` on the
-    empty path (no wrap to commit).
+    ``status`` is ``"ready"`` (a step is open, ``step`` and ``wrap_token`` are set),
+    ``"empty"`` (no episodes since the last wrap; nothing opened) or ``"downgraded"`` (the
+    consolidate baton gate declined this call, or a race made it back off, so it is capture
+    only; ``message`` says why and the store is left untouched). ``episode_count`` is the
+    episodes in this step, ``pending_count`` all the episodes waiting since the last wrap.
     """
 
     status: Literal["empty", "ready", "downgraded"]
-    message: str  # Short human-readable status summary
+    message: str
     episode_count: int
-    package: WrapPackageDict | None  # None when status == "empty"
-    assoc_context: str | None  # Always None since 1.0.2 (association formation is off)
-    wrap_token: str | None  # Session-handshake token, None when status == "empty"
-    # Move #4 library layer (v0.3.2): list of existing Proven (2x+)
-    # pattern names already in the continuity. Methodology-layer
-    # discipline (e.g., Levain WRAP_PROTOCOL.md) uses this to drive a
-    # mandatory contradiction-scan at graduation: before any new
-    # Proven graduation in the wrap, the agent considers each name in
-    # this list and either declares ``[contradicts: name]`` or
-    # ``[no-contradicts]`` on the new pattern line. Library does NOT
-    # enforce — the no-LLM-as-judge axiom means library cannot decide
-    # semantic opposition. Library surfaces the question; methodology
-    # layer enforces the scan; operator-review (Diogenes weekly sweep)
-    # catches what slips through. ``[]`` when no Proven patterns exist
-    # yet (cold-start case) or status is ``"empty"``.
-    uncovered_proven_to_check: list[str]
-    # AM-ROLECHECK (v0.5.0): a human-readable warning when the persisted section
-    # schema VALIDATES but assigns a role that would silently thin the wrap
-    # package (e.g. no ``graduating`` section → no immune system / pattern-line
-    # format; a section mis-roled off a named schema → a lost felt
-    # proportion-check). ``None`` when the schema is known-good or the divergence
-    # is benign, and always ``None`` on the ``"empty"`` path (no package built).
-    # Also emitted as a ``UserWarning`` at ``prepare_wrap`` (mirrors AM-WARN's
-    # ``association_warning``) so the signal is loud, not only structured.
-    schema_warning: str | None
-    # AM-CRYSTAL-MIGRATE (v0.6): the crystallization routing surface, read back from
-    # the package so the data the caller inspects and the instruction the agent
-    # reads share one computation. ``crystallization_candidates`` = cold-Proven
-    # patterns ready to route OUT (constitution / crystallize / compost);
-    # ``rewarm_candidates`` = hot crystallized pattern names to consider pulling
-    # back IN. Both ``[]`` on the empty path or when no crystal store is passed.
-    crystallization_candidates: list["StalePatternDict"]
-    rewarm_candidates: list[str]
-
-
-class _SaveContinuityOptional(TypedDict, total=False):
-    # Present ONLY when ``compost=`` was passed, so the default return shape
-    # is unchanged. ``NotRequired`` is 3.11+; the library targets 3.10.
-    composted: dict[str, int]
-    # Present ONLY when a derived-state (project schema) State line did not
-    # hold at save (stale, or not derived within the load budget). The save
-    # committed; these lines are the agent's to fix next wrap.
-    stale_state: list[str]
-    # Present ONLY when the store's schema has a durable section: every
-    # durable-facts warning text this save emitted (also delivered as
-    # UserWarnings), empty when there were none.
-    durable_warnings: list[str]
-    # Present ONLY when the store has live CAP-06 drift probes: ``counts`` per status
-    # (held / weakened / crystallized / lost) and every probe not ``held``.
-    drift: dict[str, Any]
-    # Present ONLY when the prior-state bound cut a pattern line (1007+29):
-    # ``{"name", "written_level", "capped_to", "prior_level", "validated"}`` per
-    # line, also delivered as a UserWarning and recorded in the audit chain.
-    level_capped: list[dict[str, Any]]
-    # Present ONLY when this save applied or refused a ``[renamed: OLD -> NEW]``
-    # marker: the renames applied (``{"old", "new"}``) and each refused one with
-    # its ``reason`` (the save still committed).
-    renamed: list[dict[str, str]]
-    renames_rejected: list[dict[str, str]]
+    pending_count: int
+    wrap_token: str | None  # None unless status == "ready"
+    step: WrapStepDict | None  # None unless status == "ready"
 
 
 class SaveContinuityReplayResult(TypedDict):
     """Return shape of a keyed ``validated_save_continuity`` retry's replay
-    (``idempotency_key``, generation 3): the key row's non-content subset,
-    projected by an explicit allowlist, marked ``replayed``. Never the full
-    :class:`SaveContinuityResult`; text derived from episodes would outlive an
-    episode's erasure (B3 L3 r1 U7, r2 V3)."""
+    (``idempotency_key``): the key row's non-content subset, projected by an explicit
+    allowlist, marked ``replayed``. Never the full :class:`SaveContinuityResult`; text
+    derived from episodes would outlive an episode's erasure."""
 
     wrap_id: int | None
     chars: int
     path: str
     content_hash: str
     episodes_compressed: int
-    graduations_validated: int
-    graduations_demoted: int
     replayed: bool  # always ``True``
 
 
-class SaveContinuityResult(_SaveContinuityOptional):
+class SaveContinuityResult(TypedDict):
     """Return shape of ``validated_save_continuity``.
 
-    Top-level convenience fields (``path``, ``chars``, etc.) mirror the
-    key entries on the embedded ``wrap_result`` dict for transports
-    that want the flat shape. ``wrap_result`` carries the full
-    :class:`WrapResult` contents as a plain dict (via
-    ``dataclasses.asdict``) so the entire ``SaveContinuityResult`` is
-    JSON-serializable top-to-bottom without the caller needing to
-    touch the dataclass. Library users who want the typed object can
-    reconstruct it via ``WrapResult(**result["wrap_result"])``.
-    """
+    ``pending_count`` is the episodes still waiting after this step: when it is not zero,
+    the next day's step is owed (prepare again). ``wrap_result`` is the
+    :class:`WrapResult` as a plain dict, so the whole result is JSON-serializable."""
 
-    path: str  # Filesystem path of the saved continuity sidecar
-    chars: int  # Character count (Python ``len(text)``) of the saved continuity text. NOT a byte count — for non-ASCII content the UTF-8 byte length can be up to 4x this value.
+    path: str  # Filesystem path of the memory file
+    chars: int  # Characters (``len(text)``, not bytes) of the saved file
     episodes_compressed: int
-    graduations_validated: int
-    graduations_demoted: int  # Total: demoted + bare_demoted
-    demoted: int  # Citations demoted due to bad evidence only
-    # ``[supersedes: OLD by NEW]`` links this wrap proposed: how many were
-    # recorded, and each rejected one with its reason (the save still committed).
-    supersessions_recorded: int
-    supersessions_rejected: list[dict[str, str]]
-    bare_demoted: int  # Bare (evidence-free) Proven-tier graduations demoted
-    citation_reuse_max: int  # Max times any single episode was cited
-    # Graduation-format lines whose date != today (carried-forward
-    # from prior sessions, OR a test-authoring bug where a hardcoded
-    # date drifted from wall-clock). Tests and deterministic
-    # experiments that intend to exercise validation should assert
-    # this is zero as a structural invariant. Closes the Diogenes
-    # Finding #3 class permanently.
-    skipped_non_today: int
-    gaming_suspects: list[str]  # Episode IDs flagged for suspicious reuse
-    # Patterns at Proven-tier (2x+) in the prior continuity, absent at any
-    # level in the new continuity. Surfaced as informational audit
-    # signal — see graduation.detect_pattern_omissions() and
-    # graduation.OmittedPattern. Each entry is a dict
-    # ``{"name": str, "prior_level": int}``. Empty list on first wrap
-    # (no prior continuity to compare against) and when the agent
-    # carried all prior Proven-tier patterns forward at any level. Closes
-    # the silent-omission gap surfaced by Bold Stand Phase 1b probe #1
-    # (2026-05-21).
-    omitted_patterns: list[dict[str, Any]]
-    # Graduations refused because today's explanation shared too many
-    # meaningful words with the pattern's prior-session explanation —
-    # sycophantic vocabulary reuse across sessions, not multi-faceted
-    # evidence accumulation. The corresponding patterns in the saved
-    # continuity were demoted BY ONE LEVEL from wherever they stood — not
-    # only 3x→2x/2x→1x; there is no ceiling since 0.9.7 — and marked
-    # ``(cross-session-overlap)``. Each entry is a dict
-    # ``{"name": str, "today_level": int, "overlap_words": list[str],
-    #  "prior_explanation": str}``. Empty list when no cross-session
-    # collision fired. Closes the slow-drift sycophantic-accumulation
-    # gap surfaced by Bold Stand Phase 1b probe #1 (2026-05-21).
-    cross_session_collisions: list[dict[str, Any]]
-    # Move #4 library layer (v0.3.2): new Proven graduations (2x or above,
-    # with today's date) that landed in this wrap WITHOUT either a
-    # ``[contradicts: ...]`` or ``[no-contradicts]`` annotation. Audit
-    # signal, not a gate — the library does not refuse the save. The
-    # signal flags that the agent skipped the methodology-layer
-    # contradiction-scan discipline; operator-review (Diogenes) can
-    # use it to surface candidate-contradictions for partnership
-    # review. Each entry: ``{"name": str, "level": int}``. Empty list
-    # when no new Provens graduated this wrap, or all new Provens
-    # carried explicit contradiction-stance declarations.
-    proven_without_contradicts_declaration: list[dict[str, Any]]
-    # Every pattern line of the saved text that declares ``[contradicts: ...]``:
-    # ``{"pattern": str, "contradicts": [str, ...]}``. A pattern declaring
-    # ``[no-contradicts]`` or nothing is not listed. Empty when none declare.
-    contradictions: list[dict[str, Any]]
-    # AM-CARRYFORWARD (v0.4.6): patterns HELD at their graduation level this
-    # wrap instead of demoted, because they are at/below their earned
-    # ``max_level_reached`` high-water mark AND were grounded recently (warm).
-    # The pre-0.4.6 demoter ratcheted any 2x/3x line whose THIS-wrap citation
-    # failed to resolve — eroding a load-bearing Proven by session-domain
-    # rather than by importance. Carryforward holds it (level kept, evidence
-    # tag replaced with ``(carried-forward)``) on the ungrounded path only; the
-    # ``(cross-session-overlap)`` immune demotion is never carried forward.
-    # Because a held line does not upsert pattern_history, its warmth decays on
-    # its own — a pattern that keeps failing to ground ages out. Each entry:
-    # ``{"name": str, "held_level": int, "max_level_reached": int,
-    #  "days_since_grounded": int, "cited": bool, "provenance": bool, "cold": bool}``
-    # (``cold``: spore-676 ruling (A), 2026-10-07 — a bare line held although not
-    # grounded within ``carryforward_cold_days``; dated back and flagged, never eroded)
-    # (``cited``: v0.5.0 — did the carry hold a citation that failed to resolve
-    # [True] vs no citation at all [bare, False]; ``provenance``: Slice A — did the
-    # carry record a ``[provenance: ...]`` audit marker, which EXCLUDES it from the
-    # graduate-OUT notice). Empty when nothing was held. Top-tier (3x) carries
-    # WITHOUT provenance also emit a "graduate OUT to partnership.md or retire"
-    # ``UserWarning`` (assisted, not silent-loss).
-    carried_forward: list[dict[str, Any]]
-    # CAP-08 T3: graduations held back because every citation grounding them
-    # is a tool/external episode (``graduation.UncorroboratedGraduation`` as a
-    # dict). Empty when none.
-    uncorroborated: list[dict[str, Any]]
-    # CAP-08 T2: pattern name -> the highest trust among the citations that
-    # grounded its graduation this wrap.
-    pattern_trust: dict[str, str]
-    # Always 0 since 1.0.2, when a save stopped forming association links;
-    # kept for existing readers until a later MAJOR release removes it.
-    associations_formed: int
-    associations_strengthened: int
-    associations_decayed: int
-    # AM-WARN Signal A (v0.4.2): a human-readable warning when this wrap's
-    # graduations cited ids that resolved to no episode in this store (a
-    # wrong-namespace citation, the invisible_infrastructure_failure that can run
-    # silent for months), or only superseded ones. ``None`` otherwise. Also
-    # emitted as a ``UserWarning`` at save time. Signal B (pairs offered, no link
-    # formed) was retired in 1.0.2 with link formation.
-    association_warning: str | None
-    # The wraps-table id this save recorded (``WrapResult.wrap_id``): the key of
-    # its ``wrap_graduations`` and drift rows. Added in 1.0.2.
-    wrap_id: int | None
-    # Always False. It reported an ``allow_unlinked=True`` bypass of the
-    # AM-LINKGATE save refusal (spore-721); the refusal was removed in 0.9.26
-    # and the key was kept so existing readers of the result do not break.
-    linkgate_overridden: bool
-    # AM-LINKGATE gauge (spore-721, Phill 2026-09-15 "ship 721 as built with
-    # the gauge"): the number of DISTINCT episode ids (8-char prefixes) cited on
-    # this wrap's today-dated 2x-and-up graduation lines that belong to THIS
-    # WRAP's episodes (the prepare snapshot). An id from an earlier session is
-    # not counted, even if it is still in the store. It INCLUDES citations on
-    # lines later demoted (grounding or cross-session), so it is citation
-    # spread, not grounded spread. Report only: nothing refuses or warns on it.
-    citation_spread: int
-    sections: dict[str, int]  # Char count per continuity section
-    wrap_result: dict[str, Any]  # WrapResult-as-dict (JSON-serializable)
+    pending_count: int
+    content_hash: str
+    wrap_result: dict[str, Any]

@@ -1602,45 +1602,34 @@ _EXIT_DOWNGRADED = 3
 
 
 def cmd_prepare_wrap(args: argparse.Namespace) -> None:
-    """Output the compression package for agent-driven wraps.
+    """Open one step of the rolling wrap and print the prompt to run.
 
-    Thin CLI adapter over the library ``prepare_wrap`` pipeline. The
-    agent reads the output (text or JSON), compresses in its own
-    reasoning, then saves via ``save-continuity``. Compression IS
-    cognition — the agent's judgment during compression is where
-    identity forms, which is why this command does not delegate
-    compression to any subprocess.
+    Thin CLI adapter over the library ``prepare_wrap``. The output is the measured
+    updater prompt filled with the current memory file and one day's episodes, plus the
+    wrap token. Run the prompt in a FRESH context with nothing else, then pass the
+    model's whole reply to ``save-continuity`` with ``--wrap-token``. anneal calls no
+    model itself.
 
-    On ``status == "ready"`` the library mints a session-handshake
-    token and freezes the episode ID list in store metadata. The
-    token is surfaced in both text and JSON output so the operator
-    (or a wrapping script) can round-trip it to ``save-continuity``
-    via ``--wrap-token`` for explicit mismatch detection across the
-    CLI process boundary.
-
-    Exits 3 when the wrap was DOWNGRADED, for any reason the library gives
-    (the store requires the consolidate baton and this command holds none,
-    another session's gated wrap is open, or the wrap was replaced while
-    deciding): no wrap was opened, so it must not exit like one that was
-    (spore-1170). The status and message are printed as before, and the
-    message also goes to stderr so a caller that keeps only stderr sees why.
-    ``empty`` (nothing to compress) exits 0, but on a store that requires the
-    baton the gate runs first, so an empty store downgrades and exits 3.
+    Exits 3 when the wrap was DOWNGRADED, for any reason the library gives (the store
+    requires the consolidate baton and this command holds none, another session's gated
+    wrap is open, or the wrap was replaced while deciding): no wrap was opened, so it
+    must not exit like one that was. The status and message are printed as before, and
+    the message also goes to stderr so a caller that keeps only stderr sees why.
+    ``empty`` (nothing to compress) exits 0, but on a store that requires the baton the
+    gate runs first, so an empty store downgrades and exits 3.
     """
     with _open_store(args) as store:
         try:
             result = _lib_prepare_wrap(
                 store,
-                max_chars=args.max_chars,
-                staleness_days=args.staleness_days,
+                max_chars=getattr(args, "max_chars", None),
+                tz=getattr(args, "tz", None),
                 session_id=_wrap_session(store, args, saving=False),
-                # AM-CRYSTAL-MIGRATE + AM-CRYSTAL-OPTIN: the crystallized tier lives
-                # beside the db (<stem>.crystal.json). OPT-IN — passed only when the
-                # operator has a crystal store (file exists) or --crystal is set; else
-                # None ⇒ byte-identical pre-crystal wrap (no crystallize-OUT proposals).
-                crystal_store=_open_crystal_store_for_wrap(args),
             )
         except _NewerSidecarError as exc:  # a refusal before any wrap opens
+            print(f"Error: {exc}", file=sys.stderr)
+            sys.exit(1)
+        except (ValueError, KeyError) as exc:  # an unusable --max-chars or an unknown --tz
             print(f"Error: {exc}", file=sys.stderr)
             sys.exit(1)
         except StoreError as exc:
@@ -1649,90 +1638,36 @@ def cmd_prepare_wrap(args: argparse.Namespace) -> None:
             print(f"Error: {exc}", file=sys.stderr)
             sys.exit(1)
         except WrapInProgressError as exc:
-            # AM-PREPARE-GUARD (0.4.2): a wrap is already open. main()
-            # has no top-level handler, so catch here and exit cleanly
-            # (matching cmd_save_continuity's idiom) rather than dumping
-            # a traceback. Recovery path is in the message: finish
-            # (save-continuity) or abandon (wrap-cancel) the open wrap.
+            # A wrap is already open. Recovery is in the message: finish it
+            # (save-continuity) or abandon it (wrap-cancel).
             print(f"Error: {exc}", file=sys.stderr)
             sys.exit(1)
 
         if args.json:
-            if result["status"] != "ready":
-                # Emit wrap_token: null on the empty and downgraded paths so
-                # jq-style scrapers can uniformly access the field without a
-                # missing-key error. "downgraded" means a require-baton store
-                # with no --session-id, a session not holding the baton, another
-                # session's gated wrap, or a wrap replaced mid-decision; without
-                # this branch it printed a bare {"wrap_token": null} and dropped the reason.
-                _print_json({
-                    "status": result["status"],
-                    "message": result["message"],
-                    "wrap_token": None,
-                })
-                if result["status"] == "downgraded":
-                    print(result["message"], file=sys.stderr)
-                    sys.exit(_EXIT_DOWNGRADED)
-            else:
-                # Preserve the pre-10.5c.4 JSON shape: emit the package
-                # dict so scripts scraping fields like `instructions`,
-                # `episodes`, `stale_patterns`, `today`, `max_chars`
-                # continue to work. The wrap_token is added as a new
-                # top-level key alongside the package — additive,
-                # non-breaking for existing scrapers. Note that this
-                # means the JSON shape does NOT exactly match the
-                # internal WrapPackageDict TypedDict (which has no
-                # wrap_token field); the CLI JSON output is its own
-                # shape, documented by the CLI subcommand output
-                # contract rather than by WrapPackageDict.
-                package = dict(result["package"]) if result["package"] else {}
-                package["wrap_token"] = result["wrap_token"]
-                _print_json(package)
+            # wrap_token and step are null unless status == "ready", so a script can read
+            # the fields without a missing-key error.
+            _print_json(dict(result))
+            if result["status"] == "downgraded":
+                print(result["message"], file=sys.stderr)
+                sys.exit(_EXIT_DOWNGRADED)
             return
 
-        text = format_wrap_package_text(result)
-        if result["status"] == "ready" and result["wrap_token"]:
-            # Append the token as a stable "Wrap token: <hex>" trailer
-            # so operators and wrapping scripts can grep/awk it. Same
-            # shape as the MCP transport uses in server.py, so a
-            # universal parser works across both transports.
-            text = f"{text}\n\n---\nWrap token: {result['wrap_token']}"
-        print(text)
+        print(format_wrap_package_text(result))
         if result["status"] == "downgraded":
             print(result["message"], file=sys.stderr)
             sys.exit(_EXIT_DOWNGRADED)
 
 
 def cmd_save_continuity(args: argparse.Namespace) -> None:
-    """Save agent-compressed continuity with full validation.
+    """Save the model's whole memory file: the reply to the step ``prepare-wrap`` opened.
 
-    Thin CLI adapter over the library ``validated_save_continuity``
-    pipeline. Reads the agent's compressed text from a file or stdin,
-    delegates structure validation, graduation citation validation,
-    metadata update, and wrap recording to the library, then formats the result dict as text or
-    JSON output.
+    Thin CLI adapter over the library ``validated_save_continuity``. Reads the text from a
+    file or stdin; the library checks it is not empty and not over the limit, and keeps it
+    together with every earlier version.
     """
-    # Read continuity text from file or stdin. NOTE: do NOT .strip() —
-    # that silently mutates user content and produces transport-level
-    # divergence (the same logical text saved via library/MCP keeps its
-    # trailing newline, while CLI users would lose it). The library's
-    # validate_structure() handles whitespace correctly, and we still
-    # need to detect entirely-blank input — but the empty-check uses a
-    # local stripped copy without modifying what we pass downstream.
-    # Format-check --wrap-token at args intake (before any file I/O)
-    # so malformed tokens give a clean "invalid format" error instead
-    # of a confusing downstream error. Mirrors the MCP transport's
-    # JSON-schema pattern constraint — same regex, imported from
-    # store.py where the shape constant now lives (10.5c.5 L1 fix
-    # moved it out of server.py to avoid the cli → server import
-    # inversion).
-    #
-    # ``getattr`` with default preserves compat with test fixtures
-    # that construct ``Namespace`` objects directly without going
-    # through the argparse parser. Under argparse's own parsing,
-    # the attribute is always set (to ``None`` when absent), so
-    # this defaults to dead defense for the production path but
-    # is load-bearing for direct-Namespace test callers.
+    # Format-check --wrap-token at args intake (before any file I/O) so a malformed token
+    # gives a clean "invalid format" error. ``getattr`` keeps test fixtures that build a
+    # Namespace directly working.
     _wrap_token_arg = getattr(args, "wrap_token", None)
     if _wrap_token_arg is not None and not _WRAP_TOKEN_RE.fullmatch(_wrap_token_arg):
         print(
@@ -1751,45 +1686,19 @@ def cmd_save_continuity(args: argparse.Namespace) -> None:
         text = file_path.read_text(encoding="utf-8")
 
     if not text.strip():
-        print("Error: empty continuity text.", file=sys.stderr)
+        print("Error: empty memory file.", file=sys.stderr)
         sys.exit(1)
 
     with _open_store(args) as store:
-        # --affect-tag / --affect-intensity are deprecated and ignored since 1.0.2
-        # (they weighted association links, which a save no longer forms). Still
-        # parsed, so a scheduled caller passing them keeps working.
-        if args.affect_tag:
-            print(
-                "Note: --affect-tag is deprecated and ignored since anneal-memory "
-                "1.0.2 (a save forms no association links); it is removed no earlier than 2.0.",
-                file=sys.stderr,
-            )
-
-        # Optional session-handshake token from ``prepare-wrap``. The
-        # library verifies it matches the persisted wrap and raises
-        # ValueError on mismatch (stale or wrong-wrap token). Without
-        # the flag the library still applies the frozen-snapshot
-        # filter (the persisted snapshot is consulted whenever it's
-        # present) — the token is a verification layer, not the
-        # snapshot enabler. Operators who want explicit safety pass
-        # ``--wrap-token $(anneal-memory prepare-wrap | ...)``; the
-        # single-user common case needs no ceremony.
-        wrap_token = getattr(args, "wrap_token", None)
-
         try:
             result = _lib_validated_save_continuity(
                 store,
                 text,
-                wrap_token=wrap_token,
+                wrap_token=_wrap_token_arg,
+                max_chars=getattr(args, "max_chars", None),
                 session_id=_wrap_session(store, args, saving=True),
-                allow_shrink=getattr(args, "allow_shrink", False),
-                allow_unlinked=getattr(args, "allow_unlinked", False),
-                # AM-CRYSTAL-MIGRATE + AM-CRYSTAL-OPTIN: pass the crystal store so the
-                # shrink gate CREDITS patterns that crystallized OUT this wrap — but
-                # only when opted in (file exists or --crystal); else None ⇒ no credit
-                # ⇒ byte-identical pre-crystal gate behavior. Symmetric with prepare.
-                crystal_store=_open_crystal_store_for_wrap(args),
-                require_rederive=getattr(args, "require_rederive", False),
+                model=getattr(args, "model", None),
+                unattended=getattr(args, "unattended", False),
             )
         except ValueError as exc:
             print(f"Error: {exc}", file=sys.stderr)
@@ -1798,9 +1707,8 @@ def cmd_save_continuity(args: argparse.Namespace) -> None:
             if isinstance(exc, _NewerSidecarError):  # a refusal, not an I/O failure
                 print(f"Error: {exc}", file=sys.stderr)
                 sys.exit(1)
-            # Surface the structured I/O error with operation + path
-            # context so operators see which file / what operation
-            # failed rather than a Python traceback.
+            # Surface the structured I/O error with operation + path context so operators
+            # see which file / what operation failed rather than a Python traceback.
             print(
                 f"Error: store I/O failure during {exc.operation} "
                 f"at {exc.path}: {exc}",
@@ -1808,101 +1716,28 @@ def cmd_save_continuity(args: argparse.Namespace) -> None:
             )
             sys.exit(1)
 
-        chars = result["chars"]
-        sections = result["sections"]
-
+        wrap_id = cast("dict[str, Any]", result).get("wrap_result", {}).get("wrap_id")
         if args.json:
-            # Preserve the pre-10.5c.1 JSON shape for backward compat
-            # with any scripts scraping the output. The demoted split
-            # (demoted + bare_demoted), citation_reuse_max,
-            # gaming_suspects, and skipped_non_today are added as pure
-            # additions — they were not in the pre-10.5c.1 shape but
-            # adding keys is safe for dict-based scrapers.
             _print_json({
                 "saved": True,
                 "path": result["path"],
-                "chars": chars,
+                "chars": result["chars"],
                 "episodes_compressed": result["episodes_compressed"],
-                "graduations_validated": result["graduations_validated"],
-                "graduations_demoted": result["graduations_demoted"],
-                "demoted": result["demoted"],
-                "bare_demoted": result["bare_demoted"],
-                "citation_reuse_max": result["citation_reuse_max"],
-                "skipped_non_today": result["skipped_non_today"],
-                "gaming_suspects": result["gaming_suspects"],
-                "associations_formed": result["associations_formed"],
-                "associations_strengthened": result["associations_strengthened"],
-                "associations_decayed": result["associations_decayed"],
-                "linkgate_overridden": result["linkgate_overridden"],
-                "association_warning": result["association_warning"],
-                "wrap_id": result["wrap_id"],
-                "citation_spread": result["citation_spread"],
-                "supersessions_recorded": result["supersessions_recorded"],
-                "supersessions_rejected": result["supersessions_rejected"],
-                "sections": {name: c for name, c in sorted(sections.items())},
-                "stale_state": result.get("stale_state", []),
-                "level_capped": result.get("level_capped", []),
-                "renamed": result.get("renamed", []),
-                "renames_rejected": result.get("renames_rejected", []),
+                "pending_count": result["pending_count"],
+                "wrap_id": wrap_id,
+                "content_hash": result["content_hash"],
             })
             return
 
-        print(f"Continuity saved ({chars:,} chars) to {result['path']}")
-        if result["wrap_id"] is not None:
-            print(f"Wrap id: {result['wrap_id']}")
+        print(f"Memory file saved ({result['chars']:,} chars) to {result['path']}")
+        if wrap_id is not None:
+            print(f"Wrap id: {wrap_id}")
         print(f"Episodes compressed: {result['episodes_compressed']}")
-        for entry in result.get("stale_state", []):
-            print(f"State line does not hold (fix it next wrap): {entry}")
-        print(
-            f"Citation spread: {result['citation_spread']} distinct episode(s) "
-            f"cited on today's 2x-and-up graduation lines (counted before grounding checks)"
-        )
-        if result["supersessions_recorded"]:
-            print(f"Supersessions recorded: {result['supersessions_recorded']}")
-        for rej in result["supersessions_rejected"]:
-            print(f"Supersession rejected ({rej['old_id']} by {rej['new_id']}): {rej['reason']}")
-        for ren in result.get("renamed", []):
-            print(f"Pattern renamed: {ren['old']} -> {ren['new']} (earned level kept)")
-        for rej in result.get("renames_rejected", []):
-            names = f" ({rej['old']} -> {rej['new']})" if rej["old"] else ""
-            print(f"Rename rejected{names}: {rej['reason']}")
-
-        if result["graduations_validated"]:
-            print(f"Citations validated: {result['graduations_validated']}")
-        if result["demoted"]:
-            print(f"Citations demoted (bad evidence): {result['demoted']}")
-        if result["bare_demoted"]:
+        if result["pending_count"]:
             print(
-                f"Bare graduations demoted (no evidence): {result['bare_demoted']}"
+                f"{result['pending_count']} episode(s) are still waiting: "
+                f"run prepare-wrap again for the next step."
             )
-        for cap in result.get("level_capped", []):
-            why = f" ({cap['reason']})" if cap.get("reason", "prior") != "prior" else ""
-            print(f"Level capped: {cap['name']} {cap['written_level']}x -> {cap['capped_to']}x{why}")
-        if result["skipped_non_today"]:
-            # Carried-forward graduations from prior sessions are
-            # normal. A non-zero count with no new validations is
-            # usually benign; a non-zero count alongside a failing
-            # test is the Finding #3 test-drift class.
-            print(
-                f"Graduations skipped (non-today date): "
-                f"{result['skipped_non_today']}"
-            )
-        if result["gaming_suspects"]:
-            print(
-                f"Citation gaming suspects: {', '.join(result['gaming_suspects'])}"
-            )
-
-        if result["associations_formed"] or result["associations_strengthened"]:
-            print(
-                f"Associations: {result['associations_formed']} formed, "
-                f"{result['associations_strengthened']} strengthened"
-            )
-        if result["associations_decayed"]:
-            print(f"Associations decayed: {result['associations_decayed']}")
-
-        print("\nSection sizes:")
-        for name, chars in sorted(sections.items()):
-            print(f"  {name}: {chars} chars")
 
 
 def cmd_wrap_status(args: argparse.Namespace) -> None:
@@ -5513,26 +5348,14 @@ def build_parser() -> argparse.ArgumentParser:
     # -- prepare-wrap --
     sub = subparsers.add_parser(
         "prepare-wrap",
-        help="Output compression package for agent-driven wraps (exits 3 if the wrap was downgraded)",
+        help="Open one step of the rolling wrap and print the prompt to run (exits 3 if the wrap was downgraded)",
         parents=[json_parent],
     )
     sub.add_argument("--max-chars", type=int, default=None,
-                     help="Target continuity size in chars (a save is refused only above the "
-                          "schema's hard maximum, which this does not move). Omit for a schema-aware "
-                          "default (20000 for the standard schema, larger for a "
-                          "richer schema like FLOW_SCHEMA).")
-    sub.add_argument("--staleness-days", type=int, default=7, help="Days before flagging stale patterns (default: 7)")
-    sub.add_argument(
-        "--crystal",
-        action="store_true",
-        help="Enable the crystallized-pattern tier for THIS wrap (surface "
-             "crystallize-OUT proposals). OPT-IN: auto-enabled when a crystal "
-             "store already exists beside the db (created when you first "
-             "crystallize a pattern). This flag enables a single wrap; it does "
-             "NOT itself create the store, so persistent opt-in comes from "
-             "crystallizing a pattern. Without it (and no existing store) the "
-             "wrap is byte-identical to the pre-crystal pipeline.",
-    )
+                     help="Hard limit on the memory file, in characters: the prompt states it and "
+                          "save-continuity enforces it (default 26000).")
+    sub.add_argument("--tz", default=None,
+                     help="IANA time zone a day is cut in (default: this machine's own).")
     sub.add_argument(
         "--session-id",
         type=_session_name,
@@ -5546,58 +5369,23 @@ def build_parser() -> argparse.ArgumentParser:
     # -- save-continuity --
     sub = subparsers.add_parser(
         "save-continuity",
-        help="Save agent-compressed continuity with validation",
+        help="Save the model's whole memory file: the reply to the step prepare-wrap opened",
         parents=[json_parent],
     )
-    sub.add_argument("file", help="Path to continuity markdown file (use '-' for stdin)")
-    sub.add_argument("--affect-tag", help="Deprecated and ignored since 1.0.2; removed no earlier than 2.0")
-    sub.add_argument("--affect-intensity", type=float, default=0.5, help="Deprecated and ignored since 1.0.2; removed no earlier than 2.0")
+    sub.add_argument("file", help="Path to the memory file text (use '-' for stdin)")
     sub.add_argument(
         "--wrap-token",
         help=(
-            "Session-handshake token from the prior prepare-wrap call "
-            "(the 'Wrap token: <hex>' trailer). When provided, mismatch "
-            "with the persisted wrap raises an error; when omitted, the "
-            "frozen-snapshot filter still applies but no token "
-            "verification runs."
+            "The token from prepare-wrap (the 'Wrap token: <hex>' line). When given, a "
+            "mismatch with the open wrap is refused; required on a store that requires "
+            "the consolidate baton."
         ),
     )
-    sub.add_argument(
-        "--allow-shrink",
-        action="store_true",
-        help=(
-            "Override the catastrophic-shrink gate. By default a wrap that "
-            "collapses a protected memory layer (the timeless felt section, "
-            "the graduating identity section, or the whole continuity) is "
-            "refused as a likely recency-trap/stateless-reset failure. Pass "
-            "this only for a deliberate diet / migration recompression."
-        ),
-    )
-    sub.add_argument(
-        "--allow-unlinked",
-        action="store_true",
-        help=(
-            "DEPRECATED, does nothing. It overrode the AM-LINKGATE save "
-            "refusal, which was removed in 0.9.26; passing it only prints a "
-            "deprecation warning."
-        ),
-    )
-    sub.add_argument(
-        "--crystal",
-        action="store_true",
-        help="Enable the crystallized-pattern tier for this wrap (credit "
-             "crystallized-OUT departures in the shrink gate). OPT-IN: "
-             "auto-enabled when a crystal store already exists; pass this only "
-             "to bootstrap the credit when no crystal store exists yet (normally "
-             "the existing store auto-enables it).",
-    )
-    sub.add_argument(
-        "--require-rederive",
-        action="store_true",
-        help="Refuse the save unless this store is opted in to re-derive "
-             "('derive allow'), so its State lines are run at this save "
-             "(see docs/rederive.md).",
-    )
+    sub.add_argument("--max-chars", type=int, default=None,
+                     help="The limit prepare-wrap was given (default 26000); a longer file is refused.")
+    sub.add_argument("--model", default=None, help="Name of the model that wrote the file (recorded on the wrap).")
+    sub.add_argument("--unattended", action="store_true",
+                     help="Mark the wrap as one no operator watched (recorded on the wrap).")
     sub.add_argument(
         "--session-id",
         type=_session_name,

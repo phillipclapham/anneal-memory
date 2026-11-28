@@ -215,21 +215,33 @@ TOOLS: list[dict[str, Any]] = [
         },
     },
     {
+        "name": "read_continuity",
+        "description": (
+            "Read the memory file: the one document the wrap keeps current, "
+            "the compressed state of everything recorded so far. Call this at "
+            "session start to load it. Returns its text, or says there is none "
+            "yet (a store gets one at its first completed wrap)."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {},
+        },
+    },
+    {
         "name": "prepare_wrap",
         "description": (
-            "Prepare a compression package for session wrap. Call this at session "
-            "boundaries — when work is ending, the user says to wrap up, or the "
-            "session is getting long. Returns all episodes since the last wrap, "
-            "the current continuity file, stale pattern warnings and compression "
-            "instructions. Marks a wrap as in-progress "
-            "and mints a session-handshake token (shown as 'Wrap token: <hex>' "
-            "at the end of the response) — round-trip that token to "
-            "save_continuity's wrap_token argument so the save call can verify "
-            "it matches the in-progress wrap and catch stale tokens. "
-            "After calling, follow the returned instructions to compress episodes "
-            "into an updated continuity file, then save with save_continuity. "
-            "The compression step is where the real thinking happens — patterns "
-            "emerge that weren't visible in the raw episodes."
+            "Open one step of the rolling wrap and return the prompt to run. Call "
+            "this at session boundaries, when the user says to wrap up, or when "
+            "episodes have piled up. The step is the oldest day of episodes since "
+            "the last wrap. The reply holds the step's facts, a wrap token "
+            "(shown as 'Wrap token: <hex>'), and a prompt: the current memory "
+            "file and that day's log, with instructions to rewrite the memory "
+            "file. Run that prompt in a FRESH context with nothing else (a "
+            "subagent, a new session, or a model call you make), then pass the "
+            "model's whole reply to save_continuity with the token. If episodes "
+            "from later days are still waiting, the reply and the save's result "
+            "say so: prepare_wrap again for the next step. Marks a wrap in "
+            "progress until it is saved or cancelled."
         ),
         "inputSchema": {
             "type": "object",
@@ -237,17 +249,16 @@ TOOLS: list[dict[str, Any]] = [
                 "max_chars": {
                     "type": "integer",
                     "description": (
-                        "Maximum size of the continuity file in characters. Omit "
-                        "to derive a schema-aware default (20000 for the standard "
-                        "schema, larger for a richer schema like FLOW_SCHEMA)."
+                        "Hard limit on the memory file in characters: the prompt "
+                        "states it and save_continuity enforces it. Default 26000."
                     ),
                 },
-                "staleness_days": {
-                    "type": "integer",
+                "tz": {
+                    "type": "string",
                     "description": (
-                        "Days without validation before flagging patterns as stale. Default 7."
+                        "IANA time zone a day is cut in, e.g. 'America/New_York'. "
+                        "Default: the server machine's own."
                     ),
-                    "default": 7,
                 },
             },
         },
@@ -255,53 +266,22 @@ TOOLS: list[dict[str, Any]] = [
     {
         "name": "save_continuity",
         "description": (
-            "Validate and save the compressed continuity file. Call this after "
-            "compressing your episodes using the instructions from prepare_wrap. "
-            "The text must contain exactly 4 sections: ## State, ## Patterns, "
-            "## Decisions, ## Context. The server validates structure, checks "
-            "graduation citations against real episodes (cited IDs must exist), "
-            "checks explanation overlap (evidence must reference actual episode "
-            "content), detects citation gaming (suspicious reuse of single "
-            "episodes), and may demote ungrounded graduations. Each pattern's "
-            "level is also capped against the level the store last saved for it: "
-            "a new pattern enters at 1x and a validated Nx becomes at most "
-            "(N+1)x, whatever the line's date says. Returns validation results, "
-            "the wrap id, and section sizes."
+            "Save the memory file: the model's whole reply to the step "
+            "prepare_wrap opened. Call this after running the prepare_wrap "
+            "prompt. The text must be the complete new memory file, not a diff "
+            "or a summary of changes. The only checks are that it is not empty, "
+            "not over the character limit, and answers the open step (pass "
+            "wrap_token). A refused save writes nothing and leaves the step "
+            "open: run the step again and save again. Every earlier version of "
+            "the file is kept. Returns the wrap id, the size, and how many "
+            "episodes are still waiting for a later step."
         ),
         "inputSchema": {
             "type": "object",
             "properties": {
                 "text": {
                     "type": "string",
-                    "description": (
-                        "The full continuity markdown to save. Must contain "
-                        "all 4 required sections."
-                    ),
-                },
-                "affective_state": {
-                    "type": "object",
-                    "description": (
-                        "DEPRECATED and ignored: omit it. It weighted association "
-                        "links, which a save no longer forms; it is accepted so "
-                        "older clients keep working, and removed no earlier than 2.0."
-                    ),
-                    "properties": {
-                        "tag": {
-                            "type": "string",
-                            "description": (
-                                "Free-text functional state label. Examples: "
-                                "engaged, curious, uncertain, frustrated, calm, "
-                                "focused, playful, concerned."
-                            ),
-                        },
-                        "intensity": {
-                            "type": "number",
-                            "description": "How strongly you felt this state (0.0-1.0).",
-                            "minimum": 0.0,
-                            "maximum": 1.0,
-                        },
-                    },
-                    "required": ["tag", "intensity"],
+                    "description": "The complete new memory file.",
                 },
                 "wrap_token": {
                     "type": "string",
@@ -309,38 +289,17 @@ TOOLS: list[dict[str, Any]] = [
                     "minLength": 32,
                     "maxLength": 32,
                     "description": (
-                        "Optional: the 32-char hex session-handshake token "
-                        "from the prepare_wrap response (the 'Wrap token: "
-                        "<hex>' line at the end of the text). Pass it back "
-                        "here to verify you are saving the wrap you prepared "
-                        "— a mismatch (stale or wrong token) raises an error "
-                        "instead of silently committing against the wrong "
-                        "wrap. The frozen-snapshot filter automatically "
-                        "applies whenever prepare_wrap established a "
-                        "snapshot; this token argument is the optional "
-                        "explicit verification layer for integration "
-                        "environments that can round-trip the value."
+                        "The 32-char hex token from the prepare_wrap reply (the "
+                        "'Wrap token: <hex>' line). Pass it back to verify you "
+                        "are saving the step you prepared: a stale or wrong "
+                        "token is refused instead of committing against the "
+                        "wrong wrap."
                     ),
                 },
-                "allow_shrink": {
-                    "type": "boolean",
+                "max_chars": {
+                    "type": "integer",
                     "description": (
-                        "Optional (default false): override the "
-                        "catastrophic-shrink gate. By default a wrap that "
-                        "collapses a protected memory layer — the timeless "
-                        "felt section, the graduating identity section, or "
-                        "the whole continuity — is refused as a likely "
-                        "recency-trap / stateless-reset failure. Set true "
-                        "ONLY for a deliberate diet / migration "
-                        "recompression that intentionally shrinks memory."
-                    ),
-                },
-                "allow_unlinked": {
-                    "type": "boolean",
-                    "description": (
-                        "Deprecated, does nothing: it overrode the "
-                        "AM-LINKGATE save refusal, which was removed in "
-                        "0.9.26. Omit it."
+                        "The limit prepare_wrap was given. Default 26000."
                     ),
                 },
             },
@@ -486,85 +445,6 @@ TOOLS: list[dict[str, Any]] = [
             "`anneal-memory verify` from the CLI to validate the audit "
             "hash chain itself — status() only surfaces cheap health "
             "signals, not integrity proof."
-        ),
-        "inputSchema": {
-            "type": "object",
-            "properties": {},
-        },
-    },
-    {
-        "name": "crystal_recall",
-        "description": (
-            "Recall crystallized patterns relevant to a free-text query — the "
-            "on-demand graduated tier (AM-CRYSTAL). Crystallized patterns are "
-            "proven-and-stable wisdom that graduated OUT of the always-loaded "
-            "working set into a retrievable store, so a large body of wisdom stays "
-            "effective without clogging context. Call this when a decision, design "
-            "choice, or question touches a topic where prior graduated wisdom might "
-            "apply — recall surfaces the relevant patterns on cue (pair it with "
-            "crystal_index, the always-on menu of what exists). Associative by "
-            "default: a pattern grounded in an episode your query matched surfaces "
-            "even with zero keyword overlap (the evidence edge). Returns scored "
-            "patterns (name, level, activation, explanation, tags). In the default "
-            "'prompt' mode it is precision-biased: a thin query or no match returns "
-            "none, by design (surface nothing rather than noise). Pass mode='query' "
-            "when you are asking explicitly. Durable facts whose cue words appear in the "
-            "query (or two distinctive words of its text) are listed first, under "
-            "'Durable facts matching your words'. max_patterns=0 returns nothing at "
-            "all, facts included."
-        ),
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "query": {
-                    "type": "string",
-                    "description": (
-                        "The free-text query (a prompt, a decision surface, a topic) "
-                        "to find relevant crystallized patterns for."
-                    ),
-                },
-                "max_patterns": {
-                    "type": "integer",
-                    "description": (
-                        "Maximum patterns to surface (precision cap). Default 3."
-                    ),
-                    "default": 3,
-                },
-                "associative": {
-                    "type": "boolean",
-                    "description": (
-                        "When true (default), augment keyword recall with the evidence "
-                        "edge — patterns whose evidence cites an episode your query "
-                        "matched surface even with zero keyword overlap. Set false for "
-                        "pure keyword scoring (the pre-0.8.0 path)."
-                    ),
-                    "default": True,
-                },
-                "mode": {
-                    "type": "string",
-                    "enum": ["prompt", "query"],
-                    "description": (
-                        "'query': for a question you are asking on purpose; one "
-                        "keyword is enough, and weaker matches come back too. "
-                        "'prompt' (default): strict, built for automatic per-turn "
-                        "injection; may return nothing."
-                    ),
-                    "default": "prompt",
-                },
-            },
-            "required": ["query"],
-        },
-    },
-    {
-        "name": "crystal_index",
-        "description": (
-            "List the always-on crystallized INDEX — a name + one-clause menu of "
-            "every live crystallized pattern (AM-CRYSTAL-INDEX). Call this at "
-            "session start, or any time you want to know what graduated wisdom "
-            "exists, so you aren't blind to your own crystallized corpus; then pull "
-            "a body on cue with crystal_recall. Deliberately thin (name + clause "
-            "only) — the menu is meant to be cheap to keep in view. Sorted by name. "
-            "Returns nothing when no patterns have been crystallized yet."
         ),
         "inputSchema": {
             "type": "object",

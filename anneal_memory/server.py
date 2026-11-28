@@ -379,13 +379,12 @@ class Server:
         self._tool_handlers: dict[str, Any] = {
             "record": self._tool_record,
             "recall": self._tool_recall,
+            "read_continuity": self._tool_read_continuity,
             "prepare_wrap": self._tool_prepare_wrap,
             "save_continuity": self._tool_save_continuity,
             "wrap_cancel": self._tool_wrap_cancel,
             "delete_episode": self._tool_delete_episode,
             "status": self._tool_status,
-            "crystal_recall": self._tool_crystal_recall,
-            "crystal_index": self._tool_crystal_index,
             "spore_add": self._tool_spore_add,
             "spore_get": self._tool_spore_get,
             "spore_list": self._tool_spore_list,
@@ -1019,96 +1018,61 @@ class Server:
             if self._crystal_path.exists() else None
         )
 
+    def _tool_read_continuity(self, args: dict[str, Any]) -> dict[str, Any]:
+        """The memory file: what the wrap keeps current. Same text as the
+        ``anneal://continuity`` resource, for a client that reads tools and not resources."""
+        text = self._store.load_continuity()
+        return _tool_result(
+            text or "(No memory file yet. It is created by the first completed wrap: "
+            "record episodes, then prepare_wrap and save_continuity.)"
+        )
+
     def _tool_prepare_wrap(self, args: dict[str, Any]) -> dict[str, Any]:
-        """MCP transport adapter for the library prepare_wrap pipeline.
+        """MCP transport adapter for the library prepare_wrap.
 
-        Parses max_chars and staleness_days from MCP tool args, delegates
-        to the library canonical pipeline, and formats the returned
-        package as text via format_wrap_package_text. The library
-        handles the full lifecycle (wrap_cancelled on empty,
-        wrap_started on ready) so this function stays transport-only.
-
-        On ``status == "ready"`` the library mints a session-handshake
-        token (``wrap_token``) and persists a frozen snapshot of the
-        episode IDs in store metadata. The token is appended to the
-        agent-facing text so the agent can round-trip it back on the
-        ``save_continuity`` call for explicit mismatch detection. The
-        frozen-snapshot filter at save time applies regardless of
-        whether the token is round-tripped — the token is the
-        verification layer, not the snapshot enabler.
+        Parses ``max_chars`` and ``tz`` from the tool args, delegates to the library,
+        and returns the library's text: the step's facts, the wrap token, and the
+        prompt to run in a fresh context. The library handles the whole lifecycle
+        (wrap_cancelled on empty, wrap_started on ready), so this stays transport-only.
         """
-        # AM-SCHEMA-BUDGET (v0.4.2): omit max_chars (None) -> the library
-        # derives a schema-aware budget (20000 for the ops DEFAULT_SCHEMA,
-        # larger for a richer schema like FLOW_SCHEMA). Do NOT inject a flat
-        # 20000 default here — that would silently defeat schema-aware budgeting
-        # for a partnership entity wrapping over MCP. An explicit caller value
-        # still overrides.
         max_chars = args.get("max_chars")
-        staleness_days = args.get("staleness_days", 7)
+        tz = args.get("tz")
+        if max_chars is not None and (isinstance(max_chars, bool) or not isinstance(max_chars, int)):
+            return _tool_result("Error: max_chars must be an integer", is_error=True)
+        if tz is not None and not isinstance(tz, str):
+            return _tool_result("Error: tz must be an IANA time zone name", is_error=True)
 
         try:
             result = _lib_prepare_wrap(
                 self._store,
                 max_chars=max_chars,
-                staleness_days=staleness_days,
-                # AM-CRYSTAL-OPTIN: opt-in gate — pass the store only when it exists.
-                crystal_store=self._crystal_store_for_wrap(),
+                tz=tz,
                 session_id=self._wrap_session(saving=False),
             )
         except _NewerSidecarError as exc:  # a refusal before any wrap opens
+            return _tool_result(f"Error: {exc}", is_error=True)
+        except (ValueError, KeyError) as exc:  # an unusable max_chars or an unknown time zone
             return _tool_result(f"Error: {exc}", is_error=True)
         except StoreError as exc:
             if exc.operation != "load_meta":  # an unreadable meta also refuses before any wrap opens
                 raise
             return _tool_result(f"Error: {exc}", is_error=True)
 
-        text = format_wrap_package_text(result)
-        if result["status"] == "ready" and result["wrap_token"]:
-            # Surface the token in a stable, machine-parseable line at
-            # the end of the agent-facing text. The agent reads this
-            # and passes it back on save_continuity. Format is
-            # deliberately boring ("Wrap token: <hex>") so a simple
-            # regex or endswith check can extract it; more elaborate
-            # structure would overfit one parsing pattern.
-            text = f"{text}\n\n---\nWrap token: {result['wrap_token']}"
-        return _tool_result(text)
+        return _tool_result(format_wrap_package_text(result))
 
     def _tool_save_continuity(self, args: dict[str, Any]) -> dict[str, Any]:
         """MCP transport adapter for the library validated_save_continuity.
 
-        Parses text from MCP tool args (a deprecated ``affective_state`` is
-        accepted and named as ignored in the reply), delegates the entire
-        save pipeline (structure validation, graduation, metadata, wrap
-        completion) to
-        the library, and formats the returned dict as an MCP text
-        response. ValueError from the library (empty text or missing
-        sections) becomes an is_error=True tool result.
+        ``text`` is the model's whole memory file, the reply to the step prepare_wrap
+        opened. The library checks it is not empty and not over the limit; a refusal
+        becomes an is_error=True tool result and leaves the step open.
         """
         text = args.get("text", "")
         if not text:
             return _tool_result("Error: text is required", is_error=True)
 
-        # affective_state is deprecated and ignored since 1.0.2 (it weighted
-        # association links, which a save no longer forms). Still accepted, so a
-        # client that sends it keeps working; the reply says it was ignored,
-        # because a library UserWarning never reaches an MCP client.
-        affect_sent = args.get("affective_state") is not None
-
-        # Optional session-handshake token. When the agent round-trips
-        # the token from the prior prepare_wrap response, the library
-        # verifies it matches the persisted wrap and rejects stale or
-        # wrong-wrap tokens. Omitting the token is fine for the
-        # single-agent common case — the frozen-snapshot filter still
-        # applies because the library consults the persisted snapshot
-        # whenever it's present.
-        #
-        # Shape validation at the MCP boundary: must be a 32-char
-        # hex string if present. The JSON schema also declares the
-        # pattern but some MCP clients skip schema validation; this
-        # explicit check is belt-and-suspenders so the library stays
-        # free of regex. Uses the module-level ``_WRAP_TOKEN_RE``
-        # constant (shared with any future transport) rather than an
-        # inline pattern.
+        # Optional session-handshake token from the prepare_wrap reply. Shape-checked
+        # here (32 hex characters) because some MCP clients skip schema validation.
         wrap_token = args.get("wrap_token")
         if wrap_token is not None:
             if not isinstance(wrap_token, str):
@@ -1117,9 +1081,7 @@ class Server:
                     is_error=True,
                 )
             if wrap_token == "":
-                # Normalize empty string to None — same as "no token
-                # passed." An empty-string token would fall into the
-                # library's mismatch path with a confusing error.
+                # An empty-string token is "no token passed", not a mismatch.
                 wrap_token = None
             elif not _WRAP_TOKEN_RE.fullmatch(wrap_token):
                 return _tool_result(
@@ -1127,146 +1089,43 @@ class Server:
                     f"(got {len(wrap_token)} chars)",
                     is_error=True,
                 )
-
-        # Optional catastrophic-shrink override (v0.3.5). Defaults to
-        # False; only a deliberate diet / migration recompression should
-        # set it. Require a genuine JSON boolean ``true`` — for a SAFETY
-        # override, a stringy ``"false"`` (or any other non-bool JSON)
-        # must NOT silently disable the gate, so anything that is not
-        # literally ``True`` leaves it enabled.
-        allow_shrink = args.get("allow_shrink", False) is True
-        # Deprecated no-op since 0.9.26: the AM-LINKGATE refusal it overrode
-        # was removed. Still accepted and passed through unchanged.
-        allow_unlinked = args.get("allow_unlinked", False) is True
+        max_chars = args.get("max_chars")
+        if max_chars is not None and (isinstance(max_chars, bool) or not isinstance(max_chars, int)):
+            return _tool_result("Error: max_chars must be an integer", is_error=True)
 
         try:
             result = _lib_validated_save_continuity(
                 self._store,
                 text,
                 wrap_token=wrap_token,
+                max_chars=max_chars,
                 session_id=self._wrap_session(saving=True),
-                allow_shrink=allow_shrink,
-                allow_unlinked=allow_unlinked,
-                # AM-CRYSTAL-OPTIN: opt-in gate — pass the store only when it exists.
-                crystal_store=self._crystal_store_for_wrap(),
             )
         except ValueError as exc:
             return _tool_result(f"Error: {exc}", is_error=True)
         except StoreError as exc:
             if isinstance(exc, _NewerSidecarError):  # a refusal, not an I/O failure
                 return _tool_result(f"Error: {exc}", is_error=True)
-            # Surface the structured I/O error with operation + path
-            # context so the agent sees which file / what operation
-            # failed rather than a bare traceback.
+            # Surface the structured I/O error with operation + path context so the
+            # agent sees which file / what operation failed rather than a traceback.
             return _tool_result(
                 f"Error: store I/O failure during {exc.operation} "
                 f"at {exc.path}: {exc}",
                 is_error=True,
             )
 
-        # Format the library result dict as the MCP text response
-        lines = [
-            f"Continuity saved ({result['chars']} chars) to {result['path']}"
-        ]
-        if result.get("wrap_id") is not None:
-            lines.append(f"Wrap id: {result['wrap_id']}")
-        if affect_sent:
-            lines.append(
-                "affective_state is deprecated and was ignored: since anneal-memory "
-                "1.0.2 a save forms no association links for it to weight. Stop "
-                "sending it; it is removed no earlier than 2.0."
-            )
+        lines = [f"Memory file saved ({result['chars']} chars) to {result['path']}"]
+        wrap_id = cast("dict[str, Any]", result).get("wrap_id")
+        if wrap_id is None:
+            wrap_id = cast("dict[str, Any]", result).get("wrap_result", {}).get("wrap_id")
+        if wrap_id is not None:
+            lines.append(f"Wrap id: {wrap_id}")
         lines.append(f"Episodes compressed: {result['episodes_compressed']}")
-        if result.get("stale_state"):
+        pending = cast("dict[str, Any]", result).get("pending_count", 0)
+        if pending:
             lines.append(
-                "State lines that do not hold (fix them next wrap): "
-                + "; ".join(result["stale_state"])
+                f"{pending} episode(s) are still waiting: call prepare_wrap again for the next step."
             )
-        lines.append(
-            f"Citation spread: {result['citation_spread']} distinct episode(s) "
-            f"cited on today's 2x-and-up graduation lines (counted before grounding checks)"
-        )
-
-        if result["graduations_validated"]:
-            lines.append(f"Citations validated: {result['graduations_validated']}")
-        if result["demoted"]:
-            lines.append(f"Citations demoted (bad evidence): {result['demoted']}")
-        if result["bare_demoted"]:
-            lines.append(
-                f"Bare graduations demoted (no evidence): {result['bare_demoted']}"
-            )
-        if result["skipped_non_today"]:
-            # Carried-forward graduations from prior sessions are
-            # normal. A non-zero count alongside a failing test or
-            # unexpected validation gap is the Finding #3 test-drift
-            # class — surfacing it here gives operators parity with
-            # the library return shape.
-            lines.append(
-                f"Graduations skipped (non-today date): "
-                f"{result['skipped_non_today']}"
-            )
-        if result["gaming_suspects"]:
-            lines.append(
-                f"Citation gaming suspects: {', '.join(result['gaming_suspects'])}"
-            )
-        # The prior-state bound's cuts travel in the text: the UserWarning is
-        # post-commit and never reaches an MCP client (L2 r1, run).
-        for cap in cast("dict[str, Any]", result).get("level_capped") or []:
-            why = (
-                cap["reason"] if cap.get("reason", "prior") != "prior"
-                else "a new pattern enters at 1x; a validated Nx becomes (N+1)x"
-            )
-            lines.append(
-                f"Level capped: {cap['name']} {cap['written_level']}x -> "
-                f"{cap['capped_to']}x ({why})"
-            )
-
-        if result["associations_formed"] or result["associations_strengthened"]:
-            lines.append(
-                f"Associations: {result['associations_formed']} formed, "
-                f"{result['associations_strengthened']} strengthened"
-            )
-        if result["associations_decayed"]:
-            lines.append(f"Associations decayed: {result['associations_decayed']}")
-        if result["supersessions_recorded"]:
-            lines.append(f"Supersessions recorded: {result['supersessions_recorded']}")
-        for rej in result["supersessions_rejected"]:
-            lines.append(
-                f"Supersession rejected ({rej['old_id']} by {rej['new_id']}): {rej['reason']}"
-            )
-        for ren in result.get("renamed", []):
-            lines.append(f"Pattern renamed: {ren['old']} -> {ren['new']} (earned level kept)")
-        for rej in result.get("renames_rejected", []):
-            names = f" ({rej['old']} -> {rej['new']})" if rej["old"] else ""
-            lines.append(f"Rename rejected{names}: {rej['reason']}")
-
-        if result["association_warning"]:
-            # A post-commit UserWarning never reaches an MCP client, so the
-            # AM-WARN signal (citations that resolve to no episode) travels in
-            # the result text.
-            lines.append(f"Association warning: {result['association_warning']}")
-        if allow_unlinked is True:
-            lines.append(
-                "allow_unlinked is deprecated and did nothing: the AM-LINKGATE save "
-                "refusal it overrode was removed in 0.9.26."
-            )
-
-        # Durable-fact save warnings (a re-inserted line, a drop marker that named
-        # nothing) are post-commit and never reach an MCP client as a UserWarning, so
-        # they travel in the result text too. Read leniently: a result without the key
-        # has none.
-        raw_warnings: Any = cast("dict[str, Any]", result).get("durable_warnings") or []
-        durable_warnings = [w for w in raw_warnings if isinstance(w, str) and w]
-        if durable_warnings:
-            lines.append("\nDurable facts:")
-            prefix = "Durable facts: "
-            for w in durable_warnings:
-                lines.append(f"  - {w[len(prefix):] if w.startswith(prefix) else w}")
-
-        lines.append("\nSection sizes:")
-        for name, chars in sorted(result["sections"].items()):
-            lines.append(f"  {name}: {chars} chars")
-
         return _tool_result("\n".join(lines))
 
     def _tool_wrap_cancel(self, args: dict[str, Any]) -> dict[str, Any]:

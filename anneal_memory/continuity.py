@@ -29,6 +29,7 @@ from typing import TYPE_CHECKING, Any, cast
 from . import rolling, sessions
 from .store import (
     IdempotencyConflictError,
+    LeaseFencedError,
     _IDEMPOTENCY_SCOPE,
     _IdempotentReplay,
     _idempotency_request_hash,
@@ -209,9 +210,14 @@ def _ready(
         prompt=rolling.render_prompt_text(system, user),
     )
     more = f" {steps_after} more step(s) follow." if steps_after else ""
+    odd = (
+        f" {step.unreadable} episode(s) have a timestamp that could not be read; "
+        f"they are filed by its date prefix, else under {rolling.UNREADABLE_DAY}."
+        if step.unreadable else ""
+    )
     return PrepareWrapResult(
         status="ready",
-        message=f"Ready: {len(step.episode_ids)} episode(s) of {step.day}.{more}",
+        message=f"Ready: {len(step.episode_ids)} episode(s) of {step.day}.{more}{odd}",
         episode_count=len(step.episode_ids),
         pending_count=pending,
         wrap_token=wrap_token,
@@ -220,7 +226,7 @@ def _ready(
 
 
 def _replay_prepare(
-    store: Store, result_json: str | None, *, max_chars: int, tz: tzinfo,
+    store: Store, result_json: str | None, *, max_chars: int, tz: tzinfo | None,
 ) -> PrepareWrapResult:
     """A keyed ``prepare_wrap`` retry: its key row holds the wrap token and the sha256
     of what the prompt was built from. While that wrap is the open one, the prompt is
@@ -468,6 +474,7 @@ def prepare_wrap(
             episode_ids=list(step.episode_ids),
             gated_session_id=session_id,
             expect_last_wrap_id=window_last_wrap_id,
+            max_chars=limit,
             expect_continuity_sha256=hashlib.sha256((memory or "").encode("utf-8")).hexdigest(),
             **extras,
         )
@@ -525,12 +532,41 @@ def format_wrap_package_text(result: PrepareWrapResult) -> str:
         f"{step['steps_remaining']} more step(s) after this one.",
         f"Memory limit: {step['max_chars']:,} characters.",
         "",
-        "Run the prompt below in a FRESH context, with nothing else, and save the model's "
-        "whole reply (the complete memory file) with the token above.",
+        "The prompt is everything from the SYSTEM banner below to the end: run only that, "
+        "in a FRESH context, with nothing else, and save the model's whole reply (the "
+        "complete memory file) with the token above. (`--json` gives it clean as `step.prompt`.)",
         "",
         step["prompt"],
     ]
     return "\n".join(lines)
+
+
+def lease_refusal_text(
+    exc: LeaseFencedError, *, saving: bool, wrap_token: str | None = None, mcp: bool = False,
+) -> str:
+    """One line for a transport that caught a :class:`LeaseFencedError` at a save or a
+    cancel: what happened, that nothing was written, and the next step. Shared by the
+    CLI and the MCP handlers so they say the same thing."""
+    if saving:
+        if exc.reason == "version_moved":
+            what = ("another identity version was written since this step was prepared, "
+                    "so the memory file it answers is no longer the current one")
+        else:
+            what = ("a consolidation lease (a 3.x feature) holds this step and no matching "
+                    f"lease token was given (reason={exc.reason})")
+        tok = wrap_token or "<token>"
+        redo = (
+            f"call wrap_cancel with wrap_token {tok}, then prepare_wrap again" if mcp
+            else f"run `anneal-memory wrap-cancel --wrap-token {tok}`, then prepare-wrap again"
+        )
+        return (f"Error: this reply was not saved: {what}. Nothing was written. "
+                f"Cancel the step and prepare it again: {redo}.")
+    return (
+        "Error: the wrap was not cancelled: a consolidation lease (a 3.x feature) holds it "
+        f"and a cancel must present the lease token (reason={exc.reason}). Nothing was "
+        "changed. Present it with the library call Store.wrap_cancelled(lease_token=...), "
+        "or wait for the lease to expire and cancel again."
+    )
 
 
 def _warn_after_commit(message: str) -> None:
@@ -649,22 +685,24 @@ def validated_save_continuity(
     """Keep the model's reply to the step :func:`prepare_wrap` opened.
 
     ``text`` is the model's whole memory file. The checks are these and no others: a wrap
-    is open (and, with ``wrap_token``, is the one named), the caller may commit it, and
-    the text is a string, not empty once surrounding whitespace is gone, and at most
-    ``max_chars`` characters (default :data:`anneal_memory.rolling.DEFAULT_MAX_CHARS`).
-    A refused save writes nothing and leaves the step open: run the step again and save
+    is open and is the one ``wrap_token`` names, the caller may commit it, and the text is
+    a string, not empty once surrounding whitespace is gone, and at most the step's
+    ``max_chars`` characters. The file is stored exactly as checked (surrounding
+    whitespace trimmed, nothing added). A refused save writes nothing and leaves the step open: run the step again and save
     again, or abandon it with ``Store.wrap_cancelled``.
 
     On success the text is the store's current memory file, the step's episodes are
     marked wrapped, and the text is appended to the version history, which keeps every
-    earlier file: ``Store.get_wrap_history`` lists the wraps, and the ``history`` and
-    ``diff`` commands show what each one changed. If the result's ``pending_count`` is not
+    earlier file: ``Store.get_wrap_history`` lists the wraps, the ``history`` command
+    lists them with their sizes, and ``diff`` prints the text each wrap changed. If the result's ``pending_count`` is not
     zero, the next day's step is owed: prepare again.
 
     Args:
-        wrap_token: The token ``prepare_wrap`` returned. Optional on a store without the
-            baton policy (the open wrap is then the one saved), required with one.
-        max_chars: The limit :func:`prepare_wrap` was given (``None`` is the default).
+        wrap_token: The token ``prepare_wrap`` returned. Required: without it a save cannot
+            tell which step the reply answers, so a stale reply could be kept for a later
+            step. The keyword default is ``None`` only so the refusal can say this.
+        max_chars: Leave it ``None``: the save uses the limit the step was prepared with
+            (kept with the wrap). A value is accepted only when it equals that limit.
         session_id, allow_sole_live: The baton gate, as in ``prepare_wrap``; the baton is
             re-checked at the save, and a wrap prepared under it is saved only by it.
         idempotency_key: A retry of a committed save with the same key and text gets its
@@ -675,18 +713,18 @@ def validated_save_continuity(
             model that wrote the file.
 
     Raises:
-        ValueError: No wrap open, a token that is not the open wrap's, or a text that is
-            empty or over the limit.
+        ValueError: No wrap open, no token or one that is not the open wrap's, a
+            ``max_chars`` that is not the step's, or a text that is empty or over the limit.
         SaveAuthorityError: The caller may not commit this wrap.
     """
     if lease_token is not None and (not isinstance(lease_token, str) or not lease_token):
         raise ValueError("validated_save_continuity: lease_token must be a non-empty str")
-    limit = rolling.validate_max_chars(max_chars)
+    explicit_limit = None if max_chars is None else rolling.validate_max_chars(max_chars)
     idem_hash = ""
     if idempotency_key is not None:
         _validate_idempotency_key(idempotency_key)
         idem_hash = _idempotency_request_hash("save_continuity", _IDEMPOTENCY_SCOPE, store.store_id, {
-            "text": text, "wrap_token": wrap_token, "max_chars": limit,
+            "text": text, "wrap_token": wrap_token, "max_chars": explicit_limit,
             "session_id": session_id, "allow_sole_live": allow_sole_live,
             "unattended": unattended, "model": model, "lease_token": lease_token,
         })
@@ -738,19 +776,32 @@ def validated_save_continuity(
             f"which discards the compression) and prepare_wrap again from {session_id!r}. "
             f"Nothing was written."
         )
-    if wrap_token is not None and snapshot["token"] != wrap_token:
+    if wrap_token is None:
+        raise ValueError(
+            "validated_save_continuity: pass the wrap_token that prepare_wrap returned: "
+            "without it a save cannot tell which step the reply answers; nothing was saved."
+        )
+    if snapshot["token"] != wrap_token:
         raise ValueError(
             f"wrap_token mismatch: caller passed '{wrap_token[:8]}…' but the in-progress wrap "
             f"has token '{snapshot['token'][:8]}…'. The token is stale (the wrap was already "
             f"completed or cancelled), from a different prepare_wrap call, or from a "
             f"concurrent process. Re-run prepare_wrap to start a new wrap with a fresh token."
         )
+    # The limit is the step's: the one its prompt stated, kept with the wrap.
+    step_limit = store.wrap_max_chars() or rolling.DEFAULT_MAX_CHARS
+    if explicit_limit is not None and explicit_limit != step_limit:
+        raise ValueError(
+            f"validated_save_continuity: max_chars is {explicit_limit:,} but this step was "
+            f"prepared with {step_limit:,}. Pass the same value, or none to use the step's. "
+            f"Nothing was saved."
+        )
     # The whole payload check.
     try:
-        body = rolling.check_reply(text, limit)
+        body = rolling.check_reply(text, step_limit)
     except ValueError as exc:
         raise ValueError(f"validated_save_continuity: {exc}") from None
-    saved_text = body + "\n"
+    saved_text = body
 
     frozen_ids = list(snapshot["episode_ids"])
     path = str(store.continuity_path)

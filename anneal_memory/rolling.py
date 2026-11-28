@@ -14,10 +14,11 @@ asked for the wrap.
 """
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from datetime import datetime, timezone, tzinfo
 from typing import Iterable, Sequence
-from zoneinfo import ZoneInfo
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 DEFAULT_MAX_CHARS = 26_000
 """The hard limit on the memory file, in characters. ``save`` refuses a longer reply."""
@@ -75,6 +76,9 @@ EMPTY_MEMORY = "(no memory file yet)"
 """Stands in for the memory file when the store has none."""
 
 
+_PLACEHOLDER = re.compile(r"\{(current_memory|day|episodes)\}")
+
+
 def _n(value: int) -> str:
     return f"{value:,}"
 
@@ -98,22 +102,59 @@ def validate_max_chars(max_chars: int | None) -> int:
     return max_chars
 
 
-def resolve_tz(tz: str | tzinfo | None) -> tzinfo:
-    """The zone a day is cut in: an IANA name, a tzinfo, or ``None`` for the machine's own."""
+def resolve_tz(tz: str | tzinfo | None) -> tzinfo | None:
+    """The zone a day is cut in: an IANA name (``"UTC"`` in any case needs no zone
+    database), a tzinfo, or ``None`` for the machine's own zone, which
+    :func:`episode_day` asks per instant, so a daylight-saving change is honoured."""
     if tz is None:
-        local = datetime.now().astimezone().tzinfo
-        return local if local is not None else timezone.utc
+        return None
     if isinstance(tz, str):
-        return ZoneInfo(tz)
+        if tz.upper() == "UTC":
+            return timezone.utc
+        try:
+            return ZoneInfo(tz)
+        except ZoneInfoNotFoundError:
+            raise ValueError(
+                f"unknown time zone {tz!r}: use an IANA name such as America/New_York. "
+                "On Windows, and in a slim container, the zone database is the `tzdata` "
+                "package: install it (pip install tzdata)."
+            ) from None
     return tz
 
 
-def episode_day(timestamp: str, tz: tzinfo) -> str:
-    """The calendar day (``YYYY-MM-DD``) an episode timestamp falls on in ``tz``."""
-    dt = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+UNREADABLE_DAY = "0000-00-00"
+"""The day label of an episode whose timestamp is neither readable nor starts with a date."""
+
+_DAY_PREFIX = re.compile(r"\d{4}-\d{2}-\d{2}")
+_NO_INSTANT = datetime(1, 1, 1, tzinfo=timezone.utc)
+
+
+def _instant(timestamp: str) -> datetime | None:
+    """The timestamp as an aware datetime (a naive one is read as UTC), or ``None``."""
+    try:
+        dt = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+    except (ValueError, TypeError, AttributeError):
+        return None
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
-    return dt.astimezone(tz).strftime("%Y-%m-%d")
+    return dt
+
+
+def episode_day(timestamp: str, tz: tzinfo | None) -> str:
+    """The calendar day (``YYYY-MM-DD``) an episode timestamp falls on in ``tz``.
+
+    ``tz=None`` is the machine's own zone, asked for each instant. A timestamp that
+    cannot be read falls back to its first 10 characters when those are a date, else to
+    :data:`UNREADABLE_DAY`; it never raises, so one odd episode cannot block a wrap.
+    """
+    dt = _instant(timestamp)
+    if dt is not None:
+        try:
+            return (dt.astimezone() if tz is None else dt.astimezone(tz)).strftime("%Y-%m-%d")
+        except (OverflowError, ValueError, OSError):
+            pass
+    head = str(timestamp)[:10]
+    return head if _DAY_PREFIX.fullmatch(head) else UNREADABLE_DAY
 
 
 def render_episode(timestamp: str, episode_type: str, content: str) -> str:
@@ -130,12 +171,13 @@ class Step:
     log: str
     chunk: int  # 0 for the first slice of the day
     chunks: int  # how many slices the day was cut into
+    unreadable: int = 0  # episodes in this step whose timestamp could not be read
 
 
 def plan_steps(
     episodes: Iterable[tuple[str, str, str, str]],
     *,
-    tz: tzinfo,
+    tz: tzinfo | None,
     chunk_max: int = CHUNK_MAX,
 ) -> list[Step]:
     """Cut ``(id, timestamp, type, content)`` rows into steps, oldest first.
@@ -144,28 +186,39 @@ def plan_steps(
     the other, each on the memory file the one before it saved, never one merged log. A
     day whose rendered log passes ``chunk_max`` characters is cut into slices of at most
     that size (a single episode longer than the bound is a slice of its own).
+
+    Within a day the log is in time order (the parsed instant, so mixed spellings of the
+    same moment sort right); an episode whose timestamp cannot be read goes last in its
+    day (see :func:`episode_day` for the day it lands on). This never raises on a timestamp.
     """
-    rows = sorted(episodes, key=lambda r: (r[1], r[0]))
-    by_day: dict[str, list[tuple[str, str]]] = {}
+    def order(row: tuple[str, str, str, str]) -> tuple[bool, datetime, str, str]:
+        instant = _instant(row[1])
+        return (instant is None, instant or _NO_INSTANT, row[1], row[0])
+
+    rows = sorted(episodes, key=order)
+    by_day: dict[str, list[tuple[str, str, bool]]] = {}
     for eid, ts, typ, content in rows:
-        by_day.setdefault(episode_day(ts, tz), []).append((eid, render_episode(ts, typ, content)))
+        by_day.setdefault(episode_day(ts, tz), []).append(
+            (eid, render_episode(ts, typ, content), _instant(ts) is None))
     steps: list[Step] = []
     for day in sorted(by_day):
-        slices: list[tuple[list[str], list[str]]] = []
+        slices: list[tuple[list[str], list[str], int]] = []
         ids: list[str] = []
         lines: list[str] = []
+        bad = 0
         size = 0
-        for eid, line in by_day[day]:
+        for eid, line, unreadable in by_day[day]:
             if lines and size + len(line) + 1 > chunk_max:
-                slices.append((ids, lines))
-                ids, lines, size = [], [], 0
+                slices.append((ids, lines, bad))
+                ids, lines, bad, size = [], [], 0, 0
             ids.append(eid)
             lines.append(line)
+            bad += unreadable
             size += len(line) + 1
         if lines:
-            slices.append((ids, lines))
-        for i, (s_ids, s_lines) in enumerate(slices):
-            steps.append(Step(day, s_ids, "\n".join(s_lines), i, len(slices)))
+            slices.append((ids, lines, bad))
+        for i, (s_ids, s_lines, s_bad) in enumerate(slices):
+            steps.append(Step(day, s_ids, "\n".join(s_lines), i, len(slices), s_bad))
     return steps
 
 
@@ -188,11 +241,10 @@ def build_prompt(
     """
     current = memory if memory and memory.strip() else EMPTY_MEMORY
     system = SYSTEM_TEMPLATE.replace("{max_chars}", _n(max_chars))
-    user = (
-        USER_TEMPLATE.replace("{current_memory}", current)
-        .replace("{day}", day_label(step))
-        .replace("{episodes}", step.log)
-    )
+    # One pass over the template: text that was substituted in (a memory file that
+    # mentions "{day}" or "{episodes}") is never read as a placeholder.
+    values = {"current_memory": current, "day": day_label(step), "episodes": step.log}
+    user = _PLACEHOLDER.sub(lambda m: values[m.group(1)], USER_TEMPLATE)
     user += SIZE_LINE.format(
         n=_n(len(memory) if memory else 0), aim=_n(_aim(max_chars)), max_chars=_n(max_chars)
     )

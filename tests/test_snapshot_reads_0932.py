@@ -31,8 +31,9 @@ c
 
 
 def _wrap(store, n):
-    assert prepare_wrap(store)["status"] == "ready"
-    validated_save_continuity(store, _WRAP.format(n=n))
+    prep = prepare_wrap(store)
+    assert prep["status"] == "ready"
+    validated_save_continuity(store, _WRAP.format(n=n), wrap_token=prep["wrap_token"])
 
 
 def test_status_counts_describe_one_state(tmp_path):

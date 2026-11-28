@@ -26,7 +26,7 @@ def _text(n: int) -> str:
     return (
         f"# T — Memory (v1)\n\n## State\nWorking {n}.\n\n"
         f"## Patterns\nthought: p{n} | 1x ({TODAY})\n\n"
-        f"## Decisions\nNone.\n\n## Context\nPass {n}.\n"
+        f"## Decisions\nNone.\n\n## Context\nPass {n}."  # stored exactly as saved: no added newline
     )
 
 

@@ -29,8 +29,8 @@ So drift becomes SAFE (a downgrade + a visible flag) rather than a silent identi
 The baton is claimed by the human designating ONE session as the consolidate seat, and taking
 it from another session needs an explicit ``take=True``.
 
-⚖ HISTORY (0.9.13, flow spore-1169). spore-194 also authorized a session when no OTHER session
-was live (``sole-live-session``), so a single-session operator never saw the gate. Phill ruled
+⚖ HISTORY (0.9.13, the require-baton ruling). spore-194 also authorized a session when no OTHER session
+was live (``sole-live-session``), so a single-session operator never saw the gate. The operator ruled
 on 2026-09-24 that every consolidate requires the baton: sole-live is judged from a registry
 snapshot that a resume or a TTL crossing can race, and the guard exists so growing automation
 cannot recompose the felt layer unbidden. The old rule survives only as an explicit
@@ -141,7 +141,7 @@ class CorruptSidecarError(json.JSONDecodeError, AnnealMemoryError):
     ``OSError`` or ``JSONDecodeError``, and callers catch exactly those two to fail closed.
     Before this class existed a wrong-shape baton raised ``AttributeError`` (``data.get`` on a
     list), which no caller caught, so ``claim_baton`` crashed instead of recovering and
-    ``prepare_wrap`` crashed instead of downgrading (flow spore-1169). It is also an
+    ``prepare_wrap`` crashed instead of downgrading (the require-baton ruling). It is also an
     :class:`~anneal_memory.AnnealMemoryError`, like every other library error."""
 
     def __init__(self, path: PathLike, why: str) -> None:
@@ -161,7 +161,7 @@ class BatonHeldError(AnnealMemoryError):
     unreadable, and the caller did not pass ``take=True``.
 
     ``holder`` is the other session's id, or ``None`` when ``unreadable`` is true. Taking the
-    baton from another session is a deliberate act (⚖ Phill, 2026-09-24, flow spore-1169), so
+    baton from another session is a deliberate act (⚖ the operator, 2026-09-24), so
     automation can never take it by accident."""
 
     def __init__(self, session_id: str, holder: str | None, unreadable: bool = False) -> None:
@@ -542,7 +542,7 @@ def claim_baton(
     - Already held by ``session_id``: a no-op success. Nothing is written, and the original
       ``claimed_at`` is returned with ``previous_holder == session_id``.
     - Held by ANOTHER session, or the baton file is unreadable: refused with
-      :class:`BatonHeldError` unless ``take=True``. ⚖ Phill, 2026-09-24 (flow spore-1169):
+      :class:`BatonHeldError` unless ``take=True``. ⚖ the operator, 2026-09-24:
       taking the baton from another session must be deliberate, so automation cannot take it
       by accident. This replaces spore-194's last-claim-wins. With ``take=True`` the baton is
       replaced atomically; an unreadable one is replaced too, which is the recovery path for
@@ -557,7 +557,7 @@ def claim_baton(
 
     ⚠ This function cannot tell a human designation from an agent calling it: anyone who calls
     it while the baton is unheld gets it. Keeping the baton away from automation is the
-    operator's part of the protocol (⚖ Phill: "this is also on human operator to manage").
+    operator's part of the protocol (⚖ the operator: "this is also on human operator to manage").
     """
     if not session_id:
         raise ValueError("claim_baton: session_id must be non-empty")
@@ -647,7 +647,7 @@ def consolidate_authorized(
     decides nothing. Under ``allow_sole_live=True`` liveness can authorize, so an unreadable
     registry fails closed there too.
 
-    ⚖ Phill, 2026-09-24 (flow spore-1105 (b), spore-1169): every consolidate requires the
+    ⚖ the operator, 2026-09-24: every consolidate requires the
     baton. Before 0.9.13 a session was also authorized when no OTHER session was live
     (``"sole-live-session"``). That judgement rests on a registry snapshot a resume or a TTL
     crossing can race, and the guard exists so that growing automation cannot recompose the

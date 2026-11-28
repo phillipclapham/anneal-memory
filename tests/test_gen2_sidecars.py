@@ -105,8 +105,8 @@ def store(tmp_path):
 class TestContinuityMeta:
     def _wrapped(self, store: Store) -> None:
         store.record("first episode", EpisodeType.OBSERVATION)
-        prepare_wrap(store)
-        validated_save_continuity(store, _CONT)
+        wrap = prepare_wrap(store)
+        validated_save_continuity(store, _CONT, wrap_token=wrap["wrap_token"])
 
     def test_this_release_writes_format_version_1_and_reads_it(self, store):
         self._wrapped(store)
@@ -140,7 +140,7 @@ class TestContinuityMeta:
             "UPDATE identity_versions SET meta_json = 'not json' WHERE version = "
             "(SELECT MAX(version) FROM identity_versions)")
         store._conn.commit()
-        assert store.load_continuity() == _CONT
+        assert store.load_continuity() == _CONT.strip()
         assert store.load_meta() == {"sessions_produced": 0, "citations_seen": False,
                                      "format_version": 1}
 
@@ -149,12 +149,13 @@ class TestContinuityMeta:
         back with sessions_produced 8."""
         self._wrapped(store)
         store.record("second episode", EpisodeType.OBSERVATION)
-        prepare_wrap(store)
+        wrap = prepare_wrap(store)
         _newer_meta(store)
         meta_before = store.meta_path.read_bytes()
         cont_before = store.continuity_path.read_bytes()
         with pytest.raises(_NewerSidecarError):
-            validated_save_continuity(store, _CONT + "Second wrap.\n")
+            validated_save_continuity(
+                store, _CONT + "Second wrap.\n", wrap_token=wrap["wrap_token"])
         assert store.meta_path.read_bytes() == meta_before
         assert store.continuity_path.read_bytes() == cont_before
         assert store.status().wrap_in_progress  # the wrap stays open
@@ -164,9 +165,9 @@ class TestContinuityMeta:
         self._wrapped(store)
         server = Server(store)
         server._tool_record({"content": "second", "episode_type": "observation"})
-        server._tool_prepare_wrap({})
+        token = server._tool_prepare_wrap({})["content"][0]["text"].split("Wrap token: ")[1].split()[0]
         _newer_meta(store)
-        result = server._tool_save_continuity({"text": _CONT + "Second.\n"})
+        result = server._tool_save_continuity({"text": _CONT + "Second.\n", "wrap_token": token})
         assert result.get("isError")
         text = result["content"][0]["text"]
         assert "written by a newer anneal-memory" in text
@@ -257,9 +258,10 @@ class TestContinuityMeta:
         # hazard); the save commits and re-projects a readable sidecar.
         self._wrapped(store)
         store.record("second episode", EpisodeType.OBSERVATION)
-        prepare_wrap(store)
+        wrap = prepare_wrap(store)
         with _unreadable(store.meta_path):
-            validated_save_continuity(store, _CONT + "Second.\n")
+            validated_save_continuity(
+                store, _CONT + "Second.\n", wrap_token=wrap["wrap_token"])
         assert store.load_meta()["sessions_produced"] == 2
         assert json.loads(store.meta_path.read_text())["sessions_produced"] == 2
 
@@ -298,8 +300,8 @@ class TestContinuityMeta:
         defaults = {"sessions_produced": 0, "citations_seen": False, "format_version": 1}
         assert store.load_meta() == defaults
         store.record("first episode", EpisodeType.OBSERVATION)
-        prepare_wrap(store)
-        validated_save_continuity(store, _CONT)
+        wrap = prepare_wrap(store)
+        validated_save_continuity(store, _CONT, wrap_token=wrap["wrap_token"])
         assert store.load_meta()["sessions_produced"] == 1
 
     def test_cli_json_continuity_and_export_survive_a_malformed_meta(self, store, tmp_path):

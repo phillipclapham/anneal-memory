@@ -48,7 +48,7 @@ import time
 import unicodedata
 import uuid
 import sys
-from datetime import date, datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, NoReturn, cast
 
@@ -64,7 +64,6 @@ from .audit import (
     _markers_in as _markers_in_audit,
     _parse_manifest_bytes as _parse_audit_manifest_bytes,
     _read_regular_bytes as _read_audit_bytes,
-    _quarantine_markers as _quarantine_audit_markers,
     _require_entry_dict as _require_audit_entry_dict,
     _signatures_match as _audit_signatures_match,
     _stat_signature as _audit_stat_signature,
@@ -85,6 +84,7 @@ def _audit_file_names(audit_dir: Path, stem: str) -> frozenset[str] | None:
         return None
 from .continuity import (
     format_wrap_package_text,
+    lease_refusal_text,
     prepare_wrap as _lib_prepare_wrap,
     validated_save_continuity as _lib_validated_save_continuity,
 )
@@ -109,6 +109,7 @@ from .spores import (
     germination_tier,
 )
 from .store import (
+    AnnealMemoryError,
     StorePathError,
     connect as sqlite_connect,
     sqlite_path,
@@ -125,8 +126,6 @@ from .store import (
     WrapRevertRefused,
     LeaseFencedError,
     _WRAP_TOKEN_RE,
-    _SCHEMA_VERSION,
-    _parse_format_version,
     normalize_state_key,
 )
 from .types import (
@@ -402,7 +401,7 @@ def cmd_init(args: argparse.Namespace) -> None:
     db_path.parent.mkdir(parents=True, exist_ok=True)
 
     project = getattr(args, "project_name", "Agent")
-    # KL-19 (Phill 10-12, ruling A): consolidation is the operator's act, so a new
+    # KL-19 (the operator 10-12, ruling A): consolidation is the operator's act, so a new
     # store requires the consolidate baton unless the operator opts out here. The
     # policy is written in the transaction that creates the store.
     requires_baton = not getattr(args, "no_baton", False)
@@ -1030,11 +1029,11 @@ def cmd_verify(args: argparse.Namespace) -> None:
         return
 
     # A sealed week audit-repair set aside is a recorded gap: printed on both
-    # paths, beside the verdict, never folded into it (Phill, 2026-10-03).
+    # paths, beside the verdict, never folded into it (the operator, 2026-10-03).
     for line in set_aside_report_lines(result.set_aside, db_path):
         print(f"  {line}", file=sys.stderr)
     if result.valid:
-        # Ruled by Phill 2026-09-13: a recovered anchor is reported beside
+        # Ruled by the operator 2026-09-13: a recovered anchor is reported beside
         # ``valid``, on the summary line itself, never folded into it.
         anchor_note = "" if result.anchor_trusted else (
             " (chain anchor recovered by audit-repair; entries before it cannot be verified)"
@@ -1206,7 +1205,15 @@ def cmd_save_continuity(args: argparse.Namespace) -> None:
     # gives a clean "invalid format" error. ``getattr`` keeps test fixtures that build a
     # Namespace directly working.
     _wrap_token_arg = getattr(args, "wrap_token", None)
-    if _wrap_token_arg is not None and not _WRAP_TOKEN_RE.fullmatch(_wrap_token_arg):
+    if _wrap_token_arg is None:
+        print(
+            "Error: --wrap-token is required: pass the wrap_token that prepare-wrap "
+            "returned (its `Wrap token:` line, or `wrap-token-current`): without it a save "
+            "cannot tell which step the reply answers; nothing was saved.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    if not _WRAP_TOKEN_RE.fullmatch(_wrap_token_arg):
         print(
             "Error: --wrap-token must be 32 lowercase hex characters",
             file=sys.stderr,
@@ -1239,6 +1246,10 @@ def cmd_save_continuity(args: argparse.Namespace) -> None:
             )
         except ValueError as exc:
             print(f"Error: {exc}", file=sys.stderr)
+            sys.exit(1)
+        except LeaseFencedError as exc:
+            print(lease_refusal_text(exc, saving=True, wrap_token=_wrap_token_arg),
+                  file=sys.stderr)
             sys.exit(1)
         except StoreError as exc:
             if isinstance(exc, _NewerSidecarError):  # a refusal, not an I/O failure
@@ -1430,6 +1441,9 @@ def cmd_wrap_cancel(args: argparse.Namespace) -> None:
                 force=bool(getattr(args, "force", False)),
                 **(cast(dict[str, Any], {"expect_partial": True}) if partial else {}),
             )
+        except LeaseFencedError as exc:
+            print(lease_refusal_text(exc, saving=False), file=sys.stderr)
+            sys.exit(1)
         except WrapCancelBoundError:
             # No recipe, as for the gated refusal below.
             print(
@@ -2213,7 +2227,7 @@ def cmd_import(args: argparse.Namespace) -> None:
                         f"{', '.join(TRUST_LEVELS)}")
                 with (store.runtime_context(floor=file_origin)
                       if file_origin is not None else contextlib.nullcontext()):
-                    recorded = store._import_record(
+                    store._import_record(
                         ep_data.get("id"),
                         content=ep_data["content"],
                         episode_type=ep_data["type"],
@@ -2698,7 +2712,8 @@ def _line_delta(old: str, new: str) -> tuple[int, int]:
 
 def cmd_diff(args: argparse.Namespace) -> None:
     """Show what each wrap changed: its size, its line delta and, for the newest
-    wrap, a text diff against the wrap before it."""
+    wrap, a text diff against the memory file in force just before it saved (the version
+    before the wrap's own: an earlier wrap, a 3.x seed, or a hand edit)."""
     with _open_store(args, read_only=True) as store:
         wraps = store.get_wrap_history()
 
@@ -2711,18 +2726,17 @@ def cmd_diff(args: argparse.Namespace) -> None:
 
         # Limit to last N wraps
         n = args.wraps
-        before = None  # the wrap just before the window, for the oldest shown wrap's diff
-        if len(wraps) > n:
-            before = wraps[-n - 1].id
-            wraps = wraps[-n:]
+        if n < 1:
+            print("Error: --wraps must be at least 1.", file=sys.stderr)
+            sys.exit(1)
+        wraps = wraps[-n:]
 
-        # What each wrap saved: the text of its identity version.
-        texts = store.wrap_identity_texts(
-            [w.id for w in wraps] + ([before] if before is not None else []))
-        previous_text: dict[int, str | None] = {}
-        for i, w in enumerate(wraps):
-            prev_id = wraps[i - 1].id if i > 0 else before
-            previous_text[w.id] = texts.get(prev_id) if prev_id is not None else ""
+        # What each wrap saved: the text of its identity version; and what was in force
+        # just before it (the version before its own, so the first rolling wrap after a
+        # 3.x seed diffs against the seed file).
+        texts = store.wrap_identity_texts([w.id for w in wraps])
+        previous_text: dict[int, str | None] = dict(
+            store.wrap_identity_before_texts([w.id for w in wraps]))
 
         def lines_changed(w: Any) -> tuple[int, int] | None:
             now, prev = texts.get(w.id), previous_text.get(w.id)
@@ -3766,6 +3780,14 @@ def build_parser() -> argparse.ArgumentParser:
     sub = subparsers.add_parser(
         "prepare-wrap",
         help="Open one step of the rolling wrap and print the prompt to run (exits 3 if the wrap was downgraded)",
+        description=(
+            "Open one step of the rolling wrap and print the prompt to run. The plain "
+            "output opens with a few lines for the operator (the token, the step); the "
+            "prompt itself starts at the `=== SYSTEM ===` line, and only that part goes to "
+            "the model. With --json, `step.prompt` is the prompt on its own, with no "
+            "operator lines: use it when a script sends the prompt. A day's log longer "
+            "than 400,000 characters is cut into several steps."
+        ),
         parents=[json_parent],
     )
     sub.add_argument("--max-chars", type=int, default=None,
@@ -3793,13 +3815,13 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_argument(
         "--wrap-token",
         help=(
-            "The token from prepare-wrap (the 'Wrap token: <hex>' line). When given, a "
-            "mismatch with the open wrap is refused; required on a store that requires "
-            "the consolidate baton."
+            "Required. The token from prepare-wrap (the 'Wrap token: <hex>' line): it says "
+            "which step the file answers, and a mismatch with the open wrap is refused."
         ),
     )
     sub.add_argument("--max-chars", type=int, default=None,
-                     help="The limit prepare-wrap was given (default 26000); a longer file is refused.")
+                     help="Leave it out: the save uses the limit the step was prepared with. "
+                          "A value is accepted only if it equals that limit.")
     sub.add_argument("--model", default=None, help="Name of the model that wrote the file (recorded on the wrap).")
     sub.add_argument("--unattended", action="store_true",
                      help="Mark the wrap as one no operator watched (recorded on the wrap).")
@@ -3996,7 +4018,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     # -- diff --
     sub = subparsers.add_parser("diff", help="Show wrap-over-wrap metric changes", parents=[json_parent])
-    sub.add_argument("--wraps", type=int, default=5, help="Number of recent wraps to compare (default: 5)")
+    sub.add_argument("--wraps", type=int, default=5, help="Number of recent wraps to show, at least 1 (default: 5)")
     sub.set_defaults(func=cmd_diff)
 
     # -- stats --
@@ -4132,6 +4154,11 @@ def main() -> None:
         if not _is_write_lock_contention(exc):
             raise
         _print_contention(getattr(args, "db", "the store"))
+        sys.exit(1)
+    except AnnealMemoryError as exc:
+        # Any other refusal the library raises (a lease fence, a wrap in progress, ...):
+        # its message says what happened; a traceback adds nothing for the operator.
+        print(f"Error: {exc}", file=sys.stderr)
         sys.exit(1)
 
 

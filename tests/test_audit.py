@@ -3186,14 +3186,15 @@ class TestCodexL3TwentySixOhNineOhFour:
             # shows up as the OLD text sitting where the NEW text belongs,
             # which is the loss the CHANGELOG actually describes.
             store.record("first observation", EpisodeType.OBSERVATION)
-            prepare_wrap(store)
-            validated_save_continuity(store, continuity_text("OLDTEXT"))
+            wrap_one = prepare_wrap(store)
+            validated_save_continuity(
+                store, continuity_text("OLDTEXT"), wrap_token=wrap_one["wrap_token"])
             assert "OLDTEXT" in store.continuity_path.read_text(
                 encoding="utf-8"
             ), "wrap 1 did not land — the baseline for wrap 2 is not set up"
 
             store.record("second observation", EpisodeType.OBSERVATION)
-            prepare_wrap(store)
+            wrap_two = prepare_wrap(store)
 
             real_log = store._audit.log
             calls = {"n": 0}
@@ -3225,7 +3226,8 @@ class TestCodexL3TwentySixOhNineOhFour:
             try:
                 with warnings.catch_warnings():
                     warnings.simplefilter("ignore")
-                    validated_save_continuity(store, continuity_text("NEWTEXT"))
+                    validated_save_continuity(
+                        store, continuity_text("NEWTEXT"), wrap_token=wrap_two["wrap_token"])
             except BaseException as exc:  # noqa: BLE001
                 # DELIBERATE, and it is the whole reason this test can go red
                 # where its sibling cannot. An uncaught ``KeyboardInterrupt``

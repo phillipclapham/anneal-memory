@@ -11,6 +11,9 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
+import subprocess
+import sys
+import time
 from datetime import timezone
 
 import pytest
@@ -92,8 +95,9 @@ def test_a_save_refuses_empty_and_over_the_limit_and_keeps_the_step_open(store):
     # nothing was written and the step is still open: the retry lands
     assert store.get_wrap_history() == []
     out = validated_save_continuity(store, "y" * 1_000, wrap_token=token, max_chars=1_000)
-    assert out["chars"] == 1_001  # the file plus its closing newline
-    assert store.load_continuity() == "y" * 1_000 + "\n"
+    # the stored file is exactly the checked text, so "at most 1,000" is true of it
+    assert out["chars"] == 1_000
+    assert store.load_continuity() == "y" * 1_000
     with pytest.raises(ValueError, match="at least 1000"):
         prepare_wrap(store, max_chars=10)
 
@@ -187,3 +191,197 @@ def test_a_wrap_left_open_by_3x_with_its_old_keys_cancels_and_a_new_prepare_open
     for key in ("wrap_section_schema", "wrap_derive_roots", "wrap_started_at", "wrap_token"):
         assert store._get_metadata(key) in ("", None), key
     assert prepare_wrap(store, tz="UTC")["status"] == "ready"
+
+
+def _cli(db, *args):
+    return subprocess.run(
+        [sys.executable, "-m", "anneal_memory.cli", "--db", str(db), *args],
+        capture_output=True, text=True,
+    )
+
+
+def test_a_memory_file_that_mentions_the_placeholders_is_not_rewritten():
+    """The prompt is filled in one pass: a memory file that contains the text
+    ``{day}`` or ``{episodes}`` reaches the model as written."""
+    memory = "The template uses {episodes} and {day} and {current_memory} placeholders."
+    system, user = rolling.build_prompt(memory, rolling.Step("2026-01-02", ["a"], "LOG LINE", 0, 1))
+    assert memory in user
+    assert user.count("LOG LINE") == 1 and "## WORK LOG FOR 2026-01-02:\nLOG LINE\n" in user
+
+
+def test_a_save_needs_the_steps_token_on_every_path(store, tmp_path):
+    _record_days(store, ["2026-03-01"])
+    prep = prepare_wrap(store, tz="UTC")
+    with pytest.raises(ValueError, match="pass the wrap_token that prepare_wrap returned"):
+        validated_save_continuity(store, "a stale reply")
+    assert store.status().wrap_in_progress and store.get_wrap_history() == []
+    # MCP: required in the schema, and refused when missing
+    save_tool = next(t for t in TOOLS if t["name"] == "save_continuity")
+    assert "wrap_token" in save_tool["inputSchema"]["required"]
+    refused = Server(store)._handle_tools_call(
+        {"name": "save_continuity", "arguments": {"text": "a stale reply"}})
+    assert refused.get("isError") and "wrap_token" in refused["content"][0]["text"]
+    assert store.status().wrap_in_progress
+    # CLI: refused before the store is opened
+    reply = tmp_path / "reply.md"
+    reply.write_text("a stale reply", encoding="utf-8")
+    r = _cli(store.path, "save-continuity", str(reply))
+    assert r.returncode == 1 and "--wrap-token is required" in r.stderr and "Traceback" not in r.stderr
+    assert store.status().wrap_in_progress
+    validated_save_continuity(store, "the real reply", wrap_token=prep["wrap_token"])
+
+
+def test_the_cap_is_bound_to_the_step(store):
+    _record_days(store, ["2026-03-01", "2026-03-02", "2026-03-03"])
+    prep = prepare_wrap(store, tz="UTC", max_chars=1_000)
+    token = prep["wrap_token"]
+    assert store.wrap_max_chars() == 1_000
+    # a bare save enforces the cap the prompt stated, not the default
+    with pytest.raises(ValueError, match="over the 1,000 limit"):
+        validated_save_continuity(store, "z" * 1_500, wrap_token=token)
+    # an explicit cap must equal the step's, and the refusal names both
+    with pytest.raises(ValueError, match=r"1,500.*1,000"):
+        validated_save_continuity(store, "z" * 10, wrap_token=token, max_chars=1_500)
+    validated_save_continuity(store, "z" * 1_000, wrap_token=token, max_chars=1_000)
+    assert store.wrap_max_chars() is None  # cleared with the wrap
+    # a higher cap on prepare is honoured by the bare save
+    prep = prepare_wrap(store, tz="UTC", max_chars=40_000)
+    out = validated_save_continuity(store, "y" * 30_000, wrap_token=prep["wrap_token"])
+    assert out["chars"] == 30_000
+    # the next prompt's size line is the stored file's size, exactly
+    nxt = prepare_wrap(store, tz="UTC")
+    assert "The current memory file is 30,000 characters" in nxt["step"]["user"]
+    # a wrap opened before the key existed falls back to the default
+    store._conn.execute("INSERT OR REPLACE INTO metadata (key, value) VALUES ('wrap_max_chars', '')")
+    store._conn.commit()
+    assert store.wrap_max_chars() is None
+    with pytest.raises(ValueError, match="over the 26,000 limit"):
+        validated_save_continuity(store, "w" * 26_001, wrap_token=nxt["wrap_token"])
+    validated_save_continuity(store, "w" * 26_000, wrap_token=nxt["wrap_token"])
+
+
+@pytest.mark.skipif(not hasattr(time, "tzset"), reason="needs time.tzset (POSIX)")
+def test_the_default_zone_is_asked_per_instant_so_a_dst_change_is_honoured(monkeypatch):
+    monkeypatch.setenv("TZ", "EST5EDT,M3.2.0,M11.1.0")  # a POSIX rule: no zone database needed
+    time.tzset()
+    try:
+        zone = rolling.resolve_tz(None)
+        assert zone is None  # the machine's zone, never one offset fixed at call time
+        # 04:30Z is 00:30 in summer (EDT) and 23:30 the day before in winter (EST)
+        assert rolling.episode_day("2026-07-01T04:30:00Z", zone) == "2026-07-01"
+        assert rolling.episode_day("2026-01-01T04:30:00Z", zone) == "2025-12-31"
+        rows = [("a", "2026-07-01T04:30:00Z", "observation", "x"),
+                ("b", "2026-01-01T04:30:00Z", "observation", "y")]
+        assert [st.day for st in rolling.plan_steps(rows, tz=zone)] == ["2025-12-31", "2026-07-01"]
+    finally:
+        monkeypatch.undo()
+        time.tzset()
+
+
+def test_an_unreadable_timestamp_never_blocks_a_wrap(store):
+    rows = [
+        ("a", "yesterday", "observation", "no date at all"),
+        ("b", "2026-03-01 garbage", "observation", "a date prefix"),
+        ("c", "2026-03-01T10:00:00+05:00", "observation", "05:00Z"),
+        ("d", "2026-03-01T06:00:00Z", "observation", "06:00Z"),
+    ]
+    steps = {st.day: st for st in rolling.plan_steps(rows, tz=timezone.utc)}
+    assert set(steps) == {"0000-00-00", "2026-03-01"}
+    assert steps["0000-00-00"].episode_ids == ["a"] and steps["0000-00-00"].unreadable == 1
+    # within a day: by the parsed instant (05:00Z before 06:00Z, though the text says otherwise),
+    # and the line whose time cannot be read goes last
+    assert steps["2026-03-01"].episode_ids == ["c", "d", "b"]
+    assert steps["2026-03-01"].unreadable == 1
+    # through prepare: it opens, and the message names the count
+    store.record("odd one", "observation", timestamp="yesterday")
+    prep = prepare_wrap(store, tz="UTC")
+    assert prep["status"] == "ready" and prep["step"]["day"] == "0000-00-00"
+    assert "1 episode(s) have a timestamp that could not be read" in prep["message"]
+    validated_save_continuity(store, "kept", wrap_token=prep["wrap_token"])
+
+
+def test_utc_needs_no_zone_database_and_a_missing_zone_names_tzdata():
+    assert rolling.resolve_tz("UTC") is timezone.utc and rolling.resolve_tz("utc") is timezone.utc
+    with pytest.raises(ValueError, match="tzdata"):
+        rolling.resolve_tz("Not/AZone")
+
+
+def test_diff_shows_a_wrap_against_the_version_just_before_it(tmp_path):
+    db = tmp_path / "d.db"
+    s = Store(db, project_name="T")
+    s.save_continuity("seed line one\nseed line two\n")  # the file a 3.x store holds
+    s.record("work", "observation", timestamp="2026-03-01T12:00:00.000000Z")
+    prep = prepare_wrap(s, tz="UTC")
+    validated_save_continuity(s, "new memory", wrap_token=prep["wrap_token"])
+    assert s.wrap_identity_before_texts([1]) == {1: "seed line one\nseed line two\n"}
+    s.close()
+    out = _cli(db, "diff", "--json")
+    assert out.returncode == 0, out.stderr
+    wrap = json.loads(out.stdout)["wraps"][-1]
+    assert (wrap["lines_added"], wrap["lines_removed"]) == (1, 2)
+    assert "-seed line one" in wrap["text_diff"] and "+new memory" in wrap["text_diff"]
+    zero = _cli(db, "diff", "--wraps", "0")
+    assert zero.returncode == 1 and "at least 1" in zero.stderr
+
+
+def test_a_fenced_save_or_cancel_says_what_to_do_and_prints_no_traceback(store, tmp_path):
+    _record_days(store, ["2026-03-01"])
+    prep = prepare_wrap(store, tz="UTC")
+    token = prep["wrap_token"]
+    store.save_continuity("a hand edit while the step ran")  # another identity version
+    with pytest.raises(Exception) as fenced:
+        validated_save_continuity(store, "the reply", wrap_token=token)
+    assert type(fenced.value).__name__ == "LeaseFencedError"
+    reply = tmp_path / "reply.md"
+    reply.write_text("the reply", encoding="utf-8")
+    r = _cli(store.path, "save-continuity", str(reply), "--wrap-token", token)
+    assert r.returncode == 1 and "Traceback" not in r.stderr
+    assert "Nothing was written" in r.stderr and f"wrap-cancel --wrap-token {token}" in r.stderr
+    mcp = Server(store)._tool_save_continuity({"text": "the reply", "wrap_token": token})
+    assert mcp.get("isError") and f"wrap_cancel with wrap_token {token}" in mcp["content"][0]["text"]
+    # the advice works: cancel, then prepare again
+    assert _cli(store.path, "wrap-cancel", "--wrap-token", token).returncode == 0
+    assert prepare_wrap(store, tz="UTC")["status"] == "ready"
+
+
+def test_a_cancel_under_a_live_lease_is_a_clean_refusal_not_a_traceback(store):
+    _record_days(store, ["2026-03-01"])
+    grant = store.lease_acquire("holder", 300)
+    prepare_wrap(store, tz="UTC", lease_token=grant.token)
+    r = _cli(store.path, "wrap-cancel")
+    assert r.returncode == 1 and "Traceback" not in r.stderr
+    assert "lease" in r.stderr and "Nothing was changed" in r.stderr
+    mcp = Server(store)._tool_wrap_cancel({})
+    assert mcp.get("isError") and "lease" in mcp["content"][0]["text"]
+    store.wrap_cancelled(lease_token=grant.token)  # the library path with the token works
+
+
+def test_the_declared_result_keys_exist_in_a_real_result(store):
+    from anneal_memory.types import PrepareWrapResult, SaveContinuityResult, WrapStepDict
+
+    _record_days(store, ["2026-03-01"])
+    prep = prepare_wrap(store, tz="UTC")
+    assert set(prep) == set(PrepareWrapResult.__annotations__)
+    assert set(prep["step"]) == set(WrapStepDict.__annotations__)
+    saved = validated_save_continuity(store, "kept", wrap_token=prep["wrap_token"])
+    assert set(saved) == set(SaveContinuityResult.__annotations__)
+
+
+def test_a_batch_holds_the_write_lock_from_its_first_statement(store):
+    """``validated_save_continuity`` reads the idempotency key inside ``_batch``; that is
+    safe only because the batch opens ``BEGIN IMMEDIATE``, not at its first write."""
+    with store._batch():
+        other = sqlite3.connect(store.path, timeout=0)
+        try:
+            with pytest.raises(sqlite3.OperationalError, match="locked"):
+                other.execute("BEGIN IMMEDIATE")
+        finally:
+            other.close()
+
+
+def test_the_prepare_text_puts_the_operator_note_before_the_system_marker(store):
+    _record_days(store, ["2026-03-01"])
+    text = Server(store)._tool_prepare_wrap({"tz": "UTC"})["content"][0]["text"]
+    note, marker, prompt = text.partition("=== SYSTEM ===")
+    assert marker and "Wrap token:" in note and "run only that" in note
+    assert "Wrap token:" not in prompt and "run only that" not in prompt

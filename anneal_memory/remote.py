@@ -164,9 +164,9 @@ _SHA256_HEX_RE = re.compile(r"^[0-9a-f]{64}$")
 READ_CONTINUITY_TOOL: dict[str, Any] = {
     "name": "read_continuity",
     "description": (
-        "Read the current continuity file: the agent's compressed long-term "
-        "memory (state, active threads, patterns, decisions, context, "
-        "understanding). Read-only."
+        "Read the current memory file: the agent's whole rolling memory, one "
+        "document the model rewrites at each wrap (it has no fixed sections). "
+        "Read-only."
     ),
     "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
 }

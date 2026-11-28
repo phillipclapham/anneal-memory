@@ -88,7 +88,7 @@ def test_t4_an_idempotency_key_reused_for_another_request_is_refused(tmp_path):
             s, _TEXT.replace("Active.", "Other."), wrap_token=p["wrap_token"],
             idempotency_key="save-1")
     assert (_count(s, "wraps"), _count(s, "identity_versions")) == (1, 1)
-    assert s.load_continuity() == _TEXT
+    assert s.load_continuity() == _TEXT.strip()
     with pytest.raises(IdempotencyConflictError) as closed:  # r1 T4: never a stale package
         prepare_wrap(s, idempotency_key="prep-1")
     assert closed.value.reason == "wrap_closed"

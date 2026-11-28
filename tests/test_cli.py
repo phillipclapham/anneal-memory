@@ -2844,6 +2844,11 @@ class TestCmdPrepareWrap:
 
 # -- cmd_save_continuity tests --
 
+def _wrap_token_of(prepare_output: str) -> str:
+    """The token a ``prepare-wrap`` printed (a save needs it)."""
+    return prepare_output.split("Wrap token:")[1].split()[0]
+
+
 class TestCmdSaveContinuity:
     @staticmethod
     def _valid_continuity(today: str | None = None) -> str:
@@ -2855,7 +2860,7 @@ class TestCmdSaveContinuity:
         base_args_with_data.max_chars = 20000
         base_args_with_data.staleness_days = 7
         cmd_prepare_wrap(base_args_with_data)
-        capsys.readouterr()  # clear
+        base_args_with_data.wrap_token = _wrap_token_of(capsys.readouterr().out)
 
         # Write continuity to a temp file
         cont_file = tmp_path / "continuity.md"
@@ -2873,7 +2878,7 @@ class TestCmdSaveContinuity:
         base_args_with_data.max_chars = 20000
         base_args_with_data.staleness_days = 7
         cmd_prepare_wrap(base_args_with_data)
-        capsys.readouterr()
+        base_args_with_data.wrap_token = _wrap_token_of(capsys.readouterr().out)
 
         base_args_with_data.file = "-"
         base_args_with_data.affect_tag = None
@@ -2887,7 +2892,7 @@ class TestCmdSaveContinuity:
         base_args_with_data.max_chars = 20000
         base_args_with_data.staleness_days = 7
         cmd_prepare_wrap(base_args_with_data)
-        capsys.readouterr()
+        base_args_with_data.wrap_token = _wrap_token_of(capsys.readouterr().out)
 
         cont_file = tmp_path / "continuity.md"
         cont_file.write_text(self._valid_continuity(), encoding="utf-8")
@@ -2906,7 +2911,7 @@ class TestCmdSaveContinuity:
     def test_save_empty_file_is_refused(self, base_args_with_data, tmp_path, capsys):
         base_args_with_data.max_chars = 20000
         cmd_prepare_wrap(base_args_with_data)
-        capsys.readouterr()
+        base_args_with_data.wrap_token = _wrap_token_of(capsys.readouterr().out)
 
         cont_file = tmp_path / "bad.md"
         cont_file.write_text("   \n", encoding="utf-8")
@@ -2927,17 +2932,27 @@ class TestCmdSaveContinuity:
         base_args_with_data.file = str(cont_file)
         base_args_with_data.affect_tag = None
         base_args_with_data.affect_intensity = 0.5
+        base_args_with_data.wrap_token = "0" * 32
         with pytest.raises(SystemExit):
             cmd_save_continuity(base_args_with_data)
         captured = capsys.readouterr()
         assert "No wrap in progress" in captured.err
+
+    def test_save_without_a_token_is_refused_before_anything_is_read(
+            self, base_args_with_data, tmp_path, capsys):
+        base_args_with_data.file = str(tmp_path / "does-not-exist.md")
+        base_args_with_data.wrap_token = None
+        with pytest.raises(SystemExit):
+            cmd_save_continuity(base_args_with_data)
+        err = capsys.readouterr().err
+        assert "--wrap-token is required" in err and "nothing was saved" in err
 
     def test_save_records_wrap_in_history(self, base_args_with_data, tmp_path, capsys):
         """After save-continuity, wrap should appear in history."""
         base_args_with_data.max_chars = 20000
         base_args_with_data.staleness_days = 7
         cmd_prepare_wrap(base_args_with_data)
-        capsys.readouterr()
+        base_args_with_data.wrap_token = _wrap_token_of(capsys.readouterr().out)
 
         cont_file = tmp_path / "continuity.md"
         cont_file.write_text(self._valid_continuity(), encoding="utf-8")
@@ -3163,7 +3178,7 @@ class TestCLICrossProcessTOCTOU:
             "record", "A real episode",
             "--type", "observation",
         )
-        self._run("--db", db_path, "prepare-wrap")
+        token = _wrap_token_of(self._run("--db", db_path, "prepare-wrap").stdout)
 
         continuity_path = tmp_path / "cross_wrong.md"
         continuity_path.write_text(
@@ -3179,21 +3194,25 @@ class TestCLICrossProcessTOCTOU:
         assert result.returncode != 0
         assert "wrap_token mismatch" in result.stderr
 
-        # Wrap is still in progress — retry without token (implicit
-        # snapshot) should succeed.
+        # Wrap is still in progress — a save with no token is refused now (it cannot
+        # tell which step it answers), and the right token still lands.
         retry = self._run(
             "--db", db_path,
             "save-continuity", str(continuity_path),
             check=False,
         )
-        assert retry.returncode == 0
+        assert retry.returncode == 1 and "--wrap-token is required" in retry.stderr
+        right = self._run(
+            "--db", db_path,
+            "save-continuity", str(continuity_path),
+            "--wrap-token", token,
+            check=False,
+        )
+        assert right.returncode == 0, right.stderr
 
-    def test_implicit_snapshot_across_process_boundary(self, tmp_path):
-        """Without --wrap-token, the CLI still uses the persisted
-        snapshot because the library consults it whenever it's
-        present. Cross-process single-user common case needs no
-        ceremony.
-        """
+    def test_snapshot_filter_holds_across_process_boundary_with_the_token(self, tmp_path):
+        """The token a prepare printed saves exactly the step's episodes, whatever was
+        recorded in another process between the prepare and the save."""
         db_path = str(tmp_path / "implicit_cross.db")
         self._run("--db", db_path, "init", "--no-baton")
         rec = self._run(
@@ -3206,7 +3225,7 @@ class TestCLICrossProcessTOCTOU:
             if line.startswith("Recorded episode"):
                 ep_id = line.split("Recorded episode", 1)[1].split(":")[0].strip()
                 break
-        self._run("--db", db_path, "prepare-wrap")
+        token = _wrap_token_of(self._run("--db", db_path, "prepare-wrap").stdout)
 
         # TOCTOU record between processes.
         self._run(
@@ -3220,10 +3239,10 @@ class TestCLICrossProcessTOCTOU:
             self._TEMPLATE.format(cited=ep_id), encoding="utf-8"
         )
 
-        # Save without --wrap-token.
         save = self._run(
             "--db", db_path,
             "save-continuity", str(continuity_path),
+            "--wrap-token", token,
             "--json",
         )
         result = json.loads(save.stdout)

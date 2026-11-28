@@ -96,12 +96,28 @@ class TestPendingMigrations:
         assert out == []
 
     def test_real_manifest_from_clean_at_current(self) -> None:
-        # A clean adopter at the installed version sees every entry <= installed.
+        # A clean adopter at the installed version sees the 4.0.0 entry alone: it retires
+        # every earlier one (they teach tools and sections 4.0 removed), which stay in the
+        # manifest as history.
         out = pending_migrations(None)  # current_version defaults to __version__
-        expected = [e for e in MIGRATION_MANIFEST
-                    if _version_tuple(e["version"]) <= _version_tuple(__version__)]
-        assert len(out) == len(expected)
-        assert len(out) >= 1  # the shipped manifest is non-empty for the current line
+        assert [e["feature"] for e in out] == ["AM-ROLLING-WRAP"]
+        assert len(MIGRATION_MANIFEST) > 1
+        assert "retires every earlier one" in out[0]["summary"]
+
+    def test_a_retiring_entry_leaves_only_itself_and_what_follows(self) -> None:
+        def entry(version: str, feature: str) -> MigrationEntry:
+            return {"version": version, "feature": feature, "summary": "s",
+                    "suggested_edit": "e", "files": ["CLAUDE.md"]}
+        manifest = [entry("0.7.1", "AM-OLD"), entry("4.0.0", "AM-ROLLING-WRAP"),
+                    entry("4.1.0", "AM-NEXT")]
+        out = pending_migrations(None, current_version="4.1.0", manifest=manifest)
+        assert [e["feature"] for e in out] == ["AM-ROLLING-WRAP", "AM-NEXT"]
+        # a store that acknowledged 4.0.0 sees the later entry only; an older one is not shown
+        assert [e["feature"] for e in pending_migrations(
+            "4.0.0", current_version="4.1.0", manifest=manifest)] == ["AM-NEXT"]
+        # while 4.0.0 is withheld (not installed yet), the older entries are shown as before
+        assert [e["feature"] for e in pending_migrations(
+            None, current_version="3.0.0", manifest=manifest)] == ["AM-OLD"]
 
     def test_real_manifest_entries_not_keyed_ahead_of_version(self) -> None:
         # Structural guard: no shipped manifest entry may be keyed to a version
@@ -397,7 +413,8 @@ class TestMigrateCLI:
         cmd_migrate_check(_args(tmp_path / "memory.db"))
         out = capsys.readouterr().out
         assert "self-migration proposal" in out
-        assert "AM-SPORES-BOUNDARY" in out
+        assert "AM-ROLLING-WRAP" in out
+        assert "AM-SPORES-BOUNDARY" not in out  # retired by the 4.0.0 entry
         assert "never edits your files" in out
 
     def test_check_json(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
@@ -523,7 +540,7 @@ class TestMigrateSubprocess:
             capture_output=True, text=True, env=env,
         )
         assert check.returncode == 0
-        assert "AM-SPORES-BOUNDARY" in check.stdout
+        assert "AM-ROLLING-WRAP" in check.stdout
 
         # The highest entry at or below the installed version (see _ack_key).
         ack = subprocess.run(

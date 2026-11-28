@@ -27,6 +27,7 @@ from . import __version__
 from . import sessions
 from .continuity import (
     format_wrap_package_text,
+    lease_refusal_text,
     prepare_wrap as _lib_prepare_wrap,
     validated_save_continuity as _lib_validated_save_continuity,
 )
@@ -52,6 +53,7 @@ from .store import (
     StoreDatabaseError,
     _NewerSidecarError,
     _is_write_lock_contention,
+    LeaseFencedError,
     StoreError,
     WrapCancelBoundError,
     WrapCancelGatedError,
@@ -60,7 +62,6 @@ from .store import (
 )
 from .types import (
     DEFAULT_TRUST,
-    Episode,
     EpisodeType,
     TRUST_LEVELS,
     trust_rank,
@@ -996,17 +997,18 @@ class Server:
         if not text:
             return _tool_result("Error: text is required", is_error=True)
 
-        # Optional session-handshake token from the prepare_wrap reply. Shape-checked
-        # here (32 hex characters) because some MCP clients skip schema validation.
+        # The token from the prepare_wrap reply is required: the library refuses a save
+        # without it. Shape-checked here (32 hex characters) because some MCP clients
+        # skip schema validation.
         wrap_token = args.get("wrap_token")
         if wrap_token is not None:
             if not isinstance(wrap_token, str):
                 return _tool_result(
-                    "Error: wrap_token must be a string if provided",
+                    "Error: wrap_token must be a string",
                     is_error=True,
                 )
             if wrap_token == "":
-                # An empty-string token is "no token passed", not a mismatch.
+                # An empty-string token is "no token passed": the library refuses it.
                 wrap_token = None
             elif not _WRAP_TOKEN_RE.fullmatch(wrap_token):
                 return _tool_result(
@@ -1028,6 +1030,10 @@ class Server:
             )
         except ValueError as exc:
             return _tool_result(f"Error: {exc}", is_error=True)
+        except LeaseFencedError as exc:
+            return _tool_result(
+                lease_refusal_text(exc, saving=True, wrap_token=wrap_token, mcp=True),
+                is_error=True)
         except StoreError as exc:
             if isinstance(exc, _NewerSidecarError):  # a refusal, not an I/O failure
                 return _tool_result(f"Error: {exc}", is_error=True)
@@ -1061,7 +1067,7 @@ class Server:
         ``Store.wrap_cancelled()`` Python method — neither reachable by
         an MCP client, so an agent that hit ``WrapInProgressError`` had
         no in-band way out and the wrap stayed stuck until a human
-        opened a terminal. Reported from the field by Alex De Groodt,
+        opened a terminal. Reported from the field by a user,
         who sat locked for three days with 31 episodes stranded.
 
         Reports from the RECEIPT ``wrap_cancelled()`` returns, which is read
@@ -1144,6 +1150,8 @@ class Server:
                 force=force,
                 **(cast(dict[str, Any], {"expect_partial": True}) if partial else {}),
             )
+        except LeaseFencedError as exc:
+            return _tool_result(lease_refusal_text(exc, saving=False), is_error=True)
         except WrapCancelBoundError:
             # No recipe, as for the gated refusal below.
             return _tool_result(
@@ -1185,7 +1193,7 @@ class Server:
                 # metadata (wrap_started_at set, wrap_token empty) can match NO
                 # token, so no proven cancel can ever succeed. Reporting it as
                 # "nothing in progress" left wrap_started_at standing and the
-                # next prepare_wrap failed — Alex's original three-day lockout,
+                # next prepare_wrap failed — the original three-day lockout,
                 # through the guard written to prevent it. L3 consensus.
                 # The recovery is partial=true, not a plain cancel: a peer may
                 # clear the state and start a healthy wrap before the retry, and
@@ -1673,7 +1681,7 @@ def start_server(
     # CAP-08 (C#11): the server is the host of this Store and pins its trust
     # ceiling at agent; no tool argument reaches it, so an agent's write can
     # never carry operator trust.
-    # KL-19 (Phill 10-12: "yes, do it please"): a store this server creates is
+    # KL-19 (the operator 10-12: "yes, do it please"): a store this server creates is
     # baton-protected, as one `init` creates is, because an MCP user's first open
     # IS their init. The Store writes the policy with the schema, only when this
     # open creates it; an existing store keeps its policy: the server never

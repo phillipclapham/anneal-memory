@@ -251,7 +251,7 @@ class StoreStatus:
     # completes without clearing it. False once retention has caught up.
     # Added in 0.9.12.
     prune_behind: bool = False
-    # The require-baton consolidate policy (flow spore-1169), read from the
+    # The require-baton consolidate policy (the require-baton ruling), read from the
     # store's metadata table, so every transport can show why a wrap
     # downgrades on a protected store. See Store.consolidate_requires_baton.
     consolidate_requires_baton: bool = False
@@ -326,7 +326,8 @@ REPLACED_CONTENT_MAX = 300
 # pipeline returns plain dicts that ``json.dumps`` serializes with no
 # conversion step; the whole result is JSON-serializable down to
 # ``SaveContinuityResult.wrap_result``. ``tests/test_rolling_wrap.py`` pins the
-# declared keys at runtime; mypy checks them statically.
+# declared keys of ``PrepareWrapResult``, ``WrapStepDict`` and ``SaveContinuityResult``
+# against a real result at runtime; mypy checks them statically.
 
 
 class WrapSnapshot(TypedDict):

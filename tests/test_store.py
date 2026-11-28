@@ -2541,9 +2541,9 @@ class TestValidatedSaveContinuity:
         from anneal_memory import validated_save_continuity
 
         store.record("Something", EpisodeType.OBSERVATION)
-        prepare_wrap(store)
+        wrap = prepare_wrap(store)
         with pytest.raises(ValueError, match="empty"):
-            validated_save_continuity(store, "")
+            validated_save_continuity(store, "", wrap_token=wrap["wrap_token"])
 
 
 
@@ -2785,9 +2785,10 @@ class TestGetWrapHistory:
         from anneal_memory import validated_save_continuity
 
         store.record("First observation", EpisodeType.OBSERVATION)
-        prepare_wrap(store)
+        wrap = prepare_wrap(store)
         validated_save_continuity(
-            store, _valid_continuity_text(date.today().isoformat())
+            store, _valid_continuity_text(date.today().isoformat()),
+            wrap_token=wrap["wrap_token"],
         )
 
         history = store.get_wrap_history()
@@ -2801,9 +2802,10 @@ class TestGetWrapHistory:
 
         store.record("Episode one", EpisodeType.OBSERVATION)
         store.record("Episode two", EpisodeType.DECISION)
-        prepare_wrap(store)
+        wrap = prepare_wrap(store)
         validated_save_continuity(
-            store, _valid_continuity_text(date.today().isoformat())
+            store, _valid_continuity_text(date.today().isoformat()),
+            wrap_token=wrap["wrap_token"],
         )
 
         record = store.get_wrap_history()[0]
@@ -2829,8 +2831,9 @@ class TestGetWrapHistory:
         today = date.today().isoformat()
         for i in range(3):
             store.record(f"Episode {i}", EpisodeType.OBSERVATION)
-            prepare_wrap(store)
-            validated_save_continuity(store, _valid_continuity_text(today))
+            wrap = prepare_wrap(store)
+            validated_save_continuity(
+                store, _valid_continuity_text(today), wrap_token=wrap["wrap_token"])
 
         history = store.get_wrap_history()
         assert len(history) == 3
@@ -2846,9 +2849,10 @@ class TestGetWrapHistory:
         from anneal_memory import validated_save_continuity
 
         store.record("Observation", EpisodeType.OBSERVATION)
-        prepare_wrap(store)
+        wrap = prepare_wrap(store)
         validated_save_continuity(
-            store, _valid_continuity_text(date.today().isoformat())
+            store, _valid_continuity_text(date.today().isoformat()),
+            wrap_token=wrap["wrap_token"],
         )
 
         record = store.get_wrap_history()[0]
@@ -2903,9 +2907,10 @@ class TestValidatedSaveContinuityReturnContract:
         from anneal_memory import validated_save_continuity
 
         store.record("Observation", EpisodeType.OBSERVATION)
-        prepare_wrap(store)
+        wrap = prepare_wrap(store)
         result = validated_save_continuity(
-            store, _valid_continuity_text(date.today().isoformat())
+            store, _valid_continuity_text(date.today().isoformat()),
+            wrap_token=wrap["wrap_token"],
         )
 
         assert result["chars"] == result["wrap_result"]["chars"]

@@ -140,7 +140,7 @@ def test_validated_save_takes_the_lock(tmp_path, monkeypatch):
     (generation 3: the projection, which takes the module-level lock)."""
     store = Store(str(tmp_path / "memory.db"), project_name="T")
     store.record("An observation worth at least a few words here.", "observation")
-    prepare_wrap(store)
+    wrap = prepare_wrap(store)
 
     entered = []
     real = store_module.continuity_lock
@@ -152,7 +152,7 @@ def test_validated_save_takes_the_lock(tmp_path, monkeypatch):
             yield
 
     monkeypatch.setattr(store_module, "continuity_lock", spy)
-    validated_save_continuity(store, _WRAP_TEXT)
+    validated_save_continuity(store, _WRAP_TEXT, wrap_token=wrap["wrap_token"])
     assert entered == [str(store.continuity_path)], "validated_save_continuity entered the continuity lock exactly once"
     assert os.path.exists(_lock_path(store.continuity_path))
 
@@ -190,7 +190,7 @@ def test_canonical_save_uses_unique_pair_id(tmp_path, monkeypatch):
     continuity lock. The wraps row's pair id is pinned in test_continuity.py."""
     store = Store(str(tmp_path / "memory.db"), project_name="T")
     store.record("an observation with enough characters to be a valid episode.", "observation")
-    prepare_wrap(store)
+    wrap = prepare_wrap(store)
 
     held = []
     real = store_module.continuity_lock
@@ -219,7 +219,7 @@ def test_canonical_save_uses_unique_pair_id(tmp_path, monkeypatch):
     monkeypatch.setattr(store_module, "continuity_lock", spy)
     monkeypatch.setattr(store, "_prepare_continuity_write", cspy)
     monkeypatch.setattr(store, "_prepare_meta_write", mspy)
-    validated_save_continuity(store, _WRAP_TEXT)
+    validated_save_continuity(store, _WRAP_TEXT, wrap_token=wrap["wrap_token"])
     assert tmp_writes == [True, True], "every tmp the save writes is written under the lock"
 
 

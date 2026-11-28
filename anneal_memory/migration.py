@@ -548,7 +548,9 @@ MIGRATION_MANIFEST: list[MigrationEntry] = [
             "tags, the durable tier and the crystal store. New: the MCP tool "
             "`read_continuity`, which reads the memory file. The "
             "reply of `prepare_wrap` no longer carries a `package`; it carries a "
-            "`step` to run. MIGRATING_TO_4.md has the full list."
+            "`step` to run. This entry retires every earlier one: they teach tools "
+            "and sections that 4.0 removed, so apply this one alone. "
+            "MIGRATING_TO_4.md has the full list."
         ),
         "suggested_edit": (
             "Where your instruction files describe the wrap, replace the 3.x "
@@ -628,6 +630,11 @@ def _ack_key(version: str) -> tuple[tuple[int, ...], int]:
     return (_version_tuple(version), 1 if final else 0)
 
 
+RETIRING_FEATURES = frozenset({"AM-ROLLING-WRAP"})
+"""Manifest features whose entry supersedes every earlier entry: while one is pending,
+:func:`pending_migrations` returns it and the entries after it, never the older ones."""
+
+
 def pending_migrations(
     acknowledged_version: str | None,
     *,
@@ -641,7 +648,9 @@ def pending_migrations(
     current_version``. ``acknowledged_version is None`` (never acknowledged)
     means everything up to ``current_version`` is pending. Entries newer than
     ``current_version`` are withheld — you cannot migrate to a feature you
-    have not installed (guards a stale-manifest/downgrade edge).
+    have not installed (guards a stale-manifest/downgrade edge). While an entry in
+    :data:`RETIRING_FEATURES` is pending, the entries before it are left out: it
+    supersedes them.
     """
     current = _version_tuple(current_version)
     ack = _ack_key(acknowledged_version) if acknowledged_version else None
@@ -653,6 +662,12 @@ def pending_migrations(
         if ack is not None and _ack_key(entry["version"]) <= ack:
             continue  # already acknowledged at or above this version
         pending.append(entry)
+    # An entry that retires the earlier ones (4.0.0: the earlier entries teach tools and
+    # sections it removed) leaves only itself and what follows it. The older entries stay
+    # in the manifest as history.
+    for i in range(len(pending) - 1, -1, -1):
+        if pending[i]["feature"] in RETIRING_FEATURES:
+            return pending[i:]
     return pending
 
 

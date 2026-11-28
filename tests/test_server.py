@@ -52,6 +52,11 @@ def _is_error(result: dict) -> bool:
     return result.get("isError", False)
 
 
+def _prepare(server) -> str:
+    """Open a step through the tool and return its wrap token (a save needs it)."""
+    return _text_from_result(server._tool_prepare_wrap({})).split("Wrap token: ")[1].split()[0]
+
+
 # -- Protocol Handlers --
 
 
@@ -545,8 +550,8 @@ class TestToolSaveContinuity:
     def test_save_valid_continuity(self, server):
         server._tool_record({"content": "Test obs", "episode_type": "observation"})
         text = "# TestProject — Memory\n\nActive on test.\n"
-        server._tool_prepare_wrap({})
-        result = server._tool_save_continuity({"text": text})
+        token = _prepare(server)
+        result = server._tool_save_continuity({"text": text, "wrap_token": token})
         assert not _is_error(result)
         output = _text_from_result(result)
         assert "Memory file saved" in output
@@ -562,8 +567,8 @@ class TestToolSaveContinuity:
 
     def test_save_over_the_limit_fails_and_keeps_the_step_open(self, server, store):
         server._tool_record({"content": "Test obs", "episode_type": "observation"})
-        server._tool_prepare_wrap({})
-        result = server._tool_save_continuity({"text": "x" * 30000})
+        token = _prepare(server)
+        result = server._tool_save_continuity({"text": "x" * 30000, "wrap_token": token})
         assert _is_error(result)
         assert "over the" in _text_from_result(result)
         assert store.status().wrap_in_progress
@@ -1192,15 +1197,15 @@ class TestMCPWrapTokenRoundTrip:
         assert _is_error(result)
         assert "wrap_token must be a string" in _text_from_result(result)
 
-    def test_save_without_token_still_uses_snapshot(self, server, store):
-        """Omitting wrap_token does not disable the snapshot filter —
-        a TOCTOU episode recorded after prepare_wrap must still be
-        deferred to the next wrap."""
+    def test_save_without_token_is_refused_and_the_snapshot_filter_holds(self, server, store):
+        """A save with no wrap_token is refused (it cannot tell which step it answers)
+        and leaves the step open; with the token, a TOCTOU episode recorded after
+        prepare_wrap is still deferred to the next wrap."""
         # Snapshot episode.
         server._tool_record(
             {"content": "Snapshot episode", "episode_type": "observation"}
         )
-        server._tool_prepare_wrap({})
+        token = _prepare(server)
         # TOCTOU episode — recorded through the record tool between
         # prepare and save.
         server._tool_record(
@@ -1216,7 +1221,10 @@ class TestMCPWrapTokenRoundTrip:
             "## Decisions\n\n"
             "## Context\nSnapshot only.\n"
         )
-        result = server._tool_save_continuity({"text": text})
+        refused = server._tool_save_continuity({"text": text})
+        assert _is_error(refused) and "wrap_token" in _text_from_result(refused)
+        assert store.status().wrap_in_progress
+        result = server._tool_save_continuity({"text": text, "wrap_token": token})
         output = _text_from_result(result)
         assert not _is_error(result)
         # Only the snapshot episode should have been compressed.
@@ -1251,8 +1259,8 @@ class TestGraduationValidation:
             "## Decisions\n\n"
             "## Context\nTest.\n"
         )
-        server._tool_prepare_wrap({})
-        result = server._tool_save_continuity({"text": text})
+        token = _prepare(server)
+        result = server._tool_save_continuity({"text": text, "wrap_token": token})
         assert not _is_error(result)
         # No validation messages — 1x doesn't need citations
         output = _text_from_result(result)
@@ -1307,6 +1315,7 @@ class TestFullWrapCycle:
         assert not _is_error(wrap_result)
         wrap_text = _text_from_result(wrap_result)
         assert "3" in wrap_text  # 3 episodes
+        token = wrap_text.split("Wrap token: ")[1].split()[0]
 
         # Save continuity
         continuity = (
@@ -1320,7 +1329,7 @@ class TestFullWrapCycle:
             "## Context\nFirst session. Evaluated storage options, settled on SQLite.\n"
             "Open question: pruning strategy.\n"
         )
-        save_result = server._tool_save_continuity({"text": continuity})
+        save_result = server._tool_save_continuity({"text": continuity, "wrap_token": token})
         assert not _is_error(save_result)
 
         # Verify status
@@ -1344,8 +1353,7 @@ class TestFullWrapCycle:
             "## Decisions\n\n"
             "## Context\nFirst session done.\n"
         )
-        server._tool_prepare_wrap({})
-        server._tool_save_continuity({"text": continuity_v1})
+        server._tool_save_continuity({"text": continuity_v1, "wrap_token": _prepare(server)})
 
         # Second cycle
         server._tool_record({"content": "Second session work", "episode_type": "observation"})
@@ -1356,8 +1364,7 @@ class TestFullWrapCycle:
             "## Decisions\n\n"
             "## Context\nTwo sessions done.\n"
         )
-        server._tool_prepare_wrap({})
-        server._tool_save_continuity({"text": continuity_v2})
+        server._tool_save_continuity({"text": continuity_v2, "wrap_token": _prepare(server)})
 
         status = store.status()
         assert status.total_wraps == 2

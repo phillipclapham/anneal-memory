@@ -1001,14 +1001,14 @@ def test_a_take_during_the_save_rolls_the_commit_back(store, monkeypatch):
     assert leftovers == []
 
 
-def test_a_policy_flip_during_a_tokenless_save_rolls_it_back(store, tmp_path, monkeypatch):
+def test_a_policy_flip_during_a_sessionless_save_rolls_it_back(store, tmp_path, monkeypatch):
     # codex L3 HIGH (round 1): the policy could be switched on between a save's read and its
     # commit. A second connection flips it mid-save; the in-transaction re-read catches it.
     # Flipped in the gap after the early check and before the batch (generation 3 stages no
     # tmp, so the flip lands as the batch is entered).
     # Inside the batch the other connection cannot write at all: this save holds the lock.
     store.record("obs", EpisodeType.OBSERVATION)
-    prepare_wrap(store)
+    wrap = prepare_wrap(store)
     real = store._batch
 
     def flip_then_batch(*a, **k):
@@ -1019,7 +1019,7 @@ def test_a_policy_flip_during_a_tokenless_save_rolls_it_back(store, tmp_path, mo
 
     monkeypatch.setattr(store, "_batch", flip_then_batch)
     with pytest.raises(ValueError, match="baton-protected"):
-        validated_save_continuity(store, _WRAP_TEXT)
+        validated_save_continuity(store, _WRAP_TEXT, wrap_token=wrap["wrap_token"])
     assert store.get_wrap_history() == []
     assert store.status().wrap_in_progress
 

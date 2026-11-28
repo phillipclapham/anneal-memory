@@ -230,7 +230,7 @@ def _sealed_period(name: str, stem: str) -> str:
     return name[len(f"{stem}.audit."):].removesuffix(".gz").removesuffix(".jsonl")
 
 
-# ⛔ QUARANTINE IS A FILE ON DISK, NOT A FLAG IN MEMORY (hybrid, ruled by Phill
+# ⛔ QUARANTINE IS A FILE ON DISK, NOT A FLAG IN MEMORY (hybrid, ruled by the operator
 # 2026-09-13). An invalid manifest is renamed to
 # ``<stem>.audit.manifest.json.corrupt-<UTC stamp>`` and never overwritten.
 # Every later process must see that, including one that finds no manifest at
@@ -265,7 +265,7 @@ class _AuditLockError(OSError):
 class _ManifestUnavailable(OSError):
     """The manifest cannot be used right now. Maintenance steps that need it
     (rotation, retention) skip; an append that needs it to record or check the
-    active file's first entry is refused (Phill 2026-10-08, "A"). A plain
+    active file's first entry is refused (the operator 2026-10-08, "A"). A plain
     instance is transient (a read error) and callers retry; see
     ``_ManifestQuarantined``."""
 
@@ -568,10 +568,10 @@ class AuditVerifyResult:
     # rather than recorded by retention cleanup. ``valid`` then speaks only for
     # the linked chain from that anchor on: whatever preceded it (entries
     # removed by retention, or a truncated front) cannot be verified. Ruled by
-    # Phill 2026-09-13: reported alongside ``valid``, never folded into it.
+    # The operator 2026-09-13: reported alongside ``valid``, never folded into it.
     anchor_trusted: bool = True
     # Sealed files audit-repair set aside as unreadable or corrupt, from the
-    # manifest's ``set_aside`` record (Phill, 2026-10-03): each a dict with
+    # manifest's ``set_aside`` record (the operator, 2026-10-03): each a dict with
     # ``filename``, ``set_aside_as``, ``period``, ``cause`` and ``at``. Their
     # entries are a known gap the chain continues past, so ``valid`` speaks
     # for the chain without them, reported beside it as ``anchor_trusted`` is.
@@ -998,7 +998,7 @@ class AuditTrail:
         self._resync_with_disk()
 
         # ⛔ ONE MANIFEST-LOCK SPAN FOR EVERYTHING THIS CALL DOES TO THE MANIFEST
-        # (Phill, 10-03, item 2; reproduced with a real second process first):
+        # (the operator, 10-03, item 2; reproduced with a real second process first):
         # with adoption and the seed in separate spans, adoption saw a
         # quarantined manifest, an ``audit-repair`` in another process rebuilt
         # it in between, and the seed refused this write on adoption's stale
@@ -2167,7 +2167,7 @@ class AuditTrail:
     ) -> AuditRepairResult:
         """Rebuild a quarantined (or missing) manifest from the sealed files on disk.
 
-        The ONLY way out of quarantine (hybrid, ruled by Phill 2026-09-13).
+        The ONLY way out of quarantine (hybrid, ruled by the operator 2026-09-13).
         Operator-run: do not run it while another process is writing the trail.
 
         Refuses, writing nothing, when the directory cannot be listed, when a
@@ -2400,7 +2400,7 @@ class AuditTrail:
             return AuditRepairResult(
                 repaired=False, error=f"Cannot list the audit directory: {e}; {nothing}"
             )
-        # ⛔ A REBUILD CANNOT VOUCH FOR AN EMPTY ACTIVE FILE (Phill 2026-10-08,
+        # ⛔ A REBUILD CANNOT VOUCH FOR AN EMPTY ACTIVE FILE (the operator 2026-10-08,
         # "A"; run first: the active file deleted while the manifest was
         # quarantined, and after this rebuild verify read VALID with that week's
         # entries gone and no gap). The record that would say the file once held
@@ -2515,9 +2515,9 @@ class AuditTrail:
     ) -> AuditRepairResult:
         """With a valid manifest: set aside every unmanifested sealed week none
         of whose copies can be read, and record each in the manifest's
-        ``set_aside`` list (Phill, 2026-10-03). The caller holds the lock.
+        ``set_aside`` list (the operator, 2026-10-03). The caller holds the lock.
 
-        ⛔ CORRUPT ONLY, UNLESS ASKED (Phill, 2026-10-03: "corrupt-only by
+        ⛔ CORRUPT ONLY, UNLESS ASKED (the operator, 2026-10-03: "corrupt-only by
         default plus the flag"). A set-aside is one-way once a write follows,
         so a week that failed only to READ (permissions, I/O) is not set aside
         unless ``set_aside_unreadable``: repair refuses, writing nothing, and
@@ -2689,7 +2689,7 @@ class AuditTrail:
                     error=f"Cannot inspect the active audit file: {e}; nothing was written.",
                 )
             if not active_entry:
-                # ``set_aside_as`` "" marks it: there is no file to move. Phill's 10-08
+                # ``set_aside_as`` "" marks it: there is no file to move. The operator's 10-08
                 # exception, as ruled ((b), 10-09): only in the crash window (the begun
                 # record still set AND a staged attempt preserved as
                 # ``.first.discarded-*``) can anneal not tell from disk whether the first
@@ -3063,7 +3063,7 @@ class AuditTrail:
         :meth:`_resync_with_disk`).
 
         ⛔ EVERY LOST FILE IS REFUSED, A PEER'S ROTATION INCLUDED (KL-24 L3 r2,
-        ruled by Phill 2026-10-08, option (b)). This used to return quietly when
+        ruled by the operator 2026-10-08, option (b)). This used to return quietly when
         a sealed file, its ``.gz`` or a ``.gz.tmp`` for the tip's week existed,
         reading a filename as proof that another writer sealed this file. A
         stale same-week orphan or temp then hid a deleted active file (codex
@@ -3317,7 +3317,7 @@ class AuditTrail:
         error propagates, leaving ``_initialized`` False so the next ``log()``
         retries rather than writing from a guessed anchor.
 
-        ⛔ HYBRID (Phill, 2026-09-13): an INVALID manifest no longer degrades
+        ⛔ HYBRID (the operator, 2026-09-13): an INVALID manifest no longer degrades
         to genesis. :meth:`_load_manifest` quarantines it, and this seeds from
         the newest sealed file's last entry instead — the value rotation would
         have recorded. If there is no readable sealed tail, it refuses (raises);
@@ -3400,7 +3400,7 @@ class AuditTrail:
 
     def _refuse_without_manifest_lock(self) -> None:
         """Inside an operation span: refuse the append when the span could not
-        take the manifest lock (Phill 2026-10-08, "A": an append that cannot
+        take the manifest lock (the operator 2026-10-08, "A": an append that cannot
         record or check the manifest leaves a window in which a deleted active
         file goes undetected, so it fails closed; the store counts the drop)."""
         failure = self._lock_failures.get(threading.get_ident())
@@ -3412,7 +3412,7 @@ class AuditTrail:
             )
 
     def _refuse_while_quarantined(self) -> None:
-        """Refuse every append while a quarantined manifest is unresolved (Phill
+        """Refuse every append while a quarantined manifest is unresolved (the operator
         2026-10-08, "A", superseding the 09-13 hybrid; run first: with the
         manifest quarantined and the active file deleted, appends seeded from
         the sealed tail, and after audit-repair verify read VALID with the
@@ -3608,7 +3608,7 @@ class AuditTrail:
         Raises ``_ManifestUnavailable`` when it cannot be saved, refusing the
         append (KL-24 L3 r4: best-effort, a failure left the week unprotected),
         including when the manifest lock cannot be taken or the manifest is
-        quarantined (Phill 2026-10-08, "A": fail closed, superseding the 10-03
+        quarantined (the operator 2026-10-08, "A": fail closed, superseding the 10-03
         degrade and the 09-13 hybrid). Where advisory locks do not exist at all
         the span holds no lock and the save still runs."""
         try:
@@ -3676,7 +3676,7 @@ class AuditTrail:
     def _refuse_past_unreadable_newer(self) -> None:
         """Raise when the last adoption found sealed weeks newer than the
         manifest that cannot be read: with no usable active file the chain
-        would continue past them (Phill, 2026-10-03). Called from every path
+        would continue past them (the operator, 2026-10-03). Called from every path
         that continues the chain after an adoption: the seed and the rotation
         whose active file is missing."""
         if not self._unreadable_newer:
@@ -3778,7 +3778,7 @@ class AuditTrail:
           reports the week. Where the week is newer than the manifest's last,
           it is noted for :meth:`_seed_from_manifest`, which refuses a write
           with no usable active file until ``audit-repair`` sets the week aside
-          (Phill, 2026-10-03, superseding round 10's seat ruling that writes
+          (the operator, 2026-10-03, superseding round 10's seat ruling that writes
           continue); a write the active file anchors still continues.
 
         ⛔ AND A COPY IS ADOPTED ONLY WHERE IT CHAINS (L1 + L2, round 10,
@@ -3886,7 +3886,7 @@ class AuditTrail:
                 # Newer than the manifest's last week: with an empty active
                 # file the chain would continue from the manifest past it, so
                 # _seed_from_manifest refuses until audit-repair sets it aside
-                # (Phill, 2026-10-03, superseding round 10's seat ruling).
+                # (the operator, 2026-10-03, superseding round 10's seat ruling).
                 if week > last_week:
                     self._unreadable_newer.extend(
                         (path.name, str(scans[path].error)) for path in paths
@@ -4363,7 +4363,7 @@ class AuditTrail:
     def _load_manifest(self) -> dict[str, Any]:
         """Load the manifest, or a fresh one ONLY when none exists.
 
-        ⛔ THE ONE GATE (hybrid, ruled by Phill 2026-09-13). This used to return
+        ⛔ THE ONE GATE (hybrid, ruled by the operator 2026-09-13). This used to return
         a fresh manifest for ANY failure, and the next writer saved it over the
         original: every validator stricter than a writer became history loss
         (rounds 6 and 7), and a new process overwrote a corrupt manifest on open.

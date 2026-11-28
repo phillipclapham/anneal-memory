@@ -242,7 +242,6 @@ from .types import (
     EpisodeType,
     RecallResult,
     StoreStatus,
-    Tombstone,
     WrapRecord,
     WrapResult,
     WrapSnapshot,
@@ -381,10 +380,12 @@ StoreOperation = Literal[
     "wrap_gated_session",
     "wrap_bound_token",
     "wrap_today",
+    "wrap_max_chars",
     "set_consolidate_requires_baton",
     "outbox_requeue",
     "get_wrap_history",
     "wrap_identity_texts",
+    "wrap_identity_before_texts",
     # Generation 3: the fenced consolidation lease
     "lease_acquire",
     "lease_renew",
@@ -698,7 +699,7 @@ class StoreDatabaseError(StoreError):
 # ("abandon it with store.wrap_cancelled()"), which is the only one of
 # the three an MCP client cannot reach — so the agent most likely to hit
 # WrapInProgressError was the one told to call a method it has no way of
-# calling. Alex De Groodt reported it from a stuck wrap that stayed stuck
+# calling. A user reported it from a stuck wrap that stayed stuck
 # for three days.
 #
 # Both halves had the defect, not just the one reported: validated_save_
@@ -995,7 +996,7 @@ class WrapOwnershipError(AnnealMemoryError):
 
     **The ownership half of the single-writer invariant.**
     :class:`WrapInProgressError` stops a second wrap CLOBBERING the first;
-    this stops a second session CANCELLING it. Reported by Alex De Groodt
+    this stops a second session CANCELLING it. Reported by a user
     2026-08-04 (A3) and deliberately not shipped in 0.9.8, whose letter said
     so rather than letting him assume it had landed: the lock recorded only
     ``started_at`` — no owner, no PID, no expiry — so ``wrap_cancel`` could not
@@ -1045,7 +1046,7 @@ class WrapOwnershipError(AnnealMemoryError):
     operator NO WRAP IS IN PROGRESS while ``wrap_started_at`` survived the
     rollback — so the next ``prepare_wrap`` failed with
     :class:`WrapInProgressError` and the store looked permanently stuck. That is
-    Alex's original three-day lockout, reachable through the guard written to
+    the original three-day lockout, reachable through the guard written to
     prevent it. Both L3 seats caught it (glm HIGH, codex MED).
     """
 
@@ -1744,7 +1745,7 @@ _NEW_FORMAT_PAIR_ID_RE = re.compile(r"[0-9a-f]{12}-[0-9a-f]{8}")
 # The store's schema GENERATION. One number for the database and every
 # store-attached sidecar (continuity meta, audit manifest): a format change to
 # any of them raises it (docs/stability.md). Generation 2 is the 1.0 store
-# (Phill 2026-10-13, "yes, let's have it in 1.0"); it changes no layout, it
+# (the operator 2026-10-13, "yes, let's have it in 1.0"); it changes no layout, it
 # arms the write guard below (tests/test_store.py, ``TestGenerationGuards``).
 # Generation 3 makes the database the identity's home: ``identity_versions``
 # holds every continuity version (the files are projections of the latest),
@@ -1756,7 +1757,7 @@ _SCHEMA_VERSION = 3
 # than reading it as this format. A
 # change to the meta format raises this AND ``_SCHEMA_VERSION`` (rule above).
 _META_FORMAT_VERSION = 1
-# ⛔ THE SQL FUNCTION THE GENERATION GUARD CALLS (Phill 2026-10-03, "3A").
+# ⛔ THE SQL FUNCTION THE GENERATION GUARD CALLS (the operator 2026-10-03, "3A").
 # Every connection the package opens registers it (in :func:`connect`), returning
 # ``_SCHEMA_VERSION``. A store at generation N carries BEFORE INSERT/UPDATE/DELETE
 # triggers on every table that ``RAISE(ABORT, ...)`` when this function returns
@@ -1920,7 +1921,7 @@ def _install_generation_guards(
     the same-named guards on a table this release does not know, and the two
     cannot be told apart. Dropping on every open stripped the newer release's
     guards and made it copy the store again on each of its next opens
-    (diogenes 10-15, measured; Phill ruled option (a) 10-15). After the one
+    (diogenes 10-15, measured; the operator ruled option (a) 10-15). After the one
     cleanup such a guard is left alone: it belongs to whichever release named
     the table.
 
@@ -2589,11 +2590,15 @@ _DEFAULT_METADATA = {
     # in the metadata defaults so wrap_cancelled / wrap_completed still clear it
     # on a wrap that was opened on 3.x and is still open.
     "wrap_derive_roots": "",
-    # The date prepare_wrap told the composer to stamp (``{today}`` in its
-    # instructions), so a save after midnight, or under another TZ, validates
-    # against that day (1007+29, codex L3 r1). Additive lifecycle key like
-    # wrap_gated_session, cleared on every terminal path.
+    # A date a caller recorded with the wrap (3.x told the composer to stamp it).
+    # 4.0's prepare_wrap passes none, so it reads empty; the key stays so a wrap
+    # opened on 3.x still clears it. Additive lifecycle key like wrap_gated_session,
+    # cleared on every terminal path.
     "wrap_today": "",
+    # The memory-file size limit the step's prompt stated (a decimal int), or empty
+    # (a wrap opened before the key, or by a direct ``wrap_started``). The save
+    # enforces it. Additive lifecycle key, cleared on every terminal path.
+    "wrap_max_chars": "",
     # The wrap's token again when prepare_wrap was given a caller-supplied
     # wrap_token, else empty. The wrap is token-bound only while this EQUALS
     # wrap_token, so a value a binary that predates the key left behind can never
@@ -3865,7 +3870,7 @@ class Store:
             self._conn.execute(
                 "ALTER TABLE wraps ADD COLUMN pair_id TEXT"
             )
-        # Dreaming primitives (Phill 10-14): whether each wrap ran unattended, and
+        # Dreaming primitives (the operator 10-14): whether each wrap ran unattended, and
         # the model that composed it. NULL / 0 for every
         # wrap written before these columns existed.
         if "unattended" not in existing_cols:
@@ -4980,7 +4985,7 @@ class Store:
     ) -> bool:
         """``others``: the OTHER keys stored for this stream's root."""
         if mine is None or mine["repin_n"] != repin_n:
-            # A key's FIRST replace, a bumped repin_n (Phill's (a)), or a lower one
+            # A key's FIRST replace, a bumped repin_n (the operator's (a)), or a lower one
             # (its state restored or copied): the clone that exists now takes over.
             return True
         if mine["epoch"] == epoch and (pos, seq) <= (mine["pos"], mine["seq"]):
@@ -5001,7 +5006,7 @@ class Store:
         """Keys this replace takes over: every other key of the root, and every key
         owning a NON-rewired row whose physical LINKER is a line of this stream by
         ``(entry_id, hash)`` (a target alone proves nothing: rulings are copied
-        between ledgers). A rewired row never takes a key over (Phill 2026-10-06:
+        between ledgers). A rewired row never takes a key over (the operator 2026-10-06:
         its provenance spiralled through three review rounds; deleted, not guarded)."""
         out = {r["key"] for r in same_root}
         line_of = {v["ep"]: (e, v["hash"]) for e, v in by_entry.items()}
@@ -5191,7 +5196,7 @@ class Store:
             conn.execute(f"DELETE FROM team_snapshot_rows WHERE key IN ({marks})", takers)
         ep_entry = {v["ep"]: e for e, v in by_entry.items()}
         line_of = {v["ep"]: (e, v["hash"]) for e, v in by_entry.items()}
-        # Rows an entry left for a later copy (slice (A), Phill 2026-10-09): each is
+        # Rows an entry left for a later copy (slice (A), the operator 2026-10-09): each is
         # hidden by the entry's current episode, derived on every replace like any
         # honoured pair, so a refusal is re-checked and a re-imported head re-linked.
         retired = self._team_retired()
@@ -5376,7 +5381,7 @@ class Store:
         changes the text, timestamp, type or source never rewrites the stored row: the
         enforced copy becomes another episode (:meth:`_supersede_team_episode`), which
         :meth:`_snapshot_replace` links over the old one, and the old row keeps its id,
-        text, trust, derivations, grounding and links (Phill 2026-10-09, (A); codex L3
+        text, trust, derivations, grounding and links (the operator 2026-10-09, (A); codex L3
         r2 1009+22, run: a save validated against the old text committed grounding on
         an id the import had rewritten)."""
         imported: list[dict[str, str]] = []
@@ -5792,7 +5797,7 @@ class Store:
         restores an episode between the two reads keeps its links (codex L3:
         they were read before the lock). Lock contention leaves the repair to
         the next open; every other database error (corruption, I/O, a full
-        disk) raises out of the open (codex L3; Phill ruled 2026-10-02 that it
+        disk) raises out of the open (codex L3; the operator ruled 2026-10-02 that it
         raises)."""
         missing_sql = """SELECT id FROM (SELECT old_id AS id FROM supersessions
                                          UNION SELECT new_id FROM supersessions)
@@ -7498,6 +7503,7 @@ class Store:
         expect_last_wrap_id: int | None = None,
         token_bound: bool = False,
         today: str | None = None,
+        max_chars: int | None = None,
         expect_continuity_sha256: str | None = None,
         lease_token: str | None = None,
         idempotency: tuple[str, str, str] | None = None,
@@ -7570,6 +7576,9 @@ class Store:
                 (``prepare_wrap(wrap_token=...)``), so :meth:`wrap_cancelled`
                 refuses to end this wrap without ``expect_token`` or ``force``
                 (:class:`WrapCancelBoundError`). Must be a bool.
+            max_chars: The memory-file size limit the step's prompt states, kept with
+                the wrap (:meth:`wrap_max_chars`) so the save enforces the same one.
+                ``None`` records none (the save then uses the default).
             lease_token: Prepare under the consolidation lease this fencing
                 token names (generation 3, :meth:`lease_acquire`): under this
                 call's write lock, the token's hash, the live lease's epoch and
@@ -7799,6 +7808,10 @@ class Store:
             self._conn.execute(
                 "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
                 ("wrap_today", today or ""),
+            )
+            self._conn.execute(
+                "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
+                ("wrap_max_chars", str(max_chars) if max_chars is not None else ""),
             )
             self._conn.execute(
                 "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
@@ -8096,7 +8109,7 @@ class Store:
             # what makes it a compare-and-swap rather than a read-compare-write
             # with a window — and it is only true because of the BEGIN IMMEDIATE
             # above. Raising here rolls back via _db_boundary, releasing the lock
-            # with NOTHING cleared. Alex De Groodt's A3; spore-699.
+            # with NOTHING cleared. a field report's A3.
             #
             # ⛔ THE STATE IS THREE-WAY, NOT TWO. The first cut collapsed
             # "nothing here" and "something here but no token" into
@@ -8105,7 +8118,7 @@ class Store:
             # edit) told the operator NO WRAP IS IN PROGRESS while
             # ``wrap_started_at`` survived the rollback. The next prepare_wrap
             # then failed with WrapInProgressError and the store looked
-            # permanently stuck: Alex's original three-day lockout, reachable
+            # permanently stuck: the original three-day lockout, reachable
             # through the guard written to prevent it. Both L3 seats caught it
             # (glm HIGH, codex MED). ``actual is None`` now means IDLE and
             # nothing else.
@@ -8181,6 +8194,10 @@ class Store:
             self._conn.execute(
                 "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
                 ("wrap_today", ""),
+            )
+            self._conn.execute(
+                "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
+                ("wrap_max_chars", ""),
             )
             self._conn.execute(
                 "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
@@ -8305,13 +8322,27 @@ class Store:
         return started if started else None
 
     def wrap_today(self) -> str | None:
-        """The date (``YYYY-MM-DD``) prepare_wrap gave the composer for the wrap in
-        progress, or ``None`` when no wrap is in progress or it was started without
-        one (an earlier version, or a direct ``wrap_started``)."""
+        """The date (``YYYY-MM-DD``) recorded with the wrap in progress, or ``None``
+        when no wrap is in progress or it was started without one (4.0's
+        ``prepare_wrap`` records none; only a 3.x wrap that is still open has one)."""
         with self._db_boundary("wrap_today"):
             if not self._get_metadata("wrap_started_at"):
                 return None
             return self._get_metadata("wrap_today") or None
+
+    def wrap_max_chars(self) -> int | None:
+        """The memory-file size limit the open wrap's prompt stated, or ``None`` when no
+        wrap is in progress or it was opened without one (the save then uses
+        :data:`anneal_memory.rolling.DEFAULT_MAX_CHARS`)."""
+        with self._db_boundary("wrap_max_chars"):
+            if not self._get_metadata("wrap_started_at"):
+                return None
+            raw = self._get_metadata("wrap_max_chars")
+        try:
+            value = int(raw) if raw else 0
+        except ValueError:
+            return None
+        return value if value > 0 else None
 
     def wrap_gated_session(self) -> str | None:
         """The ``session_id`` that prepared the wrap in progress under the consolidate
@@ -8894,6 +8925,10 @@ class Store:
             )
             self._conn.execute(
                 "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
+                ("wrap_max_chars", ""),
+            )
+            self._conn.execute(
+                "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
                 ("wrap_lease", ""),
             )
             # Clear the 3.x frozen wrap schema key in the same transaction as
@@ -9101,7 +9136,6 @@ class Store:
                 restored_version: int | None = None
                 restored_hash: str | None = None
                 restored_text: str | None = None
-                reverted_text: str | None = None
                 if self._identity_table_present():
                     own = self._conn.execute(
                         "SELECT version, text, content_hash FROM identity_versions "
@@ -9138,7 +9172,6 @@ class Store:
                             "the wrap's identity version is the store's first; there "
                             "is no earlier text to restore", wrap_id=wrap_id)
                     restored_text = str(before["text"])
-                    reverted_text = str(own["text"])
                     restored_version = self._insert_identity_version(
                         restored_text, meta_json=before["meta_json"],
                         source="raw_save", lease_token=lease_token)
@@ -9245,8 +9278,8 @@ class Store:
         """``{wrap id: the continuity text that wrap saved}`` for each listed wrap
         that has an ``identity_versions`` row (``source = 'wrap'``; the latest when
         a wrap has more than one). A wrap without a row (a legacy wrap, or a store
-        with no identity table) is absent. Read-only; what ``diff`` compares to
-        show what a wrap changed."""
+        with no identity table) is absent. Read-only; what ``diff`` prints for a wrap
+        (against :meth:`wrap_identity_before_texts`)."""
         ids = sorted({int(i) for i in wrap_ids})
         out: dict[int, str] = {}
         with self._db_boundary("wrap_identity_texts"), self._read_snapshot():
@@ -9261,6 +9294,31 @@ class Store:
                     f"ORDER BY version ASC", chunk,
                 ):
                     out[int(row["wrap_id"])] = str(row["text"])
+        return out
+
+    def wrap_identity_before_texts(self, wrap_ids: Iterable[int]) -> dict[int, str]:
+        """``{wrap id: the continuity text in force just before that wrap saved}``: the
+        identity version immediately BEFORE the wrap's own, whatever wrote it (an earlier
+        wrap, a seed from a 3.x file, a hand edit). ``""`` when the wrap's version is the
+        store's first. A wrap without an ``identity_versions`` row is absent. Read-only;
+        what ``diff`` compares a wrap's text to."""
+        ids = sorted({int(i) for i in wrap_ids})
+        out: dict[int, str] = {}
+        with self._db_boundary("wrap_identity_before_texts"), self._read_snapshot():
+            if not ids or not self._identity_table_present():
+                return out
+            for wrap_id in ids:
+                own = self._conn.execute(
+                    "SELECT MIN(version) AS v FROM identity_versions "
+                    "WHERE source = 'wrap' AND wrap_id = ?", (wrap_id,),
+                ).fetchone()
+                if own is None or own["v"] is None:
+                    continue
+                prior = self._conn.execute(
+                    "SELECT text FROM identity_versions WHERE version < ? "
+                    "ORDER BY version DESC LIMIT 1", (own["v"],),
+                ).fetchone()
+                out[wrap_id] = "" if prior is None else str(prior["text"])
         return out
 
     def get_wrap_history(self) -> list[WrapRecord]:
@@ -12006,8 +12064,8 @@ class Store:
         ``BEGIN IMMEDIATE`` at entry makes the whole batch one write
         transaction from its first statement, reads included. The cost: a
         peer writer waits for the whole batch, not only from its first DML.
-        ``test_the_in_batch_recheck_holds_the_write_lock`` fails if the lock
-        moves back to the first DML. Entering with a transaction already open
+        ``test_a_batch_holds_the_write_lock_from_its_first_statement``
+        (tests/test_rolling_wrap.py) fails if the lock moves back to the first DML. Entering with a transaction already open
         raises ``RuntimeError`` and leaves it untouched. ⚠ Because the batch's
         transaction is open from the first statement, a boundary-wrapped method
         that raises INSIDE its block rolls the whole batch back; a caller that

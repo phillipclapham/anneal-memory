@@ -1,7 +1,7 @@
 """Best-effort POSIX directory fsync — the one shared implementation.
 
-``store``, ``audit``, ``crystal`` and ``migration`` (and their callers
-``cli`` and ``continuity``) all import :func:`_fsync_dir` from this LEAF
+``store``, ``audit``, ``migration``, ``remote`` and ``cli`` all import
+:func:`_fsync_dir` from this LEAF
 module: stdlib-only, importing nothing from the package, so no caller
 gains a cycle or a heavy sibling. Before this module existed the helper
 was duplicated byte-for-idiom four times, and the copies had drifted:
@@ -9,7 +9,7 @@ was duplicated byte-for-idiom four times, and the copies had drifted:
 - ``audit`` left ``os.close`` unguarded in its ``finally``, so a rare
   ``OSError`` from close (or one masking a swallowed fsync error) could
   escape to callers that were promised best-effort.
-- ``crystal`` and ``migration`` swallowed every error but reached their
+- a retired module and ``migration`` swallowed every error but reached their
   Windows no-op only through an exception-propelled path, without the
   explicit platform guard.
 - ``store`` was strictest on both axes and is the surviving semantics.

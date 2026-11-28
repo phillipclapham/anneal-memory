@@ -266,8 +266,8 @@ TOOLS: list[dict[str, Any]] = [
             "prepare_wrap opened. Call this after running the prepare_wrap "
             "prompt. The text must be the complete new memory file, not a diff "
             "or a summary of changes. The only checks are that it is not empty, "
-            "not over the character limit, and answers the open step (pass "
-            "wrap_token). A refused save writes nothing and leaves the step "
+            "not over the step's character limit, and answers the open step "
+            "(wrap_token is required). A refused save writes nothing and leaves the step "
             "open: run the step again and save again. Every earlier version of "
             "the file is kept. Returns the wrap id, the size, and how many "
             "episodes are still waiting for a later step."
@@ -285,21 +285,22 @@ TOOLS: list[dict[str, Any]] = [
                     "minLength": 32,
                     "maxLength": 32,
                     "description": (
-                        "The 32-char hex token from the prepare_wrap reply (the "
-                        "'Wrap token: <hex>' line). Pass it back to verify you "
-                        "are saving the step you prepared: a stale or wrong "
-                        "token is refused instead of committing against the "
-                        "wrong wrap."
+                        "Required. The 32-char hex token from the prepare_wrap "
+                        "reply (the 'Wrap token: <hex>' line). It says which "
+                        "step this reply answers: without it, or with a stale or "
+                        "wrong one, nothing is saved."
                     ),
                 },
                 "max_chars": {
                     "type": "integer",
                     "description": (
-                        "The limit prepare_wrap was given. Default 26000."
+                        "Leave it out: the save uses the limit the step was "
+                        "prepared with. A value is accepted only if it equals "
+                        "that limit."
                     ),
                 },
             },
-            "required": ["text"],
+            "required": ["text", "wrap_token"],
         },
     },
     {

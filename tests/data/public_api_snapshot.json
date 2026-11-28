@@ -4479,7 +4479,7 @@
       "GEMINI.md"
      ],
      "suggested_edit": "Where your instruction files describe the wrap, replace the 3.x procedure with this one. At a session boundary, or when the user says to wrap up: call `prepare_wrap`. If its status is `ready`, run the step's prompt (`step.system` and `step.user`) in a fresh context with nothing else, then pass the whole reply to `save_continuity` with the `wrap_token` that `prepare_wrap` returned. If the result's `pending_count` is not zero, call `prepare_wrap` again for the next step. If a call refuses, nothing was written and the step stays open: run it again, or abandon it with `wrap_cancel`. Delete every instruction that names a removed feature: the four-section memory file, graduation levels (1x, 2x, 3x), evidence tags and citations, the contradiction scan, stale patterns, the crystal tools, `probe`, `derive`, `outcome` and `worth`. Do not copy the prompt into your files; `prepare_wrap` returns the current one. To read the memory file use `read_continuity` (MCP) or `anneal-memory continuity` (CLI). An episode's recording does not change: `record`, `recall`, state keys, trust, supersession, spores and intentions work as before. A script that called `validated_save_continuity` with `affective_state`, `today`, `allow_shrink`, `allow_unlinked`, `carryforward_cold_days`, `crystal_store`, `compost` or `require_rederive` must drop them, and one that read `graduations_validated` or the other graduation and association counts from a wrap result will find them 0. Read MIGRATING_TO_4.md in the anneal-memory repository for the full list; do not restate it in your files, because a static copy goes stale.",
-     "summary": "anneal-memory 4.0.0 replaces the 3.x consolidation with one method, the rolling rewrite. `prepare_wrap` opens one step: the oldest day of episodes that are not wrapped yet, with a fixed prompt filled with the current memory file and that day's log. Run the prompt in a fresh context and pass the model's whole reply to `save_continuity` (`validated_save_continuity` in the library). The save checks only that a wrap is open, that the reply is a non-empty string and that it is within the size limit (26,000 characters by default); it checks nothing else, and every earlier version of the file is kept. When the result's `pending_count` is not zero, the next day's step is owed: prepare again. A store from 3.x opens as it is: its current continuity file seeds the first wrap, no table is dropped and no row is deleted. Removed: the MCP tools `crystal_recall` and `crystal_index`; the CLI commands `crystal`, `outcome`, `worth`, `probe`, `derive`, `associations`, `pattern-associations`, `graph` and `set-schema`, and `init --schema`; the section schema, graduation levels and evidence tags, the durable tier and the crystal store. New: the MCP tool `read_continuity`, which reads the memory file. The reply of `prepare_wrap` no longer carries a `package`; it carries a `step` to run. MIGRATING_TO_4.md has the full list.",
+     "summary": "anneal-memory 4.0.0 replaces the 3.x consolidation with one method, the rolling rewrite. `prepare_wrap` opens one step: the oldest day of episodes that are not wrapped yet, with a fixed prompt filled with the current memory file and that day's log. Run the prompt in a fresh context and pass the model's whole reply to `save_continuity` (`validated_save_continuity` in the library). The save checks only that a wrap is open, that the reply is a non-empty string and that it is within the size limit (26,000 characters by default); it checks nothing else, and every earlier version of the file is kept. When the result's `pending_count` is not zero, the next day's step is owed: prepare again. A store from 3.x opens as it is: its current continuity file seeds the first wrap, no table is dropped and no row is deleted. Removed: the MCP tools `crystal_recall` and `crystal_index`; the CLI commands `crystal`, `outcome`, `worth`, `probe`, `derive`, `associations`, `pattern-associations`, `graph` and `set-schema`, and `init --schema`; the section schema, graduation levels and evidence tags, the durable tier and the crystal store. New: the MCP tool `read_continuity`, which reads the memory file. The reply of `prepare_wrap` no longer carries a `package`; it carries a `step` to run. This entry retires every earlier one: they teach tools and sections that 4.0 removed, so apply this one alone. MIGRATING_TO_4.md has the full list.",
      "version": "4.0.0"
     }
    ]
@@ -5134,6 +5134,10 @@
      "kind": "method",
      "signature": "(self) -> 'str | None'"
     },
+    "wrap_identity_before_texts": {
+     "kind": "method",
+     "signature": "(self, wrap_ids: 'Iterable[int]') -> 'dict[int, str]'"
+    },
     "wrap_identity_texts": {
      "kind": "method",
      "signature": "(self, wrap_ids: 'Iterable[int]') -> 'dict[int, str]'"
@@ -5142,9 +5146,13 @@
      "kind": "method",
      "signature": "(self) -> 'dict[str, Any] | None'"
     },
+    "wrap_max_chars": {
+     "kind": "method",
+     "signature": "(self) -> 'int | None'"
+    },
     "wrap_started": {
      "kind": "method",
-     "signature": "(self, *, token: 'str', episode_ids: 'list[str]', allow_restart: 'bool' = False, gated_session_id: 'str | None' = None, expect_last_wrap_id: 'int | None' = None, token_bound: 'bool' = False, today: 'str | None' = None, expect_continuity_sha256: 'str | None' = None, lease_token: 'str | None' = None, idempotency: 'tuple[str, str, str] | None' = None) -> 'None'"
+     "signature": "(self, *, token: 'str', episode_ids: 'list[str]', allow_restart: 'bool' = False, gated_session_id: 'str | None' = None, expect_last_wrap_id: 'int | None' = None, token_bound: 'bool' = False, today: 'str | None' = None, max_chars: 'int | None' = None, expect_continuity_sha256: 'str | None' = None, lease_token: 'str | None' = None, idempotency: 'tuple[str, str, str] | None' = None) -> 'None'"
     },
     "wrap_status_snapshot": {
      "kind": "method",
@@ -5178,7 +5186,7 @@
   "StoreOperation": {
    "kind": "value",
    "type": "_LiteralGenericAlias",
-   "value": "typing.Literal['get_by_origin_key', 'read_episode_versioned', 'origin_key_status', 'delete_by_origin_key', 'save_continuity', 'save_meta', 'load_meta', 'load_continuity', 'load_wrap_snapshot', 'wrap_completed', 'revert_wrap', 'prepare_continuity_write', 'prepare_meta_write', 'record', 'get', 'delete', 'recall', 'keyword_candidates', 'redirectable_ids', 'wrap_status_snapshot', 'supersede', 'unsupersede', 'import_team_entries', 'import_team_snapshot', 'supersession_exists', 'superseded_by_map', 'trust_map', 'trust_counts', 'origin_map', 'origin_counts', 'set_trust', 'derived_edges', 'supersession_problem', 'supersession_links', 'set_state_key', 'clear_state_key', 'state_key_report', 'episodes_since_wrap', 'store_id', 'row_to_episode', 'status', 'wrap_started', 'wrap_cancelled', 'get_wrap_started_at', 'last_wrap_id', 'count_episodes_since_wrap', 'consolidate_requires_baton', 'wrap_gated_session', 'wrap_bound_token', 'wrap_today', 'set_consolidate_requires_baton', 'outbox_requeue', 'get_wrap_history', 'wrap_identity_texts', 'lease_acquire', 'lease_renew', 'lease_release', 'prune', 'schema_init', 'batch_begin', 'batch_commit', 'supersession_repair', 'close']"
+   "value": "typing.Literal['get_by_origin_key', 'read_episode_versioned', 'origin_key_status', 'delete_by_origin_key', 'save_continuity', 'save_meta', 'load_meta', 'load_continuity', 'load_wrap_snapshot', 'wrap_completed', 'revert_wrap', 'prepare_continuity_write', 'prepare_meta_write', 'record', 'get', 'delete', 'recall', 'keyword_candidates', 'redirectable_ids', 'wrap_status_snapshot', 'supersede', 'unsupersede', 'import_team_entries', 'import_team_snapshot', 'supersession_exists', 'superseded_by_map', 'trust_map', 'trust_counts', 'origin_map', 'origin_counts', 'set_trust', 'derived_edges', 'supersession_problem', 'supersession_links', 'set_state_key', 'clear_state_key', 'state_key_report', 'episodes_since_wrap', 'store_id', 'row_to_episode', 'status', 'wrap_started', 'wrap_cancelled', 'get_wrap_started_at', 'last_wrap_id', 'count_episodes_since_wrap', 'consolidate_requires_baton', 'wrap_gated_session', 'wrap_bound_token', 'wrap_today', 'wrap_max_chars', 'set_consolidate_requires_baton', 'outbox_requeue', 'get_wrap_history', 'wrap_identity_texts', 'wrap_identity_before_texts', 'lease_acquire', 'lease_renew', 'lease_release', 'prune', 'schema_init', 'batch_begin', 'batch_commit', 'supersession_repair', 'close']"
   },
   "StoreStatus": {
    "bases": [],
@@ -5393,11 +5401,11 @@
      "name": "prepare_wrap"
     },
     {
-     "description": "Save the memory file: the model's whole reply to the step prepare_wrap opened. Call this after running the prepare_wrap prompt. The text must be the complete new memory file, not a diff or a summary of changes. The only checks are that it is not empty, not over the character limit, and answers the open step (pass wrap_token). A refused save writes nothing and leaves the step open: run the step again and save again. Every earlier version of the file is kept. Returns the wrap id, the size, and how many episodes are still waiting for a later step.",
+     "description": "Save the memory file: the model's whole reply to the step prepare_wrap opened. Call this after running the prepare_wrap prompt. The text must be the complete new memory file, not a diff or a summary of changes. The only checks are that it is not empty, not over the step's character limit, and answers the open step (wrap_token is required). A refused save writes nothing and leaves the step open: run the step again and save again. Every earlier version of the file is kept. Returns the wrap id, the size, and how many episodes are still waiting for a later step.",
      "inputSchema": {
       "properties": {
        "max_chars": {
-        "description": "The limit prepare_wrap was given. Default 26000.",
+        "description": "Leave it out: the save uses the limit the step was prepared with. A value is accepted only if it equals that limit.",
         "type": "integer"
        },
        "text": {
@@ -5405,7 +5413,7 @@
         "type": "string"
        },
        "wrap_token": {
-        "description": "The 32-char hex token from the prepare_wrap reply (the 'Wrap token: <hex>' line). Pass it back to verify you are saving the step you prepared: a stale or wrong token is refused instead of committing against the wrong wrap.",
+        "description": "Required. The 32-char hex token from the prepare_wrap reply (the 'Wrap token: <hex>' line). It says which step this reply answers: without it, or with a stale or wrong one, nothing is saved.",
         "maxLength": 32,
         "minLength": 32,
         "pattern": "^[0-9a-f]{32}$",
@@ -5413,7 +5421,8 @@
        }
       },
       "required": [
-       "text"
+       "text",
+       "wrap_token"
       ],
       "type": "object"
      },
@@ -6748,7 +6757,7 @@
   "save_continuity": {
    "properties": {
     "max_chars": {
-     "description": "The limit prepare_wrap was given. Default 26000.",
+     "description": "Leave it out: the save uses the limit the step was prepared with. A value is accepted only if it equals that limit.",
      "type": "integer"
     },
     "text": {
@@ -6756,7 +6765,7 @@
      "type": "string"
     },
     "wrap_token": {
-     "description": "The 32-char hex token from the prepare_wrap reply (the 'Wrap token: <hex>' line). Pass it back to verify you are saving the step you prepared: a stale or wrong token is refused instead of committing against the wrong wrap.",
+     "description": "Required. The 32-char hex token from the prepare_wrap reply (the 'Wrap token: <hex>' line). It says which step this reply answers: without it, or with a stale or wrong one, nothing is saved.",
      "maxLength": 32,
      "minLength": 32,
      "pattern": "^[0-9a-f]{32}$",
@@ -6764,7 +6773,8 @@
     }
    },
    "required": [
-    "text"
+    "text",
+    "wrap_token"
    ],
    "type": "object"
   },

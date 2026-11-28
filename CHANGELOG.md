@@ -10,25 +10,38 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
 
 ### Changed
 - **`prepare_wrap` opens one step of a rolling wrap.** The step is the oldest calendar day of unwrapped episodes (the day is cut in the machine's time zone, or in `tz=` / `--tz`; a very long day is sliced). It returns `{status, message, episode_count, pending_count, wrap_token, step}`, where `step` holds `day`, `chunk`, `chunks`, `episodes`, `steps_remaining`, `max_chars`, `memory_chars`, `system`, `user` and `prompt`: a fixed prompt filled with the current memory file and that day's log. A catch-up over N days is N steps in order, never one merged log.
-- **The caller runs the prompt in a fresh context, with nothing else, and passes the model's whole reply to `validated_save_continuity`.** anneal-memory calls no model and stays model-agnostic. The prompt is the one the method was measured with: a mid-size model at low effort, given the memory file and one day's log.
+- **The caller runs the prompt in a fresh context, with nothing else, and passes the model's whole reply to `validated_save_continuity`.** anneal-memory calls no model and stays model-agnostic. The prompt is fixed text, written for a mid-size model at low effort that sees the memory file and one day's log and nothing else.
 - **`validated_save_continuity(store, text, *, wrap_token, max_chars, session_id, allow_sole_live, idempotency_key, lease_token, unattended, model)`** keeps the reply as the new memory file. It checks that the reply is a non-empty string, at most 26,000 characters (`max_chars`, CLI `--max-chars`, to change the cap), and answers the step `prepare_wrap` opened. It checks nothing else: no section layout, no markers, no evidence or pattern rules. A refused save writes nothing and leaves the step open. The result is `{path, chars, episodes_compressed, pending_count, content_hash, wrap_result}`.
 - **The memory file is whatever the model wrote.** The first wrap after an upgrade runs on the store's existing continuity file as its seed. The seed may be over 26,000 characters; the prompt tells the model its current size and the limit.
 - **`prepare-wrap` and `save-continuity` (CLI) and `prepare_wrap` and `save_continuity` (MCP)** follow the new calls. `prepare-wrap` prints the token and the prompt (`--json` gives them as fields) and still exits 3 on a downgrade. `save-continuity` takes `--wrap-token`, `--max-chars`, `--model`, `--unattended` and `--session-id`.
-- Every earlier version of the memory file is kept (`identity_versions`, append-only), and `history` and `diff` show the wraps, so a fact a rewrite dropped can be recovered.
+- Every earlier version of the memory file is kept (`identity_versions`, append-only), so a fact a rewrite dropped can be recovered. `history`, `diff` and `stats` now report what each wrap changed in the file (size, lines, and for `diff` a text diff of the newest wrap), read from the same wraps and versions 3.x wrote. They no longer print graduation, pattern or association numbers, and the matching `--json` keys are gone.
+- `Store.load_continuity()` returns the stored text exactly as saved.
+- `revert-wrap` undoes the wrap row, the identity version, the episode stamps and the idempotency record. `WrapRevertReceipt` no longer has `pattern_state_exact`.
+- `WrapResult` and `WrapRecord` keep their old count fields so that wraps written by 3.x still read. For a wrap made under 4.0 they are 0. `StoreStatus` lost `association_stats`.
+- `Store.wrap_started` lost `section_schema` and `derive_roots`. `Store.wrap_completed` lost its graduation, citation, pattern, association and `section_sizes` arguments. A wrap that 3.x left open is closed with `wrap-cancel`, and its episodes are released.
+- The hosted remote path (experimental): `orient` no longer carries a crystal index, and its read tools are `recall` alone.
 - The README, the library quickstart, the integration guides, the bundled skill and the agent-instruction snippets are rewritten for the new method, and the README is much shorter.
+
+### Added
+- **`read_continuity`**, an MCP tool that returns the memory file (the `anneal://continuity` resource still works).
+- **`tz=`** on `prepare_wrap` and `tz` on the MCP tool, **`--tz`** on `prepare-wrap`: the zone a day is cut in.
+- **`--max-chars`** on `save-continuity` and `max_chars` on `save_continuity`, `--model` and `--unattended` on `save-continuity`.
+- `Store.wrap_identity_texts(wrap_ids)`: the memory file each listed wrap saved, read-only. `diff` uses it.
 
 ### Removed
 - **Graduation:** the `1x`/`2x`/`3x` pattern levels, citation and evidence checks, demotion, carry-forward, and the catastrophic-shrink gate.
 - **Patterns and pattern associations**, and the Hebbian association commands (`associations`, `pattern-associations`, `graph`).
-- **Crystals:** the crystal store, the MCP tools `crystal_recall` and `crystal_index`, and the `crystal` CLI group.
+- **Crystals:** the crystal store, the MCP tools `crystal_recall` and `crystal_index`, and the `crystal` CLI group with its subcommands.
 - **The Decisions wall and the evidence-tag rules.**
-- **Drift probes** (`probe`) and **the worth and outcome log** (`outcome`, `worth`).
-- **Rederive** (State from commands: `derive`, `continuity --rederive`) and `docs/rederive.md`.
-- **Section schemas and section edit:** `Store(section_schema=)`, the schema names and `SectionSpec`, `set-schema`, `init --schema`. The memory file has no required sections.
+- **Drift probes** (`probe` with `add`, `list`, `retire` and `status`) and **the worth and outcome log** (`outcome`, `worth`).
+- **Rederive** (State from commands: `derive` with `allow`, `revoke` and `status`, `continuity --rederive`) and `docs/rederive.md`.
+- **Section schemas and section edit:** `Store(section_schema=)`, the schema names and `SectionSpec`, `set-schema`, `init --schema`, `Store.read_section` and `replace_section`. The memory file has no required sections.
 - **Durable-fact sections.**
-- Exceptions that only the removed features raised: `ContinuityValidationError`, `SectionError`, `WrapSchemaMovedError` and `AssociationFormationOffError`.
-- Arguments of the old save and prepare calls that served those features, among them `affective_state`, `allow_shrink`, `allow_unlinked`, `carryforward_cold_days`, `crystal_store`, `compost` and `require_rederive`.
+- `continuity --ref`.
+- Exceptions that only the removed features raised: `ContinuityValidationError`, `SectionError`, `WrapSchemaMovedError`, `AssociationFormationOffError`, `CrystalError`, `CrystalConflictError`, `DeriveRefused`, `OutcomeLogBusy` and `ForeignOutcomeLogError`.
+- Arguments of the old save and prepare calls that served those features, among them `affective_state`, `allow_shrink`, `allow_unlinked`, `carryforward_cold_days`, `crystal_store`, `compost`, `require_rederive` and `staleness_days`, and their CLI and MCP counterparts (`--allow-shrink`, `--allow-unlinked`, `--crystal`, `--require-rederive`, `--affect-tag`, `--affect-intensity`, `--staleness-days`).
 - `retrieve_relevant` and `retrieve_patterns`. `search_episodes` stays.
+- The rest of the names that left `anneal_memory.__all__` (the crystal, graduation, schema, durable, rederive, outcome-log and association types and functions), and the `Store` methods for drift probes, associations, pattern history and schemas. [MIGRATING_TO_4.md](MIGRATING_TO_4.md) names every one.
 
 ### Kept
 - Capture and recall: `record`, `recall`, `search`, `episodes`, `get`, and the six episode types.

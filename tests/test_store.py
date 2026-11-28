@@ -2772,52 +2772,6 @@ def _valid_continuity_text(today: str, evidence: str = "") -> str:
     )
 
 
-class TestUpsertPatternHistorySeenAt:
-    """spore-081: upsert_pattern_history anchors last_seen_at to the pipeline's
-    logical `seen_at` (the warmth gate's clock), not wall-clock — so deterministic/
-    backdated runs stay coherent. Pins the three branches directly (the end-to-end
-    proof lives in TestWarmRewordedPreservationEndToEnd; these lock the unit
-    contract so a future regression of the seen_at handling is caught here)."""
-
-    def test_backdated_seen_at_anchors_to_logical_date(self, store):
-        store.upsert_pattern_history("p_back", 2, "expl", seen_at="2026-06-04")
-        h = store.get_pattern_history("p_back")
-        assert h["last_seen_at"] == "2026-06-04T00:00:00Z"
-
-    def test_full_iso_seen_at_normalized_to_date(self, store):
-        # codex LOW: a full ISO-Z must not produce a double-suffixed invalid value.
-        store.upsert_pattern_history("p_iso", 2, "expl",
-                                     seen_at="2026-06-04T12:34:56Z")
-        h = store.get_pattern_history("p_iso")
-        assert h["last_seen_at"] == "2026-06-04T00:00:00Z"
-
-    def test_malformed_seen_at_degrades_to_wallclock(self, store):
-        # The wall-clock fallback stamps UTC (`_dt.now(_tz.utc)` in
-        # upsert_pattern_history), so assert the UTC date — NOT local
-        # date.today(), which diverges after ~8PM EDT once UTC has rolled to
-        # the next day (the local/UTC boundary bug this assertion used to hit).
-        # Capture the UTC date BOTH sides of the call and accept either, so a
-        # 00:00:00Z straddle (the exact time-boundary flake class this patch
-        # removes) can't reintroduce a different one.
-        before_utc = datetime.now(timezone.utc).date().isoformat()
-        store.upsert_pattern_history("p_bad", 2, "expl", seen_at="not-a-date")
-        after_utc = datetime.now(timezone.utc).date().isoformat()
-        h = store.get_pattern_history("p_bad")
-        # Contract: the fallback stamps the current UTC date plus a "Z" suffix —
-        # never the invalid "not-a-dateT00:00:00Z" from suffixing the bad input.
-        # (Midnight UTC is a legitimate fallback value; we do NOT assert non-midnight.)
-        assert h["last_seen_at"][:10] in {before_utc, after_utc}
-        assert h["last_seen_at"].endswith("Z")
-        assert "not-a-date" not in h["last_seen_at"]
-
-    def test_omitted_seen_at_uses_wallclock(self, store):
-        # UTC, not local date.today() — see test_malformed_seen_at_degrades_to_wallclock
-        # (incl. the 00:00:00Z straddle guard).
-        before_utc = datetime.now(timezone.utc).date().isoformat()
-        store.upsert_pattern_history("p_none", 2, "expl")
-        after_utc = datetime.now(timezone.utc).date().isoformat()
-        h = store.get_pattern_history("p_none")
-        assert h["last_seen_at"][:10] in {before_utc, after_utc}
 
 
 class TestGetWrapHistory:

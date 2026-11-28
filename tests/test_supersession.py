@@ -417,7 +417,7 @@ def test_the_floor_is_tight_against_the_probe_minimum():
                 pairs.append((o, u if ctx else u.replace(sp.CONTEXT, "")))
     assert len(pairs) == 96
     assert all(store_mod._supersession_grounds(n, o) for o, n in pairs)
-    from anneal_memory.graduation import _meaningful_words as words
+    from anneal_memory.store import _meaningful_words as words
 
     ratios = [len(words(o) & words(n)) / max(1, min(len(words(o)), len(words(n))))
               for o, n in pairs]

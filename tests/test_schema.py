@@ -37,7 +37,6 @@ from anneal_memory.continuity import (
     prepare_wrap,
     validated_save_continuity,
 )
-from anneal_memory.graduation import extract_pattern_names
 from anneal_memory.store import register_writer_schema
 
 
@@ -332,55 +331,6 @@ FLOW_TEXT = (
 # -- _build_wrap_instructions --
 
 
-
-
-# -- Tier 2: graduation gate honors the schema --
-
-
-GRAD_TEXT = (
-    "## Patterns\n"
-    "- alpha_in_patterns | 2x (2026-01-01) [evidence: 1234abcd \"x\"]\n"
-    "## Proven\n"
-    "- beta_in_proven | 2x (2026-01-01) [evidence: 5678ef01 \"y\"]\n"
-)
-
-
-class TestGraduationGateSchema:
-    def test_default_gate_scans_patterns_only(self):
-        names = extract_pattern_names(GRAD_TEXT)
-        assert "alpha_in_patterns" in names
-        assert "beta_in_proven" not in names
-
-    def test_custom_gate_scans_named_graduating_section(self):
-        gh = graduating_headings(
-            [
-                {"heading": "State", "role": "live-state"},
-                {"heading": "Proven", "role": "graduating"},
-            ]
-        )
-        names = extract_pattern_names(GRAD_TEXT, gh)
-        assert "beta_in_proven" in names
-        assert "alpha_in_patterns" not in names
-
-    def test_multi_graduating_scans_all(self):
-        gh = graduating_headings(
-            [
-                {"heading": "Patterns", "role": "graduating"},
-                {"heading": "Proven", "role": "graduating"},
-            ]
-        )
-        names = extract_pattern_names(GRAD_TEXT, gh)
-        assert "alpha_in_patterns" in names
-        assert "beta_in_proven" in names
-
-    def test_anti_patterns_still_not_matched(self):
-        # The v0.3.2 Anti-Patterns fix must survive: "## Anti-Patterns" is not
-        # the graduating section under the default gate.
-        txt = (
-            "## Anti-Patterns\n"
-            "- should_not_match | 2x (2026-01-01) [evidence: abcd1234 \"z\"]\n"
-        )
-        assert "should_not_match" not in extract_pattern_names(txt)
 
 
 # -- End-to-end FLOW_SCHEMA wrap cycle --

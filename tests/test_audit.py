@@ -2149,8 +2149,8 @@ class TestStoreIntegration:
 #
 # ⚠ AND THE FIRST COUNT WAS ITSELF WRONG, WHICH IS THE POINT. The opening
 # census said EIGHT, because it scoped by the SYMPTOM — the literal text
-# ``self._audit.log`` — and so could not see the seven association methods
-# that reach their commit through a helper's ``commit=`` argument and emit via
+# ``self._audit.log`` — and so could not see seven methods (3.x's association
+# writers, since removed) that reach their commit through a helper's ``commit=`` argument and emit via
 # ``_audit_log``. The L1 pass found them by asking about POSITION rather than
 # spelling. A census scoped by symptom missed the class, inside the census
 # taken to fix a guard scoped by symptom.
@@ -2383,8 +2383,8 @@ class TestNoBareAuditEmitSites:
 
         ``_audit_log`` fires immediately outside a batch. That is correct for a
         PRE-commit site (a raise aborts the operation, which is what the caller
-        should hear) and wrong for a post-commit one. Seven association methods
-        used it at a post-commit position — they reach their commit through a
+        should hear) and wrong for a post-commit one. Seven methods (3.x's
+        association writers, since removed) used it at a post-commit position — they reach their commit through a
         free-function helper's ``commit=`` argument — and two of them DELETED
         edges and then raised a raw OSError.
 

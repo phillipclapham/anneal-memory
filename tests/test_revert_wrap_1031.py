@@ -162,32 +162,6 @@ def test_an_episode_recorded_on_another_connection_during_the_revert_is_not_lost
         store.close()
 
 
-def _graduating(store: Store, ep_id: str, quote: str) -> str:
-    return (
-        "## State\nw.\n\n## Patterns\n"
-        f'- alpha_proven | 2x ({TODAY}) [evidence: {ep_id} "{quote}"]\n\n'
-        "## Decisions\n- d.\n\n## Context\n- c.\n"
-    )
-
-
-def _graduation_store(tmp_path) -> Store:
-    store = Store(tmp_path / "m.db", project_name="t")
-    for i in range(4):
-        store.record(
-            f"baseline episode {i}: substrate observation about discipline rotation "
-            f"memory tracking topic {i}.", "observation")
-    prep = prepare_wrap(store)
-    validated_save_continuity(
-        store, f"## State\nw1.\n\n## Patterns\n- alpha_proven | 1x ({TODAY})\n\n"
-        "## Decisions\n- d.\n\n## Context\n- c.\n",
-        wrap_token=prep["wrap_token"])
-    for i in range(4):
-        store.record(
-            f"baseline episode d{i}: substrate observation about discipline rotation "
-            f"memory tracking topic d{i}.", "observation")
-    return store
-
-
 
 
 def test_reverting_two_wraps_in_a_row_and_a_save_retry_after_a_revert(tmp_path):

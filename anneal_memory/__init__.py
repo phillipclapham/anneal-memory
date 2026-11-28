@@ -28,7 +28,7 @@ from .store import (
     continuity_lock,
     register_writer_schema,
 )
-from .origin import canonical_section_markdown, origin_key_usable, validate_origin_key
+from .origin import origin_key_usable, validate_origin_key
 from .types import (
     DEFAULT_TRUST,
     TRUST_LEVELS,
@@ -79,22 +79,6 @@ from .continuity import (
 )
 from . import sessions
 from .sessions import BatonHeldError
-from .graduation import (
-    CrossSessionCollision,
-    OmittedPattern,
-    ProvenWithoutDeclaration,
-    check_explanation_overlap,
-    detect_pattern_omissions,
-    detect_proven_without_declaration,
-    PatternSummary,
-    detect_stale_patterns,
-    extract_contradiction_declarations,
-    extract_pattern_names,
-    extract_pattern_summaries,
-    extract_proven_patterns,
-    extract_session_co_citations,
-    validate_graduations,
-)
 from .integrity import TOOLS, RESOURCES, verify_integrity, generate_integrity_file
 from .spores import (
     ASCEND_BY_TYPE,
@@ -178,7 +162,6 @@ __all__ = [
     "DeleteResult",
     "OriginKeyStatus",
     "SectionWriteResult",
-    "canonical_section_markdown",
     "origin_key_usable",
     "StalePatternDict",
     "StoreStatus",
@@ -209,20 +192,6 @@ __all__ = [
     "validated_save_continuity",
     "sessions",
     "BatonHeldError",
-    "validate_graduations",
-    "check_explanation_overlap",
-    "detect_stale_patterns",
-    "extract_session_co_citations",
-    "extract_pattern_names",
-    "extract_pattern_summaries",
-    "PatternSummary",
-    "detect_pattern_omissions",
-    "OmittedPattern",
-    "CrossSessionCollision",
-    "extract_proven_patterns",
-    "extract_contradiction_declarations",
-    "detect_proven_without_declaration",
-    "ProvenWithoutDeclaration",
     "verify_integrity",
     "generate_integrity_file",
     "SporeStore",

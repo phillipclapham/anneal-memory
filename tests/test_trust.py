@@ -1,11 +1,5 @@
-"""CAP-08: an episode's trust class, and graduations that cannot climb on
-tool/external grounding alone (T1-T3).
-
-The BEFORE run (1007+28, 2026-10-07, on 8542f49): one episode recorded from a
-web page carrying a false claim, and a wrap citing only it, graduated the claim
-to 2x through the real pipeline. ``TestTheBeforeRunNowHolds`` is that run with
-the episode labelled ``external``.
-"""
+"""CAP-08: an episode's trust class, its effective class and what it does to
+supersession."""
 
 from __future__ import annotations
 
@@ -38,7 +32,6 @@ def _wconnect(*args, **kwargs):
     register_writer_schema(conn)
     return conn
 
-from anneal_memory.graduation import validate_graduations
 from anneal_memory.server import Server
 
 CLAIM = "Web page fetched by a tool: the Eiffel Tower was moved to Lyon in 2025."
@@ -187,125 +180,6 @@ class TestSetTrust:
             with pytest.raises(ValueError):
                 store.set_trust(ep.id, "operator")
         assert store.get(kept.id) is not None
-
-
-def _line(ids, level=2, date="2026-10-08", name="eiffel_in_lyon"):
-    return f'- {name} | {level}x ({date}) [evidence: {", ".join(ids)} "{EXPLANATION}"]'
-
-
-class TestGraduationRule:
-    """``validate_graduations`` with ``trust_of`` (T3), pure-function."""
-
-    def _run(self, ids, trust, content=None, history=None, level=2):
-        content = content or {i: CLAIM for i in ids}
-        return validate_graduations(
-            text="## Patterns\n" + _line(ids, level=level) + "\n",
-            valid_ids=set(ids),
-            today="2026-10-08",
-            node_content_map=content,
-            pattern_history_lookup=(lambda name: history) if history else None,
-            trust_of=lambda cid: trust.get(cid, DEFAULT_TRUST),
-        )
-
-    @pytest.mark.parametrize("cls", ["external", "tool"])
-    def test_grounding_only_below_agent_does_not_climb(self, cls):
-        r = self._run(["aaaa0001"], {"aaaa0001": cls})
-        assert r.validated == 0 and r.demoted == 1
-        assert "| 1x (2026-10-08) (uncorroborated)" in r.text
-        assert [(u.name, u.trust) for u in r.uncorroborated] == [("eiffel_in_lyon", cls)]
-
-    def test_a_stapled_agent_citation_that_grounds_nothing_does_not_corroborate(self):
-        """⛔ MUTATION-CHECKED: count every resolved citation instead of the
-        grounding ones and this graduates."""
-        r = self._run(
-            ["aaaa0001", "aaaa0002"],
-            {"aaaa0001": "external"},
-            content={"aaaa0001": CLAIM, "aaaa0002": "Lunch was a sandwich."},
-        )
-        assert r.validated == 0
-        assert r.uncorroborated[0].citations == ["aaaa0001"]
-
-    @pytest.mark.parametrize("cls", ["agent", "operator"])
-    def test_an_agent_or_operator_episode_that_grounds_it_lets_it_climb(self, cls):
-        r = self._run(
-            ["aaaa0001", "aaaa0002"],
-            {"aaaa0001": "external", "aaaa0002": cls},
-            content={"aaaa0001": CLAIM, "aaaa0002": f"I checked: the {EXPLANATION}."},
-        )
-        assert r.validated == 1 and r.uncorroborated == []
-        assert r.pattern_trust == {"eiffel_in_lyon": cls}
-
-    def test_without_trust_of_nothing_changes(self):
-        r = validate_graduations(
-            text="## Patterns\n" + _line(["aaaa0001"]) + "\n",
-            valid_ids={"aaaa0001"},
-            today="2026-10-08",
-            node_content_map={"aaaa0001": CLAIM},
-        )
-        assert r.validated == 1 and r.uncorroborated == [] and r.pattern_trust == {}
-
-    @pytest.mark.parametrize("claimed", [2, 3, 9])
-    def test_whatever_level_it_claims_it_lands_at_1x(self, claimed):
-        """L1 + L2 r1 (run): one level down left a claimed 9x at 8x."""
-        r = self._run(["aaaa0001"], {"aaaa0001": "external"}, level=claimed)
-        assert "| 1x (2026-10-08) (uncorroborated)" in r.text
-        # Item 7 (1008+3, run): a demotion strips the line's evidence tag by
-        # design, but a two-tag line kept its second tag. Now every tag goes, and the
-        # prose after the tags goes with them: the second tag reads as prose to the
-        # suffix check and no admitted citation grounds it.
-        two = validate_graduations(
-            text="## Patterns\n" + _line(["aaaa0001"], level=claimed)
-                 + f' [evidence: aaaa0002 "{EXPLANATION}"] — felt\n',
-            valid_ids={"aaaa0001", "aaaa0002"}, today="2026-10-08",
-            node_content_map={"aaaa0001": CLAIM, "aaaa0002": CLAIM},
-            trust_of=lambda cid: "external",
-        )
-        assert two.text.splitlines()[1] == (
-            "- eiffel_in_lyon | 1x (2026-10-08) (uncorroborated)")
-        assert "[evidence:" not in two.text
-        # codex r3 #7: a quoted "| 2x" inside the second tag is text, not the
-        # next marker; the whole tag goes, the real next marker's tag stays.
-        from anneal_memory.graduation import _strip_own_evidence_tail
-        assert _strip_own_evidence_tail(
-            ' [evidence: bbbb2222 "saw | 2x behavior"] | 1x (2026-10-08) [evidence: cccc3333]'
-        ) == " | 1x (2026-10-08) [evidence: cccc3333]"
-
-    def test_an_earned_level_is_not_held_for_relayed_text(self):
-        """L2 r1 (run): the carry-forward hold kept an earned 2x while the
-        line's text was the page's."""
-        history = {
-            "max_level_reached": 2,
-            "last_seen_at": "2026-10-07",
-            "explanation_corpus": "the landmark relocated south last year",
-            "last_explanation": "the landmark relocated south last year",
-        }
-        r = self._run(["aaaa0001"], {"aaaa0001": "external"}, history=history)
-        assert "| 1x (2026-10-08) (uncorroborated)" in r.text
-        assert r.carried_forward == []
-
-    def test_a_bare_citation_with_a_stapled_agent_id_is_still_relayed(self):
-        """L1 r1 (run): with no explanation nothing says which citation
-        grounds the claim, so one relayed citation taints the line.
-        ⛔ MUTATION-CHECKED: take the highest trust on the bare path too."""
-        r = validate_graduations(
-            text="## Patterns\n- eiffel_in_lyon | 2x (2026-10-08) [evidence: aaaa0001, aaaa0002]\n",
-            valid_ids={"aaaa0001", "aaaa0002"},
-            today="2026-10-08",
-            node_content_map={"aaaa0001": CLAIM, "aaaa0002": "Lunch was a sandwich."},
-            trust_of=lambda cid: {"aaaa0001": "external"}.get(cid, DEFAULT_TRUST),
-        )
-        assert r.validated == 0 and r.pattern_trust == {}
-        assert "| 1x (2026-10-08) (uncorroborated)" in r.text
-
-    def test_an_uncorroborated_line_forms_no_link(self):
-        r = self._run(
-            ["aaaa0001", "aaaa0002"],
-            {"aaaa0001": "external", "aaaa0002": "external"},
-            content={"aaaa0001": CLAIM, "aaaa0002": f"Another page: {EXPLANATION}."},
-        )
-        assert r.uncorroborated and r.direct_co_citations == []
-        assert r.all_validated_ids == []
-
 
 
 
@@ -511,34 +385,6 @@ class TestL3Round1:
         assert last["data"]["trust"] == "operator"
         assert last["data"]["trust_via"] == "cli:operator-env"
 
-    def test_a_bare_citation_reports_its_highest_trust(self):
-        # codex #9: an agent+operator bare citation reported "agent".
-        r = validate_graduations(
-            text="## Patterns\n- deploys_need_review | 2x (2026-10-08) [evidence: aaaa1111, bbbb2222]\n",
-            valid_ids={"aaaa1111", "bbbb2222"}, today="2026-10-08",
-            trust_of=lambda cid: {"bbbb2222": "operator"}.get(cid, DEFAULT_TRUST),
-        )
-        assert r.validated == 1
-        assert r.pattern_trust == {"deploys_need_review": "operator"}
-
-    def test_an_unrelated_low_trust_co_citation_forms_no_link(self):
-        # codex #7: an agent episode grounded the line and an unrelated external
-        # episode stapled beside it got an agent<->external link.
-        content = {
-            "aaaa1111": "Deploys require two reviewers on the release branch.",
-            "bbbb2222": "Eiffel Tower trivia from a travel page.",
-            "cccc3333": "Two reviewers sign off on every release deploy.",
-        }
-        r = validate_graduations(
-            text=("## Patterns\n- deploys_need_review | 2x (2026-10-08) "
-                  '[evidence: aaaa1111, bbbb2222, cccc3333 "deploys require two reviewers"]\n'),
-            valid_ids=set(content), today="2026-10-08", node_content_map=content,
-            trust_of=lambda cid: {"bbbb2222": "external"}.get(cid, DEFAULT_TRUST),
-        )
-        assert r.validated == 1
-        linked = {i for pair in r.direct_co_citations for i in pair}
-        assert "bbbb2222" not in linked
-        assert ("aaaa1111", "cccc3333") in r.direct_co_citations
 
     def test_an_uppercase_id_reads_its_real_class(self, store, tmp_path):
         # glm + complement #2: trust_map did not lowercase.
@@ -574,27 +420,6 @@ class TestL3Round1:
             assert s.trust_map([op.id, plain.id]) == {op.id: "operator"}
         finally:
             s.close()
-
-    def test_pattern_trust_is_the_highest_across_a_names_lines(self):
-        # codex r2 LOW: last-line-wins.
-        text = ("## Patterns\n"
-                "- p | 2x (2026-10-08) [evidence: aaaa1111]\n"
-                "- p | 2x (2026-10-08) [evidence: bbbb2222]\n")
-        r = validate_graduations(
-            text=text, valid_ids={"aaaa1111", "bbbb2222"}, today="2026-10-08",
-            trust_of=lambda cid: {"aaaa1111": "operator"}.get(cid, DEFAULT_TRUST),
-        )
-        assert r.pattern_trust == {"p": "operator"}
-
-    def test_a_graduation_the_bound_cut_reports_no_trust(self):
-        # codex r2 LOW: a new operator-grounded 2x cut to 1x still reported operator.
-        r = validate_graduations(
-            text="## Patterns\n- p | 2x (2026-10-08) [evidence: aaaa1111]\n",
-            valid_ids={"aaaa1111"}, today="2026-10-08",
-            trust_of=lambda cid: "operator", prior_text="",
-        )
-        assert r.validated == 0 and r.pattern_trust == {}
-
 
 
 

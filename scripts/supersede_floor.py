@@ -1,8 +1,8 @@
 """Derive the supersession grounding floor: how much lexical overlap separates a
 real update from an unrelated episode.
 
-Measures, per pair, the meaningful words shared (the same tokenizer as
-``graduation.check_explanation_overlap``) as a ratio of the SHORTER episode's
+Measures, per pair, the meaningful words shared (the tokenizer
+``store._meaningful_words``) as a ratio of the SHORTER episode's
 meaningful words, for three populations:
 
 * true update pairs: stale_probe.py's 16 facts x 3 update shapes, with and

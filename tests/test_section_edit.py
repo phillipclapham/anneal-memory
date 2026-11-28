@@ -13,8 +13,6 @@ from pathlib import Path
 import anneal_memory.store as _store_mod
 from anneal_memory import ContinuityLockUnavailable, SectionError, Store, WrapContinuityMovedError
 from anneal_memory.continuity import prepare_wrap
-from anneal_memory.graduation import _LINE_TERMINATORS_RE
-from anneal_memory.origin import canonical_section_markdown
 
 DOC = (
     "# Memory\n\n## State\n\nold state line\n\n## Durable Facts\n\n- fact one\n\n"
@@ -53,34 +51,6 @@ class _Case(unittest.TestCase):
         got = self.store.read_section(heading)
         assert got is not None
         return self.store.replace_section(heading, body, expected_version=got[1])
-
-
-class TestLineBreakSets(unittest.TestCase):
-    def test_splitlines_breaks_on_exactly_newline_plus_the_canonical_terminators(self) -> None:
-        # The raw/canonical line alignment rests on this (L3 r6, glm HIGH refuted).
-        breaks = {chr(c) for c in range(0x110000) if len(("a" + chr(c) + "b").splitlines()) == 2}
-        mapped = {chr(c) for c in range(0x110000) if _LINE_TERMINATORS_RE.fullmatch(chr(c))}
-        self.assertEqual(breaks, mapped | {"\n"})
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 @unittest.skipIf(_store_mod.fcntl is not None, "this platform has a file lock")

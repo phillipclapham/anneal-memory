@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import difflib
 import errno
 import json
 import os
@@ -49,7 +50,6 @@ import time
 import unicodedata
 import uuid
 import sys
-from dataclasses import asdict
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, NoReturn, cast
@@ -2132,7 +2132,7 @@ def cmd_export(args: argparse.Namespace) -> None:
             meta = _load_meta_or_exit(store)
 
             # Get wrap history (serialize as dicts for JSON export compatibility)
-            wraps = [asdict(w) for w in store.get_wrap_history()]
+            wraps = [_wrap_entry(w) for w in store.get_wrap_history()]
             requires_baton = store.consolidate_requires_baton()
 
         if fmt == "json":
@@ -2796,8 +2796,31 @@ def cmd_audit(args: argparse.Namespace) -> None:
             print(f"         {summary}")
 
 
+def _wrap_entry(w: Any) -> dict[str, Any]:
+    """The fields of a wrap a surface shows: its id, time, episodes and size. The
+    3.x graduation and association counts are not shown (always 0 on a 4.0 wrap)."""
+    return {
+        "id": w.id,
+        "wrapped_at": w.wrapped_at,
+        "episodes_compressed": w.episodes_compressed,
+        "continuity_chars": w.continuity_chars,
+    }
+
+
+def _line_delta(old: str, new: str) -> tuple[int, int]:
+    """``(lines added, lines removed)`` going from ``old`` to ``new``."""
+    added = removed = 0
+    for line in difflib.ndiff(old.splitlines(), new.splitlines()):
+        if line.startswith("+ "):
+            added += 1
+        elif line.startswith("- "):
+            removed += 1
+    return added, removed
+
+
 def cmd_diff(args: argparse.Namespace) -> None:
-    """Show wrap-over-wrap metric changes."""
+    """Show what each wrap changed: its size, its line delta and, for the newest
+    wrap, a text diff against the wrap before it."""
     with _open_store(args, read_only=True) as store:
         wraps = store.get_wrap_history()
 
@@ -2810,29 +2833,54 @@ def cmd_diff(args: argparse.Namespace) -> None:
 
         # Limit to last N wraps
         n = args.wraps
+        before = None  # the wrap just before the window, for the oldest shown wrap's diff
         if len(wraps) > n:
+            before = wraps[-n - 1].id
             wraps = wraps[-n:]
+
+        # What each wrap saved: the text of its identity version.
+        texts = store.wrap_identity_texts(
+            [w.id for w in wraps] + ([before] if before is not None else []))
+        previous_text: dict[int, str | None] = {}
+        for i, w in enumerate(wraps):
+            prev_id = wraps[i - 1].id if i > 0 else before
+            previous_text[w.id] = texts.get(prev_id) if prev_id is not None else ""
+
+        def lines_changed(w: Any) -> tuple[int, int] | None:
+            now, prev = texts.get(w.id), previous_text.get(w.id)
+            if now is None or prev is None:
+                return None
+            return _line_delta(prev, now)
 
         if args.json:
             # Include deltas between consecutive wraps
             diffs = []
             for i, w in enumerate(wraps):
-                entry: dict[str, Any] = asdict(w)
+                entry: dict[str, Any] = _wrap_entry(w)
                 if i > 0:
                     prev = wraps[i - 1]
                     entry["delta"] = {
                         "episodes_compressed": w.episodes_compressed - prev.episodes_compressed,
                         "continuity_chars": w.continuity_chars - prev.continuity_chars,
                     }
+                changed = lines_changed(w)
+                if changed is not None:
+                    entry["lines_added"], entry["lines_removed"] = changed
                 diffs.append(entry)
+            newest = wraps[-1]
+            if newest.id in texts and previous_text.get(newest.id) is not None:
+                diffs[-1]["text_diff"] = "\n".join(difflib.unified_diff(
+                    (previous_text[newest.id] or "").splitlines(),
+                    texts[newest.id].splitlines(),
+                    "before", f"wrap {newest.id}", lineterm=""))
             _print_json({"wraps": diffs})
             return
 
         print(f"Wrap progression (last {len(wraps)}):")
         print()
         # Header
-        print(f"  {'Wrap':>4}  {'When':<20}  {'Episodes':>8}  {'Chars':>7}")
-        print(f"  {'----':>4}  {'----':<20}  {'--------':>8}  {'-------':>7}")
+        print(f"  {'Wrap':>4}  {'When':<20}  {'Episodes':>8}  {'Chars':>7}  {'Lines':>9}")
+        print(f"  {'----':>4}  {'----':<20}  {'--------':>8}  {'-------':>7}  {'-----':>9}")
 
         for i, w in enumerate(wraps):
             wrap_id = w.id
@@ -2850,7 +2898,23 @@ def cmd_diff(args: argparse.Namespace) -> None:
                 elif diff < 0:
                     chars_delta = f" ({diff})"
 
-            print(f"  {wrap_id:>4}  {when:<20}  {eps:>8}  {chars:>7}{chars_delta}")
+            changed = lines_changed(w)
+            line_col = f"+{changed[0]}/-{changed[1]}" if changed is not None else "n/a"
+            print(f"  {wrap_id:>4}  {when:<20}  {eps:>8}  {chars:>7}  {line_col:>9}{chars_delta}")
+
+        newest = wraps[-1]
+        if newest.id in texts and previous_text.get(newest.id) is not None:
+            shown = list(difflib.unified_diff(
+                (previous_text[newest.id] or "").splitlines(),
+                texts[newest.id].splitlines(),
+                "before", f"wrap {newest.id}", lineterm=""))
+            if shown:
+                print()
+                print(f"What wrap {newest.id} changed:")
+                for line in shown[:80]:
+                    print(f"  {line}")
+                if len(shown) > 80:
+                    print(f"  ... {len(shown) - 80} more lines")
 
 
 def cmd_stats(args: argparse.Namespace) -> None:
@@ -2982,7 +3046,7 @@ def cmd_history(args: argparse.Namespace) -> None:
             wraps = wraps[-args.limit:]
 
         if args.json:
-            _print_json({"wraps": [asdict(w) for w in wraps], "total": total_wraps})
+            _print_json({"wraps": [_wrap_entry(w) for w in wraps], "total": total_wraps})
             return
 
         showing = f" (showing last {len(wraps)})" if len(wraps) < total_wraps else ""

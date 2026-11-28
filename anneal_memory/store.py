@@ -1,7 +1,7 @@
 """SQLite episodic store for anneal-memory.
 
 The episodic store is the substrate layer — fast, indexed, append-heavy.
-It stores typed episodes and serves as citation evidence for graduation.
+It stores typed episodes.
 The continuity file (markdown) is the human-readable layer.
 
 Zero dependencies beyond Python stdlib.
@@ -387,18 +387,10 @@ StoreOperation = Literal[
     "set_consolidate_requires_baton",
     "outbox_requeue",
     "get_wrap_history",
+    "wrap_identity_texts",
     # Pluggable section schema (v0.3.4)
     "section_schema",
     "set_section_schema",
-    # Cross-session pattern history (2026-05-21, closes Phase 1b
-    # probe #1 sycophantic-accumulation gap)
-    "get_pattern_history",
-    "upsert_pattern_history",
-    "seed_pattern_max_level",
-    # The graduation bound's receiver record (1007+29)
-    "saved_pattern_levels",
-    # CAP-08 D2: the episodes that grounded each earned rung
-    "pattern_grounding",
     # Generation 3: the fenced consolidation lease
     "lease_acquire",
     "lease_renew",
@@ -2227,19 +2219,10 @@ CREATE TABLE IF NOT EXISTS wrap_reverts (
     undone_json TEXT NOT NULL DEFAULT '{}'
 );
 
--- What the newest wrap's save overwrote or added, so Store.revert_wrap can put
--- it back. The kinds the save writes are the kinds its INSERTs into this table
--- name (grep "INTO wrap_undo"); what a revert does with each is decided by
--- Store._revert_wrap_derived. A prune rewrites the
--- pattern_grounding rows here for the episodes it deletes (``_mark_aged_out`` marks
--- them aged out), so a revert after a prune restores that mark, and prior_json is
--- not a byte-stable record of what the save wrote. kind has no CHECK on
--- purpose: CREATE TABLE IF NOT EXISTS cannot widen one on a store that has the table,
--- so a new kind would fail every save there. Keyed by the first 12 characters of
--- the wrap token, which the wraps row's pair_id keeps; only the newest wrap's rows
--- are kept (the next save deletes the rest), because only the newest wrap can be
--- reverted. Written inside the save's batch, so it commits with the wrap or not at
--- all. Additive: an older binary ignores the table.
+-- Legacy (3.x): what the newest wrap's save overwrote or added, so a revert could
+-- put it back. 4.0 neither writes nor reads it; the table stays so an older store
+-- opens unchanged and a downgrade finds it. kind had no CHECK on purpose;
+-- keyed by the first 12 characters of the wrap token.
 CREATE TABLE IF NOT EXISTS wrap_undo (
     token12 TEXT NOT NULL,
     kind TEXT NOT NULL,
@@ -3084,53 +3067,6 @@ def _content_hash(content: str, salt: bytes) -> str:
     holds the database file can still guess (see ``Store.delete``)."""
     return _SALTED_HASH_PREFIX + hmac.new(
         salt, content.encode("utf-8"), hashlib.sha256).hexdigest()
-
-
-def _normalize_explanation_for_dedup(explanation: str) -> str:
-    """Normalize an explanation string for corpus dedup comparison.
-
-    Returns the explanation lowercased, with all runs of whitespace
-    collapsed to a single space, with leading/trailing whitespace
-    stripped, and with surrounding punctuation removed. This is the
-    canonical form used by :meth:`Store.upsert_pattern_history` when
-    deciding whether a new explanation is already in the
-    ``explanation_corpus``.
-
-    Without normalization, trivial caller variation bypasses dedup
-    and the corpus accumulates near-duplicate entries faster, growing
-    the cross-session check's false-positive surface (WARNING #2 from
-    the v0.3.2 4-layer review).
-
-    Examples that this normalization collapses to the same key:
-
-        "PostgreSQL chosen for ACID"
-        "postgresql chosen for ACID"
-        "PostgreSQL chosen for ACID."
-        " PostgreSQL  chosen  for ACID "
-        "PostgreSQL chosen for ACID\\n"
-
-    Examples that this normalization keeps distinct (different
-    semantic content):
-
-        "PostgreSQL chosen for ACID guarantees"
-        "PostgreSQL chosen for ACID compliance under writes"
-
-    The normalization is intentionally minimal — it catches the
-    trivial-fuzzing case without conflating substantively different
-    explanations.
-    """
-    import re as _re
-    # Collapse whitespace + lowercase + strip outer whitespace
-    normalized = _re.sub(r"\s+", " ", explanation.lower()).strip()
-    # Strip leading/trailing punctuation that doesn't change meaning.
-    # Then strip again to catch whitespace re-revealed by the punct
-    # strip (e.g. `'— PostgreSQL chosen —'` → after first .strip()
-    # `'— postgresql chosen —'` → after punct strip `' postgresql
-    # chosen '` → final .strip() → `'postgresql chosen'`). v0.3.3
-    # session-code-review WARNING #1 fix — without the second strip,
-    # compound punctuation+whitespace cases bypassed dedup.
-    normalized = normalized.strip(".,;:!?\"'()[]{}—–-").strip()
-    return normalized
 
 
 class WrapStatusSnapshot(NamedTuple):
@@ -6434,26 +6370,6 @@ class Store:
             out |= found
         return out
 
-    def ground_state(self, episode_ids: Iterable[str]) -> dict[str, tuple[bool, str]]:
-        """``{id: (exists, effective trust)}`` for each listed id, read in one
-        view: what a save judged its grounds on, and re-reads under its write lock
-        to see whether any of them moved (CAP-08 D3 R4: comparing trust alone
-        missed a ground that vanished while the save ran). An absent id reads
-        ``(False, "agent")``; the caller decides what absence means."""
-        ids = sorted({str(i).strip().lower() for i in episode_ids})
-        out: dict[str, tuple[bool, str]] = {}
-        with self._db_boundary("trust_map"), self._read_snapshot():
-            live: set[str] = set()
-            for start in range(0, len(ids), 500):
-                chunk = ids[start:start + 500]
-                marks = ",".join("?" * len(chunk))
-                live.update(r[0] for r in self._conn.execute(
-                    f"SELECT id FROM episodes WHERE id IN ({marks})", chunk))
-            eff = self.effective_trust_map(ids)
-        for i in ids:
-            out[i] = (i in live, eff.get(i, DEFAULT_TRUST))
-        return out
-
     def derived_edges(
         self, episode_ids: Iterable[str],
     ) -> dict[str, list[tuple[str, str | None]]]:
@@ -9067,7 +8983,7 @@ class Store:
                     # (legacy path) OR let the outer ``_batch.__exit__``
                     # handle rollback (batched path). In batched mode the
                     # enclosing transaction may contain the save's other
-                    # uncommitted DML (graduation records) that must be discarded together with the failed CAS
+                    # uncommitted DML that must be discarded together with the failed CAS
                     # — that's exactly what ``_batch.__exit__`` does on
                     # exception. Double-rolling back would be harmless but
                     # semantically muddled; 10.5c.5 L2 review flagged the
@@ -9335,11 +9251,8 @@ class Store:
           (the chain is append-only). A store without that table has no identity
           to restore here; its caller restores the text.
 
-        NOT undone, on purpose: Hebbian and pattern-association weights, the
-        concept generation a compost bumped (``pattern_aliases``), crystal
-        state, ``association_formation_off_at_wrap`` if it names the wrap, and the
-        episodes' own rows. A change to ``pattern_levels`` or ``pattern_history`` made
-        between the wrap and its revert (a rename, a seed) is overwritten.
+        NOT undone, on purpose: the episodes' own rows, and any table a 3.x wrap
+        wrote beside its row (they are no longer written).
 
         Args:
             wrap_id: The wrap to revert; must be the newest.
@@ -9563,6 +9476,28 @@ class Store:
                     (row["principal_scope"], row["key"])).rowcount
         return gone
 
+    def wrap_identity_texts(self, wrap_ids: Iterable[int]) -> dict[int, str]:
+        """``{wrap id: the continuity text that wrap saved}`` for each listed wrap
+        that has an ``identity_versions`` row (``source = 'wrap'``; the latest when
+        a wrap has more than one). A wrap without a row (a legacy wrap, or a store
+        with no identity table) is absent. Read-only; what ``diff`` compares to
+        show what a wrap changed."""
+        ids = sorted({int(i) for i in wrap_ids})
+        out: dict[int, str] = {}
+        with self._db_boundary("wrap_identity_texts"), self._read_snapshot():
+            if not ids or not self._identity_table_present():
+                return out
+            for start in range(0, len(ids), 500):
+                chunk = ids[start:start + 500]
+                marks = ",".join("?" * len(chunk))
+                for row in self._conn.execute(
+                    f"SELECT wrap_id, text FROM identity_versions "
+                    f"WHERE source = 'wrap' AND wrap_id IN ({marks}) "
+                    f"ORDER BY version ASC", chunk,
+                ):
+                    out[int(row["wrap_id"])] = str(row["text"])
+        return out
+
     def get_wrap_history(self) -> list[WrapRecord]:
         """Return the full wrap history in chronological order.
 
@@ -9634,572 +9569,27 @@ class Store:
             for row in rows
         ]
 
-    # -- Pattern history (cross-session graduation tracking) --
-    #
-    # Closes the slow-drift sycophantic-accumulation gap surfaced by
-    # Bold Stand Phase 1b probe #1 (2026-05-21). Each pattern that has
-    # appeared with an [evidence: ...] explanation in any prior wrap
-    # has its most-recent explanation and max-level-reached stored
-    # here; the cross-session check at graduation time compares today's
-    # explanation against this history to detect sycophantic vocabulary
-    # reuse across sessions.
-
-    def pattern_history_names(self) -> list[str]:
-        """Every pattern name the store has a history row for (any pattern that ever
-        graduated with a citation), sorted. Read-only."""
-        with self._db_boundary("get_pattern_history"), self._read_snapshot():
-            try:
-                return [r[0] for r in self._conn.execute(
-                    "SELECT pattern_name FROM pattern_history ORDER BY pattern_name")]
-            except sqlite3.OperationalError as exc:
-                if "no such table" in str(exc):
-                    return []
-                raise
-
-    def saved_pattern_levels(self) -> dict[tuple[str, str], int] | None:
-        """The level each pattern line held when this store last saved it, keyed
-        ``(kind, key)`` as :func:`graduation.pattern_line_levels` keys a line
-        (``"name"`` and the operator name, or ``"text"`` and the normalised
-        freeform text). ``None`` when the store has not saved under the bound yet
-        (or a read-only store opened on an older schema); ``{}`` when it has and
-        recorded no lines. Read-only."""
-        with self._db_boundary("saved_pattern_levels"), self._read_snapshot():
-            if not self._has_pattern_levels_table():
-                return None
-            rows = self._conn.execute(
-                "SELECT kind, key, level FROM pattern_levels").fetchall()
-            if not any(row[0] == "init" for row in rows):
-                return None
-            return {(row[0], row[1]): int(row[2]) for row in rows if row[0] != "init"}
-
-    def pattern_grounding(self) -> dict[str, dict[int, list[dict[str, Any]]]]:
-        """CAP-08 D2: ``{pattern name: {level: [group, ...]}}``, one group per time
-        a save recorded the rung as earned: ``{"earned_on": day, "rule":
-        "checked" | "unchecked", "episodes": [ids]}`` (the rule check 4 admitted
-        it by). A group whose episodes include one since removed also carries
-        ``"gone": {id: class}``, the class its row was marked with (CAP-08 D3 R3);
-        the grounding reads that, not whatever episode now holds the id. Empty
-        when none were recorded (or on a read-only store from before the table).
-        Read-only."""
-        with self._db_boundary("pattern_grounding"), self._read_snapshot():
-            if self._conn.execute(
-                "SELECT 1 FROM sqlite_master WHERE type = 'table' "
-                "AND name = 'pattern_grounding'"
-            ).fetchone() is None:
-                return {}
-            groups: dict[tuple[str, int, str], dict[str, Any]] = {}
-            for name, level, earned_on, earning, rule, ep_id, gone in self._conn.execute(
-                "SELECT name, level, earned_on, earning, rule, episode_id, gone_trust "
-                "FROM pattern_grounding "
-                "ORDER BY name, level, earned_on, rowid"
-            ):
-                grp = groups.setdefault(
-                    (name, int(level), earning),
-                    {"earned_on": earned_on, "rule": rule, "episodes": []},
-                )
-                grp["episodes"].append(ep_id)
-                if gone is not None:
-                    grp.setdefault("gone", {})[ep_id] = gone
-            out: dict[str, dict[int, list[dict[str, Any]]]] = {}
-            for (name, level, _earning), grp in groups.items():
-                grp["episodes"].sort()
-                out.setdefault(name, {}).setdefault(level, []).append(grp)
-            return out
-
-    def _record_pattern_grounding(
-        self, rungs: Iterable[tuple[str, int, str, Iterable[str]]], earned_on: str,
-        wrap_id: str | None = None,
-    ) -> None:
-        """Add the grounding episodes of each rung this save validated, as
-        ``(name, level, rule, ids)``. Each rung is one earning, identified by
-        ``wrap_id`` (the save's wrap token; random when not given) and its place
-        in ``rungs``. Runs inside the save's batch, like
-        :meth:`_record_pattern_levels`."""
-        wrap_id = wrap_id or uuid.uuid4().hex
-        self._conn.executemany(
-            "INSERT OR IGNORE INTO pattern_grounding "
-            "(name, level, earned_on, earning, rule, episode_id) VALUES (?, ?, ?, ?, ?, ?)",
-            [(name, int(level), earned_on, f"{wrap_id}:{n}", rule, str(cid).strip().lower())
-             for n, (name, level, rule, ids) in enumerate(rungs) for cid in ids],
-        )
-
-    def _has_pattern_levels_table(self) -> bool:
-        return self._conn.execute(
-            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'pattern_levels'"
-        ).fetchone() is not None
-
-    def _wrap_undo_levels(self, token12: str) -> None:
-        """Keep the ``pattern_levels`` table as it is now, under ``token12``, for
-        :meth:`revert_wrap`; drop every other wrap's undo rows (only the newest
-        wrap can be reverted). Runs inside the save's batch, before
-        :meth:`_record_pattern_levels` changes the table."""
-        if len(token12) != 12 or not self._has_pattern_levels_table():
-            return
-        self._conn.execute("DELETE FROM wrap_undo WHERE token12 != ?", (token12,))
-        self._conn.execute(
-            "INSERT OR REPLACE INTO wrap_undo (token12, kind, key, prior_json) "
-            "VALUES (?, 'pattern_levels', '', '{}')", (token12,))
-        self._conn.executemany(
-            "INSERT OR REPLACE INTO wrap_undo (token12, kind, key, prior_json) "
-            "VALUES (?, 'pattern_levels', ?, ?)",
-            [(token12, f"{r['kind']}:{r['key']}",
-              json.dumps({k: r[k] for k in ("kind", "key", "level", "saved_at")}, sort_keys=True))
-             for r in self._conn.execute(
-                 "SELECT kind, key, level, saved_at FROM pattern_levels").fetchall()])
-
-    def _wrap_undo_grounding(self, token12: str, names: Iterable[str]) -> None:
-        """Keep the ``pattern_grounding`` rows of ``names`` under ``token12``, for
-        :meth:`revert_wrap`. Which names the save passes is decided by the save
-        pipeline (``validated_save_continuity`` in continuity.py). Inside the
-        save's batch, before it deletes or moves them."""
-        names = list(names)
-        if len(token12) != 12 or not names:
-            return
-        for name in names:
-            for r in self._conn.execute(
-                    "SELECT * FROM pattern_grounding WHERE name = ?", (name,)).fetchall():
-                self._conn.execute(
-                    "INSERT OR REPLACE INTO wrap_undo (token12, kind, key, prior_json) "
-                    "VALUES (?, 'pattern_grounding', ?, ?)",
-                    (token12, json.dumps([r[k] for k in
-                                          ("name", "level", "earning", "rule", "episode_id")]),
-                     json.dumps({k: r[k] for k in r.keys()}, sort_keys=True)))
-
-    def _wrap_undo_grounding_moved(self, token12: str, new_name: str) -> None:
-        """Note that the save moves grounding onto ``new_name`` (which had none), so
-        :meth:`revert_wrap` takes it off again. Inside the save's batch."""
-        if len(token12) == 12:
-            self._conn.execute(
-                "INSERT OR REPLACE INTO wrap_undo (token12, kind, key, prior_json) "
-                "VALUES (?, 'pattern_grounding_moved', ?, NULL)", (token12, new_name))
-
-    def _wrap_undo_supersession(self, token12: str, old_id: str, new_id: str) -> None:
-        """Note a supersession link the save just recorded, for :meth:`revert_wrap`."""
-        if len(token12) == 12:
-            self._conn.execute(
-                "INSERT OR REPLACE INTO wrap_undo (token12, kind, key, prior_json) "
-                "VALUES (?, 'supersession', ?, NULL)", (token12, f"{old_id}:{new_id}"))
-
-    def _record_pattern_levels(
-        self,
-        levels: dict[tuple[str, str], int],
-        saved_at: str,
-        *,
-        lower_to: dict[tuple[str, str], int] | None = None,
-        first_tombstones: dict[tuple[str, str], int] | None = None,
-    ) -> None:
-        """Record the levels of the continuity being saved. Runs inside the save's
-        batch, so the record commits with the wrap or not at all. Named rows not in
-        ``levels`` stay as tombstones, each lowered to ``lower_to``'s level for it
-        when that is lower (the prior file's: an operator's hand demotion survives
-        a wrap that leaves the pattern out, codex L3 r1); freeform rows are
-        replaced. On the store's FIRST save under the bound, ``first_tombstones``
-        (the prior file's named levels) seed the record, so a pattern that
-        first save omits keeps its level; after that no caller-supplied level enters the record except
-        through a bounded save (complement + codex L3 r2)."""
-        first = self._conn.execute(
-            "SELECT 1 FROM pattern_levels WHERE kind = 'init'"
-        ).fetchone() is None
-        self._conn.execute(
-            "INSERT OR IGNORE INTO pattern_levels (kind, key, level, saved_at) "
-            "VALUES ('init', 'since', 0, ?)", (saved_at,),
-        )
-        if first and first_tombstones:
-            self._conn.executemany(
-                "INSERT OR IGNORE INTO pattern_levels (kind, key, level, saved_at) "
-                "VALUES (?, ?, ?, ?)",
-                [(kind, key, lv, saved_at) for (kind, key), lv in first_tombstones.items()
-                 if kind == "name" and (kind, key) not in levels],
-            )
-        self._conn.execute("DELETE FROM pattern_levels WHERE kind = 'text'")
-        self._conn.executemany(
-            "INSERT INTO pattern_levels (kind, key, level, saved_at) VALUES (?, ?, ?, ?) "
-            "ON CONFLICT(kind, key) DO UPDATE SET level = excluded.level, "
-            "saved_at = excluded.saved_at",
-            [(kind, key, level, saved_at) for (kind, key), level in levels.items()],
-        )
-        self._conn.executemany(
-            "UPDATE pattern_levels SET level = ? WHERE kind = ? AND key = ? AND level > ?",
-            [(lv, kind, key, lv) for (kind, key), lv in (lower_to or {}).items()
-             if kind == "name" and (kind, key) not in levels],
-        )
-
-    def get_pattern_history(self, pattern_name: str) -> dict[str, Any] | None:
-        """Look up the cross-session graduation history for a pattern.
-
-        Returns a dict with keys ``max_level_reached``, ``explanation_corpus``
-        (newline-joined corpus of all distinct prior explanations for this
-        pattern), ``last_explanation`` (most recent individual explanation,
-        kept for forensic surfaces), ``last_seen_at``, ``last_wrap_id``,
-        or ``None`` if this pattern has never been seen before. The
-        first-ever appearance of a pattern returns None — the
-        cross-session check treats that as "no prior history, allow
-        graduation."
-
-        The corpus field is what the cross-session overlap check
-        compares today's explanation against: every distinct prior
-        explanation accumulated across sessions. An agent rotating
-        vocabulary to dodge per-explanation matching has to compose
-        new explanations distinct from the entire history, not just
-        from the most recent attempt.
-
-        Args:
-            pattern_name: The pattern identifier (operator-style name).
-
-        Returns:
-            History dict or None if no row exists.
-
-        Raises:
-            StoreDatabaseError: On any database failure.
-        """
-        with self._db_boundary("get_pattern_history"):
-            try:
-                row = self._conn.execute(
-                    """SELECT pattern_name, max_level_reached,
-                              explanation_corpus, last_explanation,
-                              last_seen_at, last_wrap_id
-                       FROM pattern_history WHERE pattern_name = ?""",
-                    (pattern_name,),
-                ).fetchone()
-            except sqlite3.OperationalError as exc:
-                # Same legacy-table tolerance as get_wrap_history: a
-                # store from before this column existed returns None
-                # for every lookup, which the cross-session check
-                # treats as "no history" — correct behavior for an
-                # unmigrated DB.
-                if "no such table: pattern_history" in str(exc).lower():
-                    return None
-                raise
-
-            if row is None:
-                return None
-            return {
-                "pattern_name": row["pattern_name"],
-                "max_level_reached": row["max_level_reached"],
-                "explanation_corpus": row["explanation_corpus"] or "",
-                # ``last_explanation`` is the convenience accessor the
-                # cross-session check used in the v0.4-pre design;
-                # external callers may still rely on it. The
-                # authoritative comparison field is
-                # ``explanation_corpus``.
-                "last_explanation": row["last_explanation"] or "",
-                "last_seen_at": row["last_seen_at"],
-                "last_wrap_id": row["last_wrap_id"],
-            }
-
-    def upsert_pattern_history(
-        self,
-        pattern_name: str,
-        level: int,
-        explanation: str,
-        wrap_id: int | None = None,
-        *,
-        seen_at: str | None = None,
-        undo_token: str | None = None,
-    ) -> None:
-        """Record or update a pattern's cross-session graduation history.
-
-        ``undo_token`` (the first 12 characters of a wrap token; the save
-        pipeline passes it) records the row as it was before this call in
-        ``wrap_undo``, once per pattern per wrap, so :meth:`revert_wrap` can put
-        it back. Leave it unset for any other caller.
-
-        ``seen_at`` (optional ``YYYY-MM-DD``): the pipeline's logical ``today``,
-        used as the ``last_seen_at`` recency baseline so deterministic/backdated
-        runs stay coherent with the warmth gate (see the body comment). Defaults
-        to wall-clock now when omitted or when it equals the wall-clock date.
-
-        Appends today's explanation to the pattern's accumulated
-        ``explanation_corpus`` (deduplicated — identical re-citations
-        of the same text aren't re-added), updates the
-        ``last_explanation`` convenience field to the new value, and
-        clamps ``max_level_reached`` to the max of stored and incoming.
-        A demotion (carrying a pattern forward at a lower level)
-        updates last_explanation / last_seen_at / last_wrap_id but
-        does NOT decrease the recorded max-level. Demoted graduations
-        (which lose their ``[evidence:]`` tag via ``_demote_line``) are
-        not seen by the canonical caller — they skip the upsert path
-        entirely, so the prior session's history remains authoritative.
-
-        Called at the end of the canonical save pipeline for every
-        pattern line that retains an ``[evidence: ...]`` tag in the
-        post-validation continuity, regardless of graduation level
-        (1x/2x/3x). The 1x case preserves first-time observation
-        explanations so the next session's first graduation has prior
-        history to compare against.
-
-        Args:
-            pattern_name: The pattern identifier.
-            level: The level the pattern appears at in this wrap.
-            explanation: The explanation text from the
-                ``[evidence: ID "explanation"]`` tag.
-            wrap_id: Optional pointer to the wrap that recorded this
-                appearance.
-            seen_at: Optional ``YYYY-MM-DD`` (a full ISO-Z is also tolerated —
-                only the date is used) — the pipeline's logical ``today``,
-                anchored as the ``last_seen_at`` recency baseline so the warmth
-                gate stays clock-coherent on deterministic/backdated runs.
-                Defaults to wall-clock now when omitted or malformed.
-
-        Raises:
-            StoreDatabaseError: On any database failure.
-        """
-        from datetime import datetime as _dt, timezone as _tz, date as _date
-        # AM-PRESERVE determinism (spore-081): last_seen_at is the recency baseline
-        # the cross-session preservation gate compares against the pipeline's
-        # `today` (_is_warm: today minus last_seen_at, date-granular). It MUST share
-        # the pipeline's clock, so when the caller supplies `seen_at` (always the
-        # pipeline's `today`) we anchor last_seen_at to THAT logical date — never
-        # wall-clock. Two failure modes this closes: (1) a deterministic/backdated
-        # run (the whole reason `today` exists) otherwise gets a wall-clock baseline
-        # sitting in the FUTURE of `today` -> negative days -> the warm carve-out can
-        # NEVER fire -> a warm-at-peak load-bearing antibody erodes a level per wrap;
-        # (2) the local/UTC evening-skew window (the pipeline's `today` is local
-        # `date.today()` while wall-clock UTC is already the next day) otherwise
-        # stored a date one AHEAD of `today`. Anchoring to the logical date is
-        # coherent in BOTH. Normalize to the date + re-anchor at midnight (the time
-        # component is not load-bearing: _days_between reads the first 10 chars; the
-        # lexicographic MAX recency clamp in seed_pattern_max_level stays
-        # chronological; precise write-time lives in the hash-chained audit trail,
-        # not here). A malformed `seen_at` degrades to wall-clock, never an invalid
-        # ISO-Z.
-        ts = _dt.now(_tz.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-        if seen_at:
-            seen_date = seen_at[:10]  # tolerate a full ISO-Z; we only need the date
-            try:
-                _date.fromisoformat(seen_date)
-                ts = f"{seen_date}T00:00:00Z"
-            except ValueError:
-                pass  # not a real date -> keep the wall-clock fallback
-        with self._db_boundary("upsert_pattern_history"):
-            # Fetch the current row to maintain the corpus correctly.
-            # The two-step "read then write" inside a single
-            # _db_boundary is safe — the canonical caller is the
-            # save_continuity batch which holds the SQLite connection
-            # exclusively.
-            existing_row = self._conn.execute(
-                "SELECT * FROM pattern_history WHERE pattern_name = ?",
-                (pattern_name,),
-            ).fetchone()
-            if undo_token:
-                self._conn.execute(
-                    "INSERT OR IGNORE INTO wrap_undo (token12, kind, key, prior_json) "
-                    "VALUES (?, 'pattern_history', ?, ?)",
-                    (undo_token, pattern_name,
-                     None if existing_row is None else json.dumps(
-                         {k: existing_row[k] for k in existing_row.keys()}, sort_keys=True)))
-            if existing_row is None:
-                # First appearance — corpus starts as this explanation.
-                new_corpus = explanation
-            else:
-                # Append iff this explanation is not already in the
-                # corpus. Newline-joined entries; dedup keeps the
-                # corpus bounded for patterns that get re-cited
-                # verbatim across many sessions (legitimate carry-
-                # forward) without losing distinctness.
-                #
-                # Dedup uses NORMALIZED comparison (lowercase + collapsed
-                # whitespace + stripped surrounding punctuation) — without
-                # this, trivial caller variation ("PostgreSQL chosen" vs
-                # "postgresql chosen" vs "PostgreSQL chosen." vs " PostgreSQL
-                # chosen ") all bypass the exact-string check, accumulating
-                # near-duplicate corpus entries faster and growing the
-                # cross-session check's false-positive surface (v0.3.2 fix
-                # for WARNING #2 from the 4-layer review).
-                existing_corpus = existing_row["explanation_corpus"] or ""
-                corpus_entries = existing_corpus.split("\n") if existing_corpus else []
-                new_fp = _normalize_explanation_for_dedup(explanation)
-                existing_fps = {_normalize_explanation_for_dedup(e) for e in corpus_entries}
-                if new_fp not in existing_fps:
-                    corpus_entries.append(explanation)
-                new_corpus = "\n".join(corpus_entries)
-
-            # UPSERT semantics: if the pattern exists, take MAX of the
-            # stored max_level_reached and the incoming level so a
-            # demotion doesn't erase the historical high-water mark.
-            self._conn.execute(
-                """INSERT INTO pattern_history
-                       (pattern_name, max_level_reached,
-                        explanation_corpus, last_explanation,
-                        last_seen_at, last_wrap_id)
-                   VALUES (?, ?, ?, ?, ?, ?)
-                   ON CONFLICT(pattern_name) DO UPDATE SET
-                       max_level_reached = MAX(max_level_reached, excluded.max_level_reached),
-                       explanation_corpus = excluded.explanation_corpus,
-                       last_explanation = excluded.last_explanation,
-                       last_seen_at = excluded.last_seen_at,
-                       last_wrap_id = excluded.last_wrap_id""",
-                (pattern_name, level, new_corpus, explanation, ts, wrap_id),
-            )
-            if not self._defer_commit:
-                self._conn.commit()
-
-    def _carry_pattern_history(
-        self, old_name: str, new_name: str, *, undo_token: str | None = None,
-    ) -> bool:
-        """AM-PATTERN-ALIAS: copy ``old_name``'s ``pattern_history`` row to
-        ``new_name``, so the renamed pattern keeps its high-water mark, recency
-        and explanation corpus. A row ``new_name`` already has (a composted
-        homonym's: a compost keeps history) is another concept's: it is replaced,
-        or removed when ``old_name`` has none. The old row stays. ``undo_token``
-        records ``new_name``'s row as it was in ``wrap_undo``, as
-        :meth:`upsert_pattern_history` does, so a revert puts it back. Runs inside
-        the save's batch. Returns whether ``new_name``'s row changed."""
-        with self._db_boundary("upsert_pattern_history"):
-            row = self._conn.execute(
-                "SELECT * FROM pattern_history WHERE pattern_name = ?", (old_name,)
-            ).fetchone()
-            existing = self._conn.execute(
-                "SELECT * FROM pattern_history WHERE pattern_name = ?", (new_name,)
-            ).fetchone()
-            if row is None and existing is None:
-                return False
-            if undo_token:
-                self._conn.execute(
-                    "INSERT OR IGNORE INTO wrap_undo (token12, kind, key, prior_json) "
-                    "VALUES (?, 'pattern_history', ?, ?)",
-                    (undo_token, new_name,
-                     None if existing is None else json.dumps(
-                         {k: existing[k] for k in existing.keys()}, sort_keys=True)))
-            self._conn.execute(
-                "DELETE FROM pattern_history WHERE pattern_name = ?", (new_name,))
-            if row is not None:
-                copy = {k: row[k] for k in row.keys()}
-                copy["pattern_name"] = new_name
-                cols = sorted(copy)
-                self._conn.execute(
-                    f"INSERT INTO pattern_history ({', '.join(cols)}) "
-                    f"VALUES ({', '.join('?' * len(cols))})", [copy[c] for c in cols])
-            if not self._defer_commit:
-                self._conn.commit()
-            return True
-
-    def seed_pattern_max_level(
-        self,
-        pattern_name: str,
-        max_level: int,
-        *,
-        last_seen_at: str | None = None,
-    ) -> None:
-        """One-time backfill: seed a pattern's ``max_level_reached`` high-water
-        mark (and recency baseline) WITHOUT touching its ``explanation_corpus``.
-
-        AM-CARRYFORWARD (v0.4.6) consumer surface. ``max_level_reached`` is the
-        signal carryforward consults to decide whether a pattern earned the
-        level it is being held at — but the field only began populating once
-        AM-HISTUPSERT-BULLET (v0.4.5) let bullet-less grouped patterns into the
-        upsert path. Patterns that earned 2x/3x BEFORE that have no recorded
-        high-water mark, so carryforward could not protect them. This method
-        reconstructs the earned level for such patterns (the clean oracles —
-        a git-tracked continuity, a per-pattern audit level — do not exist, so
-        the reconstruction is operator-judgment, seeded once).
-
-        Unlike :meth:`upsert_pattern_history`, this does NOT append to
-        ``explanation_corpus`` or set ``last_explanation`` — so it cannot
-        perturb the cross-session sycophancy check (which compares against the
-        corpus). It only seeds the high-water mark and a recency floor.
-
-        Fully monotonic: BOTH ``max_level_reached`` (``MAX`` clamp) AND
-        ``last_seen_at`` (lexicographic ``MAX`` on fixed-width ISO-8601, which
-        is chronological) are clamped on conflict, so a seed never LOWERS an
-        earned mark NOR regresses a recency already established by a real
-        graduation. This makes the seed a recency FLOOR, not a last-writer
-        overwrite — re-running the backfill, or seeding an explicit OLD date on
-        a pattern that has since ground for real, can never silently cold-out a
-        genuinely-warm pattern (L1+L2 convergent MEDIUM, v0.4.6). On a fresh
-        INSERT the provided/default value is used as-is; the ``MAX`` clamp only
-        governs the ON CONFLICT path. ``last_seen_at`` defaults to now (UTC) —
-        a warm baseline so freshly-seeded patterns are protected initially and
-        age naturally if they keep failing to ground; pass an explicit ISO
-        value to seed a specific recency (used by tests for determinism).
-
-        Args:
-            pattern_name: The pattern identifier (operator-style name).
-            max_level: The earned high-water level to seed (clamped to the
-                stored max, never lowered).
-            last_seen_at: Optional ISO recency floor. MUST be a canonical
-                fixed-width form — ``YYYY-MM-DD`` or ``YYYY-MM-DDTHH:MM:SSZ``
-                (UTC ``Z``, the form the store itself writes) — because the
-                ON CONFLICT clamp is a LEXICOGRAPHIC ``MAX`` that is
-                chronological only for those forms. A timezone-OFFSET string
-                (``...+05:00``) can sort non-chronologically and is NOT
-                supported (codex L3, v0.4.6). Defaults to now (UTC), a warm
-                baseline. Clamped to ``MAX`` against any existing value on
-                conflict (the clamp governs only the conflict path; a fresh
-                INSERT stores the value as-is).
-
-        Raises:
-            StoreDatabaseError: On any database failure.
-        """
-        from datetime import datetime as _dt, timezone as _tz
-        ts = last_seen_at or _dt.now(_tz.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-        with self._db_boundary("seed_pattern_max_level"):
-            self._conn.execute(
-                """INSERT INTO pattern_history
-                       (pattern_name, max_level_reached, explanation_corpus,
-                        last_explanation, last_seen_at, last_wrap_id)
-                   VALUES (?, ?, '', '', ?, NULL)
-                   ON CONFLICT(pattern_name) DO UPDATE SET
-                       max_level_reached = MAX(max_level_reached, excluded.max_level_reached),
-                       last_seen_at = MAX(last_seen_at, excluded.last_seen_at)""",
-                (pattern_name, max_level, ts),
-            )
-            if not self._defer_commit:
-                self._conn.commit()
-
     # -- Pruning --
 
     def _mark_aged_out(self, episode_ids: list[str]) -> None:
-        """Before a prune deletes these episodes, mark every row that cited one
-        (``episode_derived`` as a source, ``pattern_grounding``) with its
-        effective trust now, where not marked already. Aging out is not a
-        retraction, so it must not read as the ``external`` the delete trigger
-        would otherwise write (CAP-08 D3 R3, complement r4 MED 1). Runs inside
-        the prune's transaction, before the deletes. A prune also rewrites the
-        ``wrap_undo`` stash: a compost's ``pattern_grounding`` rows live only there
-        until a revert, so they are marked in the stash (see the comment below)."""
+        """Before a prune deletes these episodes, mark every ``episode_derived`` row
+        that cited one as a source with its effective trust now, where not marked
+        already. Aging out is not a retraction, so it must not read as the
+        ``external`` the delete trigger would otherwise write (CAP-08 D3 R3,
+        complement r4 MED 1). Runs inside the prune's transaction, before the
+        deletes."""
         if not episode_ids:
             return
         eff = self.effective_trust_map(episode_ids)
-        tables = [t for t in ("episode_derived", "pattern_grounding")
-                  if self._conn.execute(
-                      "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
-                      (t,)).fetchone() is not None]
-        for table, column in (("episode_derived", "source_id"),
-                              ("pattern_grounding", "episode_id")):
-            if table not in tables:
-                continue
-            self._conn.executemany(
-                f"UPDATE {table} SET gone_trust = ? "
-                f"WHERE {column} = ? AND gone_trust IS NULL",
-                [(eff.get(i, DEFAULT_TRUST), i) for i in episode_ids],
-            )
-        # A compost's pattern_grounding rows live only as JSON in wrap_undo until a
-        # revert_wrap puts them back, so the UPDATE above cannot mark them. Mark the
-        # stash too, or the restored row comes back unmarked for an episode that is
-        # gone and reads as a retraction instead of an aged-out ground.
         if self._conn.execute(
-                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'wrap_undo'"
-        ).fetchone() is not None:
-            # Read, edit and write back in Python, not SQL: this must not need JSON1
-            # (a prune on a build without it would otherwise fail outright).
-            ids = set(episode_ids)
-            for row in self._conn.execute(
-                    "SELECT token12, key, prior_json FROM wrap_undo "
-                    "WHERE kind = 'pattern_grounding'").fetchall():
-                try:
-                    prior = json.loads(row["prior_json"])
-                except (TypeError, ValueError):
-                    continue
-                if (not isinstance(prior, dict) or prior.get("gone_trust") is not None
-                        or not isinstance(prior.get("episode_id"), str)
-                        or prior["episode_id"] not in ids):
-                    continue
-                prior["gone_trust"] = eff.get(prior["episode_id"], DEFAULT_TRUST)
-                self._conn.execute(
-                    "UPDATE wrap_undo SET prior_json = ? "
-                    "WHERE token12 = ? AND kind = 'pattern_grounding' AND key = ?",
-                    (json.dumps(prior, sort_keys=True), row["token12"], row["key"]))
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' "
+                "AND name = 'episode_derived'").fetchone() is None:
+            return
+        self._conn.executemany(
+            "UPDATE episode_derived SET gone_trust = ? "
+            "WHERE source_id = ? AND gone_trust IS NULL",
+            [(eff.get(i, DEFAULT_TRUST), i) for i in episode_ids],
+        )
 
     def prune(self, older_than_days: int | None = None) -> int:
         """Prune old episodes, optionally creating tombstones.
@@ -10810,16 +10200,14 @@ class Store:
         This method records the continuity text as a ``raw_save`` identity
         version (generation 3), projects the sidecar file from it with an
         atomic fsync-and-rename and logs a ``continuity_saved`` audit
-        event. It does **not** validate structure, does **not** run
-        graduation citation checking, does **not** update wrap metadata, and
-        does **not** record a wrap in the wraps table.
+        event. It does **not** check the text, does **not** update wrap
+        metadata, and does **not** record a wrap in the wraps table.
 
         For agent-driven session wraps — the normal case — call
         :func:`anneal_memory.validated_save_continuity(store, text)`
-        instead. That runs the full canonical pipeline (structure
-        validation → graduation → metadata → wrap completion) which IS anneal-memory's immune system. Using
-        this raw method for session wraps silently degrades the memory
-        system to a flat file write.
+        instead. That runs the wrap's pipeline (the gate, the save, the
+        metadata, the wrap row). Using this raw method for session wraps
+        silently degrades the memory system to a flat file write.
 
         Legitimate uses of this method:
 
@@ -13101,10 +12489,8 @@ class Store:
         - :meth:`set_state_key` / :meth:`clear_state_key` (CAP-04 state slots)
         - :meth:`delete` / :meth:`delete_by_origin_key` (episode deletions)
         - :meth:`wrap_completed`
-        - :meth:`upsert_pattern_history`
-        - :meth:`seed_pattern_max_level`
 
-        ⚠ The last five were MISSING from this list until 2026-09-05 (L3
+        ⚠ Several of these were MISSING from this list until 2026-09-05 (L3
         complement) while being batch-aware in fact — each passes
         ``commit=not self._defer_commit`` and emits through
         ``_audit_log_after_commit`` with the default ``batch_aware=True``. The
@@ -13112,7 +12498,7 @@ class Store:
         safe inside a batch" for a method that is, which is the more dangerous
         direction for a list like this to be wrong in.
         ⛔ AND THAT FIX LEFT IT INCOMPLETE IN BOTH DIRECTIONS (Diogenes MED,
-        2026-09-06). The final two above were still missing — both guard with
+        2026-09-06). Two more were still missing — both guard with
         ``if not self._defer_commit`` and both were RUN-VERIFIED invisible to a
         second connection until the batch commits — and
         ``set_section_schema`` was in NEITHER list, against a sentence

@@ -430,7 +430,8 @@ class SaveContinuityReplayResult(TypedDict):
     allowlist, marked ``replayed``. Never the full :class:`SaveContinuityResult`; text
     derived from episodes would outlive an episode's erasure. ``pending_count`` is the
     episodes waiting NOW, counted at the replay (not stored with the first call): when it
-    is not zero the next day's step is owed."""
+    is not zero the next day's step is owed. If that count could not be read it is 1, a
+    floor and not a count."""
 
     wrap_id: int | None
     chars: int

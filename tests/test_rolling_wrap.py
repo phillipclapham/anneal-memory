@@ -418,6 +418,20 @@ def test_a_keyed_save_replay_survives_a_failed_count_and_reports_a_day_owed(stor
     assert again["replayed"] is True and again["pending_count"] == 1
 
 
+def test_a_first_save_whose_count_fails_reports_a_day_owed_not_zero(store, monkeypatch):
+    from anneal_memory import StoreError
+
+    _record_days(store, ["2026-03-01", "2026-03-02"], per_day=1)
+    prep = prepare_wrap(store, tz="UTC")
+
+    def broken():
+        raise StoreError("read failed", operation="count_episodes_since_wrap", path="x")
+
+    monkeypatch.setattr(store, "count_episodes_since_wrap", broken)
+    saved = validated_save_continuity(store, "day one", wrap_token=prep["wrap_token"])
+    assert saved["pending_count"] == 1
+
+
 def test_every_retired_migration_name_is_a_real_manifest_feature():
     from anneal_memory.migration import MIGRATION_MANIFEST, RETIRING_FEATURES
 

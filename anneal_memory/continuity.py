@@ -66,12 +66,14 @@ _SAVE_REPLAY_FIELDS = ("wrap_id", "chars", "path", "content_hash", "episodes_com
 
 
 def _pending_count(store: Store) -> int:
-    """Best-effort count of the open window for a retry result: the result
-    says "retry" either way, so a failed read must not replace it."""
+    """The episodes waiting since the last wrap. On a failed read the value is 1, a floor
+    and not a count: a caller treats a non-zero count as "prepare again", which answers
+    "empty" when nothing is left, while 0 would hide a day that is still owed. A save
+    that committed must still return its result, so the read never raises here."""
     try:
         return store.count_episodes_since_wrap()
     except StoreError:
-        return 0
+        return 1
 
 
 def _no_step(status: str, message: str, pending: int) -> PrepareWrapResult:
@@ -687,17 +689,11 @@ def _save_replay(store: Store, result_json: str | None) -> SaveContinuityReplayR
             "malformed, so the first call's result cannot be returned. Nothing "
             "was written.", operation="save_continuity", path=str(store.path),
             reason="malformed_row")
-    try:
-        pending = store.count_episodes_since_wrap()
-    except StoreError:
-        # The save committed on the first call, so a failed read here must not turn its
-        # replay into an error. An unknown count is reported as owed (1): the caller then
-        # prepares again, which answers "empty" when nothing is left. Reporting 0 would
-        # hide a day that is still owed.
-        pending = 1
+    # The save committed on the first call: a failed read here must not turn its replay
+    # into an error (see _pending_count: on a failed read the value is the floor 1).
     return cast(SaveContinuityReplayResult, {
         **{name: stored.get(name) for name in _SAVE_REPLAY_FIELDS},
-        "pending_count": pending, "replayed": True})
+        "pending_count": _pending_count(store), "replayed": True})
 
 
 def validated_save_continuity(

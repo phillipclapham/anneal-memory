@@ -380,7 +380,6 @@ StoreOperation = Literal[
     "unsupersede",
     "import_team_entries",
     "import_team_snapshot",
-    "drift_probes",
     "supersession_exists",
     "superseded_by_map",
     # CAP-08 provenance trust
@@ -5491,175 +5490,6 @@ class Store:
         return {"keys": keys, "overrides": overrides, "unmanaged_rewired": unmanaged,
                 "notes": notes, "protected_episodes": protected}
 
-    # --- CAP-06 drift probes (the operator's instrument; see anneal_memory.drift) ---
-
-    def add_drift_probe(
-        self,
-        *,
-        pattern: str | None = None,
-        min_level: int | None = None,
-        fact: str | None = None,
-        section: str | None = None,
-        note: str | None = None,
-    ) -> int:
-        """Declare something that must survive consolidation: a Proven ``pattern``
-        (held at ``min_level`` or above; default its level in the current continuity,
-        else 2) or a ``fact`` (every meaningful
-        word of it on one line, of ``section`` if given). Checked after every save;
-        never shown to the composer. Returns the probe id."""
-        if (pattern is None) == (fact is None):
-            raise ValueError("add_drift_probe: pass exactly one of pattern= or fact=")
-        if pattern is not None:
-            if not isinstance(pattern, str) or not pattern.strip() or section is not None:
-                raise ValueError("add_drift_probe: pattern must be a non-empty name "
-                                 "(section= applies to facts only)")
-            if min_level is not None and (isinstance(min_level, bool)
-                                          or not isinstance(min_level, int) or min_level < 2):
-                raise ValueError("add_drift_probe: min_level must be an int >= 2")
-            if min_level is None:  # the level it holds now (L2 1007), else 2
-                min_level = self._current_pattern_level(pattern.strip()) or 2
-            row: tuple[Any, ...] = ("pattern", pattern.strip(), None, min_level, None)
-        else:
-            from .drift import fact_has_words
-            if not isinstance(fact, str) or not fact_has_words(fact):
-                raise ValueError("add_drift_probe: a fact needs at least one meaningful word")
-            if min_level is not None:
-                raise ValueError("add_drift_probe: min_level applies to patterns only")
-            row = ("fact", None, fact.strip(), None, section.strip() if section else None)
-        with self._db_boundary("drift_probes"):
-            cur = self._conn.execute(
-                "INSERT INTO drift_probes (kind, name, text, min_level, section, note) "
-                "VALUES (?, ?, ?, ?, ?, ?)", (*row, note))
-            probe_id = int(cur.lastrowid or 0)
-            if not self._defer_commit:
-                self._conn.commit()
-        self._audit_log_after_commit(
-            "drift_probe_added",
-            {"probe_id": probe_id, "kind": row[0], "subject": row[1] or row[2],
-             "min_level": row[3], "section": row[4]},
-            method="add_drift_probe", committed="the probe")
-        return probe_id
-
-    def _current_pattern_level(self, name: str) -> int | None:
-        """The pattern's level in the graduating section(s) of the current continuity
-        (the parser a save uses; L3 1007, codex: a ``name | Nx`` mention in Context
-        must not set it), or None."""
-        from .continuity import _pattern_levels  # continuity imports store
-        try:
-            return _pattern_levels(self.load_continuity() or "",
-                                   self.section_schema).get(name)
-        except (OSError, StoreError, ValueError):
-            return None
-
-    def _record_wrap_graduations(self, rows: list[tuple[str, int, str]]) -> None:
-        """Write this save's validated Proven graduations against the wrap row just
-        inserted (inside the save batch): the operator's per-wrap review worklist."""
-        if not rows:
-            return
-        # A failed insert fails the whole save batch (L3 r3: swallowing it let a
-        # rolled-back transaction commit empty), as a StoreDatabaseError (L3 r4); the
-        # wrap-id read is inside the boundary too (L3 r5).
-        with self._db_boundary("drift_probes"):
-            wrap_id = self._conn.execute("SELECT MAX(id) FROM wraps").fetchone()[0]
-            self._conn.executemany(
-                "INSERT OR REPLACE INTO wrap_graduations (wrap_id, name, level, "
-                "explanation) VALUES (?, ?, ?, ?)",
-                [(wrap_id, n, lv, ex) for n, lv, ex in rows])
-
-    def list_drift_probes(self, *, include_retired: bool = False) -> list[dict[str, Any]]:
-        """Every drift probe (live only unless ``include_retired``), oldest first."""
-        where = "" if include_retired else " WHERE retired_at IS NULL"
-        with self._db_boundary("drift_probes"), self._read_snapshot():
-            try:
-                return [dict(r) for r in self._conn.execute(
-                    f"SELECT * FROM drift_probes{where} ORDER BY id").fetchall()]
-            except sqlite3.OperationalError as exc:
-                if "no such table" in str(exc):
-                    return []  # a read_only open of a store no writer has upgraded
-                raise
-
-    def retire_drift_probe(self, probe_id: int) -> bool:
-        """Stop checking a probe (its past results stay). False if no live probe has
-        that id."""
-        with self._db_boundary("drift_probes"):
-            n = self._conn.execute(
-                "UPDATE drift_probes SET retired_at = ? WHERE id = ? AND retired_at IS NULL",
-                (_now_utc(), probe_id)).rowcount
-            if not self._defer_commit:
-                self._conn.commit()
-        if n == 1:
-            self._audit_log_after_commit(
-                "drift_probe_retired", {"probe_id": probe_id},
-                method="retire_drift_probe", committed="the retirement")
-        return n == 1
-
-    def _live_drift_probes_in_txn(self) -> list[dict[str, Any]] | None:
-        """The live probes, read on the caller's open save batch (under its write lock,
-        so a probe added or retired concurrently is either in or out of this save as a
-        whole). None when the read failed (the caller warns; "no probes" and "could not
-        read" must stay distinct); a failed SELECT does not end the batch."""
-        try:
-            return [dict(r) for r in self._conn.execute(
-                "SELECT * FROM drift_probes WHERE retired_at IS NULL ORDER BY id")]
-        except sqlite3.Error:
-            return None
-
-    def _record_drift_results(self, results: list[dict[str, Any]]) -> None:
-        """Write a save's probe verdicts against the wrap row just inserted. Called
-        inside the save batch, after ``wrap_completed``, so both commit together."""
-        if not results:
-            return
-        # Fails the save, as a StoreDatabaseError (see _record_wrap_graduations).
-        with self._db_boundary("drift_probes"):
-            wrap_id = self._conn.execute("SELECT MAX(id) FROM wraps").fetchone()[0]
-            self._conn.executemany(
-                "INSERT OR REPLACE INTO drift_results (wrap_id, probe_id, status, detail) "
-                "VALUES (?, ?, ?, ?)",
-                [(wrap_id, r["probe_id"], r["status"], r["detail"]) for r in results
-                 if isinstance(r.get("probe_id"), int)])
-
-    def drift_status(self) -> dict[str, Any]:
-        """The latest save's probe verdicts, each with the first wrap since which it
-        has been continuously not ``held`` (``since_wrap``), plus that wrap's id and
-        time, and ``graduated``: the Proven lines that save graduated with a validated
-        citation, to review for truth and contradiction. Read-only."""
-        empty: dict[str, Any] = {"wrap_id": None, "wrapped_at": None, "probes": [],
-                                 "graduated": []}
-        with self._db_boundary("drift_probes"), self._read_snapshot():
-            try:
-                last = self._conn.execute(
-                    "SELECT MAX(id) FROM wraps").fetchone()[0]
-                if last is None:
-                    return empty
-                graduated = [dict(r) for r in self._conn.execute(
-                    "SELECT name, level, explanation FROM wrap_graduations "
-                    "WHERE wrap_id = ? ORDER BY level DESC, name", (last,)).fetchall()]
-                at = self._conn.execute(
-                    "SELECT wrapped_at FROM wraps WHERE id = ?", (last,)).fetchone()
-                rows = self._conn.execute(
-                    """SELECT p.id, p.kind, COALESCE(p.name, p.text) AS subject,
-                              r.status, r.detail
-                       FROM drift_results r JOIN drift_probes p ON p.id = r.probe_id
-                       WHERE r.wrap_id = ? AND p.retired_at IS NULL ORDER BY p.id""",
-                    (last,)).fetchall()
-                probes = []
-                for r in rows:
-                    since = None
-                    if r["status"] != "held":
-                        held = self._conn.execute(
-                            "SELECT MAX(wrap_id) FROM drift_results WHERE probe_id = ? "
-                            "AND status = 'held'", (r["id"],)).fetchone()[0]
-                        since = self._conn.execute(
-                            "SELECT MIN(wrap_id) FROM drift_results WHERE probe_id = ? "
-                            "AND wrap_id > ?", (r["id"], held or 0)).fetchone()[0]
-                    probes.append(dict(r) | {"since_wrap": since})
-            except sqlite3.OperationalError as exc:
-                if "no such table" in str(exc):
-                    return empty
-                raise
-        return {"wrap_id": last, "wrapped_at": at[0] if at else None, "probes": probes,
-                "graduated": graduated}
-
     def team_forget_key(self, key: str) -> int:
         """Release a snapshot key: its record and its ownership go; the links stay in
         place, unowned, until another key of the same ledger adopts or drops them.
@@ -9668,9 +9498,7 @@ class Store:
 
         One transaction (``BEGIN IMMEDIATE``) undoes:
 
-        - the ``wraps`` row, and its ``wrap_graduations`` and ``drift_results``;
-        - the ``pattern_grounding`` rungs the wrap earned (matched on the wrap
-          token's first 12 characters, which the wraps row's ``pair_id`` keeps);
+        - the ``wraps`` row;
         - a save-idempotency record whose stored result names the wrap;
         - the identity: a new ``identity_versions`` row (source ``raw_save``)
           carries the text and meta of the version before the wrap's, and the files
@@ -13904,7 +13732,6 @@ class Store:
         - :meth:`import_team_entries` (``dry_run`` is refused inside a batch)
         - :meth:`import_team_snapshot` (``dry_run`` is refused inside a batch)
         - :meth:`team_forget_key`
-        - :meth:`add_drift_probe` / :meth:`retire_drift_probe` (CAP-06)
         - :meth:`set_state_key` / :meth:`clear_state_key` (CAP-04 state slots)
         - :meth:`delete` / :meth:`delete_by_origin_key` (episode deletions)
         - :meth:`record_associations` / :meth:`decay_associations`

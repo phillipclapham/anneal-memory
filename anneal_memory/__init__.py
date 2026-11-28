@@ -184,18 +184,6 @@ from .retrieval import (
 )
 from .migration import MIGRATION_MANIFEST
 from .pattern_associations import RETRIEVAL_THRESHOLD
-from .worth import (
-    ExposedRef,
-    ExposureLabel,
-    FoldResult,
-    ForeignOutcomeLogError,
-    LogBinding,
-    OutcomeLog,
-    OutcomeLogBusy,
-    fold_surfaced,
-    outcome_log_path,
-    receipt_crystal_names,
-)
 from .server import Server
 
 __all__ = [
@@ -373,16 +361,6 @@ __all__ = [
     "CRYSTAL_SCHEMA_VERSION",
     "MIGRATION_MANIFEST",
     "RETRIEVAL_THRESHOLD",
-    "ExposedRef",
-    "ExposureLabel",
-    "OutcomeLog",
-    "fold_surfaced",
-    "outcome_log_path",
-    "receipt_crystal_names",
     # the types those return or raise, so the frozen surface is closed over them
     "Annotation",
-    "FoldResult",
-    "LogBinding",
-    "OutcomeLogBusy",
-    "ForeignOutcomeLogError",
 ]

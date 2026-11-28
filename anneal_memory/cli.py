@@ -169,24 +169,6 @@ from .types import (
     RelevantPattern,
     trust_rank,
 )
-from .worth import (
-    DEFAULT_FOLD_SKEW_SECONDS,
-    FOLLOWED_VALUES,
-    ITEM_KINDS,
-    OUTCOME_VALUES,
-    PULL_EXPOSURE_PREFIX,
-    ExposedRef,
-    ExposureLabel,
-    ADOPT_UNSUPPORTED,
-    OutcomeLog,
-    OutcomeLogBusy,
-    _build_record as _build_worth_record,
-    adopt_supported,
-    compute_worth,
-    fold_surfaced,
-    load_receipts,
-    outcome_log_path,
-)
 
 
 # -- Time parsing --
@@ -354,14 +336,12 @@ _DB_ABSENT_WINERRORS = (21, 123, 1921)  # not ready, invalid name, link cycle
 def _existing_db_path(args: argparse.Namespace, *, require_file: bool = False) -> Path:
     """The --db path, or exit 1 when no database is there. Every command that opens
     the episodic store through ``_open_store`` refuses a missing path here; ``init``,
-    ``migrate`` and ``derive`` do their own checks. ``outcome`` and ``worth`` read and
-    write files derived from this path rather than the database itself, so they pass
-    ``require_file=True`` and a directory is refused too. Checked once, with one stat,
+    ``migrate`` and ``derive`` do their own checks. A command that reads files derived
+    from this path rather than the database itself passes ``require_file=True`` and a
+    directory is refused too. Checked once, with one stat,
     when the command starts: a database removed after that point is not noticed.
     Whether an existing file is THIS store is not decided here: a check that guesses
-    at it from the file's contents refused real stores and accepted impostors (four
-    review rounds, 10-03); :func:`_outcome_store_id` binds the outcome log to the
-    store's persisted identity instead."""
+    at it from the file's contents refused real stores and accepted impostors."""
     exists = is_file = False
     db_path = Path(args.db)
     try:
@@ -4210,99 +4190,6 @@ def cmd_crystal_crystallize(args: argparse.Namespace) -> None:
           f"{item['activation_mode']}) {_truncate(item['explanation'], 70)}")
 
 
-# How long a pull waits for the outcome log's write lock, and for the db to be
-# readable, before giving the label up. Each wait is bounded on its own.
-_PULL_LOCK_TIMEOUT_SECONDS = 2.0
-_PULL_DB_TIMEOUT_SECONDS = 0.5
-
-
-class _PullSkipped(Exception):
-    """The pull is not recorded; the message is the one stderr line."""
-
-
-def _pull_note(why: str) -> None:
-    """The pull's one stderr line. Best effort: no stderr, or one that cannot be
-    written, changes nothing (never falls back to stdout, never alters the exit)."""
-    err = sys.stderr
-    if err is None:
-        return
-    try:
-        # One physical line: a reason carrying CR or LF (an OS error text, a path)
-        # must not forge a second line.
-        why = " ".join(why.split())
-        err.write(f"crystal get: pull not recorded ({why})\n")
-        err.flush()
-    except (OSError, ValueError):
-        # The unwritten text stays buffered in the dead stream, and the interpreter
-        # flushes sys.stderr at exit and turns a failure there into exit status 120.
-        # The pull is the last thing this command does, so point it at nowhere.
-        try:
-            sys.stderr = open(os.devnull, "w")
-        except OSError:
-            pass
-
-
-def _pull_store_id(db_path: Path) -> str | None:
-    """The store id for a pull, bounded; ``None`` when the store has none. A
-    refusal is a :class:`_PullSkipped` carrying its reason, never a captured
-    print-and-exit (c-pull-label L3 r1, codex: redirecting the process-global
-    ``sys.stderr`` to capture one was not thread-safe)."""
-    try:
-        sid, why = _read_store_id_bounded(db_path, _PULL_DB_TIMEOUT_SECONDS)
-    except _StoreBusy:
-        raise _PullSkipped("store busy") from None
-    except (OSError, StorePathError, sqlite3.Error) as exc:  # StorePathError: a NUL or non-UTF-8 path
-        raise _PullSkipped(f"cannot read the store id of {db_path}: {exc}") from None
-    if why is not None:
-        raise _PullSkipped(f"cannot read the store id of {db_path}: {why}")
-    return sid
-
-
-def _record_pull_label(args: argparse.Namespace, name: str) -> None:
-    """Append one ``followed`` pull record for a crystal pulled by name, to the
-    outcome log beside the episodic db. A pull is the one production signal that
-    is not a guess: the reader asked for this pattern from the index by name.
-
-    Never fails the read and never mints a store id (``mint=False``): a store
-    with no id gets one stderr line and no record. A crystal-only deployment (no
-    episodic db file) skips quietly. The db read, the log lock and the append
-    are each bounded; a store replaced between the id read and the append (the
-    id re-read under the log lock no longer matches) records nothing. Any other
-    failure is one stderr line."""
-    try:
-        try:
-            # Not _db_path: that exits, and this read must never fail (L3 r2).
-            db_path = Path(args.db).expanduser()
-            if not db_path.is_file():
-                return
-        except (OSError, ValueError, RuntimeError):
-            return
-        sid = _pull_store_id(db_path)
-        if sid is None:
-            raise _PullSkipped(
-                "the store has no store id yet; a read does not mint one, "
-                "run 'anneal-memory outcome' once"
-            )
-
-        def still_this_store() -> None:
-            if _pull_store_id(db_path) != sid:
-                raise _PullSkipped("the store changed while the label was being written")
-
-        OutcomeLog(outcome_log_path(db_path), store_id=sid).record(
-            PULL_EXPOSURE_PREFIX + uuid.uuid4().hex,
-            [ExposureLabel("crystal", name, "followed")],
-            lock_timeout=_PULL_LOCK_TIMEOUT_SECONDS,
-            pull=True,
-            before_append=still_this_store,
-        )
-    except _PullSkipped as skip:
-        _pull_note(str(skip))
-    except OutcomeLogBusy:
-        _pull_note("outcome log busy")
-    except Exception as exc:  # the read already succeeded: nothing here may fail it
-        _pull_note(str(exc) or type(exc).__name__)
-
-
 def _print_crystal_item(item: CrystalDict, as_json: bool) -> None:
     if as_json:
         _print_json(item)
@@ -4327,22 +4214,13 @@ def _print_crystal_item(item: CrystalDict, as_json: bool) -> None:
 
 
 def cmd_crystal_get(args: argparse.Namespace) -> None:
-    """Show a single crystallized pattern by name (searches live then retired).
-    A found pattern also records a ``followed`` label (see
-    :func:`_record_pull_label`) when the pattern is live (the cue index lists
-    live patterns only, so a retired pull is not that signal) and its text
-    reached stdout, unless ``--no-record`` is passed."""
+    """Show a single crystallized pattern by name (searches live then retired)."""
     store = _open_crystal_store(args)
     item = store.get(args.name)
     if item is None:
         print(f"Crystallized pattern {args.name!r} not found.", file=sys.stderr)
         sys.exit(1)
     _print_crystal_item(item, args.json)
-    # A pull the reader did not receive is not a pull: a failed flush raises here
-    # and records nothing.
-    sys.stdout.flush()
-    if not args.no_record and item.get("status") == "crystallized":
-        _record_pull_label(args, item["name"])
 
 
 def cmd_crystal_index(args: argparse.Namespace) -> None:
@@ -4533,234 +4411,6 @@ def cmd_crystal_touch(args: argparse.Namespace) -> None:
           f"({activation_tier(item)})")
 
 
-# -- Outcome write-back, surfaced fold, Worth (report-only) --
-
-def _parse_label(raw: str) -> ExposureLabel:
-    """``crystal:NAME=followed`` / ``episode:ID=ignored`` -> ExposureLabel."""
-    kind, sep, rest = raw.partition(":")
-    ref, sep2, followed = rest.rpartition("=")
-    if not sep or not sep2:
-        raise ValueError(
-            f"--item must look like KIND:REF=FOLLOWED (got {raw!r}); KIND is one of "
-            f"{ITEM_KINDS}, FOLLOWED one of {FOLLOWED_VALUES}."
-        )
-    return ExposureLabel(kind, ref, followed)
-
-
-def _parse_exposed(raw: str) -> ExposedRef:
-    kind, sep, ref = raw.partition(":")
-    if not sep:
-        raise ValueError(f"--exposed must look like KIND:REF (got {raw!r}).")
-    # A ref may contain "=", and one that ends in a label is ambiguous: a crystal
-    # can be named foo=followed, or --item syntax was pasted here. Refusing it
-    # rejected valid names, accepting it silently recorded typos (L3, twice), so
-    # it is recorded as written and the ambiguity is said out loud.
-    _head, eq, tail = ref.rpartition("=")
-    if eq and tail.strip().lower() in FOLLOWED_VALUES:
-        print(f"Warning: --exposed {raw!r} is recorded as the ref {ref!r}; if that "
-              f"was a label, record it with --item {raw} instead.", file=sys.stderr)
-    return ExposedRef(kind, ref)
-
-
-def _is_anneal_schema(conn: sqlite3.Connection) -> bool:
-    """Proof that a database is an anneal store: an ``episodes`` table, and a
-    ``metadata`` table holding ``format_version``. A ``store_id`` row is not
-    proof (L3 10-03, codex: it let a metadata-only impostor through)."""
-    tables = {
-        row[0] for row in conn.execute(
-            "SELECT name FROM sqlite_master WHERE type = 'table' "
-            "AND name IN ('episodes', 'metadata')"
-        )
-    }
-    return tables == {"episodes", "metadata"} and conn.execute(
-        "SELECT 1 FROM metadata WHERE key = 'format_version'"
-    ).fetchone() is not None
-
-
-class _StoreBusy(Exception):
-    """The db could not be read within a caller's short ``busy_timeout``."""
-
-
-def _read_store_id_bounded(db_path: Path, timeout: float) -> tuple[str | None, str | None]:
-    """``(store id or None, refusal or None)`` read through a read-only connection
-    that waits at most ``timeout`` seconds for a lock (the library's own open waits
-    its default busy timeout, several seconds). Applies the same refusals as the
-    library open: not an anneal store, written by a newer anneal. Raises
-    :class:`_StoreBusy` when the db stays locked."""
-    conn: sqlite3.Connection | None = None
-    try:
-        # The package's one opener (every byte of the path percent-escaped, NUL
-        # and non-UTF-8 names refused), read-only: no hand-built URI here.
-        conn = sqlite_connect(db_path, read_only=True, timeout=timeout)
-        if not _is_anneal_schema(conn):
-            return None, "not an anneal store (no episodes table or no format_version); nothing written"
-        found = _parse_format_version(conn.execute(
-            "SELECT value FROM metadata WHERE key = 'format_version'"
-        ).fetchone()[0])
-        if found is not None and found > _SCHEMA_VERSION:
-            return None, (f"written by a newer anneal-memory schema (format_version {found} > "
-                          f"{_SCHEMA_VERSION}); nothing written")
-        row = conn.execute("SELECT value FROM metadata WHERE key = 'store_id'").fetchone()
-    except sqlite3.OperationalError as exc:
-        if "locked" in str(exc) or "busy" in str(exc):
-            raise _StoreBusy(str(exc)) from None
-        raise
-    finally:
-        if conn is not None:
-            conn.close()
-    value = row[0] if row else None
-    return (value if isinstance(value, str) and value else None), None
-
-
-def _outcome_store_id(db_path: Path, *, mint: bool) -> str | None:
-    """The store id that binds ``<stem>.outcomes.jsonl`` to the store at ``db_path``,
-    or exit 1. Read through the library's read-only open, which also refuses a
-    store written by a newer anneal; a file that is not an anneal store (see
-    :func:`_is_anneal_schema`) refuses too. A store with no id yet returns
-    ``None`` unless ``mint`` (``outcome``; ``worth`` never mints, Phill 10-03).
-
-    The mint takes the writer lock only when the id is missing, and re-proves
-    the schema, the version (with the store's own ``_parse_format_version`` and
-    ``_SCHEMA_VERSION``) and the id inside ONE ``BEGIN IMMEDIATE`` transaction
-    before inserting the one row, so the file proven is the file written (L3
-    10-03: a proof on one open and a write-capable ``Store`` open after it could
-    write anneal's schema into a swapped file; a raw mint that skipped the
-    version check would write into a newer anneal's store)."""
-    def refuse(why: object) -> NoReturn:
-        print(f"Error: cannot read the store id of {db_path}: {why}", file=sys.stderr)
-        sys.exit(1)
-
-    not_anneal = "not an anneal store (no episodes table or no format_version); nothing written"
-    try:
-        with Store(db_path, audit=False, read_only=True) as store:
-            if not _is_anneal_schema(store._conn):
-                refuse(not_anneal)
-            sid = store.store_id
-    except (StoreError, OSError, sqlite3.Error, ValueError) as exc:
-        refuse(exc)
-    if sid is not None or not mint:
-        return sid
-    try:
-        conn = sqlite_connect(db_path, timeout=30.0, isolation_level=None)
-    except (OSError, sqlite3.Error, ValueError) as exc:  # ValueError: a URI path
-        refuse(exc)
-    try:
-        conn.execute("BEGIN IMMEDIATE")
-        if not _is_anneal_schema(conn):
-            conn.execute("ROLLBACK")
-            refuse(not_anneal)
-        found = _parse_format_version(conn.execute(
-            "SELECT value FROM metadata WHERE key = 'format_version'"
-        ).fetchone()[0])
-        if found is not None and found > _SCHEMA_VERSION:
-            conn.execute("ROLLBACK")
-            refuse(f"written by a newer anneal-memory schema (format_version {found} > "
-                   f"{_SCHEMA_VERSION}); nothing written")
-        conn.execute(
-            "INSERT OR IGNORE INTO metadata (key, value) VALUES ('store_id', ?)",
-            (uuid.uuid4().hex,),
-        )
-        row = conn.execute("SELECT value FROM metadata WHERE key = 'store_id'").fetchone()
-        conn.execute("COMMIT")
-    except (OSError, sqlite3.Error) as exc:
-        refuse(exc)
-    finally:
-        conn.close()
-    sid = row[0] if row else None
-    if not isinstance(sid, str) or not sid:
-        refuse(f"its store_id row is empty or not text ({sid!r}); nothing written")
-    return sid
-
-
-def cmd_outcome(args: argparse.Namespace) -> None:
-    """Write back what happened after an exposure (append-only; records for one
-    exposure id merge when read)."""
-    db_path = _existing_db_path(args, require_file=True)
-    if args.adopt_unbound:
-        if args.exposure_id or args.item or args.outcome or args.exposed:
-            print("Error: --adopt-unbound takes no other outcome flags", file=sys.stderr)
-            sys.exit(1)
-    elif not args.exposure_id:
-        print("Error: --exposure-id is required (or pass --adopt-unbound)", file=sys.stderr)
-        sys.exit(1)
-    try:
-        # Parsed before the id is minted, so a rejected command writes nothing to
-        # the store (L3 10-03, complement + codex).
-        items = [_parse_label(raw) for raw in (args.item or [])]
-        exposed = [_parse_exposed(raw) for raw in (args.exposed or [])]
-        if not args.adopt_unbound:
-            # The whole record is validated before the id is minted (L3 r2 10-03).
-            _build_worth_record(args.exposure_id, items, args.outcome, exposed, None)
-        elif not adopt_supported():
-            # Refused before the mint below, so "nothing was written" holds (Windows
-            # CI 10-03: the id had been minted, then adopt refused).
-            raise ValueError(ADOPT_UNSUPPORTED)
-        log = OutcomeLog(outcome_log_path(db_path), store_id=_outcome_store_id(db_path, mint=True))
-    except (ValueError, OSError) as exc:
-        print(f"Error: {exc}", file=sys.stderr)
-        sys.exit(1)
-    if args.adopt_unbound:
-        try:
-            marker = log.adopt_unbound()
-        except (ValueError, OSError) as exc:
-            print(f"Error: {exc}", file=sys.stderr)
-            sys.exit(1)
-        if args.json:
-            _print_json({"adopted": marker is not None, "marker": marker})
-        elif marker is None:
-            print(f"Nothing to adopt: no unbound record in {log.path}")
-        else:
-            print(f"Adopted the unbound records in {log.path} into store {log.store_id} "
-                  f"(marker appended at {marker['ts']}; earlier records unchanged)")
-        return
-    try:
-        rec = log.record(
-            args.exposure_id, items, outcome=args.outcome, exposed=exposed
-        )
-    except (ValueError, OSError) as exc:
-        print(f"Error: {exc}", file=sys.stderr)
-        sys.exit(1)
-    if args.json:
-        _print_json(rec)
-        return
-    labels = ", ".join(f"{i['kind']}:{i['ref']}={i['followed']}" for i in rec["items"]) or "(outcome only)"
-    print(f"Recorded outcome {rec['outcome'] or '(none)'} for {rec['exposure_id']}: {labels}")
-    if rec.get("exposed"):
-        print(f"Exposed: {', '.join(e['kind'] + ':' + e['ref'] for e in rec['exposed'])}")
-
-
-def cmd_crystal_fold_surfaced(args: argparse.Namespace) -> None:
-    """Fold retrieval receipts into surfaced_count / last_surfaced_on. Run once per
-    wrap by the wrap's single writer; never touches last_activated_on."""
-    store = _open_crystal_store(args)
-    try:
-        result = fold_surfaced(store, args.receipts, skew_seconds=args.skew_seconds)
-    except (CrystalError, ValueError, OSError) as exc:
-        print(f"Error: {exc}", file=sys.stderr)
-        sys.exit(1)
-    if args.json:
-        _print_json(result.__dict__)
-        return
-    if result.store_missing:
-        print(f"No crystal store at {store.path}; nothing is live, nothing folded, no mark written")
-        if result.paths_missing:
-            print(f"Not found (skipped): {', '.join(result.paths_missing)}", file=sys.stderr)
-        return
-    print(f"Folded {result.receipts_folded} receipt(s), {result.exposures_counted} "
-          f"exposure(s), through {result.mark} (previous mark: {result.previous_mark})")
-    if result.names_unknown:
-        print(f"Not a live crystal (not stored): {', '.join(sorted(result.names_unknown))}")
-    if result.lines_skipped:
-        print(f"Skipped {result.lines_skipped} unreadable receipt line(s)")
-    if result.event_id_missing:
-        print(f"Skipped {result.event_id_missing} receipt(s) with no event_id; they will "
-              f"not be counted by a later fold", file=sys.stderr)
-    if result.duplicates_skipped:
-        print(f"Skipped {result.duplicates_skipped} duplicate receipt(s) (same event_id)")
-    if result.paths_missing:
-        print(f"Not found (skipped): {', '.join(result.paths_missing)}", file=sys.stderr)
-
-
 def cmd_crystal_ground_evidence(args: argparse.Namespace) -> None:
     """Fill empty crystal evidence from episodes naming the pattern (KL-09)."""
     crystal_store = _open_crystal_store(args)
@@ -4789,99 +4439,6 @@ def cmd_crystal_ground_evidence(args: argparse.Namespace) -> None:
             print(f"Changed while running, left as it is: {name}")
         else:
             print(f"No episode names only {name}; left empty{hubs}")
-
-
-def cmd_worth(args: argparse.Namespace) -> None:
-    """Report-only Memory-Worth counters. Nothing reads this to rank or decay."""
-    db_path = _existing_db_path(args, require_file=True)
-    receipts = None
-    receipt_bad = 0
-    receipt_missing: list[str] = []
-    try:
-        if args.receipts:
-            receipts, receipt_bad, receipt_missing = load_receipts(args.receipts)
-        sid = _outcome_store_id(db_path, mint=False)
-        log = OutcomeLog(outcome_log_path(db_path), store_id=sid, bind=True)
-        report = compute_worth(log, _open_crystal_store(args), receipts=receipts)
-        reread = _outcome_store_id(db_path, mint=False) if sid is None else None
-        if reread is not None:
-            # An `outcome` minted the id while this read the log, so its records
-            # may carry an id this report took as foreign (L3 10-03, codex). An
-            # id is never rewritten, so one re-read settles it.
-            sid = reread
-            log = OutcomeLog(outcome_log_path(db_path), store_id=sid, bind=True)
-            report = compute_worth(log, _open_crystal_store(args), receipts=receipts)
-    except (CrystalError, OSError, ValueError) as exc:
-        print(f"Error: {exc}", file=sys.stderr)
-        sys.exit(1)
-    if receipt_missing:
-        print(f"Not found (skipped): {', '.join(receipt_missing)}", file=sys.stderr)
-    b = report.binding
-    # An all-foreign log is a wrong log, not a clean zero: exit 1 (L1 10-03, the
-    # same shape as the missing-db finding), with the report still printed.
-    foreign_warning = (
-        f"This outcome log belongs to another store ({', '.join(b.foreign_stores)}), "
-        f"not this one ({b.store_id or 'no store id yet'}): none of its {b.foreign} "
-        f"exposure(s) are counted."
-        if b is not None and b.all_foreign else None
-    )
-    if foreign_warning:
-        print(f"!! {foreign_warning}", file=sys.stderr)
-    if args.json:
-        out = report.as_dict()
-        if receipts is not None:
-            out["receipt_lines_unreadable"] = receipt_bad
-        if foreign_warning:
-            out["warning"] = foreign_warning
-        _print_json(out)
-        if foreign_warning:
-            sys.exit(1)
-        return
-    print(f"Worth (report-only) from {report.exposures} exposure(s)"
-          + (f", {report.lines_skipped} unreadable line(s) skipped" if report.lines_skipped else ""))
-    if b is not None and b.store_id is None:
-        print("store has no id yet (init, save and outcome mint one; worth writes nothing): "
-              f"{b.unbound} unbound (counted)"
-              + (f", {b.foreign} foreign (another store's; NOT counted)" if b.foreign else ""))
-    elif b is not None and (b.unbound or b.foreign):
-        print(f"store {b.store_id}: {b.bound} bound"
-              + (f", {b.unbound} unbound (written before store ids; counted; "
-                 f"'outcome --adopt-unbound' binds them)" if b.unbound else "")
-              + (f", {b.foreign} foreign (another store's; NOT counted)" if b.foreign else ""))
-    print("surf = recall-surfaced (receipt fold); the other columns come from the outcome")
-    print("log and are not joined to it. succ/fail = retrieved with that outcome, any label.")
-    print("unl+s/unl+f = exposed with that outcome and never labelled (not in succ/fail).")
-    print("pull = fetched by name (crystal get); a pull is not a judged label, so it is in")
-    print("no other column.")
-    if receipts is not None:
-        print("unrec = receipts that exposed it with no record in the outcome log at all "
-              f"({report.receipts_read} exposing receipt(s) read"
-              + (f", {report.receipts_skipped} with no event_id" if report.receipts_skipped else "")
-              + (f", {receipt_bad} unreadable line(s)" if receipt_bad else "") + ").")
-    print(f"{'crystal':<52} {'surf':>5} {'fol':>4} {'ign':>4} {'n/a':>4} "
-          f"{'succ':>5} {'fail':>5} {'fol+s':>6} {'fol+f':>6} {'unl+s':>6} {'unl+f':>6}"
-          + (f" {'unrec':>6}" if receipts is not None else "") + f" {'pull':>5}")
-    for r in report.crystals:
-        name = r.ref if r.live else f"{r.ref} (not live)"
-        surf = "-" if r.surfaced_count is None else str(r.surfaced_count)
-        fol = r.table["followed"]
-        # The full name, never sliced: two refs that share a prefix must stay
-        # distinguishable (codex L3); a long one only shifts its row.
-        print(f"{name:<52} {surf:>5} {r.followed:>4} {r.ignored:>4} "
-              f"{r.not_applicable:>4} {r.success:>5} {r.failure:>5} "
-              f"{fol['success']:>6} {fol['failure']:>6} "
-              f"{r.unlabelled_success:>6} {r.unlabelled_failure:>6}"
-              + (f" {r.exposed_unrecorded:>6}" if r.exposed_unrecorded is not None else "")
-              + f" {r.pulled:>5}")
-    if args.episodes:
-        print(f"\n{'episode':<20} {'succ':>5} {'fail':>5} {'only via citation':>18} "
-              f"{'unl+s':>6} {'unl+f':>6}")
-        for r in report.episodes:
-            print(f"{r.ref:<20} {r.success:>5} {r.failure:>5} "
-                  f"{r.credited_success:>9}/{r.credited_failure:<8} "
-                  f"{r.unlabelled_success:>6} {r.unlabelled_failure:>6}")
-    if foreign_warning:
-        sys.exit(1)
 
 
 def cmd_crystal_update(args: argparse.Namespace) -> None:
@@ -5663,8 +5220,6 @@ def build_parser() -> argparse.ArgumentParser:
 
     cp = crystal_sub.add_parser("get", help="Show a crystallized pattern by name", parents=[json_parent])
     cp.add_argument("name", help="Pattern slug")
-    cp.add_argument("--no-record", action="store_true", dest="no_record",
-                    help="Do not record a 'followed' label for this pull in the outcome log")
     cp.set_defaults(func=cmd_crystal_get)
 
     cp = crystal_sub.add_parser("list", help="List live crystallized patterns", parents=[json_parent])
@@ -5752,74 +5307,6 @@ def build_parser() -> argparse.ArgumentParser:
                     help="Force the pre-0.8.0 keyword-only backend (skip the associative "
                          "evidence-edge pass and the read-only episodic Store open).")
     cp.set_defaults(func=cmd_crystal_recall)
-
-    cp = crystal_sub.add_parser(
-        "fold-surfaced",
-        help="Fold retrieval receipts into recall-surfaced counts (intended once per wrap)",
-        description="Fold harness retrieval receipts (JSONL, exposed[].pattern) into each "
-                    "live crystal's surfaced_count and last_surfaced_on. Counts only "
-                    "receipts after the previous fold's mark and older than the skew, "
-                    "de-duplicated by event_id, so re-running counts nothing twice. Pass "
-                    "every receipt source on every fold, the live log first. Refuses, "
-                    "moving nothing, when none of the paths exists. Exposure is not "
-                    "activation: last_activated_on is never written.",
-        parents=[json_parent],
-    )
-    cp.add_argument("--receipts", nargs="+", required=True, metavar="PATH",
-                    help="Receipt JSONL file(s), e.g. the live log and its rotated backup")
-    cp.add_argument("--skew-seconds", type=int, default=DEFAULT_FOLD_SKEW_SECONDS,
-                    help=f"Leave receipts newer than this for the next fold "
-                         f"(default {DEFAULT_FOLD_SKEW_SECONDS})")
-    cp.set_defaults(func=cmd_crystal_fold_surfaced)
-
-    # -- outcome / worth (report-only Memory-Worth counters) --
-    sub = subparsers.add_parser(
-        "outcome",
-        help="Write back what happened after an exposure (followed/ignored/not_applicable)",
-        description="Append an outcome record for one exposure (a recall event, named by "
-                    "the harness's id) to <stem>.outcomes.jsonl. A later record for the same "
-                    "exposure id merges with it: a later label for an item replaces its "
-                    "earlier label, a later outcome replaces the earlier outcome.",
-        parents=[json_parent],
-    )
-    sub.add_argument("--exposure-id", help="The harness's id for the recall event (required "
-                                            "unless --adopt-unbound)")
-    sub.add_argument("--item", action="append", metavar="KIND:REF=FOLLOWED",
-                     help="A surfaced item and its label, e.g. crystal:my_pattern=followed "
-                          "(repeatable; KIND crystal|episode; FOLLOWED "
-                          "followed|ignored|not_applicable). May be omitted when "
-                          "--outcome is given: records for one exposure id merge.")
-    sub.add_argument("--outcome", choices=OUTCOME_VALUES, default=None,
-                     help="The turn's outcome, when known")
-    sub.add_argument("--exposed", action="append", metavar="KIND:REF",
-                     help="An item the exposure surfaced, labelled or not (repeatable; from "
-                          "the harness's receipt). Unlabelled ones are reported in their own "
-                          "columns, never in succ/fail. Needs --item or --outcome beside it.")
-    sub.add_argument("--adopt-unbound", action="store_true",
-                     help="Bind EVERY unbound record in the log (no store id: written before "
-                          "store ids, including any a store replaced at this path left) to THIS "
-                          "store, so check the log is this store's first. Appends one marker, "
-                          "rewrites nothing. Changes no count (unbound records are already "
-                          "counted), only the report and how a later reader classifies them. "
-                          "Takes no other outcome flags.")
-    sub.set_defaults(func=cmd_outcome)
-
-    sub = subparsers.add_parser(
-        "worth",
-        help="Report-only Memory-Worth counters per crystal (and episode)",
-        description="Two counters per crystal and per episode, from <stem>.outcomes.jsonl: "
-                    "retrieved-with-success and retrieved-with-failure, split by "
-                    "followed / ignored / not_applicable, with each crystal's exposure "
-                    "credited once to the episodes it cites. Report only: nothing in "
-                    "anneal ranks, decays or re-heats from it.",
-        parents=[json_parent],
-    )
-    sub.add_argument("--episodes", action="store_true", help="Also list per-episode counters")
-    sub.add_argument("--receipts", nargs="+", metavar="PATH",
-                     help="Retrieval receipt logs (JSONL, live log first): adds an 'unrec' "
-                          "column, receipts that exposed the crystal and have no record in "
-                          "the outcome log. Report only.")
-    sub.set_defaults(func=cmd_worth)
 
     # -- migrate (self-migration notices: propose instruction-file edits on upgrade) --
     migrate_parser = subparsers.add_parser(

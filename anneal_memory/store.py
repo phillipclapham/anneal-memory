@@ -4031,9 +4031,8 @@ class Store:
                 "INSERT OR IGNORE INTO metadata (key, value) VALUES (?, ?)",
                 (key, value),
             )
-        # The store's identity, minted once and never rewritten: the outcome log
-        # (worth.py) stamps it on each record so a log left beside a replaced
-        # store is not read as the new store's. Write-capable opens only, so an
+        # The store's identity, minted once and never rewritten (idempotency keys
+        # and sidecars are scoped by it). Write-capable opens only, so an
         # existing store gains one on its next normal open and a read-only open
         # never mints one.
         self._conn.execute(

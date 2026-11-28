@@ -10,8 +10,6 @@ CLI on the gen-2 branch before the fix):
 - audit manifest ``version`` 99: read as version 1 (verify valid). With a field
   shape 1.0 rejects (``files`` an object), the next write QUARANTINED it and
   ``audit-repair`` rebuilt a version-1 manifest over it.
-- ``derive-trust.json`` ``version`` 99: trusted on read; ``allow`` and ``revoke``
-  rewrote it as version 2, dropping what the newer release had written.
 """
 
 from __future__ import annotations
@@ -28,7 +26,6 @@ import pytest
 import anneal_memory.audit as audit_module
 from anneal_memory import prepare_wrap, validated_save_continuity
 from anneal_memory.audit import AuditTrail, _parse_manifest_bytes
-from anneal_memory.rederive import _load_trust, allow_store, revoke_store, trusted_roots
 from anneal_memory.server import Server
 from anneal_memory.store import Store, StoreError, _NewerSidecarError
 from anneal_memory.types import EpisodeType
@@ -465,90 +462,14 @@ class TestAuditManifest:
         assert "corrupt" not in r.stderr
 
 
-# -- derive-trust.json ------------------------------------------------------
-
-
-@pytest.mark.skipif(os.name != "posix", reason="re-derive is POSIX-only by design")
-class TestDeriveTrust:
-    @pytest.fixture
-    def trust(self, tmp_path, monkeypatch):
-        d = tmp_path / "trustdir"
-        d.mkdir(mode=0o700)
-        tf = d / "derive-trust.json"
-        monkeypatch.setenv("ANNEAL_MEMORY_DERIVE_TRUST", str(tf))
-        root = tmp_path / "root"
-        root.mkdir(mode=0o700)
-        db = tmp_path / "mem.db"
-        allow_store(db, root)
-        return tf, db, root
-
-    def _set_version(self, tf: Path, value) -> bytes:
-        data = json.loads(tf.read_text())
-        data["version"] = value
-        data["field_from_the_future"] = True
-        tf.write_text(json.dumps(data))
-        os.chmod(tf, 0o600)
-        return tf.read_bytes()
-
-    def test_this_release_writes_version_2_and_trusts_it(self, trust):
-        tf, db, root = trust
-        assert json.loads(tf.read_text())["version"] == 2
-        assert trusted_roots(db)
-
-    @pytest.mark.parametrize("value,message", [
-        (3, "written by a newer anneal-memory"),
-        (99, "written by a newer anneal-memory"),
-        (True, "unrecognised version"),
-        ("2", "unrecognised version"),
-        (2.0, "unrecognised version"),
-        (None, "unrecognised version"),
-    ])
-    def test_a_version_not_an_int_le_2_trusts_nothing(self, trust, value, message):
-        tf, db, _ = trust
-        self._set_version(tf, value)
-        assert _load_trust(tf) == []
-        assert trusted_roots(db) == {}
-        with pytest.raises(ValueError, match=message):
-            _load_trust(tf, strict=True)
-
-    @pytest.mark.parametrize("value", [1, 2])
-    def test_versions_this_release_reads(self, trust, value):
-        tf, db, _ = trust
-        self._set_version(tf, value)
-        assert len(_load_trust(tf)) == 1
-
-    def test_no_version_key_keeps_the_old_reading(self, trust):
-        tf, db, _ = trust
-        data = json.loads(tf.read_text())
-        del data["version"]
-        tf.write_text(json.dumps(data))
-        os.chmod(tf, 0o600)
-        assert len(_load_trust(tf)) == 1
-
-    def test_allow_and_revoke_never_overwrite_a_newer_file(self, trust, tmp_path):
-        """RUN case T: both rewrote a version-99 file as version 2."""
-        tf, db, _ = trust
-        before = self._set_version(tf, 99)
-        root2 = tmp_path / "root2"
-        root2.mkdir(mode=0o700)
-        with pytest.raises(ValueError, match="written by a newer anneal-memory"):
-            allow_store(db, root2)
-        assert tf.read_bytes() == before
-        with pytest.raises(ValueError, match="written by a newer anneal-memory"):
-            revoke_store(db)
-        assert tf.read_bytes() == before
-
-
 # -- the generation ties the sidecar formats together -----------------------
 
 
 def test_a_sidecar_format_constant_moves_only_with_a_generation_decision():
     from anneal_memory import store as store_module
-    from anneal_memory.rederive import _TRUST_VERSION
 
     assert (store_module._SCHEMA_VERSION, store_module._META_FORMAT_VERSION,
-            audit_module._MANIFEST_VERSION, _TRUST_VERSION) == (3, 1, 1, 2), (
+            audit_module._MANIFEST_VERSION) == (3, 1, 1), (
         "changing a store-attached sidecar constant (meta, manifest) requires "
-        "raising _SCHEMA_VERSION; _TRUST_VERSION is per-user, not covered by "
-        "the generation, and needs its own newer-refusal kept."
+        "raising _SCHEMA_VERSION."
     )

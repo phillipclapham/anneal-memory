@@ -2812,16 +2812,9 @@ _DEFAULT_METADATA = {
     # predates it reads "" (ungated), so an in-flight wrap across an upgrade
     # keeps the old behaviour.
     "wrap_gated_session": "",
-    # spore-1282: the re-derive root map (label -> root identity, see
-    # rederive.root_identities) prepare_wrap read and showed the composer,
-    # JSON-encoded as {"token": the wrap's token, "roots": [[label or null,
-    # value], ...]}. Empty
-    # when idle, when the schema has no derived-state section, or when the wrap
-    # was started without one (an earlier version, or a direct wrap_started).
-    # The save refuses when a root bound then is not the one frozen here for its
-    # label, so a label rebound while the composer worked cannot certify a claim
-    # in a repo it was not written about.
-    # Additive lifecycle key like wrap_gated_session, cleared on every terminal path.
+    # 3.x lifecycle key (the re-derive root map). 4.0 never writes it; it stays
+    # in the metadata defaults so wrap_cancelled / wrap_completed still clear it
+    # on a wrap that was opened on 3.x and is still open.
     "wrap_derive_roots": "",
     # The date prepare_wrap told the composer to stamp (``{today}`` in its
     # instructions), so a save after midnight, or under another TZ, validates

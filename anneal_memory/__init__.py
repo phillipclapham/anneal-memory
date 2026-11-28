@@ -78,21 +78,6 @@ from .schema import (
     sections_by_role,
     validate_schema,
 )
-from .rederive import (
-    TRUST_ENV,
-    VISIBILITIES,
-    Annotation,
-    DeriveRefused,
-    RederiveReport,
-    allow_store,
-    derived_state_lines,
-    parse_annotation,
-    rederive_continuity,
-    revoke_store,
-    strip_flag,
-    trust_file_path,
-    trusted_roots,
-)
 from .durable import DROP_DURABLE_RE, DurableFact, parse_durable_facts, section_chars
 from .continuity import (
     felt_currency,
@@ -248,11 +233,6 @@ __all__ = [
     "FLOW_SCHEMA",
     "SCHEMA_NAMES",
     "PROJECT_SCHEMA",
-    "DeriveRefused",
-    "RederiveReport",
-    "allow_store",
-    "revoke_store",
-    "rederive_continuity",
     "schema_by_name",
     "name_for_schema",
     "DEFAULT_GRADUATING",
@@ -348,13 +328,6 @@ __all__ = [
     "ScoredEpisode",
     "validate_origin_key",
     "hard_max_chars",
-    "derived_state_lines",
-    "parse_annotation",
-    "strip_flag",
-    "trusted_roots",
-    "trust_file_path",
-    "TRUST_ENV",
-    "VISIBILITIES",
     "MAX_PATTERNS",
     "DROP_DURABLE_RE",
     "section_chars",
@@ -362,5 +335,4 @@ __all__ = [
     "MIGRATION_MANIFEST",
     "RETRIEVAL_THRESHOLD",
     # the types those return or raise, so the frozen surface is closed over them
-    "Annotation",
 ]

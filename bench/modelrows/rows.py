@@ -16,7 +16,7 @@ import traceback
 from pathlib import Path
 
 from anneal_memory import Store
-from anneal_memory.retrieval import retrieve_relevant
+from anneal_memory.retrieval import search_episodes
 
 from .common import (PROJECT_NAME, Client, answer, cluster_bootstrap, judge_json, mean, new_wrap_stats,
                     paired_diff, probe_update, record_session, transcript, wrap_session)
@@ -255,9 +255,9 @@ def run_unit_b(sc: dict, filler: list[dict], seed: int, work: Path, client: Clie
             ids = record_session(rstore, s)
             if i == fact_idx:
                 fact_ids = ids[:1]
-        r = retrieve_relevant(rstore, None, sc["query"])
-        ctx["anneal-recall"] = "\n\n".join(e.content for e in r.episodes)
-        diag["recall"] = {"n_episodes": len(r.episodes), "fact_retrieved": any(e.id in fact_ids for e in r.episodes)}
+        found = [m.episode for m in search_episodes(rstore, sc["query"], limit=3)]
+        ctx["anneal-recall"] = "\n\n".join(e.content for e in found)
+        diag["recall"] = {"n_episodes": len(found), "fact_retrieved": any(e.id in fact_ids for e in found)}
     finally:
         rstore.close()
 

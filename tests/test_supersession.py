@@ -19,7 +19,7 @@ from anneal_memory import (
     prepare_wrap,
     validated_save_continuity,
 )
-from anneal_memory.retrieval import retrieve_relevant
+from anneal_memory.retrieval import search_episodes
 from anneal_memory.store import register_writer_schema
 
 
@@ -65,8 +65,7 @@ def test_explicit_link_hides_the_stale_fact_on_both_recall_surfaces(tmp_path):
                         supersedes=[old.id])
 
         keyword = [e.id for e in st.recall(keyword="quillmark").episodes]
-        scored = [e.id for e in retrieve_relevant(
-            st, None, QUESTION, max_patterns=0, associative=False).episodes]
+        scored = [m.episode.id for m in search_episodes(st, QUESTION)]
         assert old.id not in keyword and new.id in keyword
         assert old.id not in scored
 
@@ -130,9 +129,6 @@ def test_a_cutoff_before_the_replacement_still_shows_the_old_fact(tmp_path):
         _seed(st)
         old, new = _pair(st)
         assert [e.id for e in st.recall(keyword="quillmark", until="2026-02-01T00:00:00Z").episodes] == [old.id]
-        got = retrieve_relevant(st, None, QUESTION, max_patterns=0, associative=False,
-                                exclude_recent_minutes=60, now="2026-02-10T10:30:00Z").episodes
-        assert [e.id for e in got] == [old.id]
 
 
 def test_chains_cycles_and_undo(tmp_path):

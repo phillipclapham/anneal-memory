@@ -1450,9 +1450,8 @@ class LeaseFencedError(AnnealMemoryError):
     from ``validated_save_continuity`` when the fence predicate fails; and from
     every identity commit (``save_continuity``, ``save_meta``,
     ``replace_section``, a wrap's save) on a store where an unexpired lease
-    exists and the caller does not present its token; from every crystal
-    change (:class:`~anneal_memory.crystal.CrystalStore`) on the same terms;
-    and from ``wrap_cancelled`` of a leased wrap under a live lease without a
+    exists and the caller does not present its token; and from
+    ``wrap_cancelled`` of a leased wrap under a live lease without a
     token that owns it. Nothing was written.
 
     ``reason`` says which: ``held_by_other`` (another tenure holds the lease),
@@ -1460,8 +1459,8 @@ class LeaseFencedError(AnnealMemoryError):
     ``token_mismatch`` (the token presented is not the one the wrap was
     prepared under or the live lease's, or a leased wrap's save presented
     none, or the wrap's lease record is unreadable), ``expired`` (the tenure the token names has lapsed or was
-    released), ``version_moved`` (another identity version, or a
-    crystal document the wrap recorded, was written since the prepare), ``lease_held`` (an unexpired lease exists and the commit
+    released), ``version_moved`` (another identity version was written since
+    the prepare), ``lease_held`` (an unexpired lease exists and the commit
     presented no token). ``holder``, ``epoch`` and ``expires_at`` describe the
     lease row when one was read, else ``None``."""
 
@@ -1489,8 +1488,7 @@ def _reconstruct_lease_fenced(
     return cls(message, reason=reason, holder=holder, epoch=epoch, expires_at=expires_at)
 
 
-# Lock order, one for every writer (integration L3 I2): the crystal flock
-# (``<stem>.crystal.json.lock``), then the continuity flock
+# Lock order, one for every writer (integration L3 I2): the continuity flock
 # (``<stem>.continuity.md.lock``, :func:`continuity_lock`), then the SQLite
 # write lock (``BEGIN IMMEDIATE``). A writer takes only the locks it needs, but
 # never one earlier in this order while it holds a later one.
@@ -1536,54 +1534,6 @@ def _conn_lease_live(conn: sqlite3.Connection) -> bool:
     return row is not None and row["expires_at"] > _now_utc()
 
 
-def _conn_crystal_hash(conn: sqlite3.Connection) -> str | None:
-    """The ``crystal_document`` row's ``content_hash``; ``None`` with no row
-    or no table."""
-    if not _conn_has_table(conn, "crystal_document"):
-        return None
-    row = conn.execute("SELECT content_hash FROM crystal_document WHERE id = 1").fetchone()
-    return None if row is None else row[0]
-
-
-def _rebaseline_wrap_crystal(
-    conn: sqlite3.Connection, lease_token: str | None, prior_hash: str | None,
-    crystal_hash: str,
-) -> None:
-    """Inside a crystal change's write transaction, after its gate passed: when
-    the change presents the lease token the open wrap was prepared under AND
-    changes the very document the wrap record names (``prior_hash``, the row's
-    hash before this change; ``None`` with no row), it is that wrap's own change
-    (a wrap may crystallize between its prepare and its save, and undo it), so
-    the wrap record's ``crystal_hash`` moves to ``crystal_hash``. The baseline
-    only ever moves along an unbroken chain of the holder's own changes, as a
-    conditional write chains on the version its own last write returned (HTTP
-    If-Match / ETag); a change from any other document, or by anyone else,
-    leaves the record, and the wrap's save refuses (``version_moved``).
-
-    Ruled 2026-10-24 (1024+7 head, integration L3 r2 I1): only a LEASED wrap is
-    fenced on crystals. Without a lease nothing tells the wrap's own crystal
-    change from another writer's, and refusing every crystal change would refuse
-    every wrap that crystallizes; an unleased wrap keeps 1.0's behaviour
-    (no crystal precondition). A caller that needs the fence takes the lease."""
-    if lease_token is None:
-        return
-    found = dict(conn.execute(
-        "SELECT key, value FROM metadata WHERE key IN ('wrap_lease', 'wrap_token')"
-    ).fetchall())
-    try:
-        fence = json.loads(found.get("wrap_lease") or "null")
-    except ValueError:
-        return
-    if (isinstance(fence, dict) and found.get("wrap_token")
-            and fence.get("token") == found["wrap_token"]
-            and fence.get("token_hash") == _lease_token_digest(lease_token)
-            and "crystal_hash" in fence
-            and fence["crystal_hash"] == prior_hash):
-        fence["crystal_hash"] = crystal_hash
-        conn.execute("UPDATE metadata SET value = ? WHERE key = 'wrap_lease'",
-                     (json.dumps(fence),))
-
-
 def _lease_fenced_error(
     row: Any, reason: LeaseFenceReason, what: str,
 ) -> LeaseFencedError:
@@ -1593,8 +1543,7 @@ def _lease_fenced_error(
         "token_mismatch": "the lease token presented is not the one this write "
                           "needs (none was presented, or another one)",
         "expired": "the lease tenure the token names has expired or was released",
-        "version_moved": "another identity version, or another crystal document, "
-                         "was written since the prepare",
+        "version_moved": "another identity version was written since the prepare",
         "lease_held": "an unexpired consolidation lease exists and no lease token "
                       "was presented",
     }[reason]
@@ -1612,9 +1561,8 @@ def _lease_gate(
     prepared: dict[str, Any] | None,
 ) -> None:
     """THE lease fence (design B3, r1 T1/T2; integration L3 I1), one
-    function on a connection: every identity commit, every crystal mutation
-    (:class:`~anneal_memory.crystal.CrystalStore`, on its own connection) and
-    the save of a wrap run it inside their write transaction (the write lock is
+    function on a connection: every identity commit and the save of a wrap run
+    it inside their write transaction (the write lock is
     held from ``BEGIN IMMEDIATE``, so no acquire, itself a write, can move the
     lease before the commit; a lease that lapses by the clock in that window
     lapses with no one able to take it over). The writer presents the token;
@@ -1630,9 +1578,9 @@ def _lease_gate(
     always has, and one that presents a token is refused (it asserts a tenure
     it does not hold). Optimistic concurrency (B3 L3 r1 U1, integration L3
     I1): any ``prepared`` record, leased or not, carries the identity version
-    the wrap was prepared on, and a record that carries ``crystal_hash`` also
-    the crystal document's hash; the save is refused (``version_moved``) when
-    either moved. Raises :class:`LeaseFencedError`."""
+    the wrap was prepared on; the save is refused (``version_moved``) when it
+    moved. A ``crystal_hash`` in a record a 3.x wrap left is ignored. Raises
+    :class:`LeaseFencedError`."""
     row = _conn_lease_row(conn)
     now = _now_utc()
     live = row is not None and row["expires_at"] > now
@@ -1660,10 +1608,8 @@ def _lease_gate(
         reason = "token_mismatch"
     else:
         reason = "no_lease"
-    if reason is None and prepared is not None and (
-            _conn_latest_identity_version(conn) != prepared.get("identity_version")
-            or ("crystal_hash" in prepared
-                and _conn_crystal_hash(conn) != prepared["crystal_hash"])):
+    if (reason is None and prepared is not None
+            and _conn_latest_identity_version(conn) != prepared.get("identity_version")):
         reason = "version_moved"
     if reason is not None:
         raise _lease_fenced_error(row, reason, what)
@@ -1770,8 +1716,7 @@ def continuity_lock(
       than re-implementing the idiom, so the lock-path derivation lives in one
       place and cannot drift.
 
-    Reuses the exact idiom of :meth:`SporeStore._transaction` /
-    :meth:`CrystalStore._transaction`: an exclusive advisory ``flock`` on a
+    Reuses the exact idiom of :meth:`SporeStore._transaction`: an exclusive advisory ``flock`` on a
     sibling ``.lock`` file, released when the fd closes or the process dies — a
     crashed holder can never strand it.
 
@@ -1913,7 +1858,7 @@ _NEW_FORMAT_PAIR_ID_RE = re.compile(r"[0-9a-f]{12}-[0-9a-f]{8}")
 # arms the write guard below (tests/test_store.py, ``TestGenerationGuards``).
 # Generation 3 makes the database the identity's home: ``identity_versions``
 # holds every continuity version (the files are projections of the latest),
-# ``crystal_document`` holds the crystal store (its JSON file a projection) and
+# ``crystal_document`` is a dead table kept only for old stores and
 # ``audit_outbox`` holds a batched write's audit events until they are logged.
 _SCHEMA_VERSION = 3
 # The continuity meta sidecar's own ``format_version`` (every wrap writes it
@@ -2527,8 +2472,9 @@ CREATE TABLE IF NOT EXISTS identity_versions (
     created_at TEXT NOT NULL
 );
 
--- Generation 3: the crystal store's document (crystal.py). One row; the
--- <stem>.crystal.json file is its projection. content_hash is the sha256 of
+-- Generation 3: the crystal store's document (the crystal store was removed in
+-- 4.0; the table stays, unwritten, in a store that has it). One row; the
+-- <stem>.crystal.json file was its projection. content_hash is the sha256 of
 -- doc_json's UTF-8 bytes (the projection's exact bytes); prev_hash is the
 -- content_hash the row replaced (or the hash of the file a first write adopted),
 -- so a projection a crash left one write behind is recognised as stale rather
@@ -3388,10 +3334,6 @@ class Store:
     Use as a context manager (``with Store(...) as s:``) to ensure the
     connection is closed properly.
 
-    The crystal store beside it follows the sibling convention ``<stem>.db`` /
-    ``<stem>.crystal.json``; under any other database name a
-    :class:`~anneal_memory.crystal.CrystalStore` needs an explicit ``db=``.
-
     **Wrap-lifecycle invariants (10.5c.4):** The wrap state machine is
     tracked across three metadata keys — ``wrap_started_at``,
     ``wrap_token``, ``wrap_episode_ids`` — that MUST stay in sync:
@@ -3772,21 +3714,6 @@ class Store:
                         f"unaffected; load_continuity retries.",
                         stacklevel=3,
                     )
-                # The crystal file likewise (design B2): a crystal read never
-                # writes, so the writer side keeps the projection current.
-                if (not self._defer_commit and not self._conn.in_transaction
-                        and self._path != Path(":memory:")):
-                    try:
-                        from .crystal import _reconcile_crystal_projection
-                        _reconcile_crystal_projection(self._conn, self._path)
-                    except Exception as crystal_exc:
-                        _warn_after_commit(
-                            f"anneal-memory: the crystal file could not be "
-                            f"re-projected at open ({type(crystal_exc).__name__}: "
-                            f"{crystal_exc}). The crystals in the database are "
-                            f"unaffected; the next crystal change or open retries.",
-                            stacklevel=3,
-                        )
                 try:
                     self._warn_orphan_tmp_files()
                 except Exception as orphan_exc:
@@ -3898,19 +3825,11 @@ class Store:
         -> ``5.21s call``. A standing test is a better oracle than a probe
         written to settle the argument it is settling.
         """
-        # The crystal seed's lock, when this open will seed, is taken BEFORE
-        # ``BEGIN IMMEDIATE`` and held through the commit (crystal lock, then
-        # SQLite, everywhere; crystal.py owns it, imported here because it
-        # imports this module).
-        from .crystal import _crystal_seed_lock
         with ExitStack() as seed_lock:
-            may_seed_crystals = (
-                self._path != Path(":memory:")
-                and seed_lock.enter_context(_crystal_seed_lock(self._conn, self._path)))
             # Integration L3 I2: when this open may seed the identity (a store
             # that predates generation 3, with a continuity file beside it), the
-            # continuity lock is taken here too, after the crystal lock and before
-            # SQLite (the order above ``_lease_token_digest``), and held through
+            # continuity lock is taken here too, before SQLite (the order above
+            # ``_lease_token_digest``), and held through
             # the seed's commit: a generation-2 writer mid-write finishes its
             # rename first, so its text is seeded, never filed as ``.diverged``.
             if (self._path != Path(":memory:")
@@ -3922,7 +3841,7 @@ class Store:
             # lock this method exists to hold. See ``_sql_statements``.
             self._conn.execute("BEGIN IMMEDIATE")
             try:
-                self._init_schema_locked(seed_crystals=may_seed_crystals)
+                self._init_schema_locked()
                 self._conn.commit()
             except BaseException:
                 try:
@@ -3931,7 +3850,7 @@ class Store:
                     pass
                 raise
 
-    def _init_schema_locked(self, *, seed_crystals: bool = False) -> None:
+    def _init_schema_locked(self) -> None:
         """The body of :meth:`_init_schema`, run under its writer lock.
 
         Split out so the lock acquisition, the commit and the rollback read as
@@ -4001,14 +3920,6 @@ class Store:
                 self._backfill_episode_origin()
             self._conn.execute("INSERT OR IGNORE INTO metadata (key, value) VALUES (?, '1')",
                                (_ORIGIN_BACKFILL_KEY,))
-        if seed_crystals:
-            # Seeds only while there is no row: at the migration, and for a new
-            # store created beside a legacy crystal file; only under the crystal
-            # lock :meth:`_init_schema` took for it. crystal.py owns the crystal
-            # format; imported here because it imports this module. Never commits
-            # (this transaction is the open's schema transaction).
-            from .crystal import _seed_crystal_document
-            _seed_crystal_document(self._conn, self._path)
 
         # Insert default metadata (ignore if already exists)
         # format_version read now, not from the import-time dict, so the
@@ -4061,7 +3972,7 @@ class Store:
         # had CREATED, which is not the case that produces skew.
         #
         # Stamping on write makes the field answer the question it is actually
-        # asked, and matches what ``crystal.py`` / ``spores.py`` already do —
+        # asked, and matches what ``spores.py`` already does —
         # leaving SQLite create-time-only kept one contract with two mechanisms
         # giving two answers, which is the same asymmetry the guard shipped on
         # 2026-09-04 to fix, one layer down.
@@ -8235,11 +8146,7 @@ class Store:
             # never opens the global wrap under another's tenure.
             lease_json = ""
             if lease_token is not None:
-                # A leased wrap also records the crystal document it was prepared
-                # on (integration L3 I1); the holder's own crystal changes move it
-                # (:func:`_rebaseline_wrap_crystal`), anyone else's refuse the save.
-                lease_json = json.dumps({"token": token, **self._lease_prepare(lease_token),
-                                         "crystal_hash": _conn_crystal_hash(self._conn)})
+                lease_json = json.dumps({"token": token, **self._lease_prepare(lease_token)})
             elif self._identity_table_present():
                 self._lease_gate("prepare_wrap", None, None)
                 lease_json = json.dumps({
@@ -11986,7 +11893,7 @@ class Store:
         self, what: str, lease_token: str | None, prepared: dict[str, Any] | None,
     ) -> None:
         """The module-level :func:`_lease_gate` on this handle's connection:
-        the one predicate Store and CrystalStore share (integration L3 I1)."""
+        the one predicate every identity commit shares (integration L3 I1)."""
         _lease_gate(self._conn, what, lease_token, prepared)
 
     def _latest_identity_version(self) -> int | None:
@@ -12390,8 +12297,8 @@ class Store:
     def _refuse_a_newer_schema(self) -> None:
         """Refuse a store written by a NEWER anneal, the way the sidecars do.
 
-        ⛔ THE ASYMMETRY THIS CLOSES (spore-747). ``crystal.py`` and
-        ``spores.py`` both hard-refuse a newer ``schema_version`` — verbatim,
+        ⛔ THE ASYMMETRY THIS CLOSES (spore-747). The sidecar stores
+        (``spores.py`` among them) hard-refuse a newer ``schema_version`` — verbatim,
         *"refusing to read it so fields this version doesn't understand aren't
         silently dropped"*. The SQLite store wrote ``format_version`` into
         metadata and **never read it back**, so the two halves of one store

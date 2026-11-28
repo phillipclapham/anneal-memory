@@ -19,7 +19,7 @@ control:
 
 Two recall surfaces:
 
-* ``relevant``   ``retrieve_relevant`` (scored keyword recall; the harness hook path).
+* ``search``     ``search_episodes`` (scored word-by-word recall; the query path).
 * ``recall``     ``Store.recall(keyword=<subject>)`` (the MCP/CLI recall path; LIKE
                  match, newest first). Its current@1 on the update shapes holds by
                  construction (every update names the subject and is newer); the
@@ -57,7 +57,7 @@ import tempfile
 from collections import defaultdict
 from pathlib import Path
 
-from anneal_memory.retrieval import MIN_EPISODE_LEN, retrieve_relevant
+from anneal_memory.retrieval import MIN_EPISODE_LEN, search_episodes
 from anneal_memory.store import Store
 
 # (subject, attribute phrase, old value, new value, paraphrase template, question)
@@ -204,12 +204,7 @@ def run(shape: str, workdir: Path, mode: str = "none") -> dict[str, dict[str, in
             subject, _a, _o, _n, _p, question = fact
             q = question.format(s=subject)
             surfaces = {
-                "relevant": [
-                    e.id
-                    for e in retrieve_relevant(
-                        st, None, q, max_patterns=0, associative=False
-                    ).episodes
-                ],
+                "search": [m.episode.id for m in search_episodes(st, q, limit=3)],
                 "recall": [e.id for e in st.recall(keyword=subject, limit=3).episodes],
             }
             for name, ids in surfaces.items():

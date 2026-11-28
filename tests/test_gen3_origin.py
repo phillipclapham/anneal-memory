@@ -14,7 +14,6 @@ from pathlib import Path
 import pytest
 
 from anneal_memory import Store, prepare_wrap, validated_save_continuity
-from anneal_memory.retrieval import retrieve_relevant
 from anneal_memory.server import Server
 from anneal_memory.store import (
     _corroborative_trust,
@@ -482,9 +481,6 @@ def test_recall_labels_an_episode_whose_origin_is_below_its_trust(store):
     text = Server(store)._tool_recall({"keyword": "gate opens"})["content"][0]["text"]
     head, _, tail = text.partition(RELAYED)
     assert summary.id in tail and summary.id not in head
-    found = retrieve_relevant(store, None, "summary gate opens noon vendor", mode="query")
-    labels = {e.id: e.trust for e in found.episodes}
-    assert labels.get(summary.id) == "external"
 
 
 

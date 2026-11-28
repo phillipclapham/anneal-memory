@@ -17,14 +17,13 @@ class TestToolDefinitions:
     """Verify canonical tool definitions are well-formed."""
 
     def test_tool_count(self):
-        assert len(TOOLS) == 25  # 7 core + 2 crystal + 8 spore + 8 intention (the spore tools' new names, additive)
+        assert len(TOOLS) == 24  # 8 core (incl. read_continuity) + 8 spore + 8 intention (the spore tools' new names, additive)
 
     def test_tool_names(self):
         names = {t["name"] for t in TOOLS}
         assert names == {
-            "record", "recall", "prepare_wrap", "save_continuity", "wrap_cancel",
-            "delete_episode", "status",
-            "crystal_recall", "crystal_index",
+            "record", "recall", "read_continuity", "prepare_wrap", "save_continuity",
+            "wrap_cancel", "delete_episode", "status",
             "spore_add", "spore_get", "spore_list", "spore_touch",
             "spore_update", "spore_descend", "spore_ascend", "spore_surface",
             "intention_add", "intention_get", "intention_list", "intention_touch",
@@ -796,7 +795,7 @@ class TestDocumentedToolCount:
         every consumer keeps working correctly against the narrower contract it
         already knows, and the only symptom is absence — which is precisely why
         this needs a test rather than review. Same shape as the `wrap_cancel`
-        row in this same file, and as `crystal.py`'s consumer contract, which
+        row in this same file, and as the removed crystal tier's consumer contract, which
         kept instructing readers to guard `level in (2, 3)` and so RE-CREATED
         the cap in at least one consumer that trusted it.
 

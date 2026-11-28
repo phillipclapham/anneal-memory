@@ -6,6 +6,7 @@ project_memory/seat_1023_28/b3_repro.txt.
 
 from __future__ import annotations
 
+import json
 import time
 import warnings
 from unittest import mock
@@ -174,3 +175,18 @@ def test_t5_a_save_prepared_under_an_expired_lease_is_fenced(tmp_path):
     b.close()
 
 
+def test_a_lease_record_a_3x_wrap_left_with_a_crystal_hash_is_ignored(tmp_path):
+    s = Store(str(tmp_path / "lease3x.db"), project_name="T")
+    s.record("obs", EpisodeType.OBSERVATION)
+    g = s.lease_acquire("A", ttl_seconds=60)
+    p = prepare_wrap(s, lease_token=g.token)
+    row = s._conn.execute("SELECT value FROM metadata WHERE key = 'wrap_lease'").fetchone()
+    fence = json.loads(row[0])
+    assert "crystal_hash" not in fence  # 4.0 writes none
+    fence["crystal_hash"] = "0" * 64  # what a wrap opened on 3.x carries
+    s._conn.execute("UPDATE metadata SET value = ? WHERE key = 'wrap_lease'", (json.dumps(fence),))
+    s._conn.commit()
+    done = validated_save_continuity(
+        s, _TEXT, wrap_token=p["wrap_token"], lease_token=g.token)
+    assert done["wrap_result"]["wrap_id"] == 1
+    s.close()

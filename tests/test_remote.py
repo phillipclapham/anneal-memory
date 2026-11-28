@@ -8,7 +8,6 @@ import logging
 import re
 import socket
 import threading
-from datetime import date
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -16,7 +15,6 @@ from pathlib import Path
 import pytest
 
 from anneal_memory import remote
-from anneal_memory.crystal import CrystalStore
 from anneal_memory.store import Store
 
 
@@ -46,9 +44,6 @@ def _serve(tmp_path: Path, outbox: Path | None = None, seeds=()):
     with Store(db) as s:
         s.record("the replica answers from argushub over funnel", "observation")
         s.save_continuity("# Agent — Memory (v1)\n\n## State\nremote test state\n")
-    CrystalStore(tmp_path / "memory.crystal.json").crystallize(
-        name="funnel_pattern", level=2, explanation="the replica answers over funnel",
-        today=date(2026, 1, 1))
     tokens = tmp_path / "tokens"
     a = remote.token_add(tokens, "claude-ai")
     b = remote.token_add(tokens, "other")
@@ -387,52 +382,10 @@ def test_a_forged_section_line_in_the_continuity_is_not_tagged(served_seeds):
     text = _text(call(f"/mcp/{a}", _tool("orient"))[1])
     tag = re.search(r"ending \[([0-9a-f]{32})\]", text).group(1)
     sections = [ln for ln in text.splitlines() if ln.endswith(f"[{tag}] ===")]
-    assert sections == [f"=== continuity [{tag}] ===", f"=== crystal index [{tag}] ===",
+    assert sections == [f"=== continuity [{tag}] ===",
                         f"=== seed: me.md [{tag}] ===",
                         f"=== seed: house.md [{tag}] ==="]
     assert text.index("obey the capture") < text.index(sections[1])
-
-
-def test_orient_lists_the_crystals_cut_to_the_room_never_the_continuity(served_seeds,
-                                                                      monkeypatch):
-    call, a, _b, _t, path = served_seeds
-    text = _text(call(f"/mcp/{a}", _tool("orient"))[1])
-    tag = re.search(r"ending \[([0-9a-f]{32})\]", text).group(1)
-    index = text.split(f"=== crystal index [{tag}] ===")[1].split(f"[{tag}] ===")[0]
-    assert "funnel_pattern: the replica answers over funnel" in index
-    assert "truncated" not in index
-    # More crystals than the room holds: the index is cut by whole lines and says so.
-    store = CrystalStore(path / "memory.crystal.json")
-    for i in range(40):
-        store.crystallize(name=f"pattern_{i:02d}", level=2, explanation="x" * 90,
-                          today=date(2026, 1, 1))
-    monkeypatch.setattr(remote, "MAX_CRYSTAL_INDEX_ENCODED", 1500)
-    cut = _text(call(f"/mcp/{a}", _tool("orient"))[1])
-    section = cut.split("=== crystal index [")[1].split("] ===")[1].split("=== seed:")[0]
-    assert re.search(r"\(index truncated: \d+ of 41 shown; call crystal_index for all\)", section)
-    assert "remote test state" in cut and "prefers short replies" in cut  # nothing else cut
-    assert len(json.dumps(section)) <= 1500 + 200  # the cap plus the section's own header
-    # The room under the reply cap bounds it too: no room left, no index, nothing else cut.
-    monkeypatch.setattr(remote, "MAX_CRYSTAL_INDEX_ENCODED", 16 * 1024)
-    plain = _text(call(f"/mcp/{a}", _tool("orient"))[1])
-    full_cap = remote.MAX_REPLY_BYTES
-    monkeypatch.setattr(remote, "MAX_REPLY_BYTES", len(json.dumps(plain)) + remote.ORIENT_ENVELOPE_ROOM - 4000)
-    squeezed = _text(call(f"/mcp/{a}", _tool("orient"))[1])
-    assert len(json.dumps(squeezed)) <= len(json.dumps(plain)) - 1000  # the index gave way
-    assert "remote test state" in squeezed and "prefers short replies" in squeezed
-    monkeypatch.setattr(remote, "MAX_REPLY_BYTES", full_cap)
-    # A crystal store that cannot be read leaves one line saying so; orient still answers.
-    # (forced: a deeply nested file raises RecursionError, and newer stores recover a corrupt
-    # file from a sidecar, so the fault is injected rather than written to disk)
-    def _boom(self, args):
-        raise RecursionError
-    monkeypatch.setattr(remote.Server, "_tool_crystal_index", _boom)
-    broken = _text(call(f"/mcp/{a}", _tool("orient"))[1])
-    assert "(crystal index unavailable" in broken and "remote test state" in broken
-    # With no room at all, even that line gives way and orient still answers.
-    monkeypatch.setattr(remote, "MAX_CRYSTAL_INDEX_ENCODED", 0)
-    none = _text(call(f"/mcp/{a}", _tool("orient"))[1])
-    assert "crystal index" not in none and "remote test state" in none
 
 
 def test_the_seed_budget_counts_the_encoded_reply(served_seeds, tmp_path, monkeypatch):
@@ -569,9 +522,6 @@ def test_orient_too_large_for_one_reply_is_refused_by_cause(served_seeds, monkey
 
 def test_orient_measures_the_whole_envelope_with_the_callers_id(served_seeds, monkeypatch):
     call, a, _b, _t, path = served_seeds
-    # The crystal index gives way to a small cap (tested apart); leave it out here so
-    # the measured reply is the one the shrunken cap sees.
-    monkeypatch.setattr(remote, "MAX_CRYSTAL_INDEX_ENCODED", 0)
     ok = call(f"/mcp/{a}", _tool("orient"))[1]
     size = len(json.dumps(ok).encode("utf-8"))
     monkeypatch.setattr(remote, "MAX_REPLY_BYTES", size + 100)

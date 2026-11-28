@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import pytest
 
-from anneal_memory import Store, retrieve_relevant, search_episodes
+from anneal_memory import Store, search_episodes
 from anneal_memory import retrieval as _retrieval
 from anneal_memory.integrity import TOOLS
 from anneal_memory.server import Server
@@ -54,16 +54,6 @@ class TestUncappedFetchInQueryMode:
         top = search_episodes(store, "alpha beta", limit=1)
         assert [m.episode.id for m in top] == [old]
         assert top[0].matched == ("alpha", "beta")
-
-    def test_retrieve_relevant_query_mode_too_prompt_mode_keeps_the_cap(self, store):
-        old = _seed_flood(store, self.PER_WORD)
-        q = "alpha beta"
-        got = retrieve_relevant(store, None, q, mode="query", max_episodes=1)
-        assert [e.id for e in got.episodes] == [old]
-        # prompt mode still fetches only the newest candidates per keyword (and has the
-        # 80-character floor, so these short notes never surface there anyway)
-        assert old not in [e.id for e in retrieve_relevant(
-            store, None, q, max_episodes=3).episodes]
 
     def test_the_mcp_count_is_exact(self, server, store):
         _seed_flood(store, self.PER_WORD)

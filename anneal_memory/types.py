@@ -399,51 +399,7 @@ class RecallResult:
     query_params: dict[str, Any] = field(default_factory=dict)
 
 
-# -- On-demand relevance retrieval (AM-CRYSTAL-RECALL, v0.6) --
-#
-# The shapes returned by ``anneal_memory.retrieval.retrieve_relevant`` — the
-# unified, query-relevant surface a harness's per-turn recall hook renders. This
-# is the v2-consumer contract: the hook calls ONE library function and gets back
-# both kinds of relevant memory (distilled crystallized PATTERNS + raw EPISODES),
-# already scored and ranked, with zero harness-side query logic. Both halves are
-# frozen dataclasses (like ``Episode`` / ``RecallResult``), not TypedDicts: this
-# is a retrieval/domain operation, and the consumer reads attributes rather than
-# serializing the result over a transport.
-
-
-@dataclass(frozen=True)
-class RelevantPattern:
-    """A crystallized pattern scored as relevant to a query.
-
-    ``score`` is the weighted keyword-overlap score (distinctive snake_case /
-    hyphenated / long terms weigh more). ``activation`` is the read-time tier
-    (``hot``/``warm``/``cold``/``dormant``) computed at retrieval time. The
-    snake_case ``name`` is itself high-signal — a query word matches it as a
-    substring (``structural`` ⊂ ``structural_invariants_beat_discipline``).
-
-    ``source`` names WHICH retrieval path surfaced the pattern — the per-pattern
-    provenance a receipt/baseline-isolation consumer needs:
-
-    * ``"keyword"`` — the pattern's OWN text (name/explanation/tags) matched the
-      query keywords (:func:`retrieval._score_patterns`). The high-confidence path.
-    * ``"evidence_edge"`` — keyword-orthogonal: surfaced via the associative
-      backend because the pattern's ``evidence`` cites an episode the query
-      *directly* keyword-matched (no graph hop).
-    * ``"graph_hop"`` — written by anneal 0.9.6 through 0.9.25, whose associative
-      backend also followed one episode-Hebbian hop. That hop was removed in
-      0.9.26, so this version never sets it; the value stays documented because
-      receipts written by older versions carry it.
-
-    Defaults to ``"keyword"`` so the field is additive (older constructors and
-    adopter mocks stay valid; only the associative path sets the other values)."""
-
-    name: str
-    level: int
-    explanation: str
-    tags: list[str]
-    activation: str
-    score: float
-    source: str = "keyword"
+# -- Scored episodes (the search path's result rows) --
 
 
 @dataclass(frozen=True)
@@ -489,49 +445,6 @@ class ReplacedEpisode:
 
 
 REPLACED_CONTENT_MAX = 300
-
-
-@dataclass(frozen=True)
-class RelevantFact:
-    """A durable fact (a line of the continuity's ``## Durable Facts`` section) that
-    the query cued.
-
-    ``fact`` is the fact text without its cue list, ``line`` the raw ``- `` line as
-    written (cues included). ``cue_matched`` holds the cue words that matched and
-    ``fact_matched`` the distinctive words of the fact text that matched (a cue match is
-    the primary path; the fact text alone needs two words); ``matched`` is their union,
-    cue words first. ``source`` is ``"cue"`` when at least one cue matched and ``"fact"``
-    when only the fact text did.
-
-    A harness hook renders one as ``Durable fact (cue: restaurant): tree nut allergy``,
-    built from ``.fact`` and the first of ``.cue_matched`` (``matches`` and
-    ``.fact_matched`` when ``source`` is ``"fact"``)."""
-
-    fact: str
-    line: str
-    matched: tuple[str, ...]
-    source: str = "cue"
-    cue_matched: tuple[str, ...] = ()
-    fact_matched: tuple[str, ...] = ()
-
-
-@dataclass
-class RelevantResult:
-    """The unified result of :func:`anneal_memory.retrieval.retrieve_relevant`.
-
-    Two kinds kept SEPARATE (not merged) because they are different in nature —
-    distilled wisdom vs raw events — and a consumer surfacing them typically puts
-    crystallized ``patterns`` ABOVE ``episodes`` (distilled > raw for decision-time
-    recall). ``query_keywords`` is the distinctive terms the query was reduced to
-    — exposed for hit-rate measurement (``stability_is_observed_not_declared``: the
-    keyword baseline a future associative backend must beat)."""
-
-    patterns: list[RelevantPattern]
-    episodes: list[ScoredEpisode]
-    query_keywords: list[str] = field(default_factory=list)
-    # Durable facts the query cued (at most MAX_DURABLE_FACTS). Additive: empty unless
-    # the store's continuity has a durable section and a fact matched.
-    facts: list[RelevantFact] = field(default_factory=list)
 
 
 # -- TypedDict return shapes for the canonical pipeline --

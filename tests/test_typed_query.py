@@ -1,5 +1,5 @@
-"""Typed-query recall: ``mode="query"`` on the retrieval functions, ``search_episodes``,
-and the MCP ``recall`` word-by-word fallback / ``crystal_recall`` ``mode`` parameter.
+"""Typed-query recall: ``mode="query"`` on ``extract_keywords``, ``search_episodes``,
+and the MCP ``recall`` word-by-word fallback.
 
 The scenario fixtures follow what a real agent did: it asked MCP ``recall`` for a
 whole PHRASE ("bank export fmt_row64 CLI nightly rows"), the exact-substring match
@@ -8,16 +8,11 @@ found nothing, and the store did hold single-word hits (fmt_row52, cutover, nigh
 
 from __future__ import annotations
 
-from datetime import date
-
 import pytest
 
 from anneal_memory import (
-    CrystalStore,
     EpisodeMatch,
     Store,
-    retrieve_patterns,
-    retrieve_relevant,
     search_episodes,
 )
 from anneal_memory import retrieval as _retrieval
@@ -26,7 +21,6 @@ from anneal_memory.integrity import TOOLS
 from anneal_memory.server import Server
 from anneal_memory.types import EpisodeType
 
-T0 = date(2026, 10, 3)
 PHRASE = "bank export fmt_row64 CLI nightly rows"
 
 
@@ -70,42 +64,10 @@ def _seed_mykhailo(store):
     return a.id, b.id, c.id
 
 
-# -- retrieve_relevant / retrieve_patterns: the mode --------------------------
+# -- the retrieval mode -------------------------------------------------------
 
 
 class TestMode:
-    def test_query_mode_surfaces_single_hit_episode_prompt_mode_does_not(self, store):
-        a, _b, _c = _seed_mykhailo(store)
-        # Two distinctive keywords, but the store holds only ONE of them (fmt_row52).
-        q = "fmt_row52 zebraquartz"
-        prompt = retrieve_relevant(store, None, q)
-        query = retrieve_relevant(store, None, q, mode="query")
-        assert prompt.episodes == []
-        assert [e.id for e in query.episodes] == [a]
-
-    def test_query_mode_accepts_a_single_keyword_query(self, store):
-        a, _b, _c = _seed_mykhailo(store)
-        assert retrieve_relevant(store, None, "fmt_row52").episodes == []
-        r = retrieve_relevant(store, None, "fmt_row52", mode="query")
-        assert [e.id for e in r.episodes] == [a]
-        assert r.query_keywords == ["fmt_row52"]
-
-    def test_prompt_mode_is_the_default_and_unchanged(self, store):
-        _seed_mykhailo(store)
-        q = "nightly export rows finance team"
-        default = retrieve_relevant(store, None, q)
-        explicit = retrieve_relevant(store, None, q, mode="prompt")
-        assert default == explicit
-        assert len(default.episodes) == 1  # 2+ hits: the gates it keeps still pass
-
-    def test_query_mode_keeps_ranking_more_hits_first(self, store):
-        a, b, c = _seed_mykhailo(store)
-        r = retrieve_relevant(
-            store, None, "nightly export rows cutover", mode="query", max_episodes=5
-        )
-        assert [e.id for e in r.episodes][0] == c  # three hits beat one
-        assert {e.id for e in r.episodes} == {b, c}
-
     def test_query_mode_has_no_length_floor_prompt_mode_keeps_it(self, store):
         short = store.record(
             "User is allergic to tree nuts.", EpisodeType.OBSERVATION, source="agent",
@@ -113,53 +75,25 @@ class TestMode:
         )
         assert len(short.content) < _retrieval.MIN_EPISODE_LEN
         q = "allergic tree nuts"
-        assert retrieve_relevant(store, None, q).episodes == []
-        r = retrieve_relevant(store, None, q, mode="query")
-        assert [e.id for e in r.episodes] == [short.id]
         assert [m.episode.id for m in search_episodes(store, q)] == [short.id]
-
-    def test_query_mode_opens_the_pattern_tier(self, tmp_path):
-        crystal = CrystalStore(tmp_path / "mem.crystal.json")
-        crystal.crystallize(
-            name="fmt_row52_rounding", level=2,
-            explanation="the bank export rounds to whole cents", tags=[], today=T0,
-        )
-        store = Store(tmp_path / "mem.db")
-        try:
-            assert retrieve_patterns(crystal, "fmt_row52", today=T0) == []
-            assert retrieve_patterns(crystal, "fmt_row52", today=T0, mode="query")[0].name \
-                == "fmt_row52_rounding"
-            assert retrieve_relevant(store, crystal, "fmt_row52", today=T0).patterns == []
-            assert retrieve_relevant(
-                store, crystal, "fmt_row52", today=T0, mode="query"
-            ).patterns[0].name == "fmt_row52_rounding"
-        finally:
-            store.close()
 
     @pytest.mark.parametrize("bad", ["Query", "", "prompts", None, 3, ["query"]])
     def test_bad_mode_raises(self, store, bad):
         with pytest.raises(ValueError, match="mode must be one of"):
-            retrieve_relevant(store, None, "nightly export rows", mode=bad)
-        with pytest.raises(ValueError, match="mode must be one of"):
-            retrieve_patterns(None, "nightly export rows", mode=bad)
+            extract_keywords("nightly export rows", mode=bad)
 
     def test_query_mode_does_not_mutate_module_constants(self, store):
         _seed_mykhailo(store)
         before = (
-            _retrieval.MIN_KEYWORDS, _retrieval.MIN_HITS,
-            _retrieval.SCORE_THRESHOLD, _retrieval.IDF_SCORE_THRESHOLD,
-            _retrieval.IDF_ANCHOR_WEIGHT,
+            _retrieval.MIN_HITS, _retrieval.SCORE_THRESHOLD,
+            _retrieval.IDF_SCORE_THRESHOLD, _retrieval.IDF_ANCHOR_WEIGHT,
         )
-        retrieve_relevant(store, None, "fmt_row52", mode="query")
         search_episodes(store, "fmt_row52 nightly")
         after = (
-            _retrieval.MIN_KEYWORDS, _retrieval.MIN_HITS,
-            _retrieval.SCORE_THRESHOLD, _retrieval.IDF_SCORE_THRESHOLD,
-            _retrieval.IDF_ANCHOR_WEIGHT,
+            _retrieval.MIN_HITS, _retrieval.SCORE_THRESHOLD,
+            _retrieval.IDF_SCORE_THRESHOLD, _retrieval.IDF_ANCHOR_WEIGHT,
         )
-        assert before == after == (2, 2, 2.5, 1.6, 0.5)
-        # and a prompt-mode call straight after is still gated
-        assert retrieve_relevant(store, None, "fmt_row52").episodes == []
+        assert before == after == (2, 2.5, 1.6, 0.5)
 
     def test_query_mode_opens_the_anchor_under_idf(self, store):
         """A corpus past IDF_MIN_CORPUS turns the distinctive anchor on in prompt mode;
@@ -172,8 +106,7 @@ class TestMode:
                 timestamp=f"2026-09-{(i % 28) + 1:02d}T09:00:00Z",
             )
         q = "session convo build"
-        assert retrieve_relevant(store, None, q).episodes == []
-        assert len(retrieve_relevant(store, None, q, mode="query").episodes) == 3
+        assert len(search_episodes(store, q, limit=3)) == 3
 
 
 # -- search_episodes -----------------------------------------------------------
@@ -335,11 +268,6 @@ class TestMcpRecallFallback:
         assert "word by word" in recall["inputSchema"]["properties"]["keyword"]["description"]
 
 
-# -- MCP crystal_recall: mode ---------------------------------------------------
-
-
-
-
 # -- fix round -------------------------------------------------------------------
 
 
@@ -442,9 +370,6 @@ class TestQueryModeShortTokens:
         store.record("Moved the report queries from the old views into the warehouse.",
                      EpisodeType.DECISION)
         assert [m.episode.id for m in search_episodes(store, "SQL")] == [hit.id]
-        assert [e.id for e in retrieve_relevant(
-            store, None, "SQL", mode="query").episodes] == [hit.id]
-        assert retrieve_relevant(store, None, "SQL").episodes == []
 
 
 class TestFallbackTrigger:
@@ -543,129 +468,7 @@ class TestAlsoMatchingByWords:
 
 
 
-class TestEvidenceEdgeKeepsThePromptBar:
-    def _corpus(self, store):
-        ids = []
-        for i in range(60):
-            ids.append(store.record(
-                f"Session {i}: reviewed the plan and the notes for item {i}"
-                + (" including the zylophonic qismetric calibration." if i == 0 else "."),
-                EpisodeType.OBSERVATION, timestamp=f"2026-09-{(i % 28) + 1:02d}T09:00:00Z",
-            ).id)
-        return ids
-
-    def _crystal(self, tmp_path, ids):
-        crystal = CrystalStore(tmp_path / "mem.crystal.json")
-        crystal.crystallize(
-            name="calibration_is_the_gate", level=3,
-            explanation="an unrelated distilled lesson with no overlap",
-            evidence=[ids[0]], today=T0)
-        return crystal
-
-    def test_one_brushed_word_does_not_float_a_citing_pattern(self, store, tmp_path):
-        ids = self._corpus(store)
-        crystal = self._crystal(tmp_path, ids)
-        # "session" brushes every episode, including the one the pattern cites.
-        r = retrieve_relevant(store, crystal, "session", today=T0, mode="query")
-        assert r.patterns == []
-        r = retrieve_relevant(store, crystal, "zylophonic", today=T0, mode="query")
-        assert r.patterns == []  # one rare word still scores under the prompt bar
-
-    def test_two_rare_words_still_reach_it_through_the_edge(self, store, tmp_path):
-        ids = self._corpus(store)
-        crystal = self._crystal(tmp_path, ids)
-        r = retrieve_relevant(store, crystal, "zylophonic qismetric", today=T0,
-                              mode="query")
-        assert [p.name for p in r.patterns] == ["calibration_is_the_gate"]
-        assert r.patterns[0].source == "evidence_edge"
-
-
 class TestSearchEpisodesValidation:
     def test_bad_episode_type_raises_even_with_a_nonpositive_limit(self, store):
         with pytest.raises(ValueError):
             search_episodes(store, "nightly export", episode_type="nonsense", limit=0)
-
-
-# -- prompt mode, frozen -------------------------------------------------------------
-
-_PARITY_QUERIES = [
-    "billing database invoice tables",
-    "nightly export bank cutover",
-    "export",
-    "finance reconciliation script year-end",
-    "database capacity weekly growth",
-    "unrelated zebra quartz marmalade",
-    "work plan project schedule",
-]
-
-# query -> (keywords, [(seed index, score)], [(pattern, score, source)], [(pattern, score)]
-# from retrieve_patterns). Recorded from 54250bb, before any mode existed.
-_PARITY_EXPECTED = {
-    'billing database invoice tables': (['billing', 'database', 'invoice', 'tables'], [(0, 3.26), (2, 2.76), (3, 1.79)], [('billing_database_acid', 2.09, 'keyword')], [('billing_database_acid', 3.5)]),
-    'nightly export bank cutover': (['nightly', 'export', 'bank', 'cutover'], [(6, 2.98), (1, 2.15)], [('export_cutover_discipline', 2.24, 'keyword')], [('export_cutover_discipline', 3.0)]),
-    'export': (['export'], [], [], []),
-    'finance reconciliation script year-end': (['finance', 'reconciliation', 'script', 'year-end'], [(7, 3.74)], [], []),
-    'database capacity weekly growth': (['database', 'capacity', 'weekly', 'growth'], [], [], []),
-    'unrelated zebra quartz marmalade': (['unrelated', 'zebra', 'quartz', 'marmalade'], [], [], []),
-    'work plan project schedule': (['work', 'plan', 'project', 'schedule'], [], [], []),
-}
-
-
-def _parity_store(tmp_path):
-    st = Store(tmp_path / "m.db", audit=False)
-    cs = CrystalStore(tmp_path / "m.crystal.json")
-    texts = [
-        ("decision", "Chose PostgreSQL for the billing database because ACID guarantees outweigh raw write speed on the invoice tables."),
-        ("observation", "The nightly export job writes fixed-width bank rows to the shared drive and finance reads them each morning."),
-        ("tension", "Latency versus consistency in the billing database cannot both be optimized without sharding the invoice tables."),
-        ("outcome", "Migration finished: invoice queries on the hot path run three times faster after the database index change."),
-        ("context", "Production database sits at eighty percent capacity and grows about five percent every week."),
-        ("observation", "Short note about export."),
-        ("question", "Should the nightly export move to the new bank layout before the cutover, or after the quarterly audit window?"),
-        ("decision", "Retired the old tax table only after finance confirmed the year-end reconciliation script no longer imports it."),
-    ]
-    ids = [
-        st.record(c, t, timestamp=f"2026-09-{10 + i:02d}T09:00:00Z").id
-        for i, (t, c) in enumerate(texts)
-    ]
-    for i in range(58):  # past IDF_MIN_CORPUS, so the IDF regime is the one frozen
-        st.record(
-            f"Filler session {i}: reviewed the work plan and discussed the project "
-            f"schedule with the team lead for item {i}.",
-            "observation", timestamp=f"2026-08-{(i % 28) + 1:02d}T12:00:00Z")
-    cs.crystallize(name="billing_database_acid", level=3,
-                   explanation="prefer ACID guarantees for billing tables",
-                   tags=["billing"], evidence=[ids[0]], today=T0)
-    cs.crystallize(name="export_cutover_discipline", level=2,
-                   explanation="verify the layout change before the nightly job switches",
-                   tags=["export"], evidence=[ids[1], ids[6]], today=T0)
-    return st, cs, ids
-
-
-class TestPromptModeFrozen:
-    def test_prompt_mode_output_matches_the_recording_from_before_modes_existed(
-        self, tmp_path
-    ):
-        st, cs, ids = _parity_store(tmp_path)
-        try:
-            index = {i: n for n, i in enumerate(ids)}
-            for q in _PARITY_QUERIES:
-                for kwargs in ({}, {"mode": "prompt"}):
-                    r = retrieve_relevant(st, cs, q, today=T0, max_episodes=3, **kwargs)
-                    got = (
-                        r.query_keywords,
-                        [(index.get(e.id, -1), e.score) for e in r.episodes],
-                        [(p.name, p.score, p.source) for p in r.patterns],
-                        [(p.name, p.score)
-                         for p in retrieve_patterns(cs, q, today=T0, **kwargs)],
-                    )
-                    kw, eps, pats, pat_only = _PARITY_EXPECTED[q]
-                    want = (
-                        kw,
-                        [tuple(x) for x in eps],
-                        [tuple(x) for x in pats],
-                        [tuple(x) for x in pat_only],
-                    )
-                    assert got == want, (q, kwargs)
-        finally:
-            st.close()

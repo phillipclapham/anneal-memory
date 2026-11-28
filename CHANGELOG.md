@@ -4,6 +4,13 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
 
 ## [Unreleased]
 
+Three fixes to `prepare_wrap` and `validated_save_continuity`, found by the 4.0 review. All three are present in 3.0.2 and 4.0.0; each was reproduced on a scratch store before it was fixed. No API changes. This section becomes the 4.0.1 entry at the release cut.
+
+### Fixed
+- **A baton take could land between a save's baton check and its commit.** The baton is a file, the commit is SQLite's, and nothing serialised them: `baton claim --take` run from another process in that gap left a save committed under a session that no longer held the baton. A save that names a `session_id` now holds the baton lock (the one claims and releases take) from before its write lock to after its commit, so a take waits for the commit. Where the platform has no `flock` the lock is a no-op and the gap stays.
+- **A save validated its reply against one wrap and could commit another.** `validated_save_continuity` read the open wrap before it took the write lock and then compared only the token. A wrap cancelled and prepared again under the same caller-supplied token (`prepare_wrap(wrap_token=...)`) in that gap was closed by a reply checked against the old wrap's limit and episodes. The save now reads the wrap again under the write lock and refuses with `ValueError` when its prepare time or frozen episodes changed. A reply written for a wrap that was cancelled and prepared again under the same token *before* the save started is still indistinguishable from a reply for the new one: the token is the whole of what the save is given.
+- **A keyed `prepare_wrap` replay returned the wrong slice numbers.** For a day cut into slices, the replay planned the step from its frozen episodes alone and returned `chunk` 0 of `chunks` 1. The key row now keeps the slice numbers and the replay returns them. A key row written by 4.0.0 has none, and its replay returns what it did before.
+
 ## [4.0.0] - 2026-11-28
 
 **Breaking release.** Consolidation is now one method, a rolling rewrite, and everything that only served the old method is removed. Old stores open unchanged. Read [MIGRATING_TO_4.md](MIGRATING_TO_4.md) before upgrading anything that calls `prepare_wrap`, `validated_save_continuity`, the `crystal` tools, or the graduation and association commands.

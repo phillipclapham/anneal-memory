@@ -23,6 +23,8 @@ import re
 import shlex
 import uuid
 import warnings
+from contextlib import ExitStack
+from dataclasses import replace
 from datetime import tzinfo
 from typing import TYPE_CHECKING, Any, cast
 
@@ -269,7 +271,23 @@ def _replay_prepare(
             "with a new key.",
             operation="wrap_started", path=str(store.path), reason="sources_moved")
     rest = rolling.plan_steps(_rows([ep for ep in window if ep.id not in frozen]), tz=tz)
-    return _ready(steps[0], len(rest), len(window), memory, max_chars, wrap_token)
+    # The slice numbers are those the first call returned, kept in the key row: planned
+    # from the frozen episodes alone, a slice of a long day would read as a whole day.
+    # A row from before they were kept holds neither, and keeps the re-planned numbers.
+    step = steps[0]
+    if "chunk" in stored or "chunks" in stored:
+        chunk, chunks = stored.get("chunk"), stored.get("chunks")
+        if not (
+            isinstance(chunk, int) and isinstance(chunks, int)
+            and not isinstance(chunk, bool) and not isinstance(chunks, bool)
+            and 0 <= chunk < chunks
+        ):
+            raise IdempotencyConflictError(
+                "prepare_wrap: this idempotency key's stored step is malformed, so the "
+                "first call's step cannot be returned. Nothing was written.",
+                operation="wrap_started", path=str(store.path), reason="malformed_row")
+        step = replace(step, chunk=chunk, chunks=chunks)
+    return _ready(step, len(rest), len(window), memory, max_chars, wrap_token)
 
 
 def prepare_wrap(
@@ -488,7 +506,8 @@ def prepare_wrap(
         extras["idempotency"] = (
             idempotency_key, idem_hash, json.dumps({
                 "wrap_token": wrap_token,
-                "package_sha256": _fingerprint(step.episode_ids, memory, limit)}))
+                "package_sha256": _fingerprint(step.episode_ids, memory, limit),
+                "chunk": step.chunk, "chunks": step.chunks}))
     try:
         store.wrap_started(
             token=wrap_token,
@@ -759,7 +778,11 @@ def validated_save_continuity(
         if replayed:
             return _save_replay(store, stored)
     # State (precondition) before payload: a save with no wrap to commit to is doomed
-    # whatever the text says, and the agent should hear that first.
+    # whatever the text says, and the agent should hear that first. These reads are
+    # unlocked and only fail the save early: the batch below reads the wrap again under
+    # the write lock. The prepare timestamp is read first, so a wrap replaced after that
+    # read has another timestamp in the batch, whatever else of it matches.
+    started_at = store.get_wrap_started_at()
     snapshot = store.load_wrap_snapshot()
     if snapshot is None:
         raise ValueError(
@@ -836,62 +859,92 @@ def validated_save_continuity(
     # The wraps row's pair_id (``<token12>-<uuid8>``) is recorded per attempt.
     pair_id = f"{snapshot['token'][:12]}-{uuid.uuid4().hex[:8]}"
 
-    with store._batch():
-        # First under the batch's write lock: a concurrent save with the same idempotency
-        # key (its result is returned; nothing is written yet), then the lease fence.
-        if idempotency_key is not None:
-            idem_status, idem_stored = store._idempotency_lookup(idempotency_key, idem_hash)
-            if idem_status == "match":
-                return _save_replay(store, idem_stored)
-            if idem_status == "conflict":
-                store._idempotency_conflict(idempotency_key, "save_continuity")
-        lease_prepared = store._wrap_lease_prepared()
-        store._lease_gate("validated_save_continuity", lease_token, lease_prepared)
+    with ExitStack() as locks:
+        if session_id is not None:
+            # The baton is a file beside the memory file, and a claim or release takes
+            # this lock (pinned by test_a_baton_take_waits_for_a_save_in_its_commit_window).
+            # Held from before the write lock to after the commit, so a take waits for the
+            # commit and the check below is true when the batch commits. Where the platform
+            # has no flock the lock is a no-op and the window stays open (see
+            # sessions._baton_lock). The order is this lock, then SQLite's.
+            try:
+                locks.enter_context(sessions._baton_lock(store.continuity_path))
+            except OSError as exc:
+                raise SaveAuthorityError(
+                    f"Session {session_id!r} cannot be confirmed as the consolidate baton "
+                    f"holder (the baton lock could not be taken: {exc}), so it may not "
+                    f"commit this wrap. Nothing was written."
+                ) from None
+        with store._batch():
+            # First under the batch's write lock: a concurrent save with the same
+            # idempotency key (its result is returned; nothing is written yet), then
+            # the wrap this save validated against, then the lease fence.
+            if idempotency_key is not None:
+                idem_status, idem_stored = store._idempotency_lookup(idempotency_key, idem_hash)
+                if idem_status == "match":
+                    return _save_replay(store, idem_stored)
+                if idem_status == "conflict":
+                    store._idempotency_conflict(idempotency_key, "save_continuity")
+            # The wrap's identity is its token, when it was prepared, and the episodes it
+            # froze. A caller's own token can name a wrap prepared again after a cancel, so
+            # the token alone does not say this is the wrap the reply was checked against.
+            if (
+                store.get_wrap_started_at() != started_at
+                or store.load_wrap_snapshot() != snapshot
+            ):
+                raise ValueError(
+                    f"validated_save_continuity: the wrap token '{wrap_token[:8]}…' now names "
+                    f"a different wrap than the one this save checked its reply against (the "
+                    f"wrap was cancelled or completed and a new one prepared). Nothing was "
+                    f"saved. Re-run prepare_wrap and save its reply."
+                )
+            lease_prepared = store._wrap_lease_prepared()
+            store._lease_gate("validated_save_continuity", lease_token, lease_prepared)
 
-        meta = store.load_meta()
-        meta["sessions_produced"] = meta.get("sessions_produced", 0) + 1
-        wrap_result = store.wrap_completed(
-            episodes_compressed=len(frozen_ids),
-            continuity_chars=len(saved_text),
-            episode_ids=frozen_ids,
-            wrap_token=snapshot["token"],
-            unattended=unattended,
-            model=model,
-            content_hash=content_hash,
-            pair_id=pair_id,
-        )
-        # The memory file itself, in this transaction with the wraps row above.
-        store._insert_identity_version(
-            saved_text, meta_json=store._meta_json(meta),
-            source="wrap", wrap_id=wrap_result.wrap_id,
-            lease_token=lease_token, lease_prepared=lease_prepared,
-        )
-        if idempotency_key is not None:
-            # The key row's result, in this transaction: the non-content subset only,
-            # which a replay returns marked ``replayed``.
-            store._idempotency_insert(
-                idempotency_key, "save_continuity", idem_hash, json.dumps({
-                    "wrap_id": wrap_result.wrap_id, "chars": len(saved_text),
-                    "path": path, "content_hash": content_hash,
-                    "episodes_compressed": wrap_result.episodes_compressed,
-                }))
-        # The authoritative baton check, deliberately the LAST statement before the commit:
-        # wrap_completed's DML above means this connection holds SQLite's write lock, so a
-        # policy change from any other connection has either committed already (and this
-        # re-read sees it) or waits for this transaction to end. Raising rolls the whole
-        # batch back.
-        _check_save_authority(store, session_id, wrap_token, allow_sole_live)
-        # The continuity_saved event is queued inside the batch, so it is an
-        # ``audit_outbox`` row in this transaction: a kill after the commit cannot lose the
-        # record of the committed memory file.
-        if store._audit is not None:
-            store._audit_log_after_commit(
-                "continuity_saved",
-                {"chars": len(saved_text), "content_hash": content_hash},
-                method="validated_save_continuity",
-                committed="the wrap",
+            meta = store.load_meta()
+            meta["sessions_produced"] = meta.get("sessions_produced", 0) + 1
+            wrap_result = store.wrap_completed(
+                episodes_compressed=len(frozen_ids),
+                continuity_chars=len(saved_text),
+                episode_ids=frozen_ids,
+                wrap_token=snapshot["token"],
+                unattended=unattended,
+                model=model,
+                content_hash=content_hash,
+                pair_id=pair_id,
             )
-        # The batch context manager commits here on a successful exit.
+            # The memory file itself, in this transaction with the wraps row above.
+            store._insert_identity_version(
+                saved_text, meta_json=store._meta_json(meta),
+                source="wrap", wrap_id=wrap_result.wrap_id,
+                lease_token=lease_token, lease_prepared=lease_prepared,
+            )
+            if idempotency_key is not None:
+                # The key row's result, in this transaction: the non-content subset only,
+                # which a replay returns marked ``replayed``.
+                store._idempotency_insert(
+                    idempotency_key, "save_continuity", idem_hash, json.dumps({
+                        "wrap_id": wrap_result.wrap_id, "chars": len(saved_text),
+                        "path": path, "content_hash": content_hash,
+                        "episodes_compressed": wrap_result.episodes_compressed,
+                    }))
+            # The authoritative baton check, deliberately the LAST statement before the commit:
+            # the batch holds SQLite's write lock from its first statement, so a policy change
+            # from any other connection has either committed already (and this re-read sees it)
+            # or waits for this transaction to end; the baton is held by the lock taken
+            # above. Raising rolls the whole batch back.
+            _check_save_authority(store, session_id, wrap_token, allow_sole_live)
+            # The continuity_saved event is queued inside the batch, so it is an
+            # ``audit_outbox`` row in this transaction: a kill after the commit cannot lose the
+            # record of the committed memory file.
+            if store._audit is not None:
+                store._audit_log_after_commit(
+                    "continuity_saved",
+                    {"chars": len(saved_text), "content_hash": content_hash},
+                    method="validated_save_continuity",
+                    committed="the wrap",
+                )
+            # The batch context manager commits here on a successful exit.
 
     # The batch committed; project the memory file and its meta sidecar from the committed
     # row. A failure warns and the save still succeeds: the DB holds the file and the next

@@ -978,17 +978,25 @@ def test_release_without_a_baton_touches_no_lock_file(cp):
 def test_a_take_during_the_save_rolls_the_commit_back(store, monkeypatch):
     # codex L3 HIGH (round 1): the early baton check was a one-shot TOCTOU. The authoritative
     # re-check runs inside the batch, after wrap_completed, and a failure rolls the batch back.
+    # The take lands right after the early check, before the save takes the baton lock: from
+    # inside the batch a take on the same thread would wait on the lock the save holds.
+    # (A take from another process during the batch waits for the commit instead; that is
+    # pinned by tests/test_save_races_1128.py.)
+    from anneal_memory import continuity
     store.record("obs", EpisodeType.OBSERVATION)
     cp = store.continuity_path
     sessions.claim_baton(cp, "A")
     prep = prepare_wrap(store, session_id="A")
-    real = store.wrap_completed
+    real_check = continuity._check_save_authority
+    calls = {"n": 0}
 
-    def take_then_complete(*a, **k):
-        sessions.claim_baton(cp, "B", take=True)  # lands after the early check
-        return real(*a, **k)
+    def check_then_take(*a, **k):
+        real_check(*a, **k)
+        calls["n"] += 1
+        if calls["n"] == 1:
+            sessions.claim_baton(cp, "B", take=True)  # lands after the early check
 
-    monkeypatch.setattr(store, "wrap_completed", take_then_complete)
+    monkeypatch.setattr(continuity, "_check_save_authority", check_then_take)
     before = store.continuity_path.read_text() if store.continuity_path.exists() else None
     with pytest.raises(ValueError, match="does not hold the consolidate baton"):
         validated_save_continuity(store, _WRAP_TEXT, wrap_token=prep["wrap_token"],

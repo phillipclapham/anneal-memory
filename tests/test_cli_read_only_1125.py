@@ -62,12 +62,9 @@ READ_ONLY = (
     (("episodes",), 0),
     (("search", "outbox"), 0),
     (("continuity",), 1),
-    (("associations", "--stats"), 0),
-    (("pattern-associations", "--stats"), 0),
     (("diff",), 0),
     (("stats",), 0),
     (("history",), 0),
-    (("graph", "--format", "json"), 0),
 )
 
 

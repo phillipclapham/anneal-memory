@@ -1368,12 +1368,6 @@ def test_cancel_audit_records_the_gated_session(store):
     assert ev["data"]["wrap_gated_session"] == "A"
 
 
-def test_zero_edge_compost_is_audited(store):
-    assert store.sever_pattern_concept("ghost") == 0
-    ev = [e for e in _audit_events(store) if e["event"] == "pattern_concept_severed"]
-    assert ev and ev[-1]["data"] == {"name": "ghost", "severed": 0}
-
-
 def test_policy_change_takes_the_write_lock_before_reading_the_previous_value(store):
     stmts = []
     store._conn.set_trace_callback(stmts.append)

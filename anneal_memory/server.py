@@ -524,10 +524,6 @@ class Server:
         if not episode_id:
             return _tool_result("Error: episode_id is required", is_error=True)
 
-        # Count associations before delete (CASCADE will remove them)
-        # High limit: we need accurate count, not just top results
-        assoc_count = len(self._store.get_associations([episode_id], limit=10000))
-
         deleted = self._store.delete(episode_id)
         if not deleted:
             return _tool_result(
@@ -535,10 +531,7 @@ class Server:
                 is_error=True,
             )
 
-        msg = f"Deleted episode {episode_id}"
-        if assoc_count > 0:
-            msg += f" and {assoc_count} associated link(s)"
-        msg += ". This action is logged in the audit trail."
+        msg = f"Deleted episode {episode_id}. This action is logged in the audit trail."
         return _tool_result(msg)
 
     def _tool_recall(self, args: dict[str, Any]) -> dict[str, Any]:
@@ -1425,27 +1418,6 @@ class Server:
         if by_origin:
             lines.append("\nBy origin:")
             lines.extend(f"  {t}: {n}" for t, n in by_origin)
-
-        if status.association_stats and status.association_stats.total_links > 0:
-            a = status.association_stats
-            density_str = f"density {a.density:.4f}"
-            if a.local_density > 0:
-                density_str += f" (local {a.local_density:.4f})"
-            lines.append(
-                f"\nAssociations: {a.total_links} links, "
-                f"avg strength {a.avg_strength:.2f}, "
-                f"max {a.max_strength:.1f}, "
-                f"{density_str}"
-            )
-
-        # Outside the link block: a store created on 1.0.2 has no links at all,
-        # and its status must still say formation is off (codex L3 r1).
-        formation = self._store.association_formation()
-        if formation["off_at_wrap"] is not None:
-            lines.append(
-                f"No new links since wrap {formation['off_at_wrap']} "
-                f"(formation off since anneal-memory 1.0.2)"
-            )
 
         # Audit layer visibility — tamper-evident trail is load-bearing
         # for the "grounded memory" claim. Agents and operators need to

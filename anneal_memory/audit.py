@@ -779,12 +779,6 @@ class AuditTrail:
                      section_replaced
                    Consolidate policy:
                      consolidate_policy_set
-                   Hebbian (episode-level) associations:
-                     associations_updated, associations_decayed
-                   Cortical (pattern-level) association graph:
-                     pattern_associations_seeded, pattern_co_surface_drained,
-                     pattern_associations_gc, pattern_association_renamed,
-                     pattern_concept_severed
                    Outbox delivery:
                      outbox_gap (a queued event that could not be delivered;
                      its data names the dead row's ref, the attempts and why)

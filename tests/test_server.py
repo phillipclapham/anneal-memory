@@ -228,26 +228,6 @@ class TestToolDeleteEpisode:
         assert _is_error(result)
         assert "required" in _text_from_result(result)
 
-    def test_delete_cascades_associations(self, server, store):
-        ep1 = store.record("Episode one", "observation")
-        ep2 = store.record("Episode two", "observation")
-        ep3 = store.record("Episode three", "observation")
-        store.record_associations(
-            direct_pairs={(ep1.id, ep2.id), (ep1.id, ep3.id)},
-        )
-        # Verify associations exist
-        assocs = store.get_associations([ep1.id])
-        assert len(assocs) == 2
-
-        # Delete ep1 via MCP tool
-        result = server._tool_delete_episode({"episode_id": ep1.id})
-        assert not _is_error(result)
-        assert "2 associated link(s)" in _text_from_result(result)
-
-        # Associations gone
-        assocs = store.get_associations([ep1.id])
-        assert len(assocs) == 0
-
     def test_delete_no_associations_message(self, server, store):
         ep = store.record("Solo episode", "decision")
         result = server._tool_delete_episode({"episode_id": ep.id})

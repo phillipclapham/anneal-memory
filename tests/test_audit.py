@@ -2237,38 +2237,6 @@ def _committed_op_cases(tmp_path_factory=None):
         return s, lambda: s.set_section_schema(SCHEMA_OK), \
             lambda: [x["heading"] for x in s.section_schema] == ["State", "Patterns"]
 
-    def _assoc_seed(sub):
-        """A store with two episodes, one episode edge and one pattern edge."""
-        st = mk(sub)
-        a = st.record("alpha", episode_type="observation")
-        b = st.record("beta", episode_type="observation")
-        st.record_associations({(a.id, b.id)})
-        st.seed_pattern_co_graduation(["p_one", "p_two"])
-        return st, a, b
-
-    def c_record_associations(sub):
-        st, a, b = _assoc_seed(sub)
-        return st, lambda: st.record_associations({(b.id, a.id)}), \
-            lambda: st.association_stats().total_links > 0
-
-    def c_decay_associations(sub):
-        st, a, b = _assoc_seed(sub)
-        return st, lambda: st.decay_associations(), lambda: True
-
-    def c_seed_pattern_co_graduation(sub):
-        st, a, b = _assoc_seed(sub)
-        return st, lambda: st.seed_pattern_co_graduation(["p_three", "p_four"]), \
-            lambda: True
-
-    def c_rename_pattern_association(sub):
-        st, a, b = _assoc_seed(sub)
-        return st, lambda: st.rename_pattern_association("p_one", "p_new"), \
-            lambda: True
-
-    def c_sever_pattern_concept(sub):
-        st, a, b = _assoc_seed(sub)
-        return st, lambda: st.sever_pattern_concept("p_two"), lambda: True
-
     return [
         ("record", c_record),
         ("delete", c_delete),
@@ -2278,22 +2246,6 @@ def _committed_op_cases(tmp_path_factory=None):
         ("prune", c_prune),
         ("save_continuity", c_save_continuity),
         ("set_section_schema", c_set_section_schema),
-        # ⛔ THE SEVEN THE FIRST CENSUS COULD NOT SEE. These reach their
-        # commit through a free-function helper's ``commit=`` argument rather
-        # than a literal ``commit()`` in the method body, and emitted via
-        # ``_audit_log`` — so a scan for the text ``self._audit.log`` missed
-        # every one. Measured 2026-09-04 (L1): ``gc_pattern_associations``
-        # and ``sever_pattern_concept`` DELETED edges and then raised a raw
-        # OSError. Five of the seven are here; ``gc_pattern_associations``
-        # and ``drain_co_surface_events`` emit only when their count is
-        # non-zero and are covered by the mechanical scan instead — stated
-        # rather than quietly omitted, because a case that cannot fire would
-        # make this table look wider than it is.
-        ("record_associations", c_record_associations),
-        ("decay_associations", c_decay_associations),
-        ("seed_pattern_co_graduation", c_seed_pattern_co_graduation),
-        ("rename_pattern_association", c_rename_pattern_association),
-        ("sever_pattern_concept", c_sever_pattern_concept),
     ]
 
 

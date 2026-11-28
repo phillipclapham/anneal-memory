@@ -880,14 +880,6 @@ class TestIntegrationL3Round1:
         store.set_trust(page.id, "external")  # the summary's class moves with it
         assert not store.supersession_exists(old_id=fact.id, new_id=summary.id)
 
-    def test_severing_a_concept_takes_its_grounding_record(self, store):
-        """consensus: a homonym inherited the old concept's grounding groups."""
-        ep = store.record("gate evidence", EpisodeType.OBSERVATION)
-        with store._batch():
-            store._record_pattern_grounding([("gate", 2, "unchecked", [ep.id])], "2026-10-08")
-        store.sever_pattern_concept("gate")
-        assert "gate" not in store.pattern_grounding()
-
     def test_a_team_replace_that_changes_the_text_keeps_no_vouching(self, tmp_path):
         """codex HIGH: an operator raise of text X stayed on the text Y that a
         newer snapshot wrote in place, with X's derivation edges. Now Y is a new

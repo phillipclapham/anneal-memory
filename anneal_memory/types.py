@@ -200,7 +200,6 @@ class StoreStatus:
     tombstone_count: int
     continuity_chars: int | None  # Size of current continuity file, None if no file
     episodes_by_type: dict[str, int] = field(default_factory=dict)
-    association_stats: AssociationStats | None = None  # Hebbian network metrics
     # Audit trail visibility (Diogenes ARCH finding, Apr 13 2026): agents
     # and operators need cheap visibility into whether the audit layer is
     # running without walking the hash chain. ``audit_log_path`` and
@@ -274,120 +273,6 @@ class StoreStatus:
     # authority (the store's ``trust_ceiling``) and corroboration (graduation's
     # gate). Nothing gates on it. See Store.origin_map.
     origin_counts: dict[str, int] = field(default_factory=dict)
-
-
-@dataclass(frozen=True)
-class AffectiveState:
-    """Agent's self-reported functional state during consolidation.
-
-    Captures the agent's characterization of its internal state at the
-    moment of compression. Free-text tag (emergent > prescriptive) plus
-    numeric intensity. Provides the persistent emotional state tracking
-    that transformers lack natively (Anthropic emotion vectors paper, 2026).
-
-    Tag is normalized to lowercase on creation (prevents clustering
-    fragmentation from casing differences). Intensity is clamped to
-    [0.0, 1.0] at the type level so callers don't need to validate.
-    """
-
-    tag: str  # Free-text functional state (e.g., "engaged", "curious", "uncertain")
-    intensity: float  # 0.0 to 1.0 — how strongly the state was felt
-
-    def __post_init__(self) -> None:
-        object.__setattr__(self, "tag", self.tag.strip().lower())
-        object.__setattr__(self, "intensity", max(0.0, min(1.0, self.intensity)))
-
-
-@dataclass(frozen=True)
-class AssociationPair:
-    """A Hebbian association between two episodes.
-
-    Episodes are stored in canonical order (episode_a < episode_b)
-    to ensure each pair is represented exactly once.
-    """
-
-    episode_a: str
-    episode_b: str
-    strength: float
-    co_citations: int  # Raw count of co-citation events
-    first_linked: str  # ISO 8601 UTC
-    last_strengthened: str  # ISO 8601 UTC
-    affective_tag: str | None = None  # Most recent functional state during strengthening
-    affective_intensity: float = 0.0  # Most recent intensity (0.0-1.0)
-
-
-@dataclass
-class AssociationStats:
-    """Association network health metrics."""
-
-    total_links: int
-    avg_strength: float
-    max_strength: float
-    density: float  # Global density: links / all possible episode pairs. Low when many episodes have no associations.
-    strongest_pairs: list[AssociationPair] = field(default_factory=list)
-    local_density: float = 0.0  # Density among connected episodes only (episodes with >= 1 association). More useful than global density for network health.
-
-
-@dataclass(frozen=True)
-class PatternAssociationPair:
-    """A cortical association between two graduated PATTERNS (AM-LINKGATE-DECAY).
-
-    The sibling of :class:`AssociationPair` one layer up: keyed on stable pattern
-    NAMES (canonical order ``name_a < name_b``), strengthened on co-RETRIEVAL,
-    decayed on calendar-DISUSE. ``strength`` is the EFFECTIVE value (decayed to
-    the query date); ``stored_strength`` is the un-decayed value as-of
-    ``last_decay_at`` (forensics — lets telemetry see the lazy-decay gap).
-    """
-
-    name_a: str
-    name_b: str
-    strength: float  # effective (decayed-to-today) strength
-    stored_strength: float  # un-decayed value as-of last_decay_at
-    direction: str  # 'undirected' (v1); ACT-R fan-effect affordance
-    first_linked_at: str  # ISO date (logical)
-    last_strengthened_at: str  # ISO date — last reinforcement (any source)
-    last_co_surfaced_at: str  # ISO date — last co-retrieval
-    last_decay_at: str  # ISO date — strength materialized as-of this date
-    co_surface_count: int  # raw co-surface events
-    co_surface_session_count: int  # distinct sessions (burst-damped)
-    formation_source: str  # 'co_graduation' | 'co_surface' | 'co_touch'
-
-
-@dataclass
-class PatternAssociationStats:
-    """Pattern-graph health metrics — the AM-LINKGATE-DECAY shadow-phase telemetry."""
-
-    total_links: int
-    retrievable_links: int  # edges with effective strength >= retrieval threshold
-    avg_strength: float  # mean EFFECTIVE strength
-    max_strength: float  # strongest EFFECTIVE edge
-    concentration: float  # top-edge share of total effective strength (echo-chamber canary)
-    by_formation_source: dict[str, int] = field(default_factory=dict)
-    strongest_pairs: list[PatternAssociationPair] = field(default_factory=list)
-
-
-@dataclass(frozen=True)
-class PatternGraphProjectionMeta:
-    """Projection checkpoint for the pattern-association read-model (CQRS — spore-104
-    dep-1). ``(projection_version, high_water_mark)`` uniquely pins the graph STATE
-    a Slice-C retrieval receipt was produced against, so the offline A/B replay
-    harness can bucket receipts by graph generation (and detect a receipt logged
-    against a different snapshot than the one being replayed).
-
-    ``high_water_mark`` is a monotonic revision counter bumped on every committed
-    graph-edge mutation (recall is read-only, so it never advances it). It pins
-    state WITHIN A SINGLE STORE LINEAGE — it is a per-DB counter, not a content
-    hash, so it will not detect a divergent-history collision (two rebuilt/restored
-    lineages landing on the same integer). Acceptable for the single-writer
-    sovereign store. ``projection_version`` marks the projection GENERATION — bumped
-    only by a future blue/green rebuild (deferred); stamped now (constant 1) so the
-    receipt corpus is forward-distinguishable once a rebuild starts bumping it.
-    ``updated_at`` is the logical date of the last bump (``None`` if the graph has
-    never mutated)."""
-
-    projection_version: int
-    high_water_mark: int
-    updated_at: str | None
 
 
 @dataclass

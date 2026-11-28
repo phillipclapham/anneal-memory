@@ -3158,50 +3158,6 @@ class TestDbBoundaryErrorWrapping:
             store.get_wrap_history()
         self._assert_wrapped(exc_info.value, "get_wrap_history")
 
-    # -- associations --------------------------------------------
-
-    def test_get_associations_wraps_sqlite_error(self, store, monkeypatch):
-        self._flaky_execute(store, monkeypatch)
-        with pytest.raises(StoreDatabaseError) as exc_info:
-            store.get_associations(["deadbeef"])
-        self._assert_wrapped(exc_info.value, "get_associations")
-
-    def test_get_association_context_wraps_sqlite_error(
-        self, store, monkeypatch
-    ):
-        self._flaky_execute(store, monkeypatch)
-        with pytest.raises(StoreDatabaseError) as exc_info:
-            store.get_association_context(["deadbeef"])
-        self._assert_wrapped(exc_info.value, "get_association_context")
-
-    def test_record_associations_wraps_sqlite_error(
-        self, store, monkeypatch
-    ):
-        # Need an existing episode to form a real pair shape. Record
-        # before flaky-execute so the setup INSERT actually runs.
-        ep_a = store.record("source a", EpisodeType.OBSERVATION)
-        ep_b = store.record("source b", EpisodeType.OBSERVATION)
-        self._flaky_execute(store, monkeypatch)
-        with pytest.raises(StoreDatabaseError) as exc_info:
-            store.record_associations(
-                direct_pairs={(ep_a.id, ep_b.id)},
-            )
-        self._assert_wrapped(exc_info.value, "record_associations")
-
-    def test_decay_associations_wraps_sqlite_error(
-        self, store, monkeypatch
-    ):
-        self._flaky_execute(store, monkeypatch)
-        with pytest.raises(StoreDatabaseError) as exc_info:
-            store.decay_associations(strengthened_pairs=set())
-        self._assert_wrapped(exc_info.value, "decay_associations")
-
-    def test_association_stats_wraps_sqlite_error(self, store, monkeypatch):
-        self._flaky_execute(store, monkeypatch)
-        with pytest.raises(StoreDatabaseError) as exc_info:
-            store.association_stats()
-        self._assert_wrapped(exc_info.value, "association_stats")
-
     # -- prune ---------------------------------------------------
 
     def test_prune_wraps_sqlite_error(self, store, monkeypatch):

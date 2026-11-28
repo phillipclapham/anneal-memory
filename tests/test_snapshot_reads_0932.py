@@ -53,38 +53,6 @@ def test_status_counts_describe_one_state(tmp_path):
         assert st.total_episodes == sum(st.episodes_by_type.values())
 
 
-def test_association_stats_describe_one_state(tmp_path):
-    db = tmp_path / "m.db"
-    with Store(str(db), project_name="Snap") as s:
-        ids = [getattr(s.record(f"zqx e{i}", EpisodeType.OBSERVATION), "id", None)
-               for i in range(4)]
-        s.record_associations({(ids[0], ids[1])})
-
-    def peer():
-        with Store(str(db)) as p:
-            p.record_associations({(ids[2], ids[3])})
-
-    with Store(str(db), project_name="Snap") as s:
-        real = s._conn
-        s._conn = _CommitBetween(real, "SELECT episode_a,", peer)
-        a = s.association_stats()
-        assert s._conn._fired
-        assert len(a.strongest_pairs) == min(5, a.total_links)
-
-    # The wrap package's association context reads links, then their episodes:
-    # a peer deleting an endpoint between the two left a link with a "(pruned)" end.
-    def peer_delete():
-        with Store(str(db)) as p:
-            p.delete(ids[0])
-
-    with Store(str(db), project_name="Snap") as s:
-        real = s._conn
-        s._conn = _CommitBetween(real, "SELECT id, content FROM episodes", peer_delete)
-        text = s.get_association_context([ids[0], ids[1]], min_strength=0.0)
-        assert s._conn._fired
-        assert "(pruned)" not in text
-
-
 def test_compression_window_is_one_session(tmp_path):
     db = tmp_path / "m.db"
     with Store(str(db), project_name="Snap") as s:

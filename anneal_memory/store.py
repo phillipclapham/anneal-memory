@@ -68,15 +68,6 @@ _LOCK_UNAVAILABLE_ERRNOS = frozenset(
 _WRAP_TOKEN_RE = re.compile(r"^[0-9a-f]{32}$")
 
 from ._sqlkeys import json_each_available, key_list
-from .associations import (
-    association_stats as _association_stats,
-    canonical_pair,
-    decay_associations as _decay_associations,
-    get_association_context as _get_association_context,
-    get_associations as _get_associations,
-    migrate_add_affective_columns as _migrate_affective,
-    record_associations as _record_associations,
-)
 from ._fsdir import _fsync_dir
 from .audit import AuditTrail
 from .origin import ORIGIN_KEY_CHECK_SQL, validate_origin_key
@@ -242,22 +233,8 @@ def _reject_reserved_audit_kwargs(kwargs: dict[str, Any]) -> dict[str, Any]:
 # entirely under ``-W error`` (measured: zero signal of any kind), so it
 # cannot be the only one.
 _LOG = logging.getLogger("anneal-memory")
-from .pattern_associations import (
-    _aggregate_events as _aggregate_co_surface_events,
-    drain_co_surface_events as _drain_co_surface_events,
-    gc_pattern_associations as _gc_pattern_associations,
-    get_pattern_associations as _get_pattern_associations,
-    get_projection_meta as _get_projection_meta,
-    pattern_association_stats as _pattern_association_stats,
-    rename_pattern as _rename_pattern,
-    seed_co_graduation as _seed_co_graduation,
-    sever_pattern_concept as _sever_pattern_concept,
-)
 from .schema import DEFAULT_SCHEMA, SectionSpec, validate_schema
 from .types import (
-    AffectiveState,
-    AssociationPair,
-    AssociationStats,
     DEFAULT_TRUST,
     DeleteResult,
     OriginKeyStatus,
@@ -265,9 +242,6 @@ from .types import (
     TRUST_LEVELS,
     Episode,
     EpisodeType,
-    PatternAssociationPair,
-    PatternAssociationStats,
-    PatternGraphProjectionMeta,
     RecallResult,
     StoreStatus,
     Tombstone,
@@ -310,7 +284,7 @@ class AnnealMemoryError(Exception):
     PEP 249 is a contract for driver authors — those nine classes
     exist so generic ORMs can sit on top of any compliant driver.
     anneal-memory is the opposite: it consumes ``sqlite3`` internally
-    and presents a domain API (episodes, wraps, associations) to
+    and presents a domain API (episodes, wraps) to
     callers. Callers branch on operational intent ("log and retry"
     vs "log and escalate"), not on vendor-level failure taxonomy. If
     a second useful branch ever emerges in practice we add it as a
@@ -413,21 +387,6 @@ StoreOperation = Literal[
     "set_consolidate_requires_baton",
     "outbox_requeue",
     "get_wrap_history",
-    "record_associations",
-    "decay_associations",
-    "get_associations",
-    "get_association_context",
-    "association_stats",
-    "association_formation",
-    # Pattern-level cortical association graph (AM-LINKGATE-DECAY, Slice B)
-    "seed_pattern_co_graduation",
-    "drain_co_surface_events",
-    "get_pattern_associations",
-    "pattern_association_stats",
-    "gc_pattern_associations",
-    "rename_pattern_association",
-    "sever_pattern_concept",
-    "pattern_graph_projection_meta",
     # Pluggable section schema (v0.3.4)
     "section_schema",
     "set_section_schema",
@@ -730,8 +689,7 @@ class StoreDatabaseError(StoreError):
     SQLite work raises ``sqlite3.DatabaseError`` or any subclass. That
     boundary is wrapped around every public Store method that executes
     SQL, including ``record``, ``recall``, ``delete``, ``prune``,
-    ``status``, the wrap lifecycle methods, and all association
-    operations.
+    ``status`` and the wrap lifecycle methods.
 
     .. note::
         Pickle round-trips work because :class:`StoreError` implements
@@ -1027,28 +985,6 @@ class WrapWindowMovedError(AnnealMemoryError):
         # Two-argument __init__, so the default reduce (which passes self.args, the
         # one message) cannot rebuild it.
         return (type(self), (self.expected, self.actual))
-
-
-class AssociationFormationOffError(AnnealMemoryError):
-    """Raised by a legacy association-forming method on a store whose formation
-    is off (:meth:`Store.association_formation`).
-
-    The first save by a 1.0.2-or-later library records that the store forms no
-    new association links (episode or pattern graph). From then on the methods
-    that would form or decay links refuse instead of writing, so a caller that
-    still builds the graph learns it at once rather than reading a count that
-    no longer means anything. Existing links stay readable. These methods are
-    removed no earlier than 2.0.
-    """
-
-
-# The store capability that turns association formation off. Written once, by the
-# first save of a library that forms no links, and read on every call that would
-# form one (never cached per process: another process may have just written it).
-FORMATION_MODE_KEY = "association_formation_mode"
-FORMATION_OFF_AT_WRAP_KEY = "association_formation_off_at_wrap"
-FORMATION_OFF_BY_VERSION_KEY = "association_formation_off_by_version"
-FORMATION_DISABLED = "disabled"
 
 
 class WrapSchemaMovedError(AnnealMemoryError):
@@ -3896,9 +3832,6 @@ class Store:
                 "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, '1')",
                 (_CONSOLIDATE_REQUIRES_BATON_KEY,),
             )
-        # Migrate existing associations tables to include affective columns
-        # (safe no-op if columns already exist or table was just created)
-        _migrate_affective(self._conn, commit=False)
         # Migrate wraps table to include association metric columns
         self._migrate_wraps_association_columns(commit=False)
         # Migrate wraps table to include the durable recovery-oracle columns
@@ -7777,9 +7710,6 @@ class Store:
             ).fetchall()
             episodes_by_type = {row["type"]: row["count"] for row in type_rows}
 
-            # Association network metrics (also executes SQL)
-            assoc_stats = _association_stats(self._conn, total)
-
             # The health fields read metadata rows too: keep them in the snapshot.
             audit_failures = self._current_audit_failures()
             audit_last_failure = self._current_audit_last_failure()
@@ -7855,7 +7785,6 @@ class Store:
             tombstone_count=tombstone_count,
             continuity_chars=continuity_chars,
             episodes_by_type=episodes_by_type,
-            association_stats=assoc_stats,
             audit_enabled=audit_enabled,
             audit_log_path=audit_log_path,
             audit_entry_count=audit_entry_count,
@@ -10217,469 +10146,6 @@ class Store:
             )
             if not self._defer_commit:
                 self._conn.commit()
-
-    # -- Associations (Hebbian) --
-
-    def record_associations(
-        self,
-        direct_pairs: set[tuple[str, str]],
-        session_pairs: set[tuple[str, str]] | None = None,
-        affective_state: "AffectiveState | None" = None,
-    ) -> tuple[int, int]:
-        """Record or strengthen Hebbian association links from co-citation.
-
-        LEGACY, removed no earlier than 2.0. No save calls it since 1.0.2, and on a store
-        whose formation is off it raises :class:`AssociationFormationOffError`.
-        Direct pairs get stronger links than session pairs.
-
-        Args:
-            direct_pairs: Episode ID pairs co-cited on the same pattern line.
-            session_pairs: Episode ID pairs cited in the same wrap, different patterns.
-            affective_state: Optional agent functional state during consolidation.
-                Modulates association strength and is stored on the link.
-
-        Returns:
-            Tuple of (links_formed, links_strengthened).
-
-        Warns:
-            UserWarning: if the audit event could not be written. The
-                operation still SUCCEEDED — the audit trail is missing
-                this event. Also counted on ``status().audit_write_failures``
-                and logged; see :meth:`_audit_log_after_commit`.
-        """
-        ts = _now_utc()
-        # 10.5c.5: inside a ``_batch()`` the free-function helper must
-        # NOT commit — the outer pipeline owns the single commit.
-        # The refusal is decided inside the boundary and raised after it: raised
-        # inside, the boundary would roll back a caller's enclosing batch.
-        with self._db_boundary("record_associations"):
-            refused = self._formation_off()
-            if not refused:
-                formed, strengthened = _record_associations(
-                    self._conn,
-                    direct_pairs,
-                    session_pairs or set(),
-                    ts,
-                    affective_state=affective_state,
-                    commit=not self._defer_commit,
-                )
-        if refused:
-            self._raise_formation_off("record_associations")
-
-        if formed or strengthened:
-            audit_data: dict = {
-                "formed": formed,
-                "strengthened": strengthened,
-                "direct_pairs": len(direct_pairs),
-                "session_pairs": len(session_pairs) if session_pairs else 0,
-            }
-            if affective_state is not None:
-                audit_data["affective_tag"] = affective_state.tag
-                audit_data["affective_intensity"] = affective_state.intensity
-            self._audit_log_after_commit(
-                "associations_updated", audit_data,
-                method="record_associations", committed="the association writes")
-
-        return formed, strengthened
-
-    def decay_associations(
-        self,
-        strengthened_pairs: set[tuple[str, str]] | None = None,
-        decay_factor: float = 0.9,
-        cleanup_threshold: float = 0.1,
-    ) -> int:
-        """Decay associations not reinforced this wrap.
-
-        LEGACY, removed no earlier than 2.0. No save calls it since 1.0.2, and on a store
-        whose formation is off it raises :class:`AssociationFormationOffError`.
-
-        Args:
-            strengthened_pairs: Canonical pairs strengthened this wrap (skipped).
-            decay_factor: Multiplier for unreinforced links.
-            cleanup_threshold: Delete links weaker than this.
-
-        Returns:
-            Number of associations decayed (including deleted).
-
-        Warns:
-            UserWarning: if the audit event could not be written. The
-                operation still SUCCEEDED — the audit trail is missing
-                this event. Also counted on ``status().audit_write_failures``
-                and logged; see :meth:`_audit_log_after_commit`.
-        """
-        # Canonicalize the pairs (filter out self-pairs)
-        canonical = set()
-        if strengthened_pairs:
-            for pair in strengthened_pairs:
-                cp = canonical_pair(*pair)
-                if cp is not None:
-                    canonical.add(cp)
-
-        # 10.5c.5: inside a ``_batch()`` the free-function helper must
-        # NOT commit — the outer pipeline owns the single commit.
-        with self._db_boundary("decay_associations"):
-            refused = self._formation_off()
-            if not refused:
-                decayed = _decay_associations(
-                    self._conn,
-                    canonical,
-                    decay_factor,
-                    cleanup_threshold,
-                    commit=not self._defer_commit,
-                )
-        if refused:
-            self._raise_formation_off("decay_associations")
-
-        if decayed:
-            self._audit_log_after_commit("associations_decayed", {
-                "decayed": decayed,
-                "decay_factor": decay_factor,
-                "cleanup_threshold": cleanup_threshold,
-            }, method="decay_associations", committed="the decay")
-
-        return decayed
-
-    def get_associations(
-        self,
-        episode_ids: list[str],
-        min_strength: float = 0.0,
-        limit: int = 50,
-    ) -> list[AssociationPair]:
-        """Get Hebbian associations for the given episodes.
-
-        Args:
-            episode_ids: Episode IDs to query.
-            min_strength: Minimum strength to include.
-            limit: Maximum results.
-
-        Returns:
-            List of AssociationPair ordered by strength descending.
-        """
-        with self._db_boundary("get_associations"):
-            return _get_associations(self._conn, episode_ids, min_strength, limit)
-
-    def get_association_context(
-        self,
-        episode_ids: list[str],
-        min_strength: float = 0.5,
-        limit: int = 20,
-    ) -> str:
-        """Format association context for a wrap package.
-
-        Returns human-readable text describing which episodes have been
-        thought about together before, or empty string if none.
-        """
-        with self._db_boundary("get_association_context"), self._read_snapshot():
-            return _get_association_context(
-                self._conn, episode_ids, min_strength, limit
-            )
-
-    def association_formation(self) -> dict[str, Any]:
-        """Whether this store still forms association links, and since when not.
-
-        Returns ``{"mode", "off_at_wrap", "off_by_version"}``. ``mode`` is
-        ``"disabled"`` once a save by a library that forms no links has run
-        (1.0.2 and later), else ``"enabled"`` with the other two ``None``.
-        ``off_at_wrap`` is the wraps-table id of that first save: links newer
-        than it are not formed. The existing graph stays readable and still
-        changes (an episode delete cascades its links; compost severs pattern
-        links; pattern strength decays as it is read), so read it as "no new
-        links since wrap N", never as a frozen graph.
-        """
-        with self._db_boundary("association_formation"), self._read_snapshot():
-            rows = dict(self._conn.execute(
-                "SELECT key, value FROM metadata WHERE key IN (?, ?, ?)",
-                (FORMATION_MODE_KEY, FORMATION_OFF_AT_WRAP_KEY,
-                 FORMATION_OFF_BY_VERSION_KEY),
-            ).fetchall())
-        if rows.get(FORMATION_MODE_KEY) != FORMATION_DISABLED:
-            return {"mode": "enabled", "off_at_wrap": None, "off_by_version": None}
-        at = rows.get(FORMATION_OFF_AT_WRAP_KEY)
-        return {
-            "mode": FORMATION_DISABLED,
-            "off_at_wrap": int(at) if at is not None and str(at).isdigit() else None,
-            "off_by_version": rows.get(FORMATION_OFF_BY_VERSION_KEY),
-        }
-
-    def _formation_off(self) -> bool:
-        """Read the formation capability on this connection, inside the caller's
-        boundary (and its transaction, when a batch is open)."""
-        row = self._conn.execute(
-            "SELECT value FROM metadata WHERE key = ?", (FORMATION_MODE_KEY,)
-        ).fetchone()
-        return row is not None and row[0] == FORMATION_DISABLED
-
-    def _raise_formation_off(self, method: str) -> NoReturn:
-        raise AssociationFormationOffError(
-            f"{method}: this store forms no association links (turned off by "
-            f"the first save of anneal-memory 1.0.2 or later; see "
-            f"Store.association_formation()). Existing links stay readable; "
-            f"{method} is removed no earlier than 2.0. Stop calling it."
-        )
-
-    def _record_formation_off(self, wrap_id: int | None) -> None:
-        """Record, once, that this store forms no new links from ``wrap_id`` on.
-
-        INSERT OR IGNORE: the first save that runs it wins, so ``off_at_wrap``
-        names the first wrap without links and later saves change nothing. Runs
-        inside the save's batch, so it commits or rolls back with that wrap.
-        """
-        from . import __version__
-        # Through the boundary, so a database failure here (disk full) reaches the
-        # caller as StoreError and rolls the save back, like the save's own writes.
-        with self._db_boundary("association_formation"):
-            for key, value in (
-                (FORMATION_MODE_KEY, FORMATION_DISABLED),
-                (FORMATION_OFF_AT_WRAP_KEY, None if wrap_id is None else str(wrap_id)),
-                (FORMATION_OFF_BY_VERSION_KEY, __version__),
-            ):
-                if value is not None:
-                    self._conn.execute(
-                        "INSERT OR IGNORE INTO metadata (key, value) VALUES (?, ?)",
-                        (key, value),
-                    )
-
-    def association_stats(self) -> AssociationStats:
-        """Get Hebbian association network health metrics."""
-        with self._db_boundary("association_stats"), self._read_snapshot():
-            total = self._conn.execute("SELECT COUNT(*) FROM episodes").fetchone()[0]
-            return _association_stats(self._conn, total)
-
-    # -- Pattern associations (cortical layer / AM-LINKGATE-DECAY, Slice B) --
-    #
-    # The pattern-level associative graph: links between graduated PATTERNS keyed
-    # on stable names, strengthened on co-RETRIEVAL (the harness recall hook logs
-    # co-surfaced pairs → drain at wrap), decayed on calendar-DISUSE. SHADOW MODE
-    # — nothing reads this for recall yet; the producer (recall hook) + drain
-    # build + telemeter it, recall stays graph-independent until Slice C clears
-    # the validation oracle. See pattern_associations.py for the full rationale.
-
-    def seed_pattern_co_graduation(
-        self, graduated_names: list[str], today: str | None = None
-    ) -> int:
-        """Seed weak pattern links from co-graduation (same wrap).
-
-        LEGACY, removed no earlier than 2.0. No save calls it since 1.0.2, and on a store
-        whose formation is off it raises :class:`AssociationFormationOffError`.
-        Returns links newly seeded.
-
-        Warns:
-            UserWarning: if the audit event could not be written. The
-                operation still SUCCEEDED — the audit trail is missing
-                this event. Also counted on ``status().audit_write_failures``
-                and logged; see :meth:`_audit_log_after_commit`.
-        """
-        day = today or _today_local()
-        with self._db_boundary("seed_pattern_co_graduation"):
-            refused = self._formation_off()
-            if not refused:
-                formed = _seed_co_graduation(
-                    self._conn, graduated_names, day, commit=not self._defer_commit
-                )
-        if refused:
-            self._raise_formation_off("seed_pattern_co_graduation")
-        if formed:
-            self._audit_log_after_commit(
-                "pattern_associations_seeded", {"formed": formed},
-                method="seed_pattern_co_graduation", committed="the seeded links")
-        return formed
-
-    def drain_co_surface_events(
-        self, events: list[dict[str, Any]], today: str | None = None
-    ) -> dict[str, int]:
-        """Drain a batch of co-surface events into the pattern graph (idempotent).
-
-        LEGACY, removed no earlier than 2.0. On a store whose formation is off it parses the
-        events and discards them, returning zero counts (``events_seen`` counts
-        its distinct event ids), so a harness that still drains its spool keeps working.
-
-        The consumer-of-log half: the harness feeds the recall-hook spool here at
-        wrap time. event_id dedup makes a re-fed spool safe; per-session
-        burst-damp + provenance-gating + calendar lazy-decay + homeostatic
-        normalization all run in one transaction. Returns a metrics dict.
-
-        Warns:
-            UserWarning: if the audit event could not be written. The
-                operation still SUCCEEDED — the audit trail is missing
-                this event. Also counted on ``status().audit_write_failures``
-                and logged; see :meth:`_audit_log_after_commit`.
-        """
-        day = today or _today_local()
-        with self._db_boundary("drain_co_surface_events"):
-            if self._formation_off():
-                # A compatibility drain kept until a later MAJOR release, so a harness that still
-                # drains a spool at wrap time keeps working: it discards. The
-                # events are still parsed, so a malformed batch fails here as
-                # it always did.
-                _, _, seen_ids = _aggregate_co_surface_events(events)
-                # ``discarded`` (only on this path) tells a reader of the
-                # metrics that the events were dropped on purpose, not unseen.
-                return {"events_seen": len(seen_ids), "events_applied": 0,
-                        "pairs_formed": 0, "pairs_strengthened": 0, "pairs_gc": 0,
-                        "discarded": len(seen_ids)}
-            metrics = _drain_co_surface_events(
-                self._conn, events, day, commit=not self._defer_commit
-            )
-        if metrics.get("events_applied"):
-            self._audit_log_after_commit(
-                "pattern_co_surface_drained", metrics,
-                method="drain_co_surface_events", committed="the drain")
-        return metrics
-
-    def get_pattern_associations(
-        self,
-        names: list[str],
-        today: str | None = None,
-        min_strength: float = 0.2,
-        limit: int = 50,
-    ) -> list[PatternAssociationPair]:
-        """Pattern associations incident to ``names``, ranked by EFFECTIVE
-        (decayed-to-today) strength. Read-only; does not mutate the graph. The
-        surface Slice C will consume — telemetry only in Slice B."""
-        day = today or _today_local()
-        with self._db_boundary("get_pattern_associations"):
-            return _get_pattern_associations(
-                self._conn, names, day, min_strength=min_strength, limit=limit
-            )
-
-    def pattern_association_stats(
-        self, today: str | None = None, top_n: int = 10
-    ) -> PatternAssociationStats:
-        """Pattern-graph health metrics — the shadow-phase telemetry surface."""
-        day = today or _today_local()
-        with self._db_boundary("pattern_association_stats"):
-            return _pattern_association_stats(self._conn, day, top_n=top_n)
-
-    def gc_pattern_associations(self, today: str | None = None) -> int:
-        """Periodic full-graph GC: delete edges decayed below the GC floor.
-
-        NOT per-wrap (that re-introduces the regime-variant cost the calendar
-        model avoids) — a harness calls it occasionally. Returns rows deleted.
-
-        Warns:
-            UserWarning: if the audit event could not be written. The
-                operation still SUCCEEDED — the audit trail is missing
-                this event. Also counted on ``status().audit_write_failures``
-                and logged; see :meth:`_audit_log_after_commit`.
-        """
-        day = today or _today_local()
-        with self._db_boundary("gc_pattern_associations"):
-            gced = _gc_pattern_associations(
-                self._conn, day, commit=not self._defer_commit
-            )
-        if gced:
-            self._audit_log_after_commit(
-                "pattern_associations_gc", {"deleted": gced},
-                method="gc_pattern_associations", committed="the edge deletion")
-        return gced
-
-    def rename_pattern_association(
-        self, old_name: str, new_name: str, today: str | None = None
-    ) -> int:
-        """Rename a pattern: the SAME concept under a new name (first-class alias;
-        edges merge if the target pair exists). What else it moves and what it
-        leaves is what the body below does; the wrap save's ``[renamed:]`` path
-        (``validated_save_continuity`` in continuity.py) calls this method.
-        Returns edges re-keyed.
-
-        Warns:
-            UserWarning: if the audit event could not be written. The
-                operation still SUCCEEDED — the audit trail is missing
-                this event. Also counted on ``status().audit_write_failures``
-                and logged; see :meth:`_audit_log_after_commit`."""
-        if old_name == new_name:
-            # Nothing to re-key, and the record update below would delete the
-            # name's own saved level (L3 r3, codex HIGH + complement, run).
-            return 0
-        day = today or _today_local()
-        with self._db_boundary("rename_pattern_association"):
-            # The bound's record follows the rename (complement L3 r2): the old
-            # name's level moves to the new one unless the new name already has
-            # its own, which stays (a rename never raises a level).
-            level_moved = False
-            if self._has_pattern_levels_table():
-                level_moved = self._conn.execute(
-                    "UPDATE OR IGNORE pattern_levels SET key = ? "
-                    "WHERE kind = 'name' AND key = ?", (new_name, old_name)).rowcount > 0
-                level_moved = self._conn.execute(
-                    "DELETE FROM pattern_levels WHERE kind = 'name' AND key = ?",
-                    (old_name,)).rowcount > 0 or level_moved
-            # So does its grounding record (CAP-08 D2), by the same rule as the level:
-            # the rungs the old name earned stay revocable under the new one, unless
-            # the new name already has a grounding record of its own, which stays
-            # unmerged (L3 r1 1009+22: a row-by-row merge let one name's standing
-            # group keep the other's revoked rung alive).
-            if self._conn.execute(
-                "SELECT 1 FROM pattern_grounding WHERE name = ? LIMIT 1", (new_name,)
-            ).fetchone() is None:
-                self._conn.execute(
-                    "UPDATE pattern_grounding SET name = ? WHERE name = ?",
-                    (new_name, old_name))
-            self._conn.execute(
-                "DELETE FROM pattern_grounding WHERE name = ?", (old_name,))
-            rekeyed = _rename_pattern(
-                self._conn, old_name, new_name, day, commit=not self._defer_commit
-            )
-        # A level record that moved or left is a change to the bound's prior, so it
-        # gets a receipt even when no edge moved (codex L3 r1 MED 4).
-        if rekeyed or level_moved:
-            self._audit_log_after_commit(
-                "pattern_association_renamed",
-                {"old": old_name, "new": new_name, "rekeyed": rekeyed,
-                 "level_moved": level_moved},
-                method="rename_pattern_association",
-                committed="the rename",
-            )
-        return rekeyed
-
-    def sever_pattern_concept(self, name: str, today: str | None = None) -> int:
-        """Homonym guard: a pattern's concept left (composted/retired) → delete
-        its edges, delete its saved level (``pattern_levels``) and grounding record
-        (``pattern_grounding``), and bump its
-        generation, so a future homonym starts clean and enters the graduation
-        bound at 1x. Returns the number of edges severed. A wrap that composts a
-        name its own text still carries saves that line's bounded level again.
-
-        Warns:
-            UserWarning: if the audit event could not be written. The
-                operation still SUCCEEDED — the audit trail is missing
-                this event. Also counted on ``status().audit_write_failures``
-                and logged; see :meth:`_audit_log_after_commit`."""
-        day = today or _today_local()
-        with self._db_boundary("sever_pattern_concept"):
-            # The concept's earned level leaves with it (codex L3 r1 HIGH 2): a
-            # later homonym enters the bound as new, at 1x. Same transaction as
-            # the edge delete (committed by it, or by the enclosing batch).
-            if self._has_pattern_levels_table():
-                self._conn.execute(
-                    "DELETE FROM pattern_levels WHERE kind = 'name' AND key = ?",
-                    (name,))
-            # Its grounding record too (L3 r1 1009+22, run): a homonym inherited the
-            # old concept's groups, and a still-standing one kept its revoked rung.
-            self._conn.execute("DELETE FROM pattern_grounding WHERE name = ?", (name,))
-            severed = _sever_pattern_concept(
-                self._conn, name, day, commit=not self._defer_commit
-            )
-        # Emitted even at ``severed == 0``: a name with no edges still gets a new
-        # generation boundary, a durable change to the concept's lineage that a later
-        # reuse of the name observes, so it needs a record.
-        self._audit_log_after_commit(
-            "pattern_concept_severed", {"name": name, "severed": severed},
-            method="sever_pattern_concept", committed="the severance")
-        return severed
-
-    def pattern_graph_projection_meta(self) -> PatternGraphProjectionMeta:
-        """The pattern-graph projection checkpoint — ``(projection_version,
-        high_water_mark)`` (spore-104 dep-1).
-
-        The Slice-C retrieval-receipt stamp + A/B replay bucket key: a receipt
-        records this at recall time so the offline replay harness can pin which
-        graph state produced it. Read-only (never mutates the graph), so it is
-        safe on a read_only Store on the per-prompt recall path; the underlying
-        read maps a missing table (a not-yet-upgraded DB opened read_only skips
-        _init_schema) to the defaults (version 1, hwm 0) rather than faulting."""
-        with self._db_boundary("pattern_graph_projection_meta"):
-            return _get_projection_meta(self._conn)
 
     # -- Pruning --
 
@@ -13634,13 +13100,7 @@ class Store:
         - :meth:`team_forget_key`
         - :meth:`set_state_key` / :meth:`clear_state_key` (CAP-04 state slots)
         - :meth:`delete` / :meth:`delete_by_origin_key` (episode deletions)
-        - :meth:`record_associations` / :meth:`decay_associations`
         - :meth:`wrap_completed`
-        - :meth:`seed_pattern_co_graduation`
-        - :meth:`drain_co_surface_events`
-        - :meth:`gc_pattern_associations`
-        - :meth:`rename_pattern_association`
-        - :meth:`sever_pattern_concept`
         - :meth:`upsert_pattern_history`
         - :meth:`seed_pattern_max_level`
 

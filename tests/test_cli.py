@@ -24,7 +24,6 @@ from anneal_memory import Store, __version__
 from anneal_memory.cli import (
     _open_store,
     build_parser,
-    cmd_associations,
     cmd_audit,
     cmd_continuity,
     cmd_delete,
@@ -32,7 +31,6 @@ from anneal_memory.cli import (
     cmd_episodes,
     cmd_export,
     cmd_get,
-    cmd_graph,
     cmd_history,
     cmd_import,
     cmd_init,
@@ -691,55 +689,6 @@ class TestCmdContinuity:
         assert "text" in data
 
 
-# -- cmd_associations tests --
-
-class TestCmdAssociations:
-    def test_stats_empty(self, base_args, capsys):
-        Store(base_args.db).close()
-        base_args.stats = True
-        base_args.episode = None
-        base_args.min_strength = 0.0
-        base_args.limit = 20
-        cmd_associations(base_args)
-        captured = capsys.readouterr()
-        assert "Total links:     0" in captured.out
-
-    def test_stats_json(self, base_args, capsys):
-        Store(base_args.db).close()
-        base_args.json = True
-        base_args.stats = True
-        base_args.episode = None
-        base_args.min_strength = 0.0
-        base_args.limit = 20
-        cmd_associations(base_args)
-        captured = capsys.readouterr()
-        data = json.loads(captured.out)
-        assert data["total_links"] == 0
-
-    def test_episode_no_associations(self, base_args_with_data, capsys):
-        # Get an episode ID
-        with Store(base_args_with_data.db, project_name="TestProject") as store:
-            result = store.recall(limit=1)
-            ep_id = result.episodes[0].id
-
-        base_args_with_data.stats = False
-        base_args_with_data.episode = ep_id
-        base_args_with_data.min_strength = 0.0
-        base_args_with_data.limit = 20
-        cmd_associations(base_args_with_data)
-        captured = capsys.readouterr()
-        assert "No associations found" in captured.out
-
-    def test_no_episode_no_stats_errors(self, base_args, capsys):
-        Store(base_args.db).close()
-        base_args.stats = False
-        base_args.episode = None
-        base_args.min_strength = 0.0
-        base_args.limit = 20
-        with pytest.raises(SystemExit):
-            cmd_associations(base_args)
-
-
 # -- cmd_delete tests --
 
 class TestCmdDelete:
@@ -853,7 +802,7 @@ class TestParser:
     def test_json_on_subparser(self):
         """--json works at subcommand level for all commands with it."""
         parser = build_parser()
-        for cmd in ["status", "episodes", "get abc123", "continuity", "verify", "associations --stats"]:
+        for cmd in ["status", "episodes", "get abc123", "continuity", "verify"]:
             args_list = cmd.split() + ["--json"]
             args = parser.parse_args(args_list)
             assert args.json is True, f"--json failed for subcommand: {cmd}"
@@ -916,18 +865,6 @@ class TestParser:
         parser = build_parser()
         args = parser.parse_args(["init"])
         assert args.command == "init"
-
-    def test_associations_stats(self):
-        parser = build_parser()
-        args = parser.parse_args(["associations", "--stats"])
-        assert args.command == "associations"
-        assert args.stats is True
-
-    def test_associations_episode(self):
-        parser = build_parser()
-        args = parser.parse_args(["associations", "--episode", "abc123", "--min-strength", "0.5"])
-        assert args.episode == "abc123"
-        assert args.min_strength == 0.5
 
     def test_serve_command(self):
         parser = build_parser()
@@ -2543,80 +2480,6 @@ class TestCmdDiff:
         assert data["wraps"][1]["delta"]["continuity_chars"] == 100
 
 
-# -- cmd_graph tests --
-
-class TestCmdGraph:
-    def test_graph_empty(self, base_args_with_data, capsys):
-        base_args_with_data.json = True
-        base_args_with_data.format = "json"
-        base_args_with_data.output = None
-        base_args_with_data.min_strength = 0.0
-        cmd_graph(base_args_with_data)
-        captured = capsys.readouterr()
-        data = json.loads(captured.out)
-        assert data["nodes"] == []
-        assert data["edges"] == []
-
-    def test_graph_with_associations(self, tmp_path, capsys):
-        db = str(tmp_path / "test.db")
-        with Store(db) as store:
-            ep1 = store.record("Episode one", episode_type="observation")
-            ep2 = store.record("Episode two", episode_type="decision")
-            store.record_associations(
-                direct_pairs={(ep1.id, ep2.id)},
-            )
-
-        args = Namespace(db=db, project_name="Agent", json=True, format="json", output=None, min_strength=0.0)
-        cmd_graph(args)
-        captured = capsys.readouterr()
-        data = json.loads(captured.out)
-        assert len(data["nodes"]) == 2
-        assert len(data["edges"]) == 1
-
-    def test_graph_dot_format(self, tmp_path, capsys):
-        db = str(tmp_path / "test.db")
-        with Store(db) as store:
-            ep1 = store.record("Episode one", episode_type="observation")
-            ep2 = store.record("Episode two", episode_type="decision")
-            store.record_associations(
-                direct_pairs={(ep1.id, ep2.id)},
-            )
-
-        args = Namespace(db=db, project_name="Agent", json=False, format="dot", output=None, min_strength=0.0)
-        cmd_graph(args)
-        captured = capsys.readouterr()
-        assert "graph associations" in captured.out
-        assert ep1.id in captured.out
-        assert ep2.id in captured.out
-
-    def test_graph_dot_to_file(self, tmp_path, capsys):
-        db = str(tmp_path / "test.db")
-        with Store(db) as store:
-            ep1 = store.record("Episode one", episode_type="observation")
-            ep2 = store.record("Episode two", episode_type="decision")
-            store.record_associations(direct_pairs={(ep1.id, ep2.id)})
-
-        out = str(tmp_path / "graph.dot")
-        args = Namespace(db=db, project_name="Agent", json=False, format="dot", output=out, min_strength=0.0)
-        cmd_graph(args)
-        assert Path(out).exists()
-        text = Path(out).read_text()
-        assert "graph associations" in text
-
-    def test_graph_min_strength_filter(self, tmp_path, capsys):
-        db = str(tmp_path / "test.db")
-        with Store(db) as store:
-            ep1 = store.record("Episode one", episode_type="observation")
-            ep2 = store.record("Episode two", episode_type="decision")
-            store.record_associations(direct_pairs={(ep1.id, ep2.id)})
-
-        # Set min_strength higher than any edge
-        args = Namespace(db=db, project_name="Agent", json=False, format="json", output=None, min_strength=99.0)
-        cmd_graph(args)
-        captured = capsys.readouterr()
-        assert "No associations above strength" in captured.out
-
-
 # -- cmd_stats tests --
 
 class TestCmdStats:
@@ -2647,7 +2510,6 @@ class TestCmdStats:
         assert "by_source" in data["episodes"]
         assert "continuity" in data
         assert "wraps" in data
-        assert "associations" in data
 
     def test_stats_with_wraps(self, tmp_path, capsys):
         db = str(tmp_path / "test.db")
@@ -2773,20 +2635,6 @@ class TestParserNewCommands:
         args = parser.parse_args(["diff"])
         assert args.wraps == 5
 
-    def test_graph_command(self):
-        parser = build_parser()
-        args = parser.parse_args(["graph", "--format", "dot", "--output", "g.dot", "--min-strength", "0.5"])
-        assert args.command == "graph"
-        assert args.format == "dot"
-        assert args.output == "g.dot"
-        assert args.min_strength == 0.5
-
-    def test_graph_defaults(self):
-        parser = build_parser()
-        args = parser.parse_args(["graph"])
-        assert args.format == "json"
-        assert args.min_strength == 0.0
-
     def test_stats_command(self):
         parser = build_parser()
         args = parser.parse_args(["stats"])
@@ -2805,7 +2653,7 @@ class TestParserNewCommands:
 
     def test_json_on_new_subcommands(self):
         parser = build_parser()
-        for cmd in ["export", "import data.json", "audit", "diff", "graph", "stats", "history"]:
+        for cmd in ["export", "import data.json", "audit", "diff", "stats", "history"]:
             args_list = cmd.split() + ["--json"]
             args = parser.parse_args(args_list)
             assert args.json is True, f"--json failed for subcommand: {cmd}"
@@ -2928,48 +2776,24 @@ class TestAuditGzipPath:
         assert "record" in events
 
 
-class TestGraphJsonOutput:
-    def test_graph_json_output_to_file(self, tmp_path, capsys):
-        """Graph JSON to file with --json flag outputs metadata."""
-        db = str(tmp_path / "test.db")
-        with Store(db) as store:
-            ep1 = store.record("Episode one", episode_type="observation")
-            ep2 = store.record("Episode two", episode_type="decision")
-            store.record_associations(direct_pairs={(ep1.id, ep2.id)})
-
-        out = str(tmp_path / "graph.json")
-        args = Namespace(db=db, project_name="Agent", json=True, format="json", output=out, min_strength=0.0)
-        cmd_graph(args)
-        captured = capsys.readouterr()
-        # With --json + --output, should get JSON metadata on stdout
-        meta = json.loads(captured.out)
-        assert meta["format"] == "json"
-        assert meta["nodes"] == 2
-        assert meta["edges"] == 1
-        # And the file should contain the actual graph
-        graph = json.loads(Path(out).read_text())
-        assert len(graph["nodes"]) == 2
-
-
 class TestTextExportsNeverOverwrite:
-    """Ruled 10-10 (Phill, via the desk): export json/markdown and graph json/dot
+    """Ruled 10-10 (Phill, via the desk): export json and markdown
     refuse an existing --output exactly as export --format sqlite does."""
 
-    WRITERS = [("export", "json"), ("export", "markdown"), ("graph", "json"), ("graph", "dot")]
+    WRITERS = [("export", "json"), ("export", "markdown")]
 
     @pytest.fixture
     def db(self, tmp_path):
         db = str(tmp_path / "test.db")
         with Store(db, project_name="Agent") as store:
-            ep1 = store.record("Episode one", episode_type="observation")
-            ep2 = store.record("Episode two", episode_type="decision")
-            store.record_associations(direct_pairs={(ep1.id, ep2.id)})
+            store.record("Episode one", episode_type="observation")
+            store.record("Episode two", episode_type="decision")
         return db
 
     @staticmethod
     def _run(cmd, fmt, db, out):
         args = Namespace(db=db, project_name="Agent", json=False, format=fmt, output=str(out), min_strength=0.0)
-        (cmd_export if cmd == "export" else cmd_graph)(args)
+        cmd_export(args)
 
     @pytest.mark.parametrize("cmd,fmt", WRITERS)
     def test_refuses_an_existing_output_and_leaves_it(self, db, tmp_path, capsys, cmd, fmt):
@@ -3025,7 +2849,7 @@ class TestTextExportsNeverOverwrite:
     def test_json_mode_reports_the_written_path(self, db, tmp_path, capsys, cmd, fmt):
         out = tmp_path / "meta.out"
         args = Namespace(db=db, project_name="Agent", json=True, format=fmt, output=str(out), min_strength=0.0)
-        (cmd_export if cmd == "export" else cmd_graph)(args)
+        cmd_export(args)
         meta = json.loads(capsys.readouterr().out)
         assert meta["path"] == str(out) and meta["format"] == fmt
         assert out.exists()
@@ -3095,32 +2919,6 @@ class TestTextExportsNeverOverwrite:
         assert redirected.returncode == 1
         assert "never overwrites" in redirected.stderr
         assert target.read_bytes() == b"PRE\n"
-
-    @pytest.mark.parametrize("fmt", ["json", "dot"])
-    @pytest.mark.parametrize("min_strength", [0.0, 99.0])
-    def test_an_empty_graph_still_refuses_an_existing_output(self, tmp_path, capsys, fmt, min_strength):
-        """L3 r1 (codex): an empty store, or a threshold above every edge, returned
-        before the writer, so an existing --output was not refused."""
-        db = str(tmp_path / "g.db")
-        with Store(db, project_name="Agent") as store:
-            if min_strength:
-                a, b = store.record("one", episode_type="observation"), store.record("two", episode_type="decision")
-                store.record_associations(direct_pairs={(a.id, b.id)})
-        out = tmp_path / "keep.out"
-        out.write_bytes(b"previous")
-        args = Namespace(db=db, project_name="Agent", json=False, format=fmt, output=str(out), min_strength=min_strength)
-        with pytest.raises(SystemExit) as exc:
-            cmd_graph(args)
-        assert exc.value.code == 1
-        assert out.read_bytes() == b"previous"
-        new = tmp_path / "new.out"
-        args.output = str(new)
-        cmd_graph(args)
-        text = new.read_text(encoding="utf-8")
-        if fmt == "json":
-            assert json.loads(text) == {"nodes": [], "edges": []}
-        else:
-            assert text.startswith("graph associations {")
 
     @pytest.mark.skipif(os.name != "posix", reason="directory symlinks need privileges on Windows")
     @pytest.mark.parametrize("cmd,fmt", WRITERS + [("export", "sqlite")])

@@ -10,8 +10,6 @@ Usage:
     anneal-memory continuity                      # Print continuity file
     anneal-memory record "Discovered X" --type observation
     anneal-memory search "pattern"
-    anneal-memory associations --episode abc123
-    anneal-memory associations --stats
     anneal-memory verify                          # Audit trail integrity
     anneal-memory delete abc123
     anneal-memory prune --older-than 90           # Prune old episodes
@@ -25,7 +23,6 @@ Usage:
     anneal-memory import out.json                 # Import from export
     anneal-memory audit --since 3d --event record # Read audit trail
     anneal-memory diff --wraps 5                  # Wrap metric progression
-    anneal-memory graph --format dot -o graph.dot # Association graph
     anneal-memory stats                           # Detailed analytics
     anneal-memory history --limit 10              # Wrap history timeline
     anneal-memory migrate check                   # Self-migration proposals for your core files
@@ -144,7 +141,6 @@ from .store import (
 from .types import (
     DEFAULT_TRUST,
     TRUST_LEVELS,
-    AssociationStats,
     EpisodeType,
     trust_rank,
 )
@@ -345,7 +341,7 @@ def _open_store(
     command whose operator gate (:func:`_operator_ok`) said yes (CAP-08).
 
     ``read_only=True`` is for the commands that only read (episodes, get,
-    continuity, search, associations, pattern-associations, diff, graph, stats,
+    continuity, search, diff, stats,
     history). A read-only open never migrates a store to a newer schema generation
     and writes no audit entry, so these commands cannot lock an older process out
     of the store. ``status`` is not one of them: it reports the audit trail, which a
@@ -604,8 +600,6 @@ def cmd_status(args: argparse.Namespace) -> None:
                 "origin_counts": status.origin_counts,
                 "schema": schema_name,
                 "sections": section_headings,
-                "association_stats": _assoc_stats_dict(status.association_stats),
-                "association_formation": store.association_formation(),
                 "audit": {
                     "enabled": status.audit_enabled,
                     "log_path": status.audit_log_path,
@@ -659,26 +653,6 @@ def cmd_status(args: argparse.Namespace) -> None:
             print(f"Continuity: not yet created")
         if status.tombstone_count > 0:
             print(f"Tombstones: {status.tombstone_count}")
-
-        # Outside the link block: a store created on 1.0.2 has no links at all,
-        # and its status must still say formation is off (codex L3 r1).
-        formation = store.association_formation()
-        if formation["off_at_wrap"] is not None:
-            print(f"\nNo new links since wrap {formation['off_at_wrap']} "
-                  f"(formation off since anneal-memory 1.0.2)")
-
-        if status.association_stats and status.association_stats.total_links > 0:
-            a = status.association_stats
-            print()
-            print(f"Associations: {a.total_links} links")
-            print(f"  Avg strength:    {a.avg_strength:.3f}")
-            print(f"  Max strength:    {a.max_strength:.3f}")
-            print(f"  Global density:  {a.density:.4f}")
-            print(f"  Local density:   {a.local_density:.4f}")
-            if a.strongest_pairs:
-                print(f"  Strongest pairs:")
-                for p in a.strongest_pairs[:5]:
-                    print(f"    {p.episode_a} <-> {p.episode_b}  strength={p.strength:.3f}  citations={p.co_citations}")
 
         # Audit health (Diogenes ARCH finding, Apr 13 2026)
         print()
@@ -1101,145 +1075,6 @@ def cmd_state(args: argparse.Namespace) -> None:
                 content = _truncate(item["content"].replace("\n", " "), 90)
                 print(f"  {label:<8} [{item['id']}] {_format_timestamp(item['timestamp'])}  {content}")
     print("\nA wrong key hides a valid episode: take it out with `state --unset ID`.")
-
-
-def cmd_pattern_associations(args: argparse.Namespace) -> None:
-    """Inspect the cortical pattern-association graph (AM-LINKGATE-DECAY, Slice B).
-
-    SHADOW-MODE telemetry surface — the observable half of the shadow phase, and
-    the input to the Slice-C GO/NO-GO validation oracle. ``--stats`` reports the
-    graph health (effective strengths after calendar decay; the ``concentration``
-    field is the echo-chamber canary); ``--name`` lists the edges incident to a
-    pattern, ranked by effective strength."""
-    with _open_store(args, read_only=True) as store:
-        if args.name:
-            pairs = store.get_pattern_associations(
-                names=[args.name], min_strength=args.min_strength, limit=args.limit
-            )
-            if args.json:
-                _print_json([
-                    {
-                        "name_a": p.name_a, "name_b": p.name_b,
-                        "strength": p.strength, "stored_strength": p.stored_strength,
-                        "co_surface_count": p.co_surface_count,
-                        "co_surface_session_count": p.co_surface_session_count,
-                        "last_co_surfaced_at": p.last_co_surfaced_at,
-                        "formation_source": p.formation_source,
-                    }
-                    for p in pairs
-                ])
-                return
-            if not pairs:
-                print(f"No pattern associations for '{args.name}'.")
-                return
-            print(f"Pattern associations for '{args.name}' (effective strength):")
-            for p in pairs:
-                print(f"  {p.name_a} <-> {p.name_b}  strength={p.strength:.3f} "
-                      f"(stored={p.stored_strength:.3f})  co-surf={p.co_surface_count}"
-                      f"  sessions={p.co_surface_session_count}  [{p.formation_source}]")
-            return
-
-        # Default + --stats: the graph-health telemetry surface.
-        stats = store.pattern_association_stats(top_n=args.limit)
-        if args.json:
-            _print_json({
-                "total_links": stats.total_links,
-                "retrievable_links": stats.retrievable_links,
-                "avg_strength": stats.avg_strength,
-                "max_strength": stats.max_strength,
-                "concentration": stats.concentration,
-                "by_formation_source": stats.by_formation_source,
-                "strongest_pairs": [
-                    {
-                        "name_a": p.name_a, "name_b": p.name_b,
-                        "strength": p.strength, "co_surface_count": p.co_surface_count,
-                        "co_surface_session_count": p.co_surface_session_count,
-                        "formation_source": p.formation_source,
-                    }
-                    for p in stats.strongest_pairs
-                ],
-            })
-            return
-        print("Pattern Association Graph (cortical / AM-LINKGATE-DECAY, SHADOW):")
-        print(f"  Total links:        {stats.total_links}")
-        print(f"  Retrievable (>=0.2):{stats.retrievable_links:>5}")
-        print(f"  Avg strength:       {stats.avg_strength:.3f}")
-        print(f"  Max strength:       {stats.max_strength:.3f}")
-        print(f"  Concentration:      {stats.concentration:.3f}  (top-edge share — echo-chamber canary)")
-        print(f"  By formation:       {stats.by_formation_source}")
-        if stats.strongest_pairs:
-            print()
-            print("  Strongest pairs (effective strength):")
-            for p in stats.strongest_pairs:
-                print(f"    {p.name_a} <-> {p.name_b}  strength={p.strength:.3f}  "
-                      f"co-surf={p.co_surface_count}  sessions={p.co_surface_session_count}  "
-                      f"[{p.formation_source}]")
-        return
-
-
-def cmd_associations(args: argparse.Namespace) -> None:
-    """Query Hebbian associations."""
-    with _open_store(args, read_only=True) as store:
-        if args.stats:
-            stats = store.association_stats()
-            if args.json:
-                _print_json(_assoc_stats_dict(stats))
-                return
-
-            print(f"Association Network Stats:")
-            print(f"  Total links:     {stats.total_links}")
-            print(f"  Avg strength:    {stats.avg_strength:.3f}")
-            print(f"  Max strength:    {stats.max_strength:.3f}")
-            print(f"  Global density:  {stats.density:.4f}")
-            print(f"  Local density:   {stats.local_density:.4f}")
-            if stats.strongest_pairs:
-                print()
-                print(f"  Strongest pairs:")
-                for p in stats.strongest_pairs[:10]:
-                    tag_str = f"  affect={p.affective_tag}({p.affective_intensity:.1f})" if p.affective_tag else ""
-                    print(f"    {p.episode_a} <-> {p.episode_b}  strength={p.strength:.3f}  citations={p.co_citations}{tag_str}")
-            return
-
-        if not args.episode:
-            print("Error: provide --episode ID or use --stats", file=sys.stderr)
-            sys.exit(1)
-
-        pairs = store.get_associations(
-            episode_ids=[args.episode],
-            min_strength=args.min_strength,
-            limit=args.limit,
-        )
-
-        if args.json:
-            _print_json([
-                {
-                    "episode_a": p.episode_a,
-                    "episode_b": p.episode_b,
-                    "strength": p.strength,
-                    "co_citations": p.co_citations,
-                    "first_linked": p.first_linked,
-                    "last_strengthened": p.last_strengthened,
-                    "affective_tag": p.affective_tag,
-                    "affective_intensity": p.affective_intensity,
-                }
-                for p in pairs
-            ])
-            return
-
-        if not pairs:
-            print(f"No associations found for episode {args.episode}.")
-            return
-
-        print(f"Associations for episode {args.episode}:")
-        print()
-        for p in pairs:
-            other = p.episode_b if p.episode_a == args.episode else p.episode_a
-            tag_str = f"  affect={p.affective_tag}({p.affective_intensity:.1f})" if p.affective_tag else ""
-            print(f"  <-> {other}  strength={p.strength:.3f}  citations={p.co_citations}{tag_str}")
-            linked = store.get(other)
-            if linked:
-                print(f"      {_truncate(linked.content.replace(chr(10), ' '), 90)}")
-            print()
 
 
 def cmd_delete(args: argparse.Namespace) -> None:
@@ -2295,26 +2130,6 @@ def cmd_export(args: argparse.Namespace) -> None:
             supersessions = store.supersession_links()
             continuity = store.load_continuity()
             meta = _load_meta_or_exit(store)
-            assoc_stats = store.association_stats()
-
-            # Get all associations
-            all_ep_ids = [ep["id"] for ep in episodes]
-            associations = []
-            if all_ep_ids:
-                pairs = store.get_associations(all_ep_ids, limit=100000)
-                associations = [
-                    {
-                        "episode_a": p.episode_a,
-                        "episode_b": p.episode_b,
-                        "strength": p.strength,
-                        "co_citations": p.co_citations,
-                        "first_linked": p.first_linked,
-                        "last_strengthened": p.last_strengthened,
-                        "affective_tag": p.affective_tag,
-                        "affective_intensity": p.affective_intensity,
-                    }
-                    for p in pairs
-                ]
 
             # Get wrap history (serialize as dicts for JSON export compatibility)
             wraps = [asdict(w) for w in store.get_wrap_history()]
@@ -2328,8 +2143,6 @@ def cmd_export(args: argparse.Namespace) -> None:
                 "exported_at": _now_utc_str(),
                 "project_name": store.project_name,
                 "episodes": episodes,
-                "associations": associations,
-                # Informational: import does not restore links (episodes only).
                 "supersessions": supersessions,
                 "wraps": wraps,
                 "continuity": continuity,
@@ -2353,7 +2166,6 @@ def cmd_export(args: argparse.Namespace) -> None:
             lines.append(f"Exported: {_now_utc_str()}")
             lines.append(f"Version: {__version__}")
             lines.append(f"Episodes: {len(episodes)}")
-            lines.append(f"Associations: {len(associations)}")
             lines.append(f"Wraps: {len(wraps)}")
             lines.append("")
 
@@ -2376,14 +2188,6 @@ def cmd_export(args: argparse.Namespace) -> None:
                 lines.append(ep["content"])
                 lines.append("")
 
-            if associations:
-                lines.append("---")
-                lines.append("## Associations")
-                lines.append("")
-                for a in associations:
-                    tag_str = f" [{a['affective_tag']}, {a['affective_intensity']:.1f}]" if a.get("affective_tag") else ""
-                    lines.append(f"- {a['episode_a']} ↔ {a['episode_b']}: strength={a['strength']:.3f}, co-cited={a['co_citations']}{tag_str}")
-                lines.append("")
 
             text = "\n".join(lines)
             if args.output:
@@ -2413,14 +2217,11 @@ def _warn_if_policy_lost(store: Store) -> None:
 def cmd_import(args: argparse.Namespace) -> None:
     """Import episodes from a JSON export file.
 
-    Imports episodes only — not associations, continuity, wrap history, or
+    Imports episodes only, not continuity, wrap history, or
     supersession links: an export's superseded episodes come back unhidden;
     re-link them with ``supersede`` if they should stay hidden.
-    This is intentional: associations form through the agent's own consolidation
-    acts during wraps, not through external injection. Importing someone else's
-    cognitive topology would undermine the system's thesis that identity emerges
-    from the agent's own compression and citation patterns. Import the raw
-    material, let the cognitive system rebuild its own conclusions.
+    This is intentional: the import carries the raw material only, and the
+    continuity is rebuilt by the agent's own compression acts during wraps.
     """
     import_path = Path(args.path)
     if not import_path.exists():
@@ -2986,10 +2787,6 @@ def cmd_audit(args: argparse.Namespace) -> None:
         elif event == "continuity_refused":
             summary = (f"reason={data.get('reason', '?')} chars={data.get('chars', '?')} "
                        f"bound={data.get('bound', '?')}")
-        elif event == "associations_updated":
-            summary = f"formed={data.get('formed', 0)} strengthened={data.get('strengthened', 0)}"
-        elif event == "associations_decayed":
-            summary = f"decayed={data.get('decayed', 0)}"
         elif event == "prune":
             summary = f"count={data.get('count', '?')}"
 
@@ -3026,8 +2823,6 @@ def cmd_diff(args: argparse.Namespace) -> None:
                     entry["delta"] = {
                         "episodes_compressed": w.episodes_compressed - prev.episodes_compressed,
                         "continuity_chars": w.continuity_chars - prev.continuity_chars,
-                        "graduations_validated": w.graduations_validated - prev.graduations_validated,
-                        "graduations_demoted": w.graduations_demoted - prev.graduations_demoted,
                     }
                 diffs.append(entry)
             _print_json({"wraps": diffs})
@@ -3036,22 +2831,14 @@ def cmd_diff(args: argparse.Namespace) -> None:
         print(f"Wrap progression (last {len(wraps)}):")
         print()
         # Header
-        print(f"  {'Wrap':>4}  {'When':<20}  {'Episodes':>8}  {'Chars':>7}  {'Grad':>4}  {'Demoted':>7}  {'Formed':>6}  {'Decayed':>7}")
-        print(f"  {'----':>4}  {'----':<20}  {'--------':>8}  {'-------':>7}  {'----':>4}  {'-------':>7}  {'------':>6}  {'-------':>7}")
+        print(f"  {'Wrap':>4}  {'When':<20}  {'Episodes':>8}  {'Chars':>7}")
+        print(f"  {'----':>4}  {'----':<20}  {'--------':>8}  {'-------':>7}")
 
-        # A wrap at or after the store's formation-off wrap formed nothing by
-        # design: shown as "off", never as a 0 that reads like a dead write path.
-        off_at = store.association_formation()["off_at_wrap"]
         for i, w in enumerate(wraps):
             wrap_id = w.id
             when = _format_timestamp(w.wrapped_at)
             eps = w.episodes_compressed
             chars = w.continuity_chars
-            grad = w.graduations_validated
-            demoted = w.graduations_demoted
-            off = off_at is not None and wrap_id >= off_at
-            formed: int | str = "off" if off else w.associations_formed
-            decayed: int | str = "off" if off else w.associations_decayed
 
             # Show delta for continuity chars
             chars_delta = ""
@@ -3063,119 +2850,7 @@ def cmd_diff(args: argparse.Namespace) -> None:
                 elif diff < 0:
                     chars_delta = f" ({diff})"
 
-            print(f"  {wrap_id:>4}  {when:<20}  {eps:>8}  {chars:>7}{chars_delta}  {grad:>4}  {demoted:>7}  {formed:>6}  {decayed:>7}")
-
-
-def cmd_graph(args: argparse.Namespace) -> None:
-    """Export association graph."""
-    with _open_store(args, read_only=True) as store:
-        # Get all episodes to build node list
-        result = store.recall(limit=100000, include_superseded=True)
-        all_ids = [ep.id for ep in result.episodes]
-
-        if not all_ids and not args.output:
-            if args.json:
-                _print_json({"nodes": [], "edges": []})
-            else:
-                print("No episodes in store.")
-            return
-
-        pairs = store.get_associations(all_ids, min_strength=args.min_strength, limit=100000) if all_ids else []
-
-        # With --output an empty graph is still written (and an existing file
-        # still refused) through the same writer (L3 r1, codex).
-        if not pairs and not args.output:
-            if args.json:
-                _print_json({"nodes": [], "edges": [], "message": "No associations above threshold"})
-            else:
-                print(f"No associations above strength {args.min_strength}.")
-            return
-
-        # Collect connected nodes
-        connected_ids: set[str] = set()
-        for p in pairs:
-            connected_ids.add(p.episode_a)
-            connected_ids.add(p.episode_b)
-
-        # Build node info
-        nodes: dict[str, dict] = {}
-        for ep in result.episodes:
-            if ep.id in connected_ids:
-                nodes[ep.id] = {
-                    "id": ep.id,
-                    "type": ep.type.value,
-                    "label": _truncate(ep.content.replace("\n", " "), 40),
-                }
-
-        fmt = args.format
-
-        if fmt == "json":
-            graph_data = {
-                "nodes": list(nodes.values()),
-                "edges": [
-                    {
-                        "source": p.episode_a,
-                        "target": p.episode_b,
-                        "strength": p.strength,
-                        "co_citations": p.co_citations,
-                        "affective_tag": p.affective_tag,
-                        "affective_intensity": p.affective_intensity,
-                    }
-                    for p in pairs
-                ],
-            }
-            if args.output:
-                out = Path(args.output)
-                _write_text_no_clobber(json.dumps(graph_data, indent=2), out)
-                if args.json:
-                    _print_json({"format": "json", "path": str(out), "nodes": len(nodes), "edges": len(pairs)})
-                else:
-                    print(f"Graph exported to {out} ({len(nodes)} nodes, {len(pairs)} edges)", file=sys.stderr)
-            else:
-                _print_json(graph_data)
-
-        elif fmt == "dot":
-            # Type -> color mapping
-            type_colors = {
-                "observation": "#4A90D9",
-                "decision": "#D94A4A",
-                "tension": "#D9A04A",
-                "question": "#9B59B6",
-                "outcome": "#27AE60",
-                "context": "#95A5A6",
-            }
-
-            lines = ["graph associations {"]
-            lines.append('  graph [rankdir=LR, overlap=false, splines=true];')
-            lines.append('  node [shape=box, style="rounded,filled", fontsize=10];')
-            lines.append("")
-
-            for nid, ninfo in nodes.items():
-                color = type_colors.get(ninfo["type"], "#CCCCCC")
-                label = ninfo["label"].replace('\\', '\\\\').replace('"', '\\"')
-                lines.append(f'  "{nid}" [label="{nid}\\n{label}", fillcolor="{color}", fontcolor="white"];')
-
-            lines.append("")
-            for p in pairs:
-                # Width proportional to strength
-                width = max(0.5, min(4.0, p.strength))
-                label = f"{p.strength:.1f}"
-                if p.affective_tag:
-                    label += f"\\n{p.affective_tag}"
-                lines.append(f'  "{p.episode_a}" -- "{p.episode_b}" [penwidth={width:.1f}, label="{label}"];')
-
-            lines.append("}")
-            text = "\n".join(lines)
-
-            if args.output:
-                out = Path(args.output)
-                _write_text_no_clobber(text, out)
-                if args.json:
-                    _print_json({"format": "dot", "path": str(out), "nodes": len(nodes), "edges": len(pairs)})
-                else:
-                    print(f"DOT graph exported to {out} ({len(nodes)} nodes, {len(pairs)} edges)", file=sys.stderr)
-            else:
-                print(text)
+            print(f"  {wrap_id:>4}  {when:<20}  {eps:>8}  {chars:>7}{chars_delta}")
 
 
 def cmd_stats(args: argparse.Namespace) -> None:
@@ -3217,10 +2892,6 @@ def cmd_stats(args: argparse.Namespace) -> None:
             wrap_stats = {
                 "total_wraps": len(wraps),
                 "avg_episodes_per_wrap": sum(eps_per_wrap) / len(eps_per_wrap) if eps_per_wrap else 0,
-                "total_graduations": sum(w.graduations_validated for w in wraps),
-                "total_demotions": sum(w.graduations_demoted for w in wraps),
-                "total_associations_formed": sum(w.associations_formed for w in wraps),
-                "total_associations_decayed": sum(w.associations_decayed for w in wraps),
             }
             # First and last wrap timestamps
             wrap_stats["first_wrap"] = wraps[0].wrapped_at
@@ -3240,7 +2911,6 @@ def cmd_stats(args: argparse.Namespace) -> None:
                     "chars": status.continuity_chars,
                 },
                 "wraps": wrap_stats,
-                "associations": _assoc_stats_dict(status.association_stats),
             })
             return
 
@@ -3286,28 +2956,10 @@ def cmd_stats(args: argparse.Namespace) -> None:
             print("Wraps:")
             print(f"  Total:          {wrap_stats['total_wraps']}")
             print(f"  Avg episodes:   {wrap_stats['avg_episodes_per_wrap']:.1f} per wrap")
-            print(f"  Graduations:    {wrap_stats['total_graduations']} validated, {wrap_stats['total_demotions']} demoted")
-            print(f"  Associations:   {wrap_stats['total_associations_formed']} formed, {wrap_stats['total_associations_decayed']} decayed")
-            off_at = store.association_formation()["off_at_wrap"]
-            if off_at is not None:
-                print(f"                  none formed since wrap {off_at} (formation off since 1.0.2)")
             print(f"  First wrap:     {_format_timestamp(wrap_stats['first_wrap'])}")
             print(f"  Last wrap:      {_format_timestamp(wrap_stats['last_wrap'])}")
         else:
             print("Wraps: none")
-        print()
-
-        # Associations
-        a = status.association_stats
-        if a and a.total_links > 0:
-            print(f"Associations:")
-            print(f"  Total links:    {a.total_links}")
-            print(f"  Avg strength:   {a.avg_strength:.3f}")
-            print(f"  Max strength:   {a.max_strength:.3f}")
-            print(f"  Global density: {a.density:.4f}")
-            print(f"  Local density:  {a.local_density:.4f}")
-        else:
-            print("Associations: none")
 
 
 def cmd_history(args: argparse.Namespace) -> None:
@@ -3341,19 +2993,10 @@ def cmd_history(args: argparse.Namespace) -> None:
             when = _format_timestamp(w.wrapped_at)
             eps = w.episodes_compressed
             chars = w.continuity_chars
-            grad = w.graduations_validated
-            demoted = w.graduations_demoted
-            formed = w.associations_formed
-            strengthened = w.associations_strengthened
-            decayed = w.associations_decayed
 
             print(f"  Wrap {wrap_id} — {when}")
             print(f"    Episodes compressed: {eps}")
             print(f"    Continuity size:     {chars:,} chars")
-            if grad or demoted:
-                print(f"    Graduations:         {grad} validated, {demoted} demoted")
-            if formed or strengthened or decayed:
-                print(f"    Associations:        {formed} formed, {strengthened} strengthened, {decayed} decayed")
             print()
 
 
@@ -3536,30 +3179,6 @@ def cmd_serve(args: argparse.Namespace) -> None:
 def _now_utc_str() -> str:
     """Current time as ISO 8601 UTC string."""
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
-
-
-def _assoc_stats_dict(stats: AssociationStats | None) -> dict[str, Any] | None:
-    """Convert AssociationStats to a JSON-serializable dict."""
-    if stats is None:
-        return None
-    return {
-        "total_links": stats.total_links,
-        "avg_strength": stats.avg_strength,
-        "max_strength": stats.max_strength,
-        "density": stats.density,
-        "local_density": stats.local_density,
-        "strongest_pairs": [
-            {
-                "episode_a": p.episode_a,
-                "episode_b": p.episode_b,
-                "strength": p.strength,
-                "co_citations": p.co_citations,
-                "affective_tag": p.affective_tag,
-                "affective_intensity": p.affective_intensity,
-            }
-            for p in (stats.strongest_pairs or [])
-        ],
-    }
 
 
 # -- Argument parser --
@@ -4194,27 +3813,6 @@ def build_parser() -> argparse.ArgumentParser:
                           "newest: by time. Both list the same matches")
     sub.set_defaults(func=cmd_search)
 
-    # -- associations --
-    sub = subparsers.add_parser("associations", help="Query Hebbian associations", parents=[json_parent])
-    sub.add_argument("--episode", help="Episode ID to query associations for")
-    sub.add_argument("--stats", action="store_true", help="Show network statistics")
-    sub.add_argument("--min-strength", type=float, default=0.0, help="Minimum strength filter")
-    sub.add_argument("--limit", type=int, default=20, help="Max results (default: 20)")
-    sub.set_defaults(func=cmd_associations)
-
-    # -- pattern-associations (cortical graph / AM-LINKGATE-DECAY shadow telemetry) --
-    sub = subparsers.add_parser(
-        "pattern-associations",
-        help="Inspect the cortical pattern-association graph (shadow-mode telemetry)",
-        parents=[json_parent],
-    )
-    sub.add_argument("--name", help="Pattern name to list incident edges for")
-    sub.add_argument("--stats", action="store_true", help="Show graph health (default)")
-    sub.add_argument("--min-strength", type=float, default=0.2,
-                     help="Minimum effective strength filter for --name (default: 0.2)")
-    sub.add_argument("--limit", type=int, default=20, help="Max results (default: 20)")
-    sub.set_defaults(func=cmd_pattern_associations)
-
     # -- delete --
     sub = subparsers.add_parser("delete", help="Delete an episode", parents=[json_parent])
     sub.add_argument("episode_id", help="Episode ID to delete")
@@ -4481,18 +4079,6 @@ def build_parser() -> argparse.ArgumentParser:
     sub = subparsers.add_parser("diff", help="Show wrap-over-wrap metric changes", parents=[json_parent])
     sub.add_argument("--wraps", type=int, default=5, help="Number of recent wraps to compare (default: 5)")
     sub.set_defaults(func=cmd_diff)
-
-    # -- graph --
-    sub = subparsers.add_parser("graph", help="Export association graph", parents=[json_parent])
-    sub.add_argument(
-        "--format", "-f",
-        choices=["dot", "json"],
-        default="json",
-        help="Graph format (default: json)",
-    )
-    sub.add_argument("--output", "-o", help="Output file path (default: stdout)")
-    sub.add_argument("--min-strength", type=float, default=0.0, help="Minimum edge strength (default: 0.0)")
-    sub.set_defaults(func=cmd_graph)
 
     # -- stats --
     sub = subparsers.add_parser("stats", help="Detailed store statistics", parents=[json_parent])

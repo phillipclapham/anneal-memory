@@ -49,7 +49,6 @@ from .retrieval import (
     MIN_KEYWORDS,
     QUERY_MIN_KEYWORDS,
     RETRIEVAL_MODES,
-    durable_facts_for,
     EpisodeMatch,
     RetrievalMode,
     extract_keywords,
@@ -75,7 +74,6 @@ from .types import (
     DEFAULT_TRUST,
     Episode,
     EpisodeType,
-    RelevantFact,
     RelevantPattern,
     TRUST_LEVELS,
     trust_rank,
@@ -281,26 +279,6 @@ def _as_int(value: object) -> int | None:
     if isinstance(value, float) and value.is_integer():
         return int(value)
     return None
-
-
-def _durable_block(facts: list[RelevantFact]) -> str:
-    """The reply block for durable facts a query cued, or ``""`` for none: each fact's
-    text (not its cue list), then the words that brought it up: ``cue: ...`` for matched
-    cue words and ``matches: ...`` for matched words of the fact text, both when both
-    took part."""
-    if not facts:
-        return ""
-    lines = ["Durable facts matching your words:"]
-    for f in facts:
-        parts = []
-        if f.cue_matched:
-            parts.append(f"cue: {', '.join(f.cue_matched)}")
-        if f.fact_matched:
-            parts.append(f"matches: {', '.join(f.fact_matched)}")
-        if not parts:  # a RelevantFact built without the split fields
-            parts.append(f"{'cue' if f.source == 'cue' else 'matches'}: {', '.join(f.matched)}")
-        lines.append(f"- {f.fact} ({'; '.join(parts)})")
-    return "\n".join(lines)
 
 
 # CAP-08 D3 (C#11): the label recall puts above tool/external episodes.
@@ -587,15 +565,14 @@ class Server:
         return _tool_result(msg)
 
     def _tool_recall(self, args: dict[str, Any]) -> dict[str, Any]:
-        """Episode recall with the durable-fact tier on top: when a ``keyword`` is given
-        on the first page, the durable facts its words cue are listed first (see
-        :func:`_durable_block`), and a call that matched no episode but cued a fact
-        returns the facts, followed by "No matching episodes found."."""
+        """Episode recall: the matching episodes, with the block of episodes a
+        ``keyword`` match was replaced by when the call is a plain first-page
+        keyword recall."""
         # ``limit`` and ``offset`` reach SQLite and slice indices: a whole-number float (a
         # client that serializes 3 as 3.0) is read as the integer, and anything else that
         # is not an integer is refused by name rather than by a driver error. A negative
-        # value reads as 0. Normalised ONCE, here, so the episode tier and the facts gate
-        # below see the same numbers.
+        # value reads as 0. Normalised ONCE, here, so the episode tier and the replaced-block
+        # gate below see the same numbers.
         args = dict(args)
         for name in ("limit", "offset"):
             if name in args:
@@ -616,10 +593,9 @@ class Server:
         # a link committed in between showed A live above and replaced below.
         with self._store._db_boundary("recall"), self._store._read_snapshot():
             result = self._recall_episodes(args)
-            # Durable facts are not episodes: they go on a plain keyword recall's first
-            # page, and not on a call that filters episodes (since/until/source/
-            # episode_type) or one that asks for none (limit 0, which returns nothing
-            # at all, facts included).
+            # The replaced block goes on a plain keyword recall's first page, and not
+            # on a call that filters episodes (since/until/source/episode_type) or
+            # one that asks for none (limit 0, which returns nothing at all).
             if (
                 result.get("isError")
                 or not isinstance(keyword, str)
@@ -630,11 +606,10 @@ class Server:
                 return result
             replaced = ("" if args.get("include_superseded") is True
                         else self._replaced_block(keyword))
-        block = _durable_block(self._cued_facts(keyword, "query"))
-        if not block and not replaced:
+        if not replaced:
             return result
         text = result["content"][0]["text"]
-        return _tool_result("\n\n".join(b for b in (block, text, replaced) if b))
+        return _tool_result("\n\n".join(b for b in (text, replaced) if b))
 
     def _replaced_block(self, keyword: str) -> str:
         """CAP-04 on the keyword surface: episodes the phrase matches that a newer
@@ -805,10 +780,6 @@ class Server:
         if moved:
             out += [_RELAYED_LABEL, *moved]
         return out
-
-    def _cued_facts(self, query: str, mode: RetrievalMode) -> list[RelevantFact]:
-        """The durable facts of this server's store that ``query`` cues."""
-        return durable_facts_for(self._store, query, mode=mode)
 
     def _recall_episodes(self, args: dict[str, Any]) -> dict[str, Any]:
         # One read snapshot for the rows and the trust that labels them (L3 r1
@@ -1663,11 +1634,6 @@ class Server:
             # parity (cli.cmd_crystal_recall) and is belt-and-suspenders at the boundary.
             return _tool_result(f"Error: {exc}", is_error=True)
 
-        # The durable facts the query cues come first, ahead of the patterns (a no-op
-        # call, max_patterns <= 0, asks for nothing, so it gets nothing here either).
-        facts_block = (
-            _durable_block(self._cued_facts(query, mode)) if max_patterns > 0 else ""
-        )
         if not patterns:
             # Disambiguate the retry signal for an LLM consumer: a thin query (the
             # library floors recall at MIN_KEYWORDS distinctive keywords) is fixable by
@@ -1682,9 +1648,7 @@ class Server:
                     "or check crystal_index "
                     "for what exists)."
                 )
-            # The miss line stays, after the facts block, so the caller knows no pattern
-            # matched.
-            return _tool_result(facts_block + "\n\n" + miss if facts_block else miss)
+            return _tool_result(miss)
         lines = [f"Found {len(patterns)} crystallized pattern(s):"]
         for p in patterns:
             tag_info = f" [{', '.join(p.tags)}]" if p.tags else ""
@@ -1692,8 +1656,6 @@ class Server:
                 f"- {p.name} ({p.level}x, {p.activation}, score={p.score:.1f})"
                 f"{tag_info}: {p.explanation}"
             )
-        if facts_block:
-            lines = [facts_block, "", *lines]
         return _tool_result("\n".join(lines))
 
     def _crystal_recall_associative(
@@ -1725,7 +1687,6 @@ class Server:
                 max_episodes=0,
                 associative=True,
                 mode=mode,
-                durable=False,
             ).patterns
         except StoreError as exc:
             logger.warning(

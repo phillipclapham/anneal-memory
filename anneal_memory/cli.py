@@ -93,7 +93,6 @@ from .continuity import (
     prepare_wrap as _lib_prepare_wrap,
     validated_save_continuity as _lib_validated_save_continuity,
 )
-from .durable import match_headings as _matching_required_headings
 from .migration import (
     _ack_key,
     _version_tuple,
@@ -514,6 +513,17 @@ def cmd_init(args: argparse.Namespace) -> None:
         )
     else:
         print("  Consolidation: open (--no-baton): any session may wrap.")
+
+
+def _matching_required_headings(line_lower: str, headings: set[str]) -> list[str]:
+    """The lowercased required headings that one lowercased ``## `` header line
+    satisfies, as a word-bounded phrase (``## State of Mind`` satisfies ``state``;
+    ``## Interstate`` does not). More than one means the header is ambiguous."""
+    return [
+        h
+        for h in headings
+        if re.search(rf"(?<!\w){re.escape(h)}(?!\w)", line_lower)
+    ]
 
 
 def _missing_required_headings(content: str, schema: list[SectionSpec]) -> list[str]:

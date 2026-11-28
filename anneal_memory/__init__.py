@@ -78,7 +78,6 @@ from .schema import (
     sections_by_role,
     validate_schema,
 )
-from .durable import DROP_DURABLE_RE, DurableFact, parse_durable_facts, section_chars
 from .continuity import (
     felt_currency,
     format_wrap_package_text,
@@ -242,8 +241,6 @@ __all__ = [
     "sections_by_role",
     "schema_role_warning",
     "heading_marker",
-    "DurableFact",
-    "parse_durable_facts",
     "prepare_wrap",
     "felt_currency",
     "format_wrap_package_text",
@@ -329,8 +326,6 @@ __all__ = [
     "validate_origin_key",
     "hard_max_chars",
     "MAX_PATTERNS",
-    "DROP_DURABLE_RE",
-    "section_chars",
     "CRYSTAL_SCHEMA_VERSION",
     "MIGRATION_MANIFEST",
     "RETRIEVAL_THRESHOLD",

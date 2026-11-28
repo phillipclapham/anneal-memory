@@ -1,17 +1,17 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.phillipclapham/anneal-memory",
-  "description": "Living memory for AI agents with an immune system. Zero dependencies.",
+  "description": "A rolling memory file for AI agents: capture episodes, recall them, and wrap each day into the file. MCP, CLI and library. Zero dependencies.",
   "repository": {
     "url": "https://github.com/phillipclapham/anneal-memory",
     "source": "github"
   },
-  "version": "3.0.3.dev0",
+  "version": "4.0.0",
   "packages": [
     {
       "registryType": "pypi",
       "identifier": "anneal-memory",
-      "version": "3.0.3.dev0",
+      "version": "4.0.0",
       "transport": {
         "type": "stdio"
       },

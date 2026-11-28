@@ -64,9 +64,8 @@ jobs:
     # actually hits are platform-specific, not version-specific, so one
     # version is enough coverage for the cost. Runs the SAME suite as the
     # Ubuntu matrix; tests whose simulation technique doesn't reproduce on
-    # Windows (POSIX chmod-based permission checks, crystal.py's documented
-    # POSIX-only cross-process lock guarantee, an env simulation Windows
-    # never reaches) are skipif(win32) at the site with a specific reason —
+    # Windows (POSIX chmod-based permission checks, a POSIX-only cross-process
+    # lock guarantee, an env simulation Windows never reaches) are skipif(win32) at the site with a specific reason —
     # README.md's Windows section states the limitations behind them.
     name: pytest (Windows, Python 3.13)
     runs-on: windows-latest

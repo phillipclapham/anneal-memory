@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "anneal-memory"
-version = "3.0.3.dev0"
+version = "4.0.0"
 description = "Living memory for AI agents. Episodes compress into identity."
 readme = "README.md"
 license = "MIT"
@@ -165,12 +165,9 @@ filterwarnings = ["error::DeprecationWarning"]
 # mypy doesn't play well with and aren't worth the annotation tax.
 # Run via `uvx mypy anneal_memory/` (no dev-dep required) or install
 # mypy locally. This block exists to widen TypedDict key-typo
-# protection from the two runtime drift tests
-# (test_prepare_wrap_result_has_declared_keys /
-# test_save_continuity_result_has_declared_keys) to all five
-# declared shapes (PrepareWrapResult, SaveContinuityResult,
-# WrapPackageDict, StalePatternDict, WrapSnapshot). See
-# 10.5c.3 rationale in the session archive.
+# protection to the declared result shapes (PrepareWrapResult,
+# SaveContinuityResult, SaveContinuityReplayResult, WrapStepDict,
+# WrapSnapshot).
 files = ["anneal_memory"]
 python_version = "3.10"
 # Not strict — the codebase is well-annotated but wasn't written

@@ -1052,7 +1052,7 @@ class Server:
         if wrap_id is not None:
             lines.append(f"Wrap id: {wrap_id}")
         lines.append(f"Episodes compressed: {result['episodes_compressed']}")
-        pending = cast("dict[str, Any]", result).get("pending_count", 0)
+        pending = cast("dict[str, Any]", result)["pending_count"]
         if pending:
             lines.append(
                 f"{pending} episode(s) are still waiting: call prepare_wrap again for the next step."

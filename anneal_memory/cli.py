@@ -1265,13 +1265,13 @@ def cmd_save_continuity(args: argparse.Namespace) -> None:
             sys.exit(1)
 
         # The result is a fresh save or, on a keyed retry, the replay of a saved step; a
-        # replay carries no pending_count (it is a record of a past step, never today's
-        # window) and has the wrap id at the top level.
+        # replay has the wrap id at the top level. Both carry pending_count, a replay's
+        # counted at the retry (an unknown value is never read as 0).
         res = cast("dict[str, Any]", result)
         wrap_id = res.get("wrap_id")
         if wrap_id is None:
             wrap_id = res.get("wrap_result", {}).get("wrap_id")
-        pending = res.get("pending_count", 0)
+        pending = res["pending_count"]
         if args.json:
             _print_json({
                 "saved": True,

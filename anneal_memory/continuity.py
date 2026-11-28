@@ -245,6 +245,16 @@ def _replay_prepare(
     frozen = set(snapshot["episode_ids"])
     window = store.episodes_since_wrap()
     step_eps = [ep for ep in window if ep.id in frozen]
+    # The step is bound to its episode IDS: one deleted or pruned since would be missing
+    # from the rebuilt prompt, and the save would still mark it wrapped.
+    if len(step_eps) != len(frozen):
+        raise IdempotencyConflictError(
+            "prepare_wrap: this idempotency key's step can no longer be rebuilt: "
+            f"{len(frozen) - len(step_eps)} of the episode(s) frozen into wrap "
+            f"{wrap_token!r} were deleted or pruned since it was opened, so the step's "
+            "episodes changed and no prompt is returned. Nothing was written. Cancel "
+            "the wrap and prepare again with a new key.",
+            operation="wrap_started", path=str(store.path), reason="sources_moved")
     memory = store.load_continuity()
     steps = rolling.plan_steps(_rows(step_eps), tz=tz)
     if len(steps) != 1 or _fingerprint(
@@ -344,13 +354,22 @@ def prepare_wrap(
     if idempotency_key is not None:
         _validate_idempotency_key(idempotency_key)
         idem_hash = _idempotency_request_hash("wrap_started", _IDEMPOTENCY_SCOPE, store.store_id, {
-            "max_chars": limit, "tz": None if tz is None else str(tz),
+            # the RESOLVED zone, so "utc" and "UTC" are one request
+            "max_chars": limit,
+            "tz": None if zone is None else (getattr(zone, "key", None) or str(zone)),
             "session_id": session_id, "allow_sole_live": allow_sole_live,
             "wrap_token": wrap_token, "lease_token": lease_token,
             "project_name": store.project_name,
         })
         replayed, stored = store._idempotency_replay(idempotency_key, idem_hash, "wrap_started")
         if replayed:
+            # A replay is subject to the refusals the first call was: a newer meta, and
+            # the baton as it is now.
+            store.load_meta()
+            downgraded = _consolidate_gate(
+                store, session_id, allow_sole_live, _pending_count(store))
+            if downgraded is not None:
+                return downgraded
             return _replay_prepare(store, stored, max_chars=limit, tz=zone)
     # A meta written by a newer anneal-memory refuses HERE, before any wrap is opened.
     store.load_meta()
@@ -654,7 +673,10 @@ def _save_replay(store: Store, result_json: str | None) -> SaveContinuityReplayR
     """A keyed save's replay: the key row's non-content subset, projected by
     ``_SAVE_REPLAY_FIELDS`` and marked ``replayed``, never the full result. A row that
     does not parse or lacks a field raises ``IdempotencyConflictError``
-    (``reason="malformed_row"``), never a ``None`` standing in for a value."""
+    (``reason="malformed_row"``), never a ``None`` standing in for a value. The one
+    field not from the row is ``pending_count``: the window's size NOW (never the
+    first call's, and never an unknown value read as 0), so a caller that lost the
+    first response still learns whether later days are owed."""
     try:
         stored = json.loads(result_json or "")
     except ValueError:
@@ -666,7 +688,8 @@ def _save_replay(store: Store, result_json: str | None) -> SaveContinuityReplayR
             "was written.", operation="save_continuity", path=str(store.path),
             reason="malformed_row")
     return cast(SaveContinuityReplayResult, {
-        **{name: stored.get(name) for name in _SAVE_REPLAY_FIELDS}, "replayed": True})
+        **{name: stored.get(name) for name in _SAVE_REPLAY_FIELDS},
+        "pending_count": store.count_episodes_since_wrap(), "replayed": True})
 
 
 def validated_save_continuity(

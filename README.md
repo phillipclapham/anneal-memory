@@ -12,7 +12,7 @@ An agent records episodes as it works (decisions, observations, open questions, 
 
 anneal-memory calls no model itself. It builds the prompt, you run it on whatever model you like, and it keeps the reply.
 
-> **Upgrading from 3.x?** 4.0 is a breaking release. It removed graduation, patterns, crystals and the section schema, and replaced the wrap with the single method below. Old stores open unchanged. See [MIGRATING_TO_4.md](MIGRATING_TO_4.md).
+> **Upgrading from 3.x?** 4.0 is a breaking release. It removed graduation, patterns, crystals and the section schema, and replaced the wrap with the single method below. Old stores open unchanged. After a store has been used by 4.0, do not point a 3.x install back at it; keep the migration `.bak` copy if you need to go back (3.x reads the aging stamps of the tables 4.0 no longer uses differently). See [MIGRATING_TO_4.md](MIGRATING_TO_4.md).
 
 ## How the wrap works
 

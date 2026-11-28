@@ -108,6 +108,10 @@ def resolve_tz(tz: str | tzinfo | None) -> tzinfo | None:
     :func:`episode_day` asks per instant, so a daylight-saving change is honoured."""
     if tz is None:
         return None
+    if not isinstance(tz, (str, tzinfo)):
+        raise TypeError(
+            f"tz must be an IANA zone name or a tzinfo, got {type(tz).__name__}"
+        )
     if isinstance(tz, str):
         if tz.upper() == "UTC":
             return timezone.utc

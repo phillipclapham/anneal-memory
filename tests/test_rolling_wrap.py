@@ -385,3 +385,55 @@ def test_the_prepare_text_puts_the_operator_note_before_the_system_marker(store)
     note, marker, prompt = text.partition("=== SYSTEM ===")
     assert marker and "Wrap token:" in note and "run only that" in note
     assert "Wrap token:" not in prompt and "run only that" not in prompt
+
+
+# -- L3 r1 fixes -----------------------------------------------------------------------
+
+
+def test_a_keyed_save_replay_carries_the_pending_count_it_has_now(store):
+    _record_days(store, ["2026-03-01", "2026-03-02"], per_day=1)
+    prep = prepare_wrap(store, tz="UTC")
+    first = validated_save_continuity(
+        store, "day one", wrap_token=prep["wrap_token"], idempotency_key="save-day-1")
+    assert first["pending_count"] == 1
+    again = validated_save_continuity(
+        store, "day one", wrap_token=prep["wrap_token"], idempotency_key="save-day-1")
+    assert again["replayed"] is True and again["pending_count"] == 1
+
+
+def test_a_replayed_prepare_meets_the_baton_gate_again(store):
+    from anneal_memory import sessions
+    _record_days(store, ["2026-03-01"])
+    path = store.continuity_path
+    sessions.register_session(path, "s1")
+    sessions.claim_baton(path, "s1")
+    first = prepare_wrap(store, tz="UTC", session_id="s1", idempotency_key="prep-1")
+    assert first["status"] == "ready"
+    sessions.register_session(path, "s2")
+    sessions.claim_baton(path, "s2", take=True)
+    again = prepare_wrap(store, tz="UTC", session_id="s1", idempotency_key="prep-1")
+    assert again["status"] == "downgraded" and again["step"] is None
+    assert again["wrap_token"] is None
+
+
+def test_tz_must_be_a_name_or_a_tzinfo_and_one_zone_is_one_request(store):
+    with pytest.raises(TypeError, match="tz"):
+        rolling.resolve_tz(5)  # type: ignore[arg-type]
+    with pytest.raises(TypeError, match="tz"):
+        prepare_wrap(store, tz=5)  # type: ignore[arg-type]
+    _record_days(store, ["2026-03-01"])
+    first = prepare_wrap(store, tz="utc", idempotency_key="prep-tz")
+    again = prepare_wrap(store, tz="UTC", idempotency_key="prep-tz")
+    assert again["wrap_token"] == first["wrap_token"]
+
+
+def test_a_replayed_prepare_refuses_a_step_whose_episode_is_gone(store):
+    from anneal_memory.store import IdempotencyConflictError
+    _record_days(store, ["2026-03-01"])
+    first = prepare_wrap(store, tz="UTC", idempotency_key="prep-gone")
+    assert first["status"] == "ready"
+    frozen = store.load_wrap_snapshot()["episode_ids"]
+    assert store.delete(frozen[0]) is True
+    with pytest.raises(IdempotencyConflictError, match="episodes changed") as err:
+        prepare_wrap(store, tz="UTC", idempotency_key="prep-gone")
+    assert err.value.reason == "sources_moved"

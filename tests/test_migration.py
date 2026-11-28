@@ -21,6 +21,7 @@ from anneal_memory import __version__
 from anneal_memory.cli import build_parser, cmd_migrate_ack, cmd_migrate_check
 from anneal_memory.migration import (
     MIGRATION_MANIFEST,
+    RETIRING_FEATURES,
     MigrationEntry,
     _ack_key,
     _version_tuple,
@@ -96,28 +97,37 @@ class TestPendingMigrations:
         assert out == []
 
     def test_real_manifest_from_clean_at_current(self) -> None:
-        # A clean adopter at the installed version sees the 4.0.0 entry alone: it retires
-        # every earlier one (they teach tools and sections 4.0 removed), which stay in the
-        # manifest as history.
-        out = pending_migrations(None)  # current_version defaults to __version__
-        assert [e["feature"] for e in out] == ["AM-ROLLING-WRAP"]
-        assert len(MIGRATION_MANIFEST) > 1
-        assert "retires every earlier one" in out[0]["summary"]
+        # A clean adopter at the installed version never saw the old entries: the 4.0.0
+        # entry hides the ones about features 4.0 removed (they stay in the manifest as
+        # history) and leaves the store-generation, migrate, baton and spore entries.
+        out = [e["feature"] for e in pending_migrations(None)]  # current = __version__
+        assert out[-1] == "AM-ROLLING-WRAP" and "AM-GEN3-STORE" in out
+        for gone in ("AM-CRYSTAL", "AM-MCP-CRYSTAL", "AM-DURABLE-FACTS", "AM-LINKGATE",
+                     "AM-HOP-RETIRED", "AM-FORMATION-OFF", "AM-WRAP-GENERATED",
+                     "AM-PRESERVE-BARE-PATH"):
+            assert gone not in out
+        assert len(MIGRATION_MANIFEST) > len(out)
+        [last] = [e for e in MIGRATION_MANIFEST if e["feature"] == "AM-ROLLING-WRAP"]
+        assert "retires the entries about removed features" in last["summary"]
+        # every retired name is a real manifest feature
+        names = {e["feature"] for e in MIGRATION_MANIFEST}
+        assert RETIRING_FEATURES["AM-ROLLING-WRAP"] <= names
+        # a store that acknowledged 3.0.2 has seen the old ones: only 4.0.0 is pending
+        assert [e["feature"] for e in pending_migrations("3.0.2")] == ["AM-ROLLING-WRAP"]
 
-    def test_a_retiring_entry_leaves_only_itself_and_what_follows(self) -> None:
+    def test_a_retiring_entry_hides_only_the_features_it_names(self) -> None:
         def entry(version: str, feature: str) -> MigrationEntry:
             return {"version": version, "feature": feature, "summary": "s",
                     "suggested_edit": "e", "files": ["CLAUDE.md"]}
-        manifest = [entry("0.7.1", "AM-OLD"), entry("4.0.0", "AM-ROLLING-WRAP"),
-                    entry("4.1.0", "AM-NEXT")]
+        manifest = [entry("0.7.1", "AM-CRYSTAL"), entry("3.0.1", "AM-GEN3-STORE"),
+                    entry("4.0.0", "AM-ROLLING-WRAP"), entry("4.1.0", "AM-NEXT")]
         out = pending_migrations(None, current_version="4.1.0", manifest=manifest)
-        assert [e["feature"] for e in out] == ["AM-ROLLING-WRAP", "AM-NEXT"]
-        # a store that acknowledged 4.0.0 sees the later entry only; an older one is not shown
+        assert [e["feature"] for e in out] == ["AM-GEN3-STORE", "AM-ROLLING-WRAP", "AM-NEXT"]
         assert [e["feature"] for e in pending_migrations(
             "4.0.0", current_version="4.1.0", manifest=manifest)] == ["AM-NEXT"]
         # while 4.0.0 is withheld (not installed yet), the older entries are shown as before
         assert [e["feature"] for e in pending_migrations(
-            None, current_version="3.0.0", manifest=manifest)] == ["AM-OLD"]
+            None, current_version="3.0.0", manifest=manifest)] == ["AM-CRYSTAL"]
 
     def test_real_manifest_entries_not_keyed_ahead_of_version(self) -> None:
         # Structural guard: no shipped manifest entry may be keyed to a version
@@ -414,7 +424,8 @@ class TestMigrateCLI:
         out = capsys.readouterr().out
         assert "self-migration proposal" in out
         assert "AM-ROLLING-WRAP" in out
-        assert "AM-SPORES-BOUNDARY" not in out  # retired by the 4.0.0 entry
+        assert "AM-CRYSTAL" not in out  # an entry about a removed feature, retired by 4.0.0
+        assert "AM-GEN3-STORE" in out  # store-generation safety stays
         assert "never edits your files" in out
 
     def test_check_json(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:

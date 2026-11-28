@@ -428,13 +428,16 @@ class SaveContinuityReplayResult(TypedDict):
     """Return shape of a keyed ``validated_save_continuity`` retry's replay
     (``idempotency_key``): the key row's non-content subset, projected by an explicit
     allowlist, marked ``replayed``. Never the full :class:`SaveContinuityResult`; text
-    derived from episodes would outlive an episode's erasure."""
+    derived from episodes would outlive an episode's erasure. ``pending_count`` is the
+    episodes waiting NOW, counted at the replay (not stored with the first call): when it
+    is not zero the next day's step is owed."""
 
     wrap_id: int | None
     chars: int
     path: str
     content_hash: str
     episodes_compressed: int
+    pending_count: int
     replayed: bool  # always ``True``
 
 

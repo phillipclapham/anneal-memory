@@ -548,8 +548,11 @@ MIGRATION_MANIFEST: list[MigrationEntry] = [
             "tags, the durable tier and the crystal store. New: the MCP tool "
             "`read_continuity`, which reads the memory file. The "
             "reply of `prepare_wrap` no longer carries a `package`; it carries a "
-            "`step` to run. This entry retires every earlier one: they teach tools "
-            "and sections that 4.0 removed, so apply this one alone. "
+            "`step` to run. This entry retires the entries about removed features "
+            "(the crystal tier, durable facts, graduation and evidence citations, "
+            "association links and the generated section wrap): they teach tools and "
+            "sections that 4.0 removed. The entries about the store generation and "
+            "migration safety stay in force. "
             "MIGRATING_TO_4.md has the full list."
         ),
         "suggested_edit": (
@@ -630,9 +633,20 @@ def _ack_key(version: str) -> tuple[tuple[int, ...], int]:
     return (_version_tuple(version), 1 if final else 0)
 
 
-RETIRING_FEATURES = frozenset({"AM-ROLLING-WRAP"})
-"""Manifest features whose entry supersedes every earlier entry: while one is pending,
-:func:`pending_migrations` returns it and the entries after it, never the older ones."""
+RETIRING_FEATURES: dict[str, frozenset[str]] = {
+    "AM-ROLLING-WRAP": frozenset({
+        # The entries whose subject 4.0.0 removed: graduation levels and their
+        # demotion, evidence citation and co-citation links, the crystal tier and its
+        # tools, the durable tier, association formation, and the generated section
+        # wrap. Named one by one: an entry about the store generation, the migrate
+        # command, the baton or the spore store is NOT here, and stays pending.
+        "AM-PRESERVE-BARE-PATH", "AM-CRYSTAL", "AM-MCP-CRYSTAL", "AM-LINKGATE",
+        "AM-WRAP-GENERATED", "AM-HOP-RETIRED", "AM-DURABLE-FACTS", "AM-FORMATION-OFF",
+    }),
+}
+"""A manifest entry that retires others, by feature: while it is pending,
+:func:`pending_migrations` leaves out the pending entries named in its set. The entries
+stay in the manifest as history."""
 
 
 def pending_migrations(
@@ -648,9 +662,9 @@ def pending_migrations(
     current_version``. ``acknowledged_version is None`` (never acknowledged)
     means everything up to ``current_version`` is pending. Entries newer than
     ``current_version`` are withheld — you cannot migrate to a feature you
-    have not installed (guards a stale-manifest/downgrade edge). While an entry in
-    :data:`RETIRING_FEATURES` is pending, the entries before it are left out: it
-    supersedes them.
+    have not installed (guards a stale-manifest/downgrade edge). While an entry named
+    in :data:`RETIRING_FEATURES` is pending, the pending entries it lists as retired
+    (the ones about features it removed) are left out; every other entry stays.
     """
     current = _version_tuple(current_version)
     ack = _ack_key(acknowledged_version) if acknowledged_version else None
@@ -662,13 +676,13 @@ def pending_migrations(
         if ack is not None and _ack_key(entry["version"]) <= ack:
             continue  # already acknowledged at or above this version
         pending.append(entry)
-    # An entry that retires the earlier ones (4.0.0: the earlier entries teach tools and
-    # sections it removed) leaves only itself and what follows it. The older entries stay
-    # in the manifest as history.
-    for i in range(len(pending) - 1, -1, -1):
-        if pending[i]["feature"] in RETIRING_FEATURES:
-            return pending[i:]
-    return pending
+    # An entry that retires others (4.0.0: the entries that teach tools and sections it
+    # removed) hides exactly the ones it names. The rest stay pending, and every entry
+    # stays in the manifest as history.
+    retired: set[str] = set()
+    for entry in pending:
+        retired |= RETIRING_FEATURES.get(entry["feature"], frozenset())
+    return [entry for entry in pending if entry["feature"] not in retired]
 
 
 def marker_path_for(db_path: Path) -> Path:

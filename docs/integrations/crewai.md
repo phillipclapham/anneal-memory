@@ -2,8 +2,7 @@
 
 anneal-memory integrates with CrewAI through the **event bus** — a `BaseEventListener` that listens for task and crew lifecycle events. This is the cleanest integration path: non-invasive, no monkey-patching, captures everything.
 
-> **Verified:** `anneal-memory` 0.2.0 · `crewai` 1.14.1 · Python 3.13
-> (BaseEventListener + `@crewai_event_bus.on(...)` handlers register on the sync bus; field access + all five event class imports verified against live models)
+> The event-listener wiring was checked against `crewai` 1.14.1 on Python 3.13 in April 2026 (`BaseEventListener` and `@crewai_event_bus.on(...)` handlers register on the sync bus; the five event classes import). The anneal-memory calls were updated for 4.0 and not re-run against CrewAI.
 >
 > **Python compatibility:** CrewAI's `tiktoken` dependency has no prebuilt wheel for Python 3.14 as of this writing — use Python 3.10–3.13. If you need 3.14, you'll need a Rust toolchain for the source build.
 
@@ -88,17 +87,25 @@ class AnnealMemoryListener(BaseEventListener):
         @crewai_event_bus.on(CrewKickoffCompletedEvent)
         def on_crew_done(source, event):
             """Run wrap sequence when crew finishes."""
-            wrap = prepare_wrap(self.store)
-            if wrap["status"] == "ready":
-                package = wrap["package"]
-                # Feed the package to your LLM (CrewAI's `llm` from the
-                # crew config is a natural fit — the agent's own model):
-                compressed = llm.invoke(
-                    f"Compress these episodes:\n{package['instructions']}\n"
-                    f"Episodes:\n{package['episodes']}\n"
-                    f"Current continuity:\n{package['continuity'] or ''}"
+            while True:
+                wrap = prepare_wrap(self.store)
+                if wrap["status"] != "ready":
+                    break
+                step = wrap["step"]
+                # `llm` is a model client you have configured (CrewAI's own
+                # `llm` from the crew config works). One call per step, with
+                # this prompt and nothing from the crew's run.
+                reply = llm.call(
+                    [
+                        {"role": "system", "content": step["system"]},
+                        {"role": "user", "content": step["user"]},
+                    ]
                 )
-                validated_save_continuity(self.store, compressed.content)
+                result = validated_save_continuity(
+                    self.store, reply, wrap_token=wrap["wrap_token"]
+                )
+                if result["pending_count"] == 0:
+                    break
 
 
 # Instantiate listener (registers automatically)
@@ -177,12 +184,23 @@ class MyCrew:
     @after_kickoff
     def save_memory(self, output):
         """Wrap session after crew completes."""
-        wrap = prepare_wrap(self.store)
-        if wrap["status"] == "ready":
-            package = wrap["package"]
-            # Your LLM compresses the package, then save with the full pipeline:
-            compressed = llm.invoke(package["instructions"] + "\n" + package["episodes"])
-            validated_save_continuity(self.store, compressed.content)
+        while True:
+            wrap = prepare_wrap(self.store)
+            if wrap["status"] != "ready":
+                break
+            step = wrap["step"]
+            # Your model client, one fresh call per step (see the listener above).
+            reply = llm.call(
+                [
+                    {"role": "system", "content": step["system"]},
+                    {"role": "user", "content": step["user"]},
+                ]
+            )
+            result = validated_save_continuity(
+                self.store, reply, wrap_token=wrap["wrap_token"]
+            )
+            if result["pending_count"] == 0:
+                break
         return output
 
     @crew
@@ -193,6 +211,6 @@ class MyCrew:
 ## Key Considerations
 
 - **Event bus vs callbacks:** The event bus (`BaseEventListener`) is richer — it captures tool usage, agent execution, and LLM calls in addition to task events. Use it for full integration. Callbacks are simpler for task-level-only recording.
-- **CrewAI's built-in Memory:** CrewAI has its own `Memory` class with LLM-based extraction and consolidation. It does deduplication, not graduation. It has no immune system, no citation-validated graduation, and no explanation-grounding check. anneal-memory can run alongside it or replace it.
+- **CrewAI's built-in Memory:** CrewAI has its own `Memory` class with LLM-based extraction and consolidation. anneal-memory differs in what it keeps: an append-only episode log, one memory file rewritten a day at a time with every version kept, and a hash-chained audit trail. It can run alongside CrewAI's memory or replace it.
 - **Multi-agent recording:** Use the `source` parameter on `store.record()` to attribute episodes to specific agents — this matters for per-agent identity tracking.
-- **The cognitive loop:** The event listener captures episodes automatically, but compression should still involve an LLM — the agent's judgment during compression is where identity forms.
+- **The wrap:** The event listener records episodes automatically. The wrap is a separate model call per step, made after the crew finishes.

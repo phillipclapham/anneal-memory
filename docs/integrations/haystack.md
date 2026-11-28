@@ -1,6 +1,6 @@
 # Haystack (deepset) Integration
 
-> Verified against `haystack-ai 2.27.0` + `anneal-memory 0.2.0` (Apr 14, 2026).
+> The tracer wiring was checked against `haystack-ai 2.27.0` in April 2026. The anneal-memory calls were updated for 4.0 and not re-run against Haystack.
 
 anneal-memory integrates with Haystack through a custom **Tracer** implementation. Haystack's tracing system wraps every component execution in spans automatically — a custom tracer can record episodes from this data without modifying any user code.
 
@@ -143,18 +143,23 @@ agent = Agent(
 
 result = agent.run(messages=[ChatMessage.from_user("Analyze the dataset")])
 
-# Wrap after run — reuse the agent's ChatGenerator for compression:
-wrap = prepare_wrap(store)
-if wrap["status"] == "ready":
-    package = wrap["package"]
-    prompt_msg = ChatMessage.from_user(
-        f"{package['instructions']}\n\n"
-        f"Episodes:\n{package['episodes']}\n\n"
-        f"Current continuity:\n{package['continuity'] or ''}"
+# Wrap after the run. The agent's ChatGenerator can be reused, but call it
+# directly: the messages are the step's prompt and nothing from the run.
+while True:
+    wrap = prepare_wrap(store)
+    if wrap["status"] != "ready":
+        break
+    step = wrap["step"]
+    out = agent.chat_generator.run(
+        messages=[
+            ChatMessage.from_system(step["system"]),
+            ChatMessage.from_user(step["user"]),
+        ]
     )
-    result = agent.chat_generator.run(messages=[prompt_msg])
-    compressed = result["replies"][0].text
-    validated_save_continuity(store, compressed)
+    reply = out["replies"][0].text
+    result = validated_save_continuity(store, reply, wrap_token=wrap["wrap_token"])
+    if result["pending_count"] == 0:
+        break
 
 store.close()
 ```
@@ -201,7 +206,7 @@ result = agent.run(
 ## Key Considerations
 
 - **Tracing is the primary hook:** Haystack wraps every component execution in spans. A custom tracer sees all I/O without modifying the pipeline.
-- **No built-in long-term memory:** Haystack's `InMemoryChatMessageStore` is experimental and handles conversation history only. anneal-memory provides compressed knowledge, graduation, and the immune system.
+- **No built-in long-term memory:** Haystack's `InMemoryChatMessageStore` is experimental and handles conversation history only. anneal-memory provides a memory file that persists across sessions, an episode log, and an audit trail.
 - **Pipeline vs Agent:** For pipeline-based workflows (not agents), the same tracer approach works — each component execution creates a span.
 - **State is ephemeral:** Haystack's `state_schema` provides key-value state within a single agent run. It doesn't persist. anneal-memory provides cross-session persistence.
-- **The cognitive loop:** The tracer handles recording automatically. Compression should happen after `Agent.run()` returns, using the agent's ChatGenerator for the compression work.
+- **The wrap:** The tracer handles recording. Run the wrap after `Agent.run()` returns, one fresh generator call per step, as above.

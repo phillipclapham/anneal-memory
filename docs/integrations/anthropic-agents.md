@@ -1,6 +1,6 @@
 # Anthropic Agents SDK / Claude Code Integration
 
-> Verified against `claude-agent-sdk 0.1.59` + `anneal-memory 0.2.0` (Apr 14, 2026). Zero drift.
+> The hook wiring was checked against `claude-agent-sdk 0.1.59` in April 2026. The anneal-memory calls were updated for 4.0 and not re-run against the SDK.
 
 anneal-memory integrates with Anthropic's ecosystem through two complementary paths: the **CLAUDE.md snippet** (proven at scale, zero code) and the **Claude Agent SDK hooks** (programmatic control).
 
@@ -29,11 +29,10 @@ This is the simplest and most battle-tested integration. Copy the agent-instruct
 The snippet teaches the agent:
 - When to record episodes (during work, at meaningful moments)
 - When to recall (before decisions that might have prior context)
-- The full wrap sequence (prepare → compress → save) at session end
-- How the immune system works (graduation, citations, demotion)
-- How to handle errors (missing sections, demoted patterns)
+- The wrap sequence at session end: prepare a step, run its prompt in a fresh context (in Claude Code, a subagent given only that prompt), save the whole reply
+- How to handle a refused save or a stuck wrap
 
-**Why this works:** The snippet teaches the cognitive WORKFLOW, not just tool descriptions. Tool descriptions tell agents WHAT each tool does. The snippet teaches WHEN and HOW to orchestrate them. This is the "skills paradigm" — instructions that make agents proactive, not just reactive.
+**Why this works:** Tool descriptions tell an agent what each tool does. The snippet tells it when to call them and in what order, which is what makes an agent record and recall on its own instead of waiting to be asked.
 
 ## Path 2: Claude Agent SDK Hooks (Programmatic)
 
@@ -47,29 +46,21 @@ store = Store("./memory.db", project_name="my-claude-agent")
 
 
 async def on_session_stop(input_data, tool_use_id, context):
-    """Trigger wrap when agent finishes."""
-    wrap = prepare_wrap(store)
-    if wrap["status"] == "ready":
-        package = wrap["package"]
-        # The Claude agent compresses in-conversation by receiving the
-        # package as a system message. The agent's compressed reply is
-        # then passed to validated_save_continuity by a follow-up hook
-        # (or by the main conversation loop) — showing the full pattern:
-        #
-        #   compressed = agent_reply_text  # the agent's compression reply
-        #   validated_save_continuity(store, compressed)
-        #
-        # Never call store.save_continuity() directly — that bypasses
-        # the immune system.
-        return {
-            "systemMessage": (
-                f"Before you finish, compress your session memory:\n"
-                f"{package['instructions']}\n"
-                f"Episodes:\n{package['episodes']}\n"
-                f"Current continuity:\n{package['continuity'] or ''}"
-            ),
-            "continue_": True,
-        }
+    """Wrap when the agent finishes: one fresh-context model call per step."""
+    while True:
+        wrap = prepare_wrap(store)
+        if wrap["status"] != "ready":
+            break
+        step = wrap["step"]
+        # run_model_fresh is yours: one model call that receives step["system"]
+        # and step["user"] and nothing from this agent's conversation (for
+        # example a plain Anthropic Messages API call, or a separate
+        # claude-agent-sdk query with no project settings loaded). It returns
+        # the reply text.
+        reply = await run_model_fresh(step["system"], step["user"])
+        result = validated_save_continuity(store, reply, wrap_token=wrap["wrap_token"])
+        if result["pending_count"] == 0:
+            break
     return {}
 
 
@@ -86,7 +77,7 @@ async def on_tool_use(input_data, tool_use_id, context):
 
 
 async def on_compact(input_data, tool_use_id, context):
-    """Context window pressure — good time to compress."""
+    """Context window pressure: a good time to suggest a wrap."""
     # store.status() is the read-only peek at store state — use this for
     # threshold checks, not store.episodes_since_wrap() (that's a
     # private-ish API; status() is the public surface).
@@ -118,7 +109,7 @@ async for message in query(
 | Hook | Use |
 |------|-----|
 | `Stop` | Session end — trigger wrap sequence |
-| `PreCompact` | Context pressure — prompt the agent to compress |
+| `PreCompact` | Context pressure: suggest a wrap |
 | `PostToolUse` | After tool execution — record episodes |
 | `UserPromptSubmit` | New user input — recall relevant episodes |
 
@@ -131,5 +122,5 @@ async for message in query(
 ## Key Considerations
 
 - **Snippet vs SDK hooks:** The CLAUDE.md snippet works without any code changes — it's the right choice for most users. SDK hooks give programmatic control for custom agent frameworks built on the Claude Agent SDK.
-- **Both paths preserve the cognitive loop:** The snippet teaches the agent to compress using its own judgment. The SDK hooks can inject wrap instructions but the agent still does the compression.
+- **The wrap runs in a fresh context on both paths.** With the snippet, the agent hands the prompt to a subagent. With SDK hooks, the hook makes the model call itself, as above. Either way the wrap prompt does not run inside the agent's own conversation.
 - **Session boundaries:** In Claude Code, each conversation is a natural session. The snippet teaches the agent to detect session-end signals ("let's wrap up", "we're done") and run the wrap sequence automatically.

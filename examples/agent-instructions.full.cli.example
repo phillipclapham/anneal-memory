@@ -1,381 +1,131 @@
-# anneal-memory CLI — Agent-Instructions Snippet
+# anneal-memory CLI - Agent-Instructions Snippet (full)
 #
 # Paste the section below into your harness's agent-instructions file
-# — CLAUDE.md (Claude Code), AGENTS.md (Codex), GEMINI.md (Gemini CLI)
-# — to enable anneal-memory's memory via the CLI. Use this
-# when the agent has shell access (Claude Code, Aider, etc.) instead
-# of MCP.
-#
-# This snippet teaches the agent WHEN and HOW to use the CLI
-# throughout a session.
+# - CLAUDE.md (Claude Code), AGENTS.md (Codex), GEMINI.md (Gemini CLI) -
+# to teach an agent with shell access how to use anneal-memory through the
+# CLI. Use this when the agent has a shell (Claude Code, Aider, and so on)
+# instead of MCP.
 
 ## Memory (anneal-memory CLI)
 
-This project uses anneal-memory for persistent memory across sessions.
-Episodes (raw observations) compress into continuity (compressed
-working memory), and an immune system decides which patterns may
-graduate. Use memory naturally — don't explain the
-tooling to the user, just work with what you know.
+This project uses anneal-memory for memory across sessions. You record
+episodes (raw notes) as you work. At each wrap, a model rewrites one memory
+file from the old file plus one day of episodes, and every later session
+loads that file at the start. A separate **spore** store holds open loops.
+Use it naturally; don't explain the tooling to the user.
 
-**Setup:** The `anneal-memory` CLI must be installed (`pip install anneal-memory`).
-Set `ANNEAL_MEMORY_DB` to your database path, or use `--db` on every command.
-First run: `anneal-memory init` creates the database and continuity file.
+**Setup.** `pip install anneal-memory`. Set `ANNEAL_MEMORY_DB` to the
+database path, or pass `--db` on every command. First run:
+`anneal-memory init` creates the database. Every command takes `--json`.
 
-**Spores — your prospective layer (a parallel store, not part of memory):**
+**Spores: your prospective layer.** Episodes and the memory file are about
+what happened, and they never complete. A spore is about what is still open
+and must close. Plant one with `anneal-memory spore add --type task --text
+"..."` the moment a loop opens (`--type` is `task`, `question` or
+`thought`). Resolve every one: `spore descend ID --kind ...` (done or
+dropped) or `spore ascend ID --kind ...` (the loop closes by its content
+becoming an episode or a project). `spore list` and `spore surface` show
+what is open. `anneal-memory intention ...` is the same store under its
+newer name (`close` and `promote` for descend and ascend). If your harness
+already tracks open loops elsewhere, plant them here and let your list point
+at them.
 
-Episodes and continuity are *retrospective* — they hold what happened
-and who you're becoming, and they never complete. anneal-memory also ships
-a separate **spore store** for *prospective* open loops: things you intend
-to do or to resolve. Plant one with `anneal-memory spore add` the moment a
-loop opens — a `task` (open doing), a `question` (open not-knowing), or a
-`thought` (open idea) — and resolve every one: `anneal-memory spore
-descend` (composted — done/dropped) or `anneal-memory spore ascend` (the
-loop *closes* by graduating its content into an episode, pattern, or
-project — the spore still ends; its content is what carries forward).
-`anneal-memory spore list` / `anneal-memory spore surface` show what's open
-(the spore store is a `<db-stem>.spores.json` sibling, created on first
-write — no `init` needed).
+**Start of session.** `anneal-memory continuity`. If it prints "No
+continuity file yet" and exits non-zero, this is the first session: start
+recording (not an error). `anneal-memory status` shows the store's health.
 
-Two cuts keep this from colliding with what you already do:
+**During work.** Record when something happens that would change a later
+decision, the reasoning and not just the fact:
 
-- **Memory vs spores is a *lifecycle* cut.** Memory (episodes and continuity) is
-  *what persists* — it accretes and never completes. A spore is *what's
-  open* — it must close. `tasks ≠ memory`.
-- **Methodology vs both is a *procedure-vs-item* cut.** Your methodology
-  (your wrap discipline, recall-before-deciding, honest compression —
-  whatever your harness instructions define) is the *active process you
-  run*; memory and spores are the two kinds of state it touches — one it
-  accretes, one it resolves. Methodology is the *how*; a spore is one of
-  the *whats* it operates on. `procedure ≠ item`.
+    anneal-memory record "Chose X because Y" --type decision
+    echo "multi-line note" | anneal-memory record - --type observation
 
-So if your harness already carries its own workflow or methodology
-instructions (a FLOW-style CLAUDE.md, say), the spore store does not
-compete with them — your procedures **operate** it. And if your
-methodology already captures open loops (a wrap that notes next-actions, a
-scratchpad), that capture *is* a spore plant: the spore store is the
-canonical home for them. Plant the loops you're already holding here, and
-let any scratchpad or list *reference* them rather than keep its own copy —
-don't run two trackers in parallel. Your existing procedures drive the one
-store; you're giving the loops you already hold a real lifecycle.
+Types: `observation`, `decision`, `tension`, `question`, `outcome`,
+`context`. Aim for 5-15 per session.
 
-**Crystallized patterns — your long-term semantic tier (on-demand, opt-in):**
+When a fact changes, record the new episode and say what it replaces:
+`--supersedes OLD_ID`, or `--state-key KEY` for the slot the fact fills
+(for example `user.home_city`; the newest episode in a slot replaces the
+others). Recall then stops serving the old one; nothing is deleted. A wrong
+link is undone with `unsupersede --old ID --new ID`. A link or key is your
+claim, so make it only when you are sure. Content you got from a tool or a
+web page: add `--trust tool` or `--trust external`.
 
-Graduated patterns (1x->2x->3x) live in your continuity's `## Patterns` —
-always loaded. That works until there are too many: past a few dozen,
-always-loaded patterns drown each other out and the right one stops
-surfacing (attention doesn't scale — a bigger continuity is not a smarter
-one). anneal-memory's **crystallized store** (`<db-stem>.crystal.json`) is
-the fix: a long-term semantic store that holds proven, stable patterns
-*out* of the always-loaded set and surfaces them *on cue*. `## Patterns`
-shrinks to what's developing or recently-used; the deep stable wisdom moves
-to the store and comes back when a query is relevant to it. (This completes
-the memory architecture as Complementary Learning Systems — see *The Memory
-Architecture* in the project README.)
+**Before decisions (NON-NEGOTIABLE).** `anneal-memory recall "<area>"`
+(alias `search`) before any architectural decision, design choice or rule
+change, and use what comes back. If nothing returns, go ahead and say so.
+`episodes --since 7d --type decision` browses by time and type.
 
-It is **opt-in and harness-fired** — two things to know:
+**Wrap, at "wrap up", "save memory", "we're done" or any natural
+equivalent.**
+1. `anneal-memory prepare-wrap` opens one step, the oldest calendar day of
+   episodes not yet wrapped. It prints the step's facts, a "Wrap token:
+   <hex>" line, and a prompt: the current memory file and that day's log,
+   with instructions to rewrite the file. (`--json` gives the same as
+   fields: `step.system`, `step.user`, `wrap_token`.)
+2. Run that prompt in a FRESH context with nothing else: a subagent given
+   only the prompt text, or a new session or plain model call. Not in this
+   conversation. Write the model's whole reply, the complete new memory
+   file, to a file such as `memory.md`.
+3. `anneal-memory save-continuity memory.md --wrap-token TOKEN`
+4. If the result says episodes are still waiting (`pending_count` above
+   zero), the next day's step is owed: prepare again and repeat. A catch-up
+   over several days is several steps in order.
+Pass `--session-id NAME` to both commands if your operator gave you one.
+The save checks only that the reply is not empty, is within the character
+limit (26,000 by default; `--max-chars` changes it on both commands) and
+answers the step that was opened. A refused save writes nothing and leaves
+the step open: run the step again. Saving twice without a new `prepare-wrap`
+is refused by design. If `prepare-wrap` reports no episodes, there is
+nothing to do.
 
-- **Recall is the harness's job, not yours to poll.** A per-turn recall hook
-  runs on every prompt and surfaces the relevant crystallized patterns on cue
-  (flow does this today; Levain fires the spore layer today, crystal recall
-  landing in its v2 adapter). Without one, recall is manual:
-  ```bash
-  anneal-memory crystal index            # name + one-clause menu of the store
-  anneal-memory crystal recall "topic"   # patterns relevant to a query
-  ```
-  Run them before deciding, the same way you `search` episodes (both support
-  `--json`).
-- **Crystallizing happens at wrap, only when you've opted in.** The crystal
-  store (`<db-stem>.crystal.json`) is created when you first
-  `anneal-memory crystal crystallize …` or accept a candidate at wrap. Once
-  it exists, `prepare-wrap` surfaces cold, stable Proven patterns as
-  *crystallization candidates*, and you route each one in the decision block
-  it describes: **crystallize** (move it to the store), **constitution**
-  (catastrophic-if-missed → your always-loaded harness identity layer, not
-  on-demand), or **compost** (phase-specific and cold → drop it; the
-  episodic trail keeps it). **Only crystallize OUT when a retrieval surface
-  exists** (a recall hook, or `crystal index` / `crystal recall`) — else the
-  pattern strands with no way back. Pass `--crystal` on a wrap to preview
-  proposals before anything is crystallized. Until then, wraps are
-  byte-identical to before.
+**Downgrade.** A store created by `anneal-memory init` requires the
+consolidate baton. Until the operator claims it for your session id,
+`prepare-wrap` downgrades to capture-only and exits 3. Nothing is lost.
+Tell your human what it says: how many episodes are waiting and the one
+command to run (`anneal-memory baton claim NAME`). Consolidating is the
+operator's act; never run `baton claim` yourself.
 
-**One non-negotiable rule:** never compost a *timeless* pattern. On-demand
-recall is the safety net for just-in-time wisdom; a timeless principle
-wrongly dropped corrupts the substrate. (The library refuses a
-`compost`+`timeless` decision structurally — but hold the rule yourself,
-don't lean on the backstop.)
+**One store per entity.** A store is one entity's memory: give each agent
+its own store path. Several processes of the same entity (a CLI beside an
+MCP server) may record into one store, provided each runs a version that
+takes the audit lock.
 
-**Session workflow:**
+**What to record:** decisions and their reasons; tradeoffs and tensions
+(name the axis); blockers and dependencies; outcomes, both successes and
+failures; context that shapes decisions.
 
-- **Start of session:** Read your continuity file:
-  ```bash
-  anneal-memory continuity
-  ```
-  If the database doesn't exist yet, run `anneal-memory init` first.
-  If continuity is empty ("No continuity file yet"), this is the first
-  session — just start recording. Search prior episodes when needed:
-  ```bash
-  anneal-memory search "topic"
-  anneal-memory episodes --since 7d --type decision
-  ```
+**What NOT to record:** routine code changes (git has them); transient
+debugging; anything already in the docs; every small observation.
 
-- **During work:** Record episodes when important things happen:
-  ```bash
-  anneal-memory record "Chose PostgreSQL because ACID outweighs speed" --type decision
-  anneal-memory record "Connection pool is the real bottleneck" --type observation
-  anneal-memory record "Latency vs consistency tradeoff" --type tension
-  anneal-memory record "Should we shard or add read replicas?" --type question
-  anneal-memory record "Migration done, 3x query improvement" --type outcome
-  anneal-memory record "Prod DB at 80% capacity, growing 5%/week" --type context
-  ```
+**Correcting a mistake versus deleting an episode.** For a changed or wrong
+fact, record a new episode with `--supersedes`. For content that should not
+exist (PII, secrets), `anneal-memory delete ID --force`. It is logged in the
+audit trail and cannot be undone.
 
-  Record the reasoning, not just the fact. "Chose X because Y" is more
-  valuable than "using X." Do this proactively without being asked.
+**How to present memory.** Report what you find naturally; don't narrate
+commands. The memory file is a summary written by a reader who was not in
+the room: it can be stale or wrong, and the episodes behind it are there to
+check against.
 
-  **Recording cadence:** Default to recording, not to skipping. Episodes
-  are cheap — the compression step sorts out what matters. After each
-  meaningful exchange, record at least one episode. Target 5-15 per session.
+**When things go wrong.**
+- `prepare-wrap` refuses because a wrap is already in progress: if it will
+  not be finished, `anneal-memory wrap-status` shows it and
+  `anneal-memory wrap-cancel` clears it (add `--wrap-token TOKEN` to cancel
+  only your own wrap). Episodes are not deleted. A wrap that began moments
+  ago is probably a live session; check `wrap-status` first.
+- `save-continuity` refused the reply (empty, over the limit, wrong or
+  missing token): nothing was written and the step is still open. Fix what
+  the message names and run the step again.
 
-  For multi-line content, pipe from stdin:
-  ```bash
-  echo "Detailed analysis..." | anneal-memory record - --type observation
-  ```
+**Operator commands.** `status`, `stats`, `history` (the wraps so far),
+`diff` (how recent wraps changed the file), `audit --since 7d`, `verify`
+(the audit hash chain), `export --format json`, `import FILE`,
+`prune --older-than 90`, `revert-wrap WRAP_ID --reason "..."` (undo the
+newest wrap).
 
-- **Before decisions (NON-NEGOTIABLE):** Before any architectural
-  decision, design choice, or rule change, search for relevant prior
-  episodes on the surface area being decided:
-  ```bash
-  anneal-memory search "decision surface area"
-  anneal-memory episodes --type decision --since 30d
-  ```
-  Integrate findings into the decision context. If search returns
-  nothing relevant, proceed and note that recall fired clean. The store
-  is not a write-only sink — recall before deciding is what produces
-  closed-loop learning. Skipping this step produces the **dead-store
-  failure mode**: wraps land, episodes write, the store grows, but
-  architectural decisions get made blind to accumulated patterns.
-  Memory storage without recall is functionally dead, regardless of how
-  many episodes it contains.
-
-  **Pair with staleness:** If you suspect a Proven pattern on the
-  surface area you're deciding on is going unreferenced, run
-  `anneal-memory prepare-wrap` mid-session — its output includes
-  stale-pattern warnings drawn from the continuity file's pattern
-  markers. The surface read does the work; you don't have to follow
-  it with `save-continuity` to get the warnings.
-
-- **End of session:** When the user signals the session is ending —
-  "let's wrap up", "save memory", "we're done" — run the FULL wrap
-  sequence. The act of compressing IS cognitive work — your judgment
-  during compression is where identity forms.
-
-  **Step 1: Get your compression package:**
-  ```bash
-  anneal-memory prepare-wrap
-  ```
-  This outputs: your episodes, existing continuity, compression
-  instructions, and stale pattern warnings.
-  Read it carefully — it's your raw material.
-
-  **Step 1.5: Pre-compose pattern recall.** Read your existing
-  continuity (already in the prepare-wrap output) and scan Proven
-  and Developing observations for the session's surface areas
-  before composing new patterns. Ask: "Are we about to write a
-  pattern already in Proven under different framing? Are there
-  Developing 1x/2x entries this session's evidence advances?
-  Cross-section coherence issues — two 1x entries describing the
-  same pattern under different names?" Distinct from the
-  per-decision recall in "Before decisions" — that fires LTP-style
-  at individual decisions; this fires SWR-style across the session's
-  set, catching categorization and graduation moves invisible from
-  any single decision point.
-
-  **Step 2: Compress.** Follow the instructions from prepare-wrap.
-  Extract principles, not facts. Graduate patterns with evidence
-  citations. Write your compressed continuity to a file.
-
-  **Step 3: Save with validation:**
-  ```bash
-  anneal-memory save-continuity continuity.md
-  # Or from stdin:
-  echo "..." | anneal-memory save-continuity -
-  ```
-  This validates your compression (structure, citations, graduation),
-  and records the wrap in history.
-
-  The sequence is: `prepare-wrap` → you compress → `save-continuity`.
-  All three steps, every time. Your judgment during compression is
-  where identity forms — this cannot be delegated.
-  Wrap with `--session-id` if your operator gave you one. If the wrap
-  downgrades to capture-only (exit 3), nothing is lost: tell your human
-  what it says (episodes waiting, and the one claim command).
-  Consolidating is the operator's act; never run `baton claim` yourself.
-
-  An explicit wrap produces better continuity than stopping without one.
-  Always encourage wrapping before ending a session.
-
-  **Wrap once.** Run the wrap sequence exactly once per session.
-  `save-continuity` may report demoted graduations — that is the
-  immune system working, not an error. Don't re-run `save-continuity`
-  to chase a clean report; re-saving compresses nothing, and a second
-  save with no new `prepare-wrap` is refused. If a pattern is
-  ungrounded, fix it in your *next* wrap with fresh evidence.
-
-**How the cognitive system works (why recording quality matters):**
-
-Your episodes feed a graduation system that separates signal from noise.
-New patterns start at 1x. When a later wrap cites the same pattern with
-fresh evidence, it graduates to 2x. At 3x, it's proven knowledge. Each
-graduation REQUIRES citing the episode ID that validates it — you can't
-game the system by repeating claims without evidence.
-
-Structural defenses at the citation layer (narrow but real):
-- **Citation validation:** Graduations must reference real episode IDs
-  from the current wrap. Ungrounded patterns demote with `(ungrounded)`.
-- **Explanation-grounding check:** The quoted explanation in `[evidence:
-  ID "explanation"]` must share ≥2 meaningful words with the cited
-  episode's content. Wholesale-fabricated explanations demote.
-- **Per-ID citation-gaming flag:** Reusing the same episode ID ≥3 times
-  in one wrap surfaces a gaming-suspect flag (informational, not an
-  auto-demote).
-- **Staleness flagging:** Patterns whose dates fall behind the staleness
-  threshold (default 7 days) appear in the next wrap's package as
-  removal candidates. You decide.
-- **Pattern-omission audit:** Proven-tier patterns (2x or above) that were
-  in the prior continuity and are absent from the new continuity
-  surface as `omitted_patterns` on the save result and in the audit
-  log. Intentional retirement is fine; the audit just records what
-  changed so downstream review can see it. Demotion (carrying a
-  pattern forward at a lower level) does NOT trigger this — only
-  complete dropout.
-- **Cross-session corpus-overlap demotion:** Each pattern's
-  accumulated explanation history is tracked across sessions. At
-  graduation time, today's explanation is compared against the
-  corpus of all prior explanations for the same pattern; ≥3
-  shared meaningful words demotes the graduation and marks
-  `(cross-session-overlap)`. Sycophantic rephrasing-style accumulation
-  gets caught; legitimate multi-faceted evidence with distinct
-  vocabulary passes. Surfaced as `cross_session_collisions` on the
-  save result + in the audit log with the specific overlap words.
-
-What these primitives do NOT catch (named honestly):
-- Lexical-overlap exploits where an explanation shares ≥2 words with
-  the cited episode but misinterprets it semantically.
-- Rotated-pair citation gaming that keeps per-ID frequency below the
-  threshold while pumping unrelated patterns.
-- Slow-drift sycophantic graduation with deliberately-divergent
-  vocabulary (where each session's explanation uses entirely new
-  words, defeating the corpus-overlap check). The rephrasing-style
-  variant IS caught.
-- Patterns that contradict existing graduated Proven patterns — no
-  semantic comparison runs.
-
-These gaps are reachable under adversarial-agent conditions. You are
-the first line of defense; the library is the second. Compose wraps
-honestly.
-
-**One store per entity (load-bearing):** A store is one entity's
-memory: sharing it between agents removes the actor-scoping that
-filesystem-path isolation provides, so give each agent its own store
-path. One `Store` object is not thread-safe, not task-safe, not
-reentrant; use one per thread. Several processes of the same entity
-(this CLI beside an MCP server) may record into one store (the audit
-trail serializes its appends with a cross-process lock), provided every
-writer runs a version that takes that lock; an older anneal-memory
-writing alongside breaks the hash chain, and on Windows, which has no
-such lock, keep to one writer.
-
-Your recording and citation patterns directly shape what the system
-remembers and what it lets graduate.
-
-This is why "record the reasoning, not just the fact" matters at the
-system level — rich episodes with rationale provide citable evidence for
-graduation. Thin episodes ("used X")
-provide neither.
-
-**Operator commands (things MCP can't do):**
-
-These commands are why the CLI exists — inspection, debugging, and
-analysis that require filesystem access or broad queries.
-
-```bash
-# Store overview
-anneal-memory status
-
-# Detailed analytics (type/age/source distribution, wrap metrics)
-anneal-memory stats
-
-# Graph of association links formed before 1.0.2 (a save forms none now)
-anneal-memory graph --format dot -o graph.dot   # Graphviz DOT
-anneal-memory graph --format json               # JSON adjacency list
-
-# Wrap history and progression
-anneal-memory history                           # Timeline of all wraps
-anneal-memory diff --wraps 5                    # Metric changes wrap-over-wrap
-
-# Audit trail (tamper-evident event log)
-anneal-memory audit --since 7d                  # Recent entries
-anneal-memory audit --event wrap_completed      # Filter by event type
-anneal-memory verify                            # Verify hash chain integrity
-
-# Export and backup
-anneal-memory export --format json -o backup.json      # Full JSON export
-anneal-memory export --format markdown -o report.md    # Human-readable report
-anneal-memory export --format sqlite -o copy.db        # Database copy
-
-# Import from export
-anneal-memory import backup.json                # Restore episodes (skips duplicates)
-
-# Housekeeping
-anneal-memory delete <episode_id> --force       # Delete specific episode
-anneal-memory prune --older-than 90             # Remove old episodes
-anneal-memory prune --older-than 90 --dry-run   # Preview what would be pruned
-```
-
-**All commands support `--json` for machine-readable output.**
-
-**Episode types** (choose the most specific):
-- `observation` — pattern noticed, insight, general learning
-- `decision` — committed choice with rationale
-- `tension` — conflict, tradeoff, opposing forces
-- `question` — open question needing resolution
-- `outcome` — result of an action (success or failure)
-- `context` — environmental or state information
-
-**What to record:**
-- Decisions and their rationale
-- Tradeoffs and tensions (with the axis of tension)
-- Patterns you notice recurring
-- Blockers and dependencies
-- Outcomes of actions (both success and failure)
-- Environmental context that shapes decisions
-
-**What NOT to record:**
-- Routine code changes (git tracks those)
-- Transient debugging steps
-- Information already in documentation
-- Every small observation — record what would change a decision
-
-**Correcting mistakes vs. deleting episodes:**
-- For **factual corrections**: record a new episode with the correction.
-  Compression naturally resolves contradictions.
-- For **content that should not exist** (PII, sensitive data, wrong
-  recordings): `anneal-memory delete <id> --force`. Deletion cascades
-  to any association links an earlier version formed and is audit-logged. Irreversible.
-
-**How to present memory:**
-- Report findings naturally: "From prior sessions, there was a tension
-  between X and Y" — not "The search command returned..."
-- Don't narrate CLI calls — just use them and share what's relevant
-- When your continuity mentions a pattern at 2x or above, trust it —
-  it earned that level through validated evidence
-
-**Environment variables:**
-- `ANNEAL_MEMORY_DB` — default database path (overridden by `--db`)
-- `ANNEAL_MEMORY_SOURCE` — default source for `record` (overridden by `--source`)
-
-**Staying current.** After you (or your operator) upgrade the
-`anneal-memory` package, run `anneal-memory migrate check` — it reports any
-change that suggests an edit to *these* instructions and proposes the edit,
-so your hand-tuned guidance doesn't silently drift from the substrate as it
-evolves. Apply what fits, then `anneal-memory migrate ack`. It only
-proposes; it never edits your files.
+**Staying current.** After you or your operator upgrade the
+`anneal-memory` package, run `anneal-memory migrate check`. It reports any
+change that suggests an edit to *these* instructions and proposes it, so
+your guidance doesn't drift from the package. Apply what fits, then
+`anneal-memory migrate ack`. It only proposes; it never edits your files.

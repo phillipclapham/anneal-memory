@@ -1,6 +1,6 @@
 # CAMEL-AI Integration
 
-> Verified against `camel-ai 0.2.90` + `anneal-memory 0.2.0` (Apr 14, 2026).
+> The callback wiring was checked against `camel-ai 0.2.90` in April 2026. The anneal-memory calls were updated for 4.0 and not re-run against CAMEL.
 
 anneal-memory integrates with CAMEL-AI through **WorkforceCallback** for multi-agent orchestration and by wrapping `ChatAgent.step()` for single-agent use. CAMEL-AI's role-playing architecture makes it well-suited for per-agent memory with distinct identity tracking.
 
@@ -102,18 +102,21 @@ class AnnealMemoryCallback(WorkforceCallback):
 
     def log_all_tasks_completed(self, event: AllTasksCompletedEvent) -> None:
         """All tasks done — trigger wrap sequence."""
-        wrap = prepare_wrap(store)
-        if wrap["status"] == "ready":
-            package = wrap["package"]
-            # Use a ChatAgent to compress, then save with the full pipeline:
-            compressor = ChatAgent(system_message="You compress agent memory.")
-            response = compressor.step(
-                BaseMessage.make_user_message(
-                    role_name="User",
-                    content=f"{package['instructions']}\n\n{package['episodes']}",
-                )
+        while True:
+            wrap = prepare_wrap(store)
+            if wrap["status"] != "ready":
+                break
+            step = wrap["step"]
+            # A new ChatAgent per step: it sees this prompt and nothing else.
+            wrapper = ChatAgent(system_message=step["system"])
+            response = wrapper.step(
+                BaseMessage.make_user_message(role_name="User", content=step["user"])
             )
-            validated_save_continuity(store, response.msgs[0].content)
+            result = validated_save_continuity(
+                store, response.msgs[0].content, wrap_token=wrap["wrap_token"]
+            )
+            if result["pending_count"] == 0:
+                break
 
 
 # Create workforce with memory callback
@@ -227,4 +230,4 @@ while True:
 - **WorkforceCallback vs step wrapping:** `WorkforceCallback` is the mature integration for multi-agent orchestration — 11 lifecycle hooks with structured Pydantic events. For single `ChatAgent` use, wrapping `step()` is necessary since ChatAgent has no lifecycle hooks.
 - **Per-agent identity:** Use the `source` parameter on `store.record()` to attribute episodes to specific agents/roles. This matters for the flagship paper's identity-through-memory thesis.
 - **Shared memory:** CAMEL-AI's `share_memory=True` flag on Workforce enables memory sharing among workers. With anneal-memory, all agents write to the same store but are distinguished by `source` — natural multi-agent memory.
-- **The cognitive loop:** The WorkforceCallback handles recording automatically. Compression should happen in `log_all_tasks_completed()`, using an LLM for the actual compression judgment.
+- **The wrap:** The WorkforceCallback handles recording. Run the wrap in `log_all_tasks_completed()` with a fresh `ChatAgent` per step, as above.

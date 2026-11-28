@@ -2,8 +2,7 @@
 
 anneal-memory integrates with smolagents through **step_callbacks** — per-step-type callback registration that fires after each agent action or planning step. Simple, clean, and covers both CodeAgent and ToolCallingAgent.
 
-> **Verified:** `anneal-memory` 0.2.0 · `smolagents` 1.24.0 · Python 3.13
-> (step_callbacks dict registration + 2-arg callback form + ActionStep/PlanningStep fields + Model.generate messages shape all verified against live classes)
+> The callback wiring was checked against `smolagents` 1.24.0 on Python 3.13 in April 2026 (`step_callbacks` registration, the two-argument callback form, the `ActionStep` and `PlanningStep` fields, the `Model.generate` messages shape). The anneal-memory calls were updated for 4.0 and not re-run against smolagents.
 
 ## Install
 
@@ -78,24 +77,27 @@ agent = CodeAgent(
 # Run
 result = agent.run("Analyze the latest AI memory research papers")
 
-# Wrap after run — reuse the agent's own model for compression so the
-# model that did the work reflects on it. smolagents' Model.generate()
-# takes a list of ChatMessage objects (not plain dicts) and returns a
-# ChatMessage whose .content holds the compressed text.
+# Wrap after the run. The agent's own model can make the call, but call it
+# directly with the step's prompt: not through the agent, so nothing from its
+# run is in the context. smolagents' Model.generate() takes a list of
+# ChatMessage objects (not plain dicts) and returns a ChatMessage whose
+# .content holds the reply text.
 from smolagents.models import ChatMessage, MessageRole
 
-wrap = prepare_wrap(store)
-if wrap["status"] == "ready":
-    package = wrap["package"]
-    prompt = (
-        f"{package['instructions']}\n\n"
-        f"Episodes:\n{package['episodes']}\n\n"
-        f"Current continuity:\n{package['continuity'] or ''}"
+while True:
+    wrap = prepare_wrap(store)
+    if wrap["status"] != "ready":
+        break
+    step = wrap["step"]
+    reply = agent.model.generate(
+        messages=[
+            ChatMessage(role=MessageRole.SYSTEM, content=step["system"]),
+            ChatMessage(role=MessageRole.USER, content=step["user"]),
+        ],
     )
-    compressed = agent.model.generate(
-        messages=[ChatMessage(role=MessageRole.USER, content=prompt)],
-    )
-    validated_save_continuity(store, compressed.content)
+    result = validated_save_continuity(store, reply.content, wrap_token=wrap["wrap_token"])
+    if result["pending_count"] == 0:
+        break
 
 store.close()
 ```
@@ -155,4 +157,4 @@ result2 = agent.run("Research phase 2", reset=True)
 - **Step callbacks are synchronous:** smolagents uses a generator-based streaming model, not async. Your callbacks run synchronously.
 - **ActionStep vs FinalAnswerStep:** `FinalAnswerStep` callbacks currently don't fire ([smolagents#1879](https://github.com/huggingface/smolagents/issues/1879)). Use `ActionStep` where `is_final_answer=True` to detect the final step.
 - **Managed agents:** smolagents supports hierarchical agents via `managed_agents`. Each sub-agent can have its own callbacks — useful for per-agent episode recording with different `source` values.
-- **The cognitive loop:** The step callbacks handle recording automatically. Compression must be done after `run()` returns, using your agent's LLM for the actual compression work.
+- **The wrap:** The step callbacks handle recording. Run the wrap after `run()` returns, one fresh model call per step, as above.

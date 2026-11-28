@@ -1,48 +1,48 @@
-# anneal-memory — LEAN Agent-Instructions Snippet (MCP)
+# anneal-memory - LEAN Agent-Instructions Snippet (MCP)
 #
 # Paste the section below into your harness's agent-instructions file
-# (CLAUDE.md / AGENTS.md / GEMINI.md). This is the always-loaded MINIMUM —
-# the workflow an agent needs to act correctly. For the full reference
-# (immune-system internals, operator commands),
-# install the anneal-memory SKILL (skill/anneal-memory/SKILL.md), which
-# loads on-demand, or see examples/agent-instructions.full.example.
+# (CLAUDE.md / AGENTS.md / GEMINI.md). This is the always-loaded MINIMUM:
+# the workflow an agent needs to act correctly. For more detail, install the
+# anneal-memory SKILL (skill/anneal-memory/SKILL.md), which loads on demand,
+# or see examples/agent-instructions.full.example.
 #
 # Requires the anneal-memory MCP server configured in your harness
 # (see the MCP setup section in the project README).
 
 ## Memory (anneal-memory)
 
-This project uses anneal-memory for persistent memory across sessions —
-retrospective memory (episodes compress into continuity, and an immune
-system decides what graduates) plus a **spore** store for
-prospective open loops (`task`/`question`/`thought`, planted then
-resolved) and an on-demand **crystallized** tier that holds proven, stable
-patterns *out* of always-loaded context and surfaces them on cue (opt-in +
-harness-fired — see the SKILL or full snippet). Use memory naturally; don't
-narrate the tooling.
+This project uses anneal-memory for memory across sessions. Episodes you
+record are rewritten into one memory file, a day at a time, at each wrap.
+A separate **spore** store holds open loops (`task` / `question` /
+`thought`, planted when they open and resolved when they end). Use memory
+naturally; don't narrate the tooling.
 
-**Start:** read the `anneal://continuity` resource. Empty = first session.
+**Start:** call `read_continuity` (or read the `anneal://continuity`
+resource). Empty means a first session.
 
 **During work:** `record` decisions, observations, tensions, questions,
-outcomes, and context as they happen — the *reasoning*, not just the
-fact ("chose X because Y"). Record proactively; target 5–15 episodes a
-session. Plant a spore (`spore_add`) the moment a loop opens.
+outcomes and context as they happen: the *reasoning*, not just the fact
+("chose X because Y"). Record proactively; aim for 5-15 episodes a
+session. When a fact changes, record the new one with `supersedes` (the
+old episode's id) or a `state_key`. Plant a spore (`spore_add`) the moment
+a loop opens.
 
-**Before decisions (NON-NEGOTIABLE):** call `recall` on the surface area
-being decided and integrate what comes back. If it returns nothing,
-proceed and note recall fired clean. Skipping this is the dead-store
-failure mode — the store grows while decisions get made blind to it.
+**Before decisions (NON-NEGOTIABLE):** call `recall` on the area being
+decided and use what comes back. If it returns nothing, go ahead and say
+so. A store that is never read before deciding is dead.
 
-**Wrap (at "wrap up" / "save memory" / "we're done"):** run the full
-sequence, once — `prepare_wrap` → compress per its instructions (this
-step IS the thinking; principles over facts) → `save_continuity`.
-Demoted graduations are the validation pipeline working, not an error;
-don't re-run to chase a clean report. Cite real episode IDs honestly —
-you are the first line of defense, the library is the second.
-If `prepare_wrap` downgrades to capture-only, nothing is lost: tell your
-human what it says (episodes waiting, and the one claim command).
-Consolidating is the operator's act; never try to claim the baton.
+**Wrap (at "wrap up" / "save memory" / "we're done"):**
+1. `prepare_wrap` opens one step (the oldest unwrapped day) and returns a
+   wrap token and a prompt.
+2. Run that prompt in a FRESH context with nothing else (in Claude Code, a
+   subagent given only the prompt text). Not in this conversation.
+3. `save_continuity` with the model's whole reply and the token.
+If episodes from later days are still waiting, prepare again and repeat.
+A refused save writes nothing; run the step again. If `prepare_wrap`
+downgrades to capture-only, nothing is lost: tell your human what it
+says (episodes waiting, and the one claim command). Consolidating is the
+operator's act; never try to claim the baton.
 
 **Staying current:** after upgrading the package, run `anneal-memory
-migrate check` — it proposes edits to *these* instructions so they don't
-drift from the substrate (it never edits your files); then `migrate ack`.
+migrate check`. It proposes edits to *these* instructions so they don't
+drift from the package (it never edits your files). Then `migrate ack`.

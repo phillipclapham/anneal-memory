@@ -1,6 +1,6 @@
 # LlamaIndex Integration
 
-> Verified against `llama-index-core 0.14.20` + `anneal-memory 0.2.0` (Apr 14, 2026).
+> The event-handler wiring was checked against `llama-index-core 0.14.20` in April 2026. The anneal-memory calls were updated for 4.0 and not re-run against LlamaIndex.
 
 anneal-memory integrates with LlamaIndex through the **instrumentation system** — event handlers and span handlers that wrap every component execution. LlamaIndex also offers a `BaseMemoryBlock` interface for deeper memory pipeline integration.
 
@@ -89,18 +89,26 @@ agent = FunctionAgent(
 # Run
 result = await agent.run(user_msg="Analyze the dataset")
 
-# Wrap after run — LlamaIndex's llm abstraction compresses the package:
-wrap = prepare_wrap(store)
-if wrap["status"] == "ready":
-    package = wrap["package"]
-    from llama_index.core.llms import ChatMessage
-    prompt = (
-        f"{package['instructions']}\n\n"
-        f"Episodes:\n{package['episodes']}\n\n"
-        f"Current continuity:\n{package['continuity'] or ''}"
+# Wrap after the run. LlamaIndex's llm abstraction makes the call, with the
+# step's prompt and nothing from the agent's run.
+from llama_index.core.llms import ChatMessage
+
+while True:
+    wrap = prepare_wrap(store)
+    if wrap["status"] != "ready":
+        break
+    step = wrap["step"]
+    reply = await llm.achat(
+        [
+            ChatMessage(role="system", content=step["system"]),
+            ChatMessage(role="user", content=step["user"]),
+        ]
     )
-    compressed = await llm.achat([ChatMessage(role="user", content=prompt)])
-    validated_save_continuity(store, compressed.message.content)
+    result = validated_save_continuity(
+        store, reply.message.content, wrap_token=wrap["wrap_token"]
+    )
+    if result["pending_count"] == 0:
+        break
 
 store.close()
 ```
@@ -205,4 +213,4 @@ memory = Memory.from_defaults(
 - **Instrumentation vs legacy callbacks:** The instrumentation system (`BaseEventHandler`, `BaseSpanHandler`) is the current recommended approach. The legacy `CallbackManager` still works but is deprecated.
 - **Async-first:** LlamaIndex's workflow agents are async. The instrumentation handlers receive events synchronously but can trigger async operations.
 - **AgentWorkflow:** For multi-agent setups with handoffs, the `AgentWorkflow` class coordinates agents. Each agent can have its own memory context via different system prompts, while sharing the same anneal-memory store with different `source` values.
-- **The cognitive loop:** The event handler records episodes automatically. Compression should happen after the agent run completes, using the agent's own LLM for judgment.
+- **The wrap:** The event handler records episodes automatically. Run the wrap after the agent run completes, one fresh `achat` call per step, as above.

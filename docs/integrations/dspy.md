@@ -1,6 +1,6 @@
 # DSPy Integration
 
-> Verified against `dspy 3.1.3` + `anneal-memory 0.2.0` (Apr 14, 2026). Zero drift.
+> The callback wiring was checked against `dspy 3.1.3` in April 2026. The anneal-memory calls were updated for 4.0 and not re-run against DSPy.
 
 anneal-memory integrates with DSPy through **BaseCallback** — 12 lifecycle hooks (6 start/end pairs) that fire during module execution. DSPy's "programming, not prompting" paradigm makes it architecturally unique among frameworks — episodes capture module I/O rather than conversational turns.
 
@@ -104,20 +104,31 @@ rag = MemoryAwareRAG()
 result = rag(question="What are the trends in AI memory systems?")
 print(result.answer)
 
+def wrap_all(store):
+    """One fresh model call per step: the step's prompt and nothing else.
+
+    Calls the configured LM directly rather than a DSPy module, because the
+    prompt is fixed text, not a signature to optimise.
+    """
+    lm = dspy.settings.lm
+    while True:
+        wrap = prepare_wrap(store)
+        if wrap["status"] != "ready":
+            return
+        step = wrap["step"]
+        reply = lm(
+            messages=[
+                {"role": "system", "content": step["system"]},
+                {"role": "user", "content": step["user"]},
+            ]
+        )[0]
+        result = validated_save_continuity(store, reply, wrap_token=wrap["wrap_token"])
+        if result["pending_count"] == 0:
+            return
+
+
 # Wrap after program execution
-wrap = prepare_wrap(store)
-if wrap["status"] == "ready":
-    package = wrap["package"]
-    # Compress via LLM
-    compress_module = dspy.ChainOfThought(
-        "episodes, continuity, instructions -> compressed_continuity"
-    )
-    compressed = compress_module(
-        episodes=package["episodes"],
-        continuity=package["continuity"] or "",
-        instructions=package["instructions"],
-    )
-    validated_save_continuity(store, compressed.compressed_continuity)
+wrap_all(store)
 
 store.close()
 ```
@@ -190,20 +201,9 @@ DSPy's optimizers compile programs using training data. Memory adds context acro
 optimizer = dspy.MIPROv2(metric=my_metric, auto="light")
 optimized = optimizer.compile(rag, trainset=train_data)
 
-# Wrap after optimization to capture what was learned. Use the same
-# prepare_wrap + validated_save_continuity pattern as the main example:
-wrap = prepare_wrap(store)
-if wrap["status"] == "ready":
-    package = wrap["package"]
-    compress_module = dspy.ChainOfThought(
-        "episodes, continuity, instructions -> compressed_continuity"
-    )
-    compressed = compress_module(
-        episodes=package["episodes"],
-        continuity=package["continuity"] or "",
-        instructions=package["instructions"],
-    )
-    validated_save_continuity(store, compressed.compressed_continuity)
+# Wrap after optimization to capture what was learned, with the
+# wrap_all helper from the main example:
+wrap_all(store)
 
 # Save the optimized program
 optimized.save("optimized_rag.json")
@@ -215,4 +215,4 @@ optimized.save("optimized_rag.json")
 - **Callbacks are global:** Registered via `dspy.configure(callbacks=[...])` — they fire for ALL module executions in the program. Use `call_id` to track nesting and parent-child relationships.
 - **Don't mutate in callbacks:** DSPy callbacks should not modify inputs or outputs. Create copies if you need to transform data. Recording to anneal-memory is a side effect, which is fine.
 - **Signatures as episode types:** DSPy's typed signatures (`question -> answer`, `context, question -> answer, confidence`) provide natural episode type mapping — inputs are context, outputs are observations/decisions.
-- **The cognitive loop:** DSPy's `ChainOfThought` can be used for the compression step itself — define a signature like `episodes, continuity, instructions -> compressed_continuity` and let DSPy handle the prompting.
+- **The wrap prompt is fixed text.** It is the prompt the method was measured with, so call the LM with it directly, as `wrap_all` does, rather than wrapping it in a signature that a DSPy optimizer could rewrite.

@@ -6,7 +6,7 @@ anneal-memory follows semantic versioning from 1.0. This page says what the vers
 
 Four things are public, and only these:
 
-1. **The Python API.** Every name in `anneal_memory.__all__`, and the names listed in the own `__all__` of an exported module (today `sessions`: the baton and liveness-registry functions). Each name is also frozen at the module path that defines it, so `from anneal_memory.durable import section_chars` and `from anneal_memory import section_chars` both stay valid. Names that start with an underscore, and public-looking names that are not in `__all__`, are internal and carry no promise, even when a module exposes them.
+1. **The Python API.** Every name in `anneal_memory.__all__`, and the names listed in the own `__all__` of an exported module (today `sessions`: the baton and liveness-registry functions). Each name is also frozen at the module path that defines it, so `from anneal_memory.sessions import claim_baton` and `from anneal_memory import sessions` both stay valid. Names that start with an underscore, and public-looking names that are not in `__all__`, are internal and carry no promise, even when a module exposes them.
 2. **The command line.** The subcommands, their flags, and the keys of the `--json` output of each command.
 3. **The MCP server.** The tool names and each tool's input schema. The tool descriptions are guarded separately by the integrity manifest ([tests/test_integrity.py](../tests/test_integrity.py)); the schemas are guarded by the public API snapshot test.
 4. **The files on disk.** See "On-disk format" below.
@@ -27,7 +27,9 @@ A public name, flag or field is deprecated before it is removed:
 2. Using it emits a warning, and the [CHANGELOG](../CHANGELOG.md) has a line that names the replacement.
 3. It is removed no earlier than the next MAJOR release.
 
-The first deprecation is `allow_unlinked` (the `allow_unlinked` argument of `validated_save_continuity`, the CLI flag `--allow-unlinked`, and the MCP argument of the same name). It is accepted and does nothing. The library and the CLI emit a `UserWarning` after the save has committed, which Python shows by default (a `DeprecationWarning` would be hidden from a CLI user), and the MCP tool's result carries a line saying the same. It stays accepted and is removed no earlier than 2.0.
+The first deprecation was `allow_unlinked` (an argument of `validated_save_continuity`, the CLI flag `--allow-unlinked` and the MCP argument of the same name). It was accepted, did nothing and warned, and it was removed in 4.0 with the rest of the features it belonged to.
+
+**4.0.0 is a MAJOR release and removed public names without a deprecation period**, because the features they belonged to were removed outright (graduation, patterns, crystals, section schemas, rederive, the worth and outcome log, associations). What was removed and what replaced it is in [MIGRATING_TO_4.md](../MIGRATING_TO_4.md). The deprecation rule above applies to every release after it.
 
 ## Supported environments
 
@@ -43,7 +45,8 @@ This section states what 1.0 promises. It holds from schema generation 2, which 
 - A store written by any published 0.9.x release opens under 1.x without operator action.
 - The migration is forward-only, additive and idempotent, and it copies the database before changing it.
 - An older release refuses a store that 1.x has migrated (the first write-capable open under 1.x migrates it) and writes nothing to it. The refusal is deliberate: it keeps an older release from writing into a store whose format it does not know.
-- The sidecar files and the per-record formats (the audit log, the outcome log) are versioned. A record written by one release stays readable by every later release.
+- The sidecar files and the per-record formats (the audit log, for one) are versioned. A record written by one release stays readable by every later release.
+- 4.0 reads every store a 3.x release wrote, and drops no table or row. It stops using the tables and files that belonged to removed features (patterns, the crystal file, the outcome log, section schemas) and leaves them where they are; the store's current continuity file seeds the first rolling wrap.
 - The spore/intention store (`<stem>.spores.json`) is a public document too. Since 2.0.0 it keeps its open rows under `intentions` with `"schema_version": 2`; releases up to 1.0.7 kept them under `spores`, and 2.0 and later refuse that spelling until `anneal-memory intention migrate-key` converts the file once.
 - A program that writes to a store with plain `sqlite3` calls `anneal_memory.register_writer_schema(conn)` on its connection first. That connection needs `PRAGMA trusted_schema=ON` (SQLite's default); with it OFF the call raises `sqlite3.NotSupportedError` and leaves the setting alone. Reading needs nothing.
 

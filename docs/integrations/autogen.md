@@ -1,6 +1,6 @@
 # AutoGen / AG2 Integration
 
-> Verified against `ag2 0.11.5` + `anneal-memory 0.2.0` (Apr 14, 2026). Zero drift.
+> The hook wiring was checked against `ag2 0.11.5` in April 2026. The anneal-memory calls were updated for 4.0 and not re-run against AG2.
 
 anneal-memory integrates with AutoGen/AG2 through **hooks** — four message lifecycle hooks registered via `register_hook()`. These fire during the reply generation process, giving you access to messages before and after they're sent between agents.
 
@@ -105,24 +105,26 @@ user_proxy.initiate_chat(
     message="Analyze the latest trends in AI memory systems",
 )
 
-# Wrap after conversation ends — use a dedicated compression agent
-# (the assistant's own llm_config works fine):
-wrap = prepare_wrap(store)
-if wrap["status"] == "ready":
-    package = wrap["package"]
-    compressor = AssistantAgent(
-        name="compressor",
-        system_message="You compress agent memory into a continuity file.",
+# Wrap after the conversation ends. Each step gets a NEW agent that sees
+# the step's prompt and nothing from the conversation above (the
+# assistant's own llm_config works fine).
+while True:
+    wrap = prepare_wrap(store)
+    if wrap["status"] != "ready":
+        break
+    step = wrap["step"]
+    wrapper = AssistantAgent(
+        name="wrapper",
+        system_message=step["system"],
         llm_config={"config_list": [...]},
     )
-    reply = compressor.generate_reply(
-        messages=[{
-            "role": "user",
-            "content": f"{package['instructions']}\n\n{package['episodes']}",
-        }]
+    reply = wrapper.generate_reply(
+        messages=[{"role": "user", "content": step["user"]}]
     )
-    compressed = reply if isinstance(reply, str) else reply.get("content", "")
-    validated_save_continuity(store, compressed)
+    text = reply if isinstance(reply, str) else reply.get("content", "")
+    result = validated_save_continuity(store, text, wrap_token=wrap["wrap_token"])
+    if result["pending_count"] == 0:
+        break
 
 store.close()
 ```
@@ -177,4 +179,4 @@ def memory_tool(query: str, context_variables: ContextVariables) -> str:
 - **`process_message_before_send` is permanent:** Changes to the message in this hook persist in chat history. This makes it the best place for recording — you see the final message that will be sent.
 - **`process_all_messages_before_reply` is transient:** Changes here affect the current LLM call only, not the stored chat history. Good for injecting memory context without polluting the conversation.
 - **No built-in persistence:** AG2 keeps conversation history in memory only (`chat_messages` dict). anneal-memory provides cross-session persistence and compressed knowledge.
-- **The cognitive loop:** The hooks handle recording automatically. Compression should happen after `initiate_chat()` returns, using an LLM for the actual compression judgment.
+- **The wrap:** The hooks handle recording. Run the wrap after `initiate_chat()` returns, with a fresh agent per step as above, so the prompt is not read inside the conversation it summarises.

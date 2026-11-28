@@ -4,6 +4,46 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
 
 ## [Unreleased]
 
+## [4.0.0] - 2026-11-28
+
+**Breaking release.** Consolidation is now one method, a rolling rewrite, and everything that only served the old method is removed. Old stores open unchanged. Read [MIGRATING_TO_4.md](MIGRATING_TO_4.md) before upgrading anything that calls `prepare_wrap`, `validated_save_continuity`, the `crystal` tools, or the graduation and association commands.
+
+### Changed
+- **`prepare_wrap` opens one step of a rolling wrap.** The step is the oldest calendar day of unwrapped episodes (the day is cut in the machine's time zone, or in `tz=` / `--tz`; a very long day is sliced). It returns `{status, message, episode_count, pending_count, wrap_token, step}`, where `step` holds `day`, `chunk`, `chunks`, `episodes`, `steps_remaining`, `max_chars`, `memory_chars`, `system`, `user` and `prompt`: a fixed prompt filled with the current memory file and that day's log. A catch-up over N days is N steps in order, never one merged log.
+- **The caller runs the prompt in a fresh context, with nothing else, and passes the model's whole reply to `validated_save_continuity`.** anneal-memory calls no model and stays model-agnostic. The prompt is the one the method was measured with: a mid-size model at low effort, given the memory file and one day's log.
+- **`validated_save_continuity(store, text, *, wrap_token, max_chars, session_id, allow_sole_live, idempotency_key, lease_token, unattended, model)`** keeps the reply as the new memory file. It checks that the reply is a non-empty string, at most 26,000 characters (`max_chars`, CLI `--max-chars`, to change the cap), and answers the step `prepare_wrap` opened. It checks nothing else: no section layout, no markers, no evidence or pattern rules. A refused save writes nothing and leaves the step open. The result is `{path, chars, episodes_compressed, pending_count, content_hash, wrap_result}`.
+- **The memory file is whatever the model wrote.** The first wrap after an upgrade runs on the store's existing continuity file as its seed. The seed may be over 26,000 characters; the prompt tells the model its current size and the limit.
+- **`prepare-wrap` and `save-continuity` (CLI) and `prepare_wrap` and `save_continuity` (MCP)** follow the new calls. `prepare-wrap` prints the token and the prompt (`--json` gives them as fields) and still exits 3 on a downgrade. `save-continuity` takes `--wrap-token`, `--max-chars`, `--model`, `--unattended` and `--session-id`.
+- Every earlier version of the memory file is kept (`identity_versions`, append-only), and `history` and `diff` show the wraps, so a fact a rewrite dropped can be recovered.
+- The README, the library quickstart, the integration guides, the bundled skill and the agent-instruction snippets are rewritten for the new method, and the README is much shorter.
+
+### Removed
+- **Graduation:** the `1x`/`2x`/`3x` pattern levels, citation and evidence checks, demotion, carry-forward, and the catastrophic-shrink gate.
+- **Patterns and pattern associations**, and the Hebbian association commands (`associations`, `pattern-associations`, `graph`).
+- **Crystals:** the crystal store, the MCP tools `crystal_recall` and `crystal_index`, and the `crystal` CLI group.
+- **The Decisions wall and the evidence-tag rules.**
+- **Drift probes** (`probe`) and **the worth and outcome log** (`outcome`, `worth`).
+- **Rederive** (State from commands: `derive`, `continuity --rederive`) and `docs/rederive.md`.
+- **Section schemas and section edit:** `Store(section_schema=)`, the schema names and `SectionSpec`, `set-schema`, `init --schema`. The memory file has no required sections.
+- **Durable-fact sections.**
+- Exceptions that only the removed features raised: `ContinuityValidationError`, `SectionError`, `WrapSchemaMovedError` and `AssociationFormationOffError`.
+- Arguments of the old save and prepare calls that served those features, among them `affective_state`, `allow_shrink`, `allow_unlinked`, `carryforward_cold_days`, `crystal_store`, `compost` and `require_rederive`.
+- `retrieve_relevant` and `retrieve_patterns`. `search_episodes` stays.
+
+### Kept
+- Capture and recall: `record`, `recall`, `search`, `episodes`, `get`, and the six episode types.
+- Supersession and state keys, trust classes, `delete`, `prune`.
+- The audit trail, `verify`, `audit`, `audit-repair`, and tool description integrity.
+- The consolidate baton, leases, idempotency keys, `wrap-status`, `wrap-cancel`, `revert-wrap`.
+- Spores and intentions.
+- The MCP server (`record`, `recall`, `read_continuity`, `prepare_wrap`, `save_continuity`, `wrap_cancel`, `delete_episode`, `status`, `spore_*`, `intention_*`) and the hosted remote path.
+- `export`, `import`, `team-import`, `team-status`, `team-forget-key`, and `migrate check` / `migrate ack`.
+
+### Compatibility
+- **No table is dropped and no row is deleted.** A 3.x store opens in 4.0 with its rows, and its current continuity file seeds the first rolling wrap. The old crystal file, if there is one, is no longer read.
+- Episode version tokens are not changed by this release.
+- After upgrading, run `anneal-memory migrate check`, then `anneal-memory migrate ack`.
+
 ## [3.0.2] — 2026-11-27
 
 ### Changed

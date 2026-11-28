@@ -2,8 +2,7 @@
 
 anneal-memory integrates with LangGraph through **middleware** — the recommended extension mechanism in LangChain 1.0+. Middleware hooks fire at agent and model lifecycle boundaries, giving you full control over when to record, recall, and compress memory.
 
-> **Verified:** `anneal-memory` 0.2.0 · `langchain` 1.2.15 · `langgraph` 1.1.6 · Python 3.14
-> (end-to-end test: all four lifecycle hooks fire, `Store`/`record`/`recall`/`load_continuity`/`prepare_wrap`/`validated_save_continuity` all work)
+> The middleware wiring was checked against `langchain` 1.2.15 and `langgraph` 1.1.6 in April 2026 (all four lifecycle hooks fire). The anneal-memory calls were updated for 4.0 and not re-run against them.
 
 ## Install
 
@@ -73,20 +72,21 @@ class AnnealMemoryMiddleware(AgentMiddleware):
 
     def after_agent(self, state: AgentState, runtime: Runtime) -> dict | None:
         """Run the wrap sequence at session end."""
-        wrap = prepare_wrap(self.store)
-        if wrap["status"] == "ready":
-            package = wrap["package"]
-            # Feed the package to your LLM. Adapt this to your runtime —
-            # any LangChain chat model works. The agent's own LLM is ideal:
-            # compression IS the cognition, so the model that did the work
-            # should be the one reflecting on it.
-            compressed = llm.invoke(
-                f"Compress these episodes into continuity:\n"
-                f"{package['instructions']}\n"
-                f"Episodes:\n{package['episodes']}\n"
-                f"Current continuity:\n{package['continuity'] or ''}"
+        # One step per day of waiting episodes. Each step's prompt runs in a
+        # fresh context: a plain chat-model call with this system and user
+        # message and nothing from the agent's conversation. `llm` is any
+        # LangChain chat model you have configured.
+        while True:
+            wrap = prepare_wrap(self.store)
+            if wrap["status"] != "ready":
+                break
+            step = wrap["step"]
+            reply = llm.invoke([("system", step["system"]), ("user", step["user"])])
+            result = validated_save_continuity(
+                self.store, reply.content, wrap_token=wrap["wrap_token"]
             )
-            validated_save_continuity(self.store, compressed.content)
+            if result["pending_count"] == 0:
+                break
 
         return None
 
@@ -138,4 +138,5 @@ graph.invoke(input, config={"callbacks": [AnnealMemoryCallback("./memory.db", "m
 - **Middleware vs Callbacks:** Middleware can mutate state and control execution flow. Callbacks are read-only observers. Use middleware for full integration, callbacks for logging-only.
 - **Store thread safety:** Each `Store` instance is safe for single-threaded use. For concurrent LangGraph nodes, create one Store per thread or use locks.
 - **Compression timing:** The `after_agent` hook fires once per `create_agent` invocation — this is the natural session boundary for wraps.
-- **The cognitive loop:** Don't automate compression. The wrap sequence should involve the agent's own LLM — the act of compressing IS where identity forms.
+- **The wrap is a separate model call.** Don't run the wrap prompt inside the agent's conversation. It is built to run with nothing but the memory file and one day's log, so give it its own call, as above. The model can be the same one the agent uses.
+- **Baton.** On a store made by `anneal-memory init`, pass `session_id=` to both calls (see the [library quickstart](../library-quickstart.md#the-baton)).

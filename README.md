@@ -6,654 +6,306 @@
 
 # anneal-memory
 
-**Living memory for AI agents. Episodes compress into identity.**
+**Memory for AI agents: a log of what happened, and one memory file that gets rewritten a day at a time.**
 
-Memory without grounding is amplification infrastructure.
+An agent records episodes as it works (decisions, observations, open questions, outcomes). Now and then a model rewrites one memory file from the old file plus one day of those episodes. The agent loads that file at the start of every session. A local SQLite store, no dependencies beyond the Python standard library, no vendor in the loop, and every version of the file is kept.
 
-Persistent user memory profiles [increase agent sycophancy 16–45% across models](https://arxiv.org/abs/2509.12517) (Gemini 2.5 Pro at 45%, others lower). Production deployments [accumulate 97.8% junk entries](https://github.com/mem0ai/mem0/issues/4573) within weeks. Clinical research documents memory [scaffolding delusions across sessions](https://doi.org/10.1016/S2215-0366(25)00396-7). The failure mode here isn't memory. It's memory with nothing checking what gets kept.
+anneal-memory calls no model itself. It builds the prompt, you run it on whatever model you like, and it keeps the reply.
 
-anneal-memory puts a check between what an agent writes down and what it comes to believe. That idea isn't rare any more. [MemTxn](https://arxiv.org/abs/2607.27834) refuses a fact update whose values don't appear in the source it cites, and [Agent Zero Memory](https://arxiv.org/abs/2608.29606) answers only from evidence its reader actually opened.
+> **Upgrading from 3.x?** 4.0 is a breaking release. It removed graduation, patterns, crystals and the section schema, and replaced the wrap with the single method below. Old stores open unchanged. See [MIGRATING_TO_4.md](MIGRATING_TO_4.md).
 
-Here's what I think is actually distinct, going by the 2026 systems I've read. A pattern in anneal is an abstraction, not a copied fact, and it has to earn its rank: it moves up a level (1x → 2x → 3x, up to a 9-digit level) only when it cites real episodes its explanation is grounded in, and a failed citation drops it a level (or holds it there for a while, marked carried-forward, if it was grounded recently). The consolidator can't quietly gut the memory it rewrites, either. On a store that declares an identity layer, a save that collapses those sections is refused, and consolidators wearing down their own memory is [a documented failure](https://arxiv.org/abs/2605.12978). Then there's the assembly. An episodic evidence store, a bounded always-loaded continuity file, a long-term pattern tier recalled on cue, prospective tasks, a single-writer consolidation gate and a hash-chained audit log all ship in one package, with zero dependencies and no embeddings. None of those pieces is unique on its own. The combination is, as far as I've found.
+## How the wrap works
 
-The citation checks are narrow and structural: cited IDs must exist, the explanation must share words with the episode it cites, fabricated citations demote (unless carryforward holds a recently grounded pattern), one episode cited too often raises a flag, and re-citing old episodes doesn't count. They are not a complete defense against memory drift. *Honest scope* below says what they catch and what they don't.
+There is one consolidation method, a rolling rewrite.
 
-And it's memory you own and govern. A local store, zero dependencies, no vendor in the loop — you decide what graduates into long-term memory, every change is recorded in a tamper-evident chain (best-effort on the write side — see *Hash-chained audit trail* for what `verify` can and cannot see), and the consolidation step that rewrites an agent's identity is gated to a human, not run unbidden (the *Single-consolidator gate* below). Own the substrate; govern what enters it.
+1. `prepare_wrap` opens **one step**: the oldest calendar day that has episodes not yet wrapped. A day is cut in the machine's time zone, or in the zone you pass (`--tz`, `tz=`). A very long day is cut into slices. It returns a fixed prompt, filled with the current memory file and that day's log, and a wrap token.
+2. You run that prompt in a **fresh context** that holds the prompt and nothing else: a subagent, a new session, or a plain model call. The prompt is the one the method was measured with: a mid-size model at low effort, given the memory file and one day's log, nothing else.
+3. You pass the model's **whole reply** to `save_continuity`, with the token.
 
-An append-only episodic log, consolidated by a single writer into a versioned identity the agent always loads, with an immune system that decides what is allowed to graduate, and a long-term pattern tier recalled on cue. Plus prospective **spores** (what the agent intends to do next). That's Complementary Learning Systems: a fast episodic store and slow consolidation (see *The Memory Architecture* below). Earlier versions also built a Hebbian link graph and an affect weight. I measured them for months, they never changed what recall returned, and 1.0.2 stopped building them. Zero dependencies (Python stdlib only). Works with any agent framework.
+A catch-up over several days is several steps in order, each one starting from the file the last one saved. It is never one merged log. After a save, `pending_count` says how many episodes are still waiting; if it is not zero, prepare the next step.
 
-## Quick Start
+The save checks three things: the reply is not empty, it is at most 26,000 characters (`--max-chars` / `max_chars` changes the cap), and it answers the step that `prepare_wrap` opened. That is all. There is no required section layout and nothing is parsed out of the file. The prompt asks the model to keep what changes how the assistant should work with this user, drop what is finished or superseded, and stay under the limit. What the file looks like is the model's call.
+
+A refused save writes nothing and leaves the step open, so you run it again. Every previous version of the file stays in the database (`history` and `diff` show them), so a fact that a rewrite dropped can be found and put back. See [Recovering an older version](#recovering-an-older-version).
+
+## Quick start
 
 ```
 pip install anneal-memory
 ```
 
-### Windows
-
-anneal-memory runs on Windows. What to know:
-
-- **Write locking is advisory POSIX `fcntl` and degrades to no lock at all on Windows.** The sites (`grep -n "fcntl.flock" anneal_memory/*.py`) include `store.py`'s continuity lock, `crystal.py`'s `CrystalStore._transaction`, `spores.py`'s `SporeStore._transaction`, and `audit.py`'s audit manifest and audit append locks. On Windows, concurrent writers to one store — whether separate processes or threads within one process — can race or lose updates, since there is no lock of any kind to serialize them there. A single writer (one process, one thread) is unaffected: the unique-tmp + atomic-replace write still prevents a torn file.
-- **No fork support for the audit trail.** POSIX `flock` locks follow the open file description, which a forked child inherits. Do not fork a process while an `AuditTrail` in it is in use; a child must open its own `AuditTrail`.
-- **The CLI's standard streams are UTF-8 on every platform.**
-- **If `ANNEAL_MEMORY_DB` is unset and no home directory can be found (a launcher that drops `USERPROFILE`/`HOMEPATH`, or on POSIX a container uid with no passwd entry and no `HOME`), only a command that opens the default path needs a home, and it refuses with exit 1, naming `--db` and `ANNEAL_MEMORY_DB`.**
-- Windows CI runs a real but reduced subset of the suite: tests that simulate an unreadable/unlistable file or directory via POSIX `chmod` are skipped there, since Windows/NTFS doesn't restrict access the same way, as are the cross-process lock test (see the write-locking bullet above) and the missing-home-directory simulation that clears the whole environment (the no-home tests that patch `Path.expanduser` run everywhere).
-
-### Python Library
-
-The library is the core product. Import it, use it in any framework or script.
+### Python library
 
 ```python
 from anneal_memory import Store, EpisodeType, prepare_wrap, validated_save_continuity
 
-# Initialize (creates DB + continuity file automatically)
-store = Store("./memory.db", project_name="MyAgent")
+store = Store("./memory.db")
 
-# Record episodes during work
 store.record("Connection pool is the real bottleneck", EpisodeType.OBSERVATION)
-store.record("Chose PostgreSQL as the database because ACID outweighs speed", EpisodeType.DECISION)
+store.record("Chose PostgreSQL because ACID outweighs speed", EpisodeType.DECISION)
 
-# Recall before decisions
 result = store.recall(episode_type=EpisodeType.DECISION, keyword="database")
 for ep in result.episodes:
     print(f"[{ep.type}] {ep.content}")
 
-# Compress at session end — this is where the cognition happens
-wrap = prepare_wrap(store)  # fetches episodes, marks wrap in progress
-if wrap["status"] == "ready":
-    # Feed wrap["package"] to your LLM. Compression IS the cognition —
-    # patterns emerge from the act of compressing, not from storage.
-    compressed = your_llm.compress(wrap["package"])
-    validated_save_continuity(store, compressed)  # full immune system pipeline
-# "empty" status means no new episodes to wrap — skip
+while True:
+    wrap = prepare_wrap(store)
+    if wrap["status"] != "ready":      # "empty": nothing waiting; "downgraded": see below
+        break
+    step = wrap["step"]                # step["system"], step["user"], step["prompt"]
+    reply = run_model(step["system"], step["user"])   # your model call, fresh context
+    saved = validated_save_continuity(store, reply, wrap_token=wrap["wrap_token"])
+    if saved["pending_count"] == 0:
+        break
 
 store.close()
 ```
 
-See [Library Quickstart](docs/library-quickstart.md) for the full guide.
+`run_model` is yours to write; anneal-memory has no model client. The [library quickstart](docs/library-quickstart.md) has one for the Anthropic SDK. A store made by `anneal-memory init` requires the baton (below), and a library caller on such a store gets `"downgraded"` unless it passes `session_id=` to both calls; a store opened with `Store(...)` directly has no such requirement.
 
 ### CLI
 
-Inspect, debug, and manage agent memory from the command line — a full operator CLI with machine-readable `--json` output. Agents with shell access (Claude Code, Aider, etc.) can use the CLI directly for the full memory workflow.
-
 ```bash
-# Point the demo at its own store. Without --db or ANNEAL_MEMORY_DB every
-# command uses ~/.anneal-memory/memory.db, your default store.
+# Without --db or ANNEAL_MEMORY_DB every command uses ~/.anneal-memory/memory.db.
 export ANNEAL_MEMORY_DB=./demo.db
 
-# Initialize. Global flags such as --db and --project-name go before the
-# subcommand. --project-name names the memory in the continuity header and is
-# not stored: pass it on each command (the default is "Agent").
-anneal-memory --project-name MyAgent init
-
-# Record and recall
+anneal-memory init
 anneal-memory record "Chose PostgreSQL as the database for ACID" --type decision
 anneal-memory search "database"
 
-# Consolidation is the operator's act: a new store wraps only under a session
-# you have claimed the baton for. Claim once (init --no-baton opts out).
+# A new store consolidates only under a session id the operator has claimed
+# the baton for (see "Consolidation is yours" below). Claim once.
 anneal-memory baton claim me
 
-# Agent-driven compression (same workflow as library and MCP)
-anneal-memory --project-name MyAgent prepare-wrap --session-id me    # Get compression package
-# Agent compresses...
-anneal-memory --project-name MyAgent save-continuity out.md \
-    --session-id me --wrap-token "$WRAP_TOKEN"                        # the 'Wrap token:' line
+anneal-memory prepare-wrap --session-id me
+# Prints "Wrap token: <hex>" and the prompt. Run the prompt in a fresh context,
+# write the model's whole reply to memory.md, then:
+anneal-memory save-continuity memory.md --session-id me --wrap-token "$WRAP_TOKEN"
 
-# Operator commands (things MCP can't do)
-anneal-memory stats                  # Detailed analytics
-anneal-memory graph --format dot     # Graph of links formed before 1.0.2 (Graphviz)
-anneal-memory diff --wraps 5         # Wrap metric progression
-anneal-memory audit --since 7d       # Read audit trail
-anneal-memory audit-repair           # Rebuild a quarantined audit manifest, or set aside a corrupt sealed week (--set-aside-unreadable: one that only fails to read)
-anneal-memory export --format json   # Full store export
-
-# Done with the demo: return the CLI to your default store
-unset ANNEAL_MEMORY_DB
+anneal-memory continuity        # print the current memory file
+anneal-memory history           # the wraps so far
+anneal-memory diff              # how recent wraps changed the file
 ```
 
-See [`examples/agent-instructions.lean.cli.example`](examples/agent-instructions.lean.cli.example) for the agent workflow snippet.
+`prepare-wrap --json` returns the same thing as an object (`step.system`, `step.user`, `wrap_token`), which is easier to script. `prepare-wrap` exits 3 when the wrap was downgraded to capture-only; see below.
 
-### MCP Server
+Other commands: `status`, `episodes`, `get`, `supersede`, `unsupersede`, `state`, `trust`, `delete`, `prune`, `verify`, `audit-repair`, `wrap-status`, `wrap-cancel`, `revert-wrap`, `wrap-token-current`, `audit`, `stats`, `export`, `import`, `team-import`, `team-status`, `team-forget-key`, and the `spore` and `intention` groups. `anneal-memory --help` is the list for your installed version. Every command takes `--json`.
 
-For MCP-capable agent harnesses — Claude Code, Codex and Gemini CLI.
+### MCP server
 
-The server is one command — `anneal-memory --project-name MyProject serve` — wired into the harness's MCP config. The `serve` subcommand starts the MCP server; `--project-name` (and optional `--db`) are global flags and come *before* `serve`. Each harness has its own config file and format:
+For MCP-capable harnesses such as Claude Code, Codex and Gemini CLI. The server is `anneal-memory serve`, wired into the harness's MCP config. Global flags such as `--db` go before `serve`.
 
-**Claude Code** — `mcpServers` JSON (a project `.mcp.json`):
+**Claude Code**, a project `.mcp.json`:
 
 ```json
 {
   "mcpServers": {
     "anneal_memory": {
       "command": "uvx",
-      "args": ["anneal-memory", "--project-name", "MyProject", "serve", "--session-id", "claude-code"]
+      "args": ["anneal-memory", "serve", "--session-id", "claude-code"]
     }
   }
 }
 ```
 
-**Codex** — `~/.codex/config.toml` (or a project `.codex/config.toml`):
+**Codex**, `~/.codex/config.toml`:
 
 ```toml
 [mcp_servers.anneal_memory]
 command = "uvx"
-args = ["anneal-memory", "--project-name", "MyProject", "serve", "--session-id", "codex"]
+args = ["anneal-memory", "serve", "--session-id", "codex"]
 ```
 
-**Gemini CLI** — `~/.gemini/settings.json` (or a project `.gemini/settings.json`):
+**Gemini CLI**, `~/.gemini/settings.json`:
 
 ```json
 {
   "mcpServers": {
     "anneal_memory": {
       "command": "uvx",
-      "args": ["anneal-memory", "--project-name", "MyProject", "serve", "--session-id", "gemini"]
+      "args": ["anneal-memory", "serve", "--session-id", "gemini"]
     }
   }
 }
 ```
 
-Gemini CLI starts MCP servers only from a folder it trusts: in an untrusted folder `gemini mcp list` shows a server from the user-level settings as `Disconnected` and does not list one from a project `.gemini/settings.json` at all, even though the config is right (trust the folder, or set `GEMINI_CLI_TRUST_WORKSPACE=true`; measured with Gemini CLI 0.42.0, where the variable made the server show `Connected`).
+Gemini CLI starts MCP servers only from a folder it trusts. In an untrusted folder `gemini mcp list` shows a user-level server as `Disconnected` and does not list a project one at all, even with the config right. Trust the folder, or set `GEMINI_CLI_TRUST_WORKSPACE=true`.
 
-Then add the agent-instructions snippet — [`agent-instructions.lean.example`](examples/agent-instructions.lean.example) (the always-loaded baseline) or the [`.full.example`](examples/agent-instructions.full.example) reference — to the harness's instructions file (`CLAUDE.md` for Claude Code, `AGENTS.md` for Codex, `GEMINI.md` for Gemini CLI). It teaches the agent *when* and *how* to use the memory tools; without it the tools are available but the agent won't know the cognitive workflow. (See [Claude Code / agent-harness adopters](#claude-code--agent-harness-adopters-skill--snippet) below for the lean/Skill/full layering.)
+`uvx` fetches the latest published version on every run. For a pinned install, `pip install anneal-memory` and set `"command": "anneal-memory"` with the same `args`.
 
-**Consolidation is yours.** Agents record episodes freely. Rewriting the agent's identity layer (the wrap) is the operator's act, so a new store consolidates only through a server whose `--session-id` you have claimed the baton for, once, from your own shell: `uvx anneal-memory baton claim claude-code` (or `anneal-memory baton claim claude-code` with a pip install). Until then the agent's wrap downgrades to capture-only, and both the downgrade and the `status` tool say how many episodes are waiting and the command for you to run. Set the id in the client's config as above, not in a shell profile (`ANNEAL_MEMORY_SESSION_ID` also works, but an exported one reaches every client launched from that shell). Every conversation started from one config shares its id, so after the claim each of that client's conversations may consolidate: the claim designates a client, not a single conversation. Move the baton between clients with `baton claim NAME --take`; see who holds it with `baton status`. A store created before this policy, or with `init --no-baton`, ignores `--session-id` and wraps as before.
+Then add one of the [agent-instruction snippets](#agent-harnesses-skill-and-snippets) to the harness's instructions file (`CLAUDE.md`, `AGENTS.md`, `GEMINI.md`). The tools are there without it, but the agent will not know when to call them.
 
-What the gate does and does not hold: no MCP tool lets an agent choose its id or claim the baton, so an agent following the protocol cannot consolidate on its own initiative, and parallel sessions cannot each recompose your agent's identity. It is not a lock against an agent with a shell that ignores its instructions: such an agent can run `baton claim` or edit its own config. Keeping the baton with you is part of the operator's job.
+**What the agent does at a wrap over MCP:** call `prepare_wrap`, run the prompt it returns in a fresh context (in Claude Code, a subagent that is given only that prompt), then call `save_continuity` with the subagent's whole reply and the token. The agent that did the day's work is the wrong place to run the prompt, because it carries the whole session with it.
 
-> **Pinned install:** `uvx` fetches the latest published version on each run. For a pinned install, `pip install anneal-memory`, then set `"command": "anneal-memory"` with `"args": ["--project-name", "MyProject", "serve", "--session-id", "claude-code"]` — or point `command` at an absolute path to the installed binary.
+**Consolidation is yours.** Agents record freely. Rewriting the memory file is the operator's act, so a new store consolidates only through a server whose `--session-id` you have claimed the baton for, once, from your own shell: `anneal-memory baton claim claude-code`. Until then the agent's `prepare_wrap` downgrades to capture-only, and both that message and the `status` tool say how many episodes are waiting and the command to run. Set the id in the client's config as above, not in a shell profile. Every conversation started from one config shares its id, so the claim designates a client, not one conversation. Move the baton with `baton claim NAME --take`; see who holds it with `baton status`. A store created before this policy, or with `init --no-baton`, ignores `--session-id` and wraps without it.
 
-### All Three Paths, Same Cognitive Loop
+The gate stops an agent that follows its instructions from consolidating on its own initiative, and stops parallel sessions from each rewriting the memory file. It is not a lock against an agent with a shell that ignores its instructions: such an agent can run `baton claim` itself. Keeping the baton with you is part of the operator's job.
 
-CLI and MCP are thin transport adapters over the same library — not separate implementations. Every access pattern calls the same `prepare_wrap(store)` and `validated_save_continuity(store, text)` pipeline under the hood, preserving the same workflow: record episodes during work → compress at session boundaries → load continuity at session start. The agent that records is the agent that compresses; that compression can't be delegated.
+### Windows
+
+anneal-memory runs on Windows with these limits:
+
+- **Write locking is advisory POSIX `fcntl` and there is no lock at all on Windows.** Concurrent writers to one store, whether processes or threads, can race or lose updates. One writer at a time is fine; the unique-tmp plus atomic-replace write still prevents a torn file.
+- **No fork support for the audit trail.** Do not fork a process while an `AuditTrail` in it is in use; a child opens its own.
+- The CLI's standard streams are UTF-8 on every platform.
+- If `ANNEAL_MEMORY_DB` is unset and no home directory can be found, a command that needs the default path exits 1 and names `--db` and `ANNEAL_MEMORY_DB`.
+- Windows CI runs a reduced subset of the suite. Tests that depend on POSIX `chmod` or on the cross-process lock are skipped there.
+
+## Same loop, three transports
+
+The CLI and the MCP server are thin adapters over the library. All three call the same `prepare_wrap` and `validated_save_continuity`.
 
 | | Library | CLI | MCP |
 |---|---|---|---|
-| **Install** | `pip install anneal-memory` | Same | `uvx anneal-memory` or same |
-| **Record** | `store.record(content, type)` | `anneal-memory record "..." --type T` | `record` tool |
-| **Recall** | `store.recall(keyword=...)` | `anneal-memory search "..."` | `recall` tool |
-| **Compress** | `prepare_wrap(store)` → agent → `validated_save_continuity(store, text)` | `prepare-wrap` → agent → `save-continuity` | `prepare_wrap` → agent → `save_continuity` |
-| **Best for** | Framework integration, custom agents | Agents with shell access, operators | MCP-enabled editors |
+| **Record** | `store.record(content, type)` | `record "..." --type T` | `record` |
+| **Recall** | `store.recall(keyword=...)` | `search "..."` | `recall` |
+| **Open a step** | `prepare_wrap(store)` | `prepare-wrap` | `prepare_wrap` |
+| **Keep the reply** | `validated_save_continuity(store, text, wrap_token=...)` | `save-continuity FILE` | `save_continuity` |
+| **Best for** | Frameworks, custom agents | Agents with a shell, operators | MCP-enabled editors |
 
-**Recall reads one committed state.** A recall reads one committed state, as of its start: an episode deleted or erased before recall begins is never returned; a delete that commits while a recall runs may or may not be reflected, as with any database read.
+A recall reads one committed state, as of its start. An episode deleted before the recall begins is never returned; a delete that commits while a recall runs may or may not show, as with any database read.
 
-## Framework Integrations
+## Framework integrations
 
-anneal-memory works with any agent framework through the Python library. Each guide below shows where to call the four core functions — `record()`, `recall()`, `prepare_wrap()`, `validated_save_continuity()` — within the framework's lifecycle.
+Each guide shows where the library calls go in a framework's lifecycle. They show patterns from each framework's API at the time they were written; the wrap code uses the 4.0 calls above and was not re-run against every framework.
 
-| Framework | Integration Point | Guide |
+| Framework | Integration point | Guide |
 |-----------|------------------|-------|
-| **LangGraph / LangChain** | `AgentMiddleware` (before/after agent + model) | [docs/integrations/langgraph.md](docs/integrations/langgraph.md) |
-| **CrewAI** | `BaseEventListener` (event bus) | [docs/integrations/crewai.md](docs/integrations/crewai.md) |
-| **OpenAI Agents SDK** | `RunHooks` (agent lifecycle) | [docs/integrations/openai-agents.md](docs/integrations/openai-agents.md) |
-| **Anthropic Agents SDK** | agent-instructions snippet + `Stop` hook | [docs/integrations/anthropic-agents.md](docs/integrations/anthropic-agents.md) |
-| **Google ADK** | Callbacks + custom `MemoryService` | [docs/integrations/google-adk.md](docs/integrations/google-adk.md) |
-| **Pydantic AI** | `AbstractCapability` with `Hooks` | [docs/integrations/pydantic-ai.md](docs/integrations/pydantic-ai.md) |
-| **smolagents** | `step_callbacks` dict | [docs/integrations/smolagents.md](docs/integrations/smolagents.md) |
-| **LlamaIndex** | Instrumentation `BaseEventHandler` | [docs/integrations/llamaindex.md](docs/integrations/llamaindex.md) |
-| **Haystack** | Custom `Tracer` | [docs/integrations/haystack.md](docs/integrations/haystack.md) |
-| **CAMEL-AI** | `WorkforceCallback` | [docs/integrations/camel-ai.md](docs/integrations/camel-ai.md) |
-| **AutoGen / AG2** | `register_hook()` | [docs/integrations/autogen.md](docs/integrations/autogen.md) |
-| **DSPy** | `BaseCallback` | [docs/integrations/dspy.md](docs/integrations/dspy.md) |
+| **LangGraph / LangChain** | `AgentMiddleware` | [langgraph.md](docs/integrations/langgraph.md) |
+| **CrewAI** | `BaseEventListener` | [crewai.md](docs/integrations/crewai.md) |
+| **OpenAI Agents SDK** | `RunHooks` | [openai-agents.md](docs/integrations/openai-agents.md) |
+| **Anthropic Agents SDK** | instructions snippet + `Stop` hook | [anthropic-agents.md](docs/integrations/anthropic-agents.md) |
+| **Google ADK** | callbacks + custom `MemoryService` | [google-adk.md](docs/integrations/google-adk.md) |
+| **Pydantic AI** | `AbstractCapability` with `Hooks` | [pydantic-ai.md](docs/integrations/pydantic-ai.md) |
+| **smolagents** | `step_callbacks` | [smolagents.md](docs/integrations/smolagents.md) |
+| **LlamaIndex** | instrumentation `BaseEventHandler` | [llamaindex.md](docs/integrations/llamaindex.md) |
+| **Haystack** | custom `Tracer` | [haystack.md](docs/integrations/haystack.md) |
+| **CAMEL-AI** | `WorkforceCallback` | [camel-ai.md](docs/integrations/camel-ai.md) |
+| **AutoGen / AG2** | `register_hook()` | [autogen.md](docs/integrations/autogen.md) |
+| **DSPy** | `BaseCallback` | [dspy.md](docs/integrations/dspy.md) |
 
-These guides show integration patterns based on each framework's current API. The library works with any Python framework — the pattern is always the same: initialize a `Store`, call `record()` at meaningful moments, `recall()` before decisions, and run the wrap sequence at session end. **Don't see your framework?** The [library quickstart](docs/library-quickstart.md) shows the 4-function pattern that works everywhere.
+Not listed? The pattern is the same everywhere: open a `Store`, `record()` at meaningful moments, `recall()` before decisions, run the wrap at a session boundary.
 
-## Claude Code / agent-harness adopters (Skill + snippet)
+## Agent harnesses: skill and snippets
 
-Using anneal-memory inside an agent harness — Claude Code, Codex, Gemini CLI — rather than a Python framework? The Skill and snippets are **repository artifacts**: they live in this GitHub repo (and the source distribution), **not in the pip/uvx wheel** — clone the repo or download the files directly from GitHub to use them. They layer, they aren't a menu: the lean snippet is the always-loaded baseline; the Skill adds depth on demand.
+For Claude Code, Codex or Gemini CLI rather than a Python framework. These are repository files; they are **not** in the pip wheel, so clone the repo or download them from GitHub.
 
-- **Lean snippet — the always-loaded baseline.** Paste [`examples/agent-instructions.lean.example`](examples/agent-instructions.lean.example) (MCP) or [`examples/agent-instructions.lean.cli.example`](examples/agent-instructions.lean.cli.example) (CLI) into your `CLAUDE.md` / `AGENTS.md` / `GEMINI.md`. ~45 lines, always in context — the **start-of-session continuity load**, recording, recall-before-decisions, and the wrap sequence, with depth delegated to the Skill. (Copy-paste text; nothing to install.)
-- **The Skill — depth on demand.** Copy the [`skill/anneal-memory/`](skill/anneal-memory) directory into `.claude/skills/` (per-project) or `~/.claude/skills/` (global). [`SKILL.md`](skill/anneal-memory/SKILL.md) carries the comprehensive workflow and is model-invoked when you're doing memory work — primarily **before decisions and on wrap**. It is *depth-on-demand, not a replacement for the lean snippet*: a model-invoked skill won't reliably fire at a bare session start, so keep the lean snippet in place for the start-of-session step.
-- **The full reference — everything inline.** [`examples/agent-instructions.full.example`](examples/agent-instructions.full.example) / [`.full.cli.example`](examples/agent-instructions.full.cli.example) are the complete snippets (immune-system internals, the operator-command catalog) for adopters who'd rather keep it all in their instructions file than install a Skill.
+- **Lean snippet, always loaded.** [`examples/agent-instructions.lean.example`](examples/agent-instructions.lean.example) (MCP) or [`.lean.cli.example`](examples/agent-instructions.lean.cli.example) (CLI), pasted into `CLAUDE.md` / `AGENTS.md` / `GEMINI.md`. About 50 lines: load the memory file at start, record, recall before decisions, run the wrap.
+- **The skill, loaded on demand.** Copy [`skill/anneal-memory/`](skill/anneal-memory) into `.claude/skills/` or `~/.claude/skills/`. A model-invoked skill does not reliably fire at a bare session start, so keep the lean snippet in place as well.
+- **Full reference.** [`.full.example`](examples/agent-instructions.full.example) and [`.full.cli.example`](examples/agent-instructions.full.cli.example) hold the same material inline, for adopters who would rather not install a skill.
 
-After upgrading the package, run `anneal-memory migrate check` — it proposes edits to your instructions so they don't silently drift from the substrate (it never edits your files), then `anneal-memory migrate ack`.
+After upgrading the package, run `anneal-memory migrate check`. It proposes edits to your instructions so they do not drift from the package (it never edits your files). Then `anneal-memory migrate ack`.
 
-## Why This Exists
+## Updated facts: supersession and state keys
 
-Three independent production failures share one root cause: no quality mechanism between memory write and memory read.
+When a fact changes, the new episode can say which episode it replaces, and recall stops serving the old one. Nothing is deleted. The old episode stays in the store and in exports, and `include_superseded=True` (CLI `--include-superseded`) shows it, marked with what replaced it.
 
-**Sycophancy amplification.** Agents with persistent user memory profiles become 16–45% more sycophantic than memoryless baselines, depending on model (Gemini 2.5 Pro at 45%, others lower). Memory recalls what the user liked hearing, the agent learns to repeat it, and stored approval patterns compound across sessions ([Jain et al., CHI 2026](https://arxiv.org/abs/2509.12517); measured with user memory profiles across Gemini and Llama variants).
+- **Explicit link:** `store.record(text, "observation", supersedes=[old_id])`, CLI `record --supersedes ID`, MCP `record` with `supersedes`. It is validated: the old episode has to exist and not be newer, the link cannot close a cycle, and the two texts have to share at least a quarter of the shorter one's meaningful words. A link that fails records nothing. `unsupersede --old ID --new ID` removes a wrong one.
+- **State key, for updates that share no words.** "Based in Seattle" becomes "settled into my new place in Austin", and no word-overlap rule links those. A key names the slot a fact fills: `record --state-key user.home_city`, MCP `record` with `state_key`, `store.record(..., state_key="user.home_city")`, or `state KEY --set ID` for an episode already recorded. A slot holds one value; the newest episode in it replaces the others. For a relation with several values, put the value in the key (`user.pet/archie`) or leave it unkeyed. `state [KEY]` shows each key's holder and what it replaced, and `state --unset ID` takes a wrongly keyed episode out of its slot.
 
-**Junk accumulation.** A [detailed production audit](https://github.com/mem0ai/mem0/issues/4573) on Mem0's tracker documents a deployment that generated 10,134 memory entries over 32 days — 224 were usable. The rest were duplicates, self-referential loops, and hallucinated entries: recalled memories re-extracted as new memories in a feedback loop that no one designed but nothing prevented.
+Two limits. Nothing detects an update on its own: an update recorded with neither a link nor a key sits beside the old fact. And the word-overlap check is a floor, not a judgment that one episode replaces the other. It catches a link to the wrong episode entirely, not a link to a different fact on the same subject. A wrong link or key hides a still-valid episode until someone removes it.
 
-**Harmful reinforcement.** Clinical research documents AI systems with persistent memory scaffolding delusional content across sessions — stored context creates feedback loops between recalled memories and generated responses, with cases of documented real-world harm ([Morrin et al., Lancet Psychiatry 2026](https://doi.org/10.1016/S2215-0366(25)00396-7)).
+## Prospective memory: spores and intentions
 
-Most memory servers store memories and retrieve them. Few ask: *is this memory still true? Was it ever true? Is it making the agent worse?*
+Episodes and the memory file are about what already happened. An agent also needs a record of what it means to do next, and that has a different lifecycle: it must close. anneal keeps these in a separate store beside the database (`<stem>.spores.json`): a `task` (open doing), a `question` (open not-knowing) or a `thought` (open idea), planted when the loop opens and resolved when it ends (`descend`: done or dropped; `ascend`: its content graduates into a project or an episode).
 
-anneal-memory asks the first two at the pattern level, and has started measuring the third (see *Does a recalled memory help?* below):
+The same store is also called **intentions**: `IntentionStore` is an alias of `SporeStore`, the `intention_*` MCP tools and `anneal-memory intention ...` sit beside the `spore_*` ones, and `intention_close` and `intention_promote` are the names for `spore_descend` and `spore_ascend`. An id of either spelling reads in either. Nothing named `spore` is deprecated.
 
-- **Is it true?** Patterns must cite specific episode IDs as evidence to graduate. The server verifies the episodes exist and the explanation references the cited content via lexical overlap (≥2 meaningful words shared between the explanation and the episode body). Ungrounded citations demote, unless the pattern was grounded recently and carryforward holds it (see *Activation-aware carryforward*).
-- **Is it still current?** Graduated patterns whose dates fall behind the staleness threshold (default 7 days) surface in the next wrap's package as removal candidates. The agent decides whether to demote, refresh evidence, or carry forward. This is a check on age, not on truth. A changed fact is handled separately, when the update names the episode it replaces (see *Updated facts: supersession*).
-- **Is the citation evidence real?** The library catches fabricated episode IDs (no matching episode → demote), suspicious reuse of the same episode across many patterns in one session (per-ID frequency ≥3 → flag), and bare graduations with no `[evidence:]` tag at all. The explanation-grounding check (≥2-word lexical overlap with episode content) raises the cost of fabricated evidence chains but is not a semantic-coherence check — see *Honest scope* below for what this catches and what it doesn't.
+A spore file written by 1.0.7 or earlier is refused with the command that converts it: `anneal-memory intention migrate-key` (`--dry-run` to preview). It copies the file first and changes no row.
 
-The result: **memory as a living system, not a filing cabinet.** Episodes accumulate fast, get compressed at session boundaries — and that compression is where patterns emerge and get validated. The continuity file stays bounded and always-loaded, getting denser rather than longer.
+## Session hygiene
 
-## The Immune System
+Wrap at the end of a session, or when episodes have piled up, and check that the wrap finished. An unwrapped session leaves its episodes in the log, still recallable, but the memory file the next session loads does not know about them.
 
-The agent memory ecosystem is converging on consolidation as the right approach — even Anthropic's Claude Code now runs a periodic consolidation pass over accumulated session data. This validates the direction: raw accumulation doesn't scale, and compression at session boundaries is where intelligence emerges.
+- **Wrap once per prepare.** A second `save_continuity` with no new `prepare_wrap` is refused by design.
+- **Several days waiting means several steps.** Keep preparing until `pending_count` is 0.
+- **`prepare_wrap` says "empty"** when nothing is waiting. Skip the save.
+- **A stuck wrap.** If `prepare_wrap` refuses because a wrap is already open and that wrap will not be finished, clear it with `wrap_cancel` (MCP) or `anneal-memory wrap-cancel`. Episodes are not deleted. Check `status` first: a wrap that began moments ago may be a live session still working. Pass `--wrap-token` to cancel only your own wrap.
+- **A wrap you want back.** `anneal-memory revert-wrap WRAP_ID --reason "..."` undoes the newest completed wrap so its episodes are offered again.
+- **Short sessions are fine.** A few episodes still make a useful step.
 
-But consolidation alone doesn't solve the problem. A system that consolidates faithfully and a system that consolidates sycophantically produce the same *kind* of output — compressed, structured, always-loaded. The difference is whether anything checks the quality of what got consolidated. That's the immune system.
+### Recovering an older version
 
-### Structural immune-system primitives at the citation layer
-
-The library implements a set of structural defenses around how patterns earn graduation. They are narrow and specific — naming them honestly is part of the architecture.
-
-**Citation-validated graduation.** Patterns start at 1x. To graduate to Proven tier — 2x and every level above it, up to the 9-digit bound (a longer digit run is a malformed marker and is never matched) — they must cite specific episode IDs as evidence. The server verifies those IDs exist in the current wrap's frozen episode snapshot — the cross-session episode set is intentionally out of scope. No matching episode IDs, no promotion.
-
-**Explanation-grounding check.** For each cited episode, the explanation in `[evidence: ID "explanation"]` must share ≥2 meaningful words (>2 chars, non-stopword) with the cited episode's content. This catches citations whose explanations are fabricated wholesale (no overlap → demote). It is lexical, not semantic — see *Honest scope* below.
-
-**Active demotion of ungrounded citations.** A graduation that fails either check above demotes **by one level** — from *any* level, not just from 3x; there is no ceiling short of the 9-digit bound on a level (`4x` → `3x`, `12x` → `11x`) — and gets marked `(ungrounded)` — *unless* it is carried forward (see below). Bare graduations (no `[evidence:]` tag) demote after the first wrap with `citations_seen=True` (first-wrap exemption protects onboarding), marked `(needs-evidence)` — also *unless* carried forward (see below).
-
-**Activation-aware carryforward.** A failed citation means "this session's domain didn't cleanly re-ground the pattern," which is not the same as "the pattern is fading." So a pattern that is **at or below its earned high-water mark** (`pattern_history.max_level_reached`) **and** was grounded recently (`last_seen_at` within `carryforward_cold_days`, default 7) is **held** at its level and marked `(carried-forward)` instead of demoted — demotion no longer decays a Proven by session-*domain* rather than importance. This applies on **both** demotion paths: the ungrounded-citation path **and** the bare-graduation sunset path (a Proven carried forward and re-stamped to today without a fresh citation, the common "didn't re-exercise it this wrap" case). Forgetting stays ruthless where it should: the held line loses/omits its evidence tag (so it doesn't refresh recency and ages out on its own if it keeps failing to ground), a brand-new bald `name | Nx` with no earned high-water still sunsets (the level guard blocks inflation), the cross-session sycophancy-overlap path is never carried forward, and a carry at **3x or higher** surfaces an assisted "graduate out to a stable home or retire" warning. A **bare** line at or below its mark that has gone **cold** is not eroded either: it is held, dated back to its last grounding, and surfaced so the operator decides to re-exercise it, graduate it out or retire it (a cited line whose citation fails while cold still demotes, because a failed citation is a real event). The citation-namespace warning (AM-WARN) counts only *cited* carries, so a bare carry — which has no citation — cannot fabricate a wrong-namespace alarm. Carryforward is inert for stores with no `pattern_history`, and opt-out via `carryforward_cold_days=None`.
-
-**One rung per wrap, measured against what the store last saved.** Every check above reads the line the agent wrote, so on its own it would trust the line's date, level and tag shape. The last check reads the store's own record of the level each pattern held when it was last *saved*: each line is cut to that level, or one rung above it if the line validated this wrap. A pattern new to the store enters at `1x`. A pattern dropped from the file and added back returns to the level it was saved at, never to a high-water mark it was later demoted from. The continuity file can lower a level (an operator's hand demotion stands) but never raise one, and a line added to the file outside a save counts as new. So a back-dated line, a bare line, a line whose `[evidence:]` tag isn't adjacent to its marker, and a line that jumps several rungs on one citation all land where the record entitles them, and a carried-forward hold never lifts a line above it either. A cut line is marked `(level-capped)` (the mark clears once the line stands at a level it is entitled to), and the cut is reported: `level_capped` on the save result, the MCP reply and the CLI output, a `UserWarning`, and the audit chain. Before this check, a brand-new `claim | 9x (yesterday)` was saved at 9x. Lines are keyed by operator name, and a name's level is its highest line across the graduating sections, as every reader takes it; a renamed pattern is a new one unless the wrap carries a `[renamed: old -> new]` marker, which reads the prior under the new name, and a freeform line is keyed by its text, so rewording it makes it new. Only a line's own marker earns its rung: evidence on a second marker later in the line does not. A store's first save under this check takes the file as its prior. A crystal's level is never a prior: a pattern crystallized out of the file before then re-enters as new and re-earns its rungs (its crystal is untouched). Every `| Nx` marker on a line in a graduating section is governed, dated or not; a line's identity is the text before its first marker, and a line with none (`- | 9x`) is always new, every marker on it at `1x`. The save dates the wrap by the day `prepare_wrap` gave the composer, so a wrap saved after midnight keeps the graduations it stamped. The check governs what a canonical save writes: a continuity written by the raw `Store.save_continuity()` or by an older anneal is outside it until the next canonical save, which bounds it against the record again. Schema generation 2, which 1.0 introduces, arms the `anneal_writer_schema()` write triggers, so an older anneal refuses a store that 1.x has migrated, and anything pinned to one refuses it until upgraded (`docs/stability.md`, *On-disk format*).
-
-**Citation-gaming flag.** When any single episode ID is cited ≥3 times in one wrap, the wrap result surfaces the gaming-suspect list. The flag is informational — it does not auto-demote. Useful operator signal; not a hard gate.
-
-**Staleness flagging.** Patterns whose dates fall behind the staleness threshold (default 7 days, configurable) surface in the next wrap's compression package. The agent decides removal vs refresh-evidence vs carry-forward; the library does not auto-demote on staleness alone.
-
-**Replay-attack block (structural).** Each wrap's `valid_ids` set is scoped to the frozen episode snapshot from `prepare_wrap`. Patterns citing prior-session episode IDs that are not in the current snapshot demote — re-graduating a stale pattern requires fresh evidence from the current session.
-
-**Hash-chained audit trail.** Every memory mutation appends to a SHA-256 hash-chained JSONL audit log. `AuditTrail.verify` walks the chain and detects post-hoc tampering at the exact entry where the chain breaks. **What it does not detect, stated plainly:** the append is best-effort *after* the mutation is durable — a sink failure (disk full, permissions, a failed rotation) is recorded and warned, never raised, because failing the caller would report a completed operation as failed. `verify` therefore proves the integrity of the entries that *were* written; it cannot see one that was never written, and will return `valid=True` over such a gap. The loss is not silent: the count of dropped writes rides into the next entry that lands as `dropped_before` (so it is itself hash-chained), is surfaced by `Store.status()` as `audit_write_failures` / `audit_last_failure`, and is logged on the `anneal-memory` logger. **`audit_write_failures` is durable and lifetime-scoped** — persisted in the store's SQLite metadata (a different I/O path from the failing sink) and seeded at open, so `anneal-memory status --json` from a cron job reports losses caused by a process that has already exited, and the number never resets: a trail that lost an entry is permanently incomplete. Poll it rather than relying on having caught the warning. **Bounded, not absolute — the guarantee is that a loss *recorded* here survives the process, not that every loss is recorded:** the metadata write is itself best-effort and issued after the mutation committed, so a full volume can fail it too; and a failure raised inside a caller's open transaction cannot commit there, so its delta is written at the end of that batch or, failing that, at `close()` — a process killed before either loses that last delta. (The `dropped_before` marker is the narrower of the two: it pins *where* the gap is in the chain, and it reaches the chain only if a later write lands in the same process. **And it can over-report, in one measured case:** if you register an `on_event` callback and that callback raises a *terminal* exception — `KeyboardInterrupt`, `SystemExit` — it escapes the append, which by then has already succeeded and fsynced. The caller cannot distinguish that from a failed write, records a drop, and the next entry carries `dropped_before` naming an entry that is sitting on disk. Ordinary exceptions from the callback are caught and logged and do not do this. So the marker's honest reading is *"a write was reported lost here"*, not *"a write is missing here"*.) **One `Store` per thread** — `Store` is documented as not thread-safe, not task-safe, not reentrant. Separate processes, each with its own `Store`, may record into one database: audit appends are serialized by a cross-process lock on POSIX (see "One database is one entity's memory" below), and on Windows the trail needs one writer at a time.
-
-**A crash during a week's first audit append: a declared limit that a person decides.** After a crash during a week's first audit append, anneal cannot always tell from disk whether that entry committed. It refuses further appends until you run `audit-repair`, which records a POSSIBLE gap and names the preserved attempt files (`.first.discarded-*`). Inspect them to decide. anneal keeps them and never deletes them. On a readable manifest the gap is POSSIBLE only when, at repair time, the begun record was still set and at least one attempt was preserved (repair then withdraws the begun record); otherwise it is recorded as a definite gap. A manifest rebuilt from quarantine records POSSIBLE whenever the active file holds no valid entry, with or without preserved attempts.
-
-**Catastrophic-shrink gate (structural; partnership entities).** A wrap can pass structure validation — every required section present — while gutting the content beneath it, so the latest session quietly compresses over the accumulated identity. For entities whose continuity declares a felt/identity layer (the *Configurable continuity structure* below), `save_continuity` refuses a wrap that collapses a protected section below its retain floor — the felt (timeless relationship) and graduated-identity sections must each keep ≥50% of prior mass, the whole file ≥25%; and a reference floor (`REFERENCE_FLOOR_PERCENT`) holds the felt layer to a share of the largest it was in the last 30 days, so a shrink spread across several saves is refused too (the largest includes the save before this one, so the floor also caps a single save's loss; the identity layer is pruned by design and keeps the save-to-save check alone) — and leaves the wrap recoverable so the agent re-wraps preserving the full arc, or passes `allow_shrink=True` for a deliberate diet (fail-closed: only a literal `True` bypasses). A corrupt section schema fails the wrap closed rather than silently degrading an entity to ungated behavior. Ops entities, which legitimately consolidate many graduated patterns into a few dense ones, are not gated. A save-boundary structural invariant, not a proportion-check the agent is trusted to hold.
-
-**No save refusal on unlinked wraps (AM-LINKGATE).** A save forms no association link since 1.0.2, so there is nothing for a wrap to be refused over. `allow_unlinked` is still accepted and does nothing, and `linkgate_overridden` is always `false`. Every save reports `citation_spread`, the number of distinct episodes from this wrap that its graduation lines cited (demoted lines included), so a citation habit stays visible as a number.
-
-**Single-consolidator gate (structural; on by default for new stores).** Consolidation is the operator's act. A store created by `init` or by the MCP server requires the consolidate baton; `init --no-baton` creates an open one, and an existing store keeps whatever policy it has. The operator claims the baton for a session id once (`anneal-memory baton claim NAME`); a CLI wrap names it with `--session-id`, and the MCP server takes it from its launch config (`serve --session-id NAME` or `ANNEAL_MEMORY_SESSION_ID`), never from a tool argument. This holds against an agent consolidating through the protocol on its own initiative; it is not a lock against an agent with a shell that runs `baton claim` itself, which is the operator's to manage. Recording episodes is afferent — append-only, parallel-safe, every session does it. Consolidating — recomposing the compressed identity layer — is efferent: it rewrites shared state, so it's gated to human authority. When several sessions run in parallel over one store (the real operating mode of a multi-conversation operator), each could independently recompose the felt/identity layer from its own narrow slice of context, and the identity memory thrashes. The gate makes the discipline structural: a consolidation proceeds only if this session holds the consolidate baton — otherwise it auto-downgrades to capture-only and surfaces a flag. The operator designates one session as the consolidate seat by claiming the baton, and taking it from another session requires an explicit `take=True`, so automation cannot take it by accident. (Before 0.9.13 a session that was the only live one was authorized without the baton; that rule is now an explicit `allow_sole_live=True` opt-in, because "only live session" is judged from a registry snapshot a resumed session can race.) The policy, `Store.set_consolidate_requires_baton(True)` (on by default for a store `init` or the MCP server creates, written in the transaction that creates the schema; a `Store()` opened from Python keeps it off unless set, or unless it creates the store with `consolidate_requires_baton_on_create=True`), extends the gate to callers that pass no `session_id`: they downgrade, and a save must name the baton holder (`session_id`) as well as carry the prepare `wrap_token`. A wrap prepared with a `session_id` on any store is committed only by that same `session_id` (a save that omits it, or names another session even if it now holds the baton, is refused, since the token identifies the wrap, not who may commit it); a gated wrap that cannot be finished is abandoned with `wrap-cancel`, which for a gated wrap needs its `--wrap-token`, the preparing `--session-id`, or an explicit `--force` (MCP: `wrap_token`, `session_id`, `force`). Because the baton is a file outside the store's transaction, a take landing in the milliseconds between a save's final check and its commit is not seen; the take then applies to the next wrap. The layer engages when a caller passes a `session_id` or the store carries that policy, and lives in coordination sidecars next to the store, never in the store's single-writer DB. Drift becomes a safe downgrade, not a silent identity-thrash.
-
-**Citation-namespace warning (AM-WARN).** A citation layer can silently stop grounding anything — the failure runs invisibly for months while every wrap still reports success. AM-WARN warns at the end of a wrap when graduated patterns carried evidence citations but *none* resolved to an episode in this store — typically ids minted in another namespace — so nothing can ground them. It is structural and false-positive-free: it fires only on a genuine mis-wire. Nothing in AM-WARN refuses a save. A wrap with no graduations at all stays silent. Only *cited* carryforwards are counted, so a bare carry cannot fabricate a wrong-namespace alarm. (An earlier second signal, B, warned when co-citation pairs were offered and no link formed. It was retired in 1.0.2 along with link formation, because it would have fired on every save.)
-
-### Wrap-package integrity — two checks that guard what the agent is asked to do
-
-The primitives above defend the citation layer. Two more defend the *compression package itself* — the instructions `prepare_wrap` hands the agent. Both follow the same rule as the contradiction scan: the library is zero-dependency with no LLM and no embeddings, so it **surfaces the corpus and the agent judges**.
-
-**Pattern dedup scan (AM-SEMDUP).** The immune system catches a pattern re-cited with overlapping vocabulary, and a pattern that contradicts an existing one. It does not catch the same *principle* re-graduated under fresh words and a new name — a silent duplicate that forks the pattern graph, so two names for one principle each accrue half the evidence. Fresh vocabulary is by definition *low* lexical overlap, so a lexical or embedding detector is structurally blind to exactly this case. Instead, `prepare_wrap` renders a **Pattern Dedup Scan** block listing existing graduated patterns across all named levels as `name (Nx): one-line meaning`, with a merge-don't-fork instruction — the meaning line is what lets the agent judge semantic rather than merely nominal overlap. Capped at 50 with an announced overflow; never silently truncated. Public helpers: `extract_pattern_summaries(text, ...) -> list[PatternSummary]` and the `PatternSummary` NamedTuple (`name`, `level`, `summary`).
-
-**Schema role check (AM-ROLECHECK).** The wrap package is assembled conditionally on section *roles*: the pattern-line format and contradiction scan emit only for a `graduating` role, and the felt proportion-check only for `narrative-timeless`. `validate_schema` already refuses a schema with no graduating section or duplicate headings, and the shrink gate refuses catastrophic felt collapse at save — but a schema that validates, keeps a graduating section, and is mis-roled *elsewhere* slips between them. The load-bearing case is `narrative-timeless` → `narrative`, which silently drops both the felt proportion-check and the shrink gate's felt protection, so the package quietly comes back thinner and nothing says so. `schema_role_warning(schema) -> str | None` warns on role drift off a named schema (naming the section, expected vs actual role, and the fix) and enforces a no-graduating floor for a raw schema. `prepare_wrap` surfaces it both as a `UserWarning` and as the `schema_warning` key on `PrepareWrapResult`. Known limitation: a fully custom novel-heading schema with a felt mis-role is not caught, because there is no named reference to drift from.
-
-### Honest scope — what these primitives do NOT catch
-
-**anneal proves grounding; the human holds truth.** The library checks, structurally, that
-what graduates is lexically grounded in real episodes it can cite. Whether a grounded claim
-is *true*, and whether it contradicts something already Proven, is the operator's to judge
-by design: an AI grading its own memory would be the substitution this library exists to
-avoid. The operator gets instruments for it, not a verdict: drift probes (below), the
-contradiction-scan record in every wrap, and the hash-chained audit.
-
-The same line holds for updates. Whether one fact replaces another is the writer's claim,
-made with an explicit link or a shared state key; anneal checks that the link is well formed
-(and, for an explicit link, lexically grounded) and never decides it semantically. The
-operator's instruments are `anneal-memory state` (each key's current holder and what it
-replaced), `search --include-superseded`, `state --unset` to take a wrongly keyed episode out of
-its slot, and `unsupersede` to undo a wrong explicit link.
-
-**Origin keys and section edits are contracts with anneal's own code.** Every anneal version
-that writes a store keeps its episode keys right: triggers key an older version's inserts
-and retire its deletes. A raw SQLite writer (a shell, a script, a dropped trigger,
-`PRAGMA ignore_check_constraints`) is outside that contract, as any hand edit of the
-database is. `replace_section` is safe against wraps run by this version or later; a wrap
-prepared by an older anneal can overwrite an edit that lands in the few milliseconds before
-it starts, so upgrade every process that wraps a store before editing sections in it.
-
-**Drift probes.** Declare what must survive consolidation, a Proven pattern at a level (its
-current level by default) or a fact whose words must stay in one sentence or bullet:
-`anneal-memory probe add --pattern NAME` / `--fact TEXT [--section HEADING]`. Every save
-checks each probe against the saved text and records held / changed (every word kept but the
-negation flipped) / weakened / crystallized / lost with that wrap. `probe status` shows each
-verdict with its detail; the save result's `drift` and the `continuity_saved` audit event
-carry only the counts and each probe's id and status, so neither hands the probe text back
-to the composer being measured. Probes are not part of the wrap package,
-so they measure drift rather than obedience, and a probe never blocks a save (one that cannot
-be checked is reported `unchecked`). `probe status` also lists what that wrap graduated with a
-validated citation: the worklist for judging truth and contradiction with your Proven
-patterns. The check is lexical: numbers and negation count, but a distortion that keeps every
-word (two roles swapped, say) reads held, and that residue is the operator's.
-
-The defenses above are **structural at the citation layer**. They catch fabricated citation evidence (fake IDs, missing IDs, wholesale-invented explanations), naive replay (re-citing prior-session episodes), per-ID citation gaming (single episode pumped across patterns), and post-hoc audit tampering. They do not catch:
-
-- **Lexical-overlap exploits.** An agent who can read episode content can craft an explanation that shares ≥2 meaningful words with the episode while making a claim the episode does not actually support. The explanation-grounding check is anti-fabrication, not anti-misinterpretation.
-- **Rotated-pair citation pumping.** Five patterns each citing a distinct pair of episodes from a pool of ten — `citation_reuse_max=1`, the per-ID gaming detector cannot trip. The shape bypasses gaming detection cleanly. What it cannot bypass is the operator's worklist: `probe status` lists every pattern a save graduated at 2x and up with a validated citation, whatever the detector said. Run on 2026-10-07, five absurd claims built this way all graduated and all five were on the worklist. Whether a grounded claim is true is the operator's call, as above; the per-ID detector is a hint, not the check.
-- **Deliberately-divergent-vocabulary drift.** A pattern whose explanation uses entirely new words each session passes the lexical check and rides up ungrounded. (The library *does* catch the easier variant — a re-grounding that merely rephrases prior words demotes on a per-prior overlap of ≥3 meaningful words.) Reaching the divergent case needs the contradiction scan plus the operator-review pass below.
-- **Semantic contradiction with existing graduated patterns.** No semantic comparison runs between a candidate graduation and existing Proven-tier patterns inside the library — and structurally cannot, under the no-LLM-as-judge rule that keeps the library zero-dependency. The library ships the *substrate* for catching it: `prepare_wrap` lists the existing Proven and renders a contradiction-scan step directly into the compression package, recognizes per-pattern `[contradicts: name]` / `[no-contradicts]` declarations, and records any new Proven that lands without a stance into the hash-chained audit log — so the discipline travels with the wrap instead of depending on an external doc an adopter has to keep in sync. Turning that substrate into semantic closure is the operator's review, on their own cadence and outside the zero-dep library; drift probes and the audit are its instruments. The library records whether the discipline was followed; it doesn't catch the contradictions itself.
-- **One database is one entity's memory.** There is no tenant scoping inside a database: two agents that must not see each other's memory need two stores. Several processes of one entity can record into one store: SQLite serializes the episodes, and each audit append holds a cross-process lock and re-reads the chain's tip from disk first, so the hash chain stays valid. Measured 2026-10-07: before the lock, three processes writing 200 episodes each broke the chain (`verify` invalid while `status` counted no audit failure); with it, six processes writing 250 each left one valid chain of 1,500 entries, and four processes appending across a week rotation left one valid chain of 800. Every writer must run a version that takes the lock: an older anneal-memory writing alongside breaks the chain as before. On Windows, or a filesystem without `flock`, the lock is not held and the audit trail needs one writer at a time.
-- **What a consolidation leaves out does not come back by itself.** An episode the composer did not keep is not brought back into the always-loaded continuity automatically. Measured 2026-10-23 over eight nightly consolidations of my own store: of 86 episodes cited in a later save, 85 had already been kept by the first consolidation after they were recorded. The episode is not lost: it stays in the episodic store, and `recall` and `search` still find it. The limit is on the always-loaded file, not the store.
-
-The library *does* now catch some attacks earlier versions didn't: complete dropout of a Proven-tier pattern surfaces as an `omitted_patterns` audit signal on the save result and in the hash-chained log (a signal, not a save-time gate — intentional retirement is fine, and a rename without a `[renamed: old -> new]` marker reads as a false-positive omission), and the cross-session check demotes lexical-rephrasing sycophancy on the graduation path. These gaps are documented because they're reachable under adversarial-agent or drift-leaking conditions, not because they're hypothetical. "Immune system" names the citation-layer structural primitives above plus those audit and cross-session checks — not a complete defense against every form of memory drift. The honest line: the structural layer raises the cost of fabrication and catches the mechanical attacks; the semantic gaps it can't reach by construction are what the operator-review pass is for. Own the substrate, govern what graduates, run the review for what the structure can't see.
-
-### Associations: a history
-
-Through 1.0.1, a wrap formed lateral links between episodes. When an agent cited several episodes on a pattern line that claimed `2x` or higher, those episodes got Hebbian-style links: direct co-citation added 1.0, links decayed 0.9x per wrap, and an optional affect tag weighted them. A parallel graph did the same between patterns. In practice the links stayed weak: on my own long-running store (2026-10-04), 594 links, the strongest at 1.325 and none above 2.0.
-
-**What the links did, measured.** Nothing that recall used. I measured recall that also followed one Hebbian hop from the episodes a query matched. On my own long-running store (15,774 recall events, June 21 to September 30, 2026; the store is private and the replay script isn't published), recall exposed a crystallized pattern 788 times: 744 through the citation edge (query → matched episode → the patterns that cite it), 44 by keyword, and **0 through the Hebbian hop**, because the episodes the links connect and the episodes the patterns cite turned out to be disjoint sets. I then gave a copy of the store the cheapest fix (link each pattern's own evidence episodes to each other) and replayed real prompts against it: the hop still surfaced nothing that recall without it had not. The part of recall that works is the citation edge, and it never needed the links.
-
-**1.0.2 stopped forming them.** A save forms and decays no link, in either graph, and the first 1.0.2 save records that on the store (`Store.association_formation()` reports `mode`, `off_at_wrap` and `off_by_version`). Links formed earlier stay readable until a later MAJOR release removes them (`anneal-memory associations`, `graph`, `Store.get_associations`), and deleting an episode still cascades its links. The affect input (`affective_state`, `--affect-tag`, `--affect-intensity`) is accepted and ignored until a later MAJOR release removes it (no earlier than 2.0). What remains of the old design is the immune system's citation checks, which never depended on the links.
-
-### Architecture
-
-```
-  Episodes (fast)              Continuity (compressed)
-  ┌─────────────┐             ┌──────────────────────┐
-  │ observation  │             │ ## State             │
-  │ decision     │── wrap ───→│ ## Patterns (1x→Nx)  │
-  │ tension      │  compress  │ ## Decisions          │
-  │ question     │      │      │ ## Context            │
-  │ outcome      │      │      └──────────────────────┘
-  │ context      │      │        always loaded, bounded
-  └─────────────┘      │        human-readable markdown
-   SQLite, indexed     │
-                       │      Crystallized tier
-                       └────→┌──────────────────────┐
-                              │ proven patterns       │
-                              │ recalled on cue       │
-                              └──────────────────────┘
-                               held out of always-loaded context
-
-  Immune system, at the wrap: citations verified against real episodes,
-  ungrounded graduations demoted, reuse flagged, every change audit-logged.
-```
-
-**The working core, modeled on how memory actually works:**
-
-1. **Episodic store** (SQLite) — timestamped, typed episodes. Fast writes, indexed queries. Cheap to accumulate. The hippocampus.
-2. **Continuity file** (Markdown) — compressed session memory. Always loaded at session start. Rewritten (not appended) at each session boundary. The neocortex's always-loaded **working set**. Its structure is a configurable section schema (below) — four sections by default; partnership entities add a timeless felt layer.
-3. **Immune system** — runs at the wrap and decides what is allowed to graduate: cited episode ids verified, explanations checked against the cited content, ungrounded graduations demoted, reuse flagged, every change recorded in the audit chain (see *The Immune System*).
-4. **Crystallized pattern store** (`<stem>.crystal.json`) — proven, stable patterns held *out* of the always-loaded continuity and recalled on cue. The long-term semantic store that splits working memory from long-term memory; see *The Memory Architecture (Complementary Learning Systems)* below for why this completes the design.
-
-**Who decides what survives.** At each wrap, a model (the composer) chooses what to keep. The immune system then checks that every pattern rising a level cites real episodes and that its explanation shares words with them (a lexical check, not a semantic one; see *Honest scope*). No importance score decides what the continuity keeps: the composer chooses, and the immune system checks the citations.
-
-One sibling store sits alongside them (a separate file, same atomic-write durability discipline) and addresses a different axis — whether a thing is retrospective or prospective:
-
-- **Spore store** (`<stem>.spores.json`) — prospective tasks that open and self-clean. Memory's forward-looking sibling; see *Prospective memory — spores* below.
-
-**Six episode types** give the immune system richer signal:
-
-| Type | Purpose | Example |
-|------|---------|---------|
-| `observation` | Pattern or insight | "Connection pool is the real bottleneck" |
-| `decision` | Committed choice | "Chose Postgres because ACID > raw speed" |
-| `tension` | Tradeoff identified | "Latency vs consistency — can't optimize both" |
-| `question` | Needs resolution | "Should we shard or add read replicas?" |
-| `outcome` | Result of action | "Migration done, 3x improvement on hot path" |
-| `context` | Environmental state | "Production DB at 80% capacity, growing 5%/week" |
-
-### Configurable continuity structure
-
-The continuity file's structure is a per-store **section schema**: an ordered list of `{heading, role}` specs, where the role tells the system how each section behaves. It defaults to the classic four sections — State / Patterns / Decisions / Context — and a partnership entity adds more. `graduating` is where the immune system's citation/graduation scan runs (more than one allowed); `narrative` is compressed *work* narrative (temporal, rewritten each wrap); `narrative-timeless` is the felt relationship layer — dateless, carried forward and evolved rather than rewritten; `live-state` is volatile current focus that never graduates; `frozen` is preserved verbatim; `durable` holds facts that survive by mechanism (below). A section may be marked `"optional": True` (only a `durable` one may): it is not required at save and is ignored when a schema is matched to its name.
-
-`DEFAULT_SCHEMA` is the historical four sections plus an optional `Durable Facts` section after State, so a text without it validates exactly as before. `FLOW_SCHEMA` is the reference *partnership* schema — it adds an `Active Threads` live-state section, the optional `Durable Facts`, and an `Understanding` narrative-timeless section. **The persisted schema is the authority:** a store that persisted the default or partnership schema before `Durable Facts` existed keeps that schema, reads back under the same name, and behaves exactly as before; a new store (`init`, or `init --schema partnership`) and a store with no persisted schema get the section. An existing store opts in by re-setting its schema (`anneal-memory set-schema partnership`, or `store.set_section_schema(FLOW_SCHEMA)`); flow's own store is opted in by its operator. The distinction is load-bearing: only entities that declare a `narrative-timeless` section carry the felt layer, the richer compression instructions that protect it, and the catastrophic-shrink gate above. Ops agents stay lean — zero extra weight, zero behavior change. Zero new dependencies; stdlib only.
+Every saved file is a row in the `identity_versions` table of the store's SQLite database, and `history` and `diff` list the wraps. To read an older one:
 
 ```python
-from anneal_memory import Store, FLOW_SCHEMA
+import sqlite3
 
-# A partnership entity: gains the felt layer + the shrink gate.
-store = Store("./memory.db", project_name="flow", section_schema=FLOW_SCHEMA)
-# An existing store stays on DEFAULT_SCHEMA untouched — or migrate in place:
-store.set_section_schema(FLOW_SCHEMA)   # validated; frozen during an active wrap
+con = sqlite3.connect("./memory.db")
+for version, created_at, chars in con.execute(
+    "SELECT version, created_at, length(text) FROM identity_versions ORDER BY version DESC LIMIT 10"
+):
+    print(version, created_at, chars)
+
+old = con.execute("SELECT text FROM identity_versions WHERE version = ?", (1,)).fetchone()[0]
+con.close()
 ```
 
-**Size.** `default_max_chars(schema)` is the size a composer is asked to stay within. A save is refused above `hard_max_chars(schema)` (`ceil(1.25 *` that, the durable section excluded) with a `ContinuityValidationError` that names the size, the bound and the sections to cut: the ones holding facts you can fetch again (`live-state`, `narrative`), never the graduating (Patterns) or felt layers. The bound comes from the schema, not from the `max_chars` passed to `prepare_wrap`, and `allow_shrink` does not lift it. A refused save writes a `continuity_refused` audit event (`reason`, `chars`, `bound`, `target`, `over_by`) and leaves the wrap open.
+Reading needs nothing special. To put a fact back, record it again as a new episode so the next wrap sees it.
 
-**Durable facts.** One fact per bullet line (`- `, `* ` or `1. `; an indented line right under it continues it) under `## Durable Facts`: things that would change a future answer, or that the user would be upset or harmed to have forgotten (health, allergies, constraints, commitments, preferences, relationships, identity facts, system facts a future action depends on). A line may end with cue words for the situations where it matters: `- tree nut allergy — cues: restaurant, dinner, recipe, food, menu` (`– cues:`, `-- cues:` and `| cues:` work too); `parse_durable_facts(text, schema)` returns them as `DurableFact(line, fact, cues)`. At save, every line of the prior section must be in the new one, compared by its fact part, so changing only the cues is an update: a line the wrap left out is re-inserted verbatim (the section is re-created if it is gone) and a warning names it. That is never a refusal. The only way to remove a line is a marker line in the section, `[drop-durable: <exact line text>]`; the save removes the marker and records the drop in the audit chain (`durable_dropped` on `continuity_saved`). A reworded fact is a drop plus an add, and a reword without the marker draws a near-duplicate warning; a re-inserted line that shares cue words or identifier-like tokens with a new one is flagged as possibly superseded. Every durable warning is also on the save result as `durable_warnings`. The section has its own budget, 15% of the schema's default size target (`default_max_chars(schema)`) on top of it; a `max_chars` passed to `prepare_wrap` does not change it. The wrap package shows it as `Durable Facts: <current> / <budget> chars`, and over it the save warns and keeps every line. When a value will change on a future event, the line states the current value and the pending change, so a reader does not take the newest code path as today's: `- The nightly bank export calls fmt_row52; it switches to fmt_row64 only at the bank cutover, which has not happened`. The wrap package lists such pending lines for the composer to re-check.
-
-### Comparison
-
-As of 2026-10:
-
-| | anneal-memory | Anthropic Memory MCP | Mem0 | Ori-Mnemos | BrainBox |
-|---|---|---|---|---|---|
-| **Architecture** | Episodic + continuity + crystallized tier | JSONL flat file (graph-shaped) | Vector + graph | Retrieval + Hebbian | Memory + Hebbian |
-| **Attention management** | Working-set / crystallized split — graduated wisdom recalled on cue, not always loaded | None | None | None | None |
-| **Compression** | Session-boundary rewrite | None | One-pass extraction | None | None |
-| **Quality mechanism** | Structural citation-layer primitives (cited episode IDs verified + lexical-overlap explanation check + ungrounded-citation demotion + per-ID gaming flag + audit chain) | None | LLM update step (add / update / delete) | NPMI normalization | None |
-| **Audit trail** | Hash-chained JSONL | None | None | None | None |
-| **Access patterns** | Library + CLI + MCP | MCP only | REST API | Python only | MCP only |
-| **Dependencies** | Zero (Python stdlib) | Node.js | Docker + cloud | Embeddings model | Not specified |
-
-The table compares against MCP-adjacent memory servers. Further out, several 2026 systems are ahead of anneal on pieces of this. [MemLineage](https://arxiv.org/abs/2605.14421)'s audit log is an RFC-6962 Merkle log with per-principal Ed25519 signatures, which is stronger than anneal's SHA-256 chain. Letta's [MemFS](https://docs.letta.com/concepts/memfs) commits every memory edit to git. [Agent Zero Memory](https://arxiv.org/abs/2608.29606) answers under a citation lock, and [MemClaw](https://arxiv.org/abs/2606.24535) reconstructs derivation chains. [HeLa-Mem](https://arxiv.org/abs/2604.16839) uses its Hebbian graph at retrieval. anneal built a Hebbian graph, measured that recall never used it, and stopped building it in 1.0.2 (see *Associations: a history*).
-
-## The Memory Architecture (Complementary Learning Systems)
-
-anneal splits memory the way the brain does, and for the same reason: **attention doesn't scale.** Past a few dozen always-loaded patterns they drown each other out, so a pattern's value is *firing at the right moment*, not *being present*. Graduated wisdom lives in the **crystallized** store (`<stem>.crystal.json`), held *out* of the always-loaded continuity and recalled on cue — the working set stays small while the body of proven patterns keeps growing. This is Complementary Learning Systems ([McClelland, McNaughton & O'Reilly, 1995](https://pubmed.ncbi.nlm.nih.gov/7624455/)): a fast episodic store, slow consolidation at the wrap, and a long-term store you retrieve from rather than hold open. The crystallized tier is what gives graduation an OUT path — without it, every Proven pattern had nowhere to live but the always-loaded file, and the working set only ever grew.
-
-**anneal is the substrate; the harness fires it.** The library owns the crystallized store and the on-demand recall API — `retrieve_patterns(crystal_store, query)`, `anneal-memory crystal index`/`recall`, and the `crystal_index` / `crystal_recall` MCP tools — but it can't fire on its own. Surfacing the right pattern at the right moment needs a per-turn hook, and a hook is harness-specific (a Claude Code hook would break the 12-framework neutrality the library guarantees). So raw anneal gives you the store, the API, and *manual* recall — you query if you remember to, which is the dead-store failure mode discipline always rots into. A harness with hooks runs that recall on every prompt automatically. **flow** does this today, and **[Levain](https://github.com/levainhq/levain)** — the portable kit built on anneal — fires both the prospective (spore) layer and per-turn crystallized recall on every prompt. The store is universal; the firing is the harness's job, which is also why anneal stays zero-dep and framework-neutral while a harness can be opinionated on top of it.
-
-**The cue index.** `anneal-memory crystal index` (MCP: `crystal_index`) prints one line per live crystallized pattern: its name and one clause, nothing else. A harness loads it (at session start, for example) so the agent knows which patterns exist without carrying their bodies; `crystal recall` fills a body on cue. The index is the only part of the crystallized tier meant to be always loaded, so it is kept that thin on purpose.
-
-*Why the tiers fall out of one problem — the full Complementary Learning Systems derivation, the tier table, and the one-way ratchet that forced the crystallized store → [docs/architecture.md](docs/architecture.md).*
-
-## Does a recalled memory help? (report-only)
-
-Graduation shows a pattern was earned. It doesn't show the pattern ever helped. anneal now records that, and only records it:
-
-- `anneal-memory outcome --exposure-id ID --item crystal:NAME=followed --outcome success` writes back what happened after a recall: per surfaced item `followed`, `ignored` or `not_applicable`, and optionally whether the turn succeeded. Records go to `<stem>.outcomes.jsonl`, append-only; a later record for the same exposure corrects an earlier one.
-- `anneal-memory crystal fold-surfaced --receipts FILE...`, run once per wrap, writes into the crystal store how often recall surfaced each crystallized pattern. Being surfaced is not counted as being used, so it never re-heats a pattern.
-- `anneal-memory worth` reports, per pattern (and per cited episode with `--episodes`), how often it was retrieved on a turn that succeeded and on one that failed, split by label. The library API is `anneal_memory.worth` (`OutcomeLog`, `fold_surfaced`, `compute_worth`).
-
-- `anneal-memory crystal get NAME` also records a pull: one `pull: true` record (exposure id `pull:<uuid>`, one `followed` label, no outcome) in the outcome log. `worth` counts it in its own `pull` column (`pulled` in `--json`), never in `fol`, succ/fail or the unlabelled columns, and it credits no episode. `--no-record` reads without recording; the label is skipped with one stderr line when the store has no id, is busy or was replaced, and never changes the read's exit status.
-
-- `--exposed KIND:REF` (repeatable, or `exposed=[ExposedRef(kind, ref)]` in `OutcomeLog.record`) lists what the recall surfaced, labelled or not, straight from the harness's receipt. An item that was exposed and never labelled is counted in its own columns (`unl+s` / `unl+f`), never in succ/fail: a label means something judged the item, and an unlabelled exposure only means it was shown.
-
-**This is a report. Nothing in anneal ranks, decays, re-heats or retires anything from it.** A failure after a recall is not evidence the recalled memory caused it. There is no evidence yet that the counters separate useful memory from useless; that needs real outcome labels collected over time.
-
-## Updated facts: supersession
-
-When a fact changes, the new episode can say which episode it replaces. Then recall stops serving the old one. Nothing is deleted: the old episode stays in the store and in exports, and `include_superseded=True` (CLI `--include-superseded`) shows it, marked with what replaced it.
-
-There are two ways to write the link. Either way it's validated like a citation: the old episode has to exist and not be newer, the link can't close a cycle, and the two texts have to share at least a quarter of the shorter one's meaningful words.
-
-That last check is a floor, and I measured where to put it (`scripts/supersede_floor.py`, on a copy of my own store, about 12,500 episodes). It keeps every planted update in the probe, and it sits right at their minimum, so it is tight; a test fails if the tokenizer ever moves that boundary. Of 500 random pairs of episodes, 6 to 18 get through, depending on the sample. The two-shared-words rule it replaced let 422 of 500 through, and it refused some real updates that only share the subject's name. What no word-overlap rule can do is tell "replaces" from "is about the same thing": 113 to 170 of 500 same-topic pairs pass, again depending on the sample. I read 40 of the ones that pass: 5 were real updates, 6 were near-duplicates, and 29 were different facts on the same subject. So the floor catches a link to the wrong episode entirely, not a link to the wrong episode on the same subject. That part is still the writer's call, and a wrong link can be undone.
-
-- Explicitly, when recording: `store.record(text, "observation", supersedes=[old_id])`, CLI `record --supersedes ID`, MCP `record` with `supersedes`. A link that fails validation records nothing at all.
-- In a wrap: the agent writes `[supersedes: OLD_ID by NEW_ID]` in the continuity text, where `NEW_ID` is an episode of that wrap. A bad link doesn't fail the save; it comes back in `supersessions_rejected` with the reason.
-
-A wrong link can be removed with `unsupersede` (CLI `unsupersede --old ID --new ID`). A superseded episode also stops counting as evidence: a pattern can't graduate by citing a fact that's been replaced.
-
-What it fixes, measured with `scripts/stale_probe.py` (16 planted fact-and-update pairs among 120 unrelated episodes, graded mechanically, no judge model):
-
-- Without a link, recall behaves as it did before. Keyword recall (`Store.recall`, CLI `search`, MCP `recall`) returns the stale fact beside the current one in 16 of 16 cases. Scored recall (`retrieve_relevant`) returns it in 12 to 14 of 16, depending on how the update is worded.
-- With the link, written either way, the stale fact is served in 0 of 16 cases on every wording and both recall paths. A fact that never changed is unaffected.
-- With the link, scored recall also serves the current fact when the question only reaches the old one. Recall ranks the live episodes as before, adds the hits on replaced episodes (scored as if nothing had been replaced, so a link never raises a score), and swaps each of those, in its own slot, for the episode that replaced it; that episode's `replaces` lists the old one (its id, date and text), so a reader can treat the answer as an update. On reworded updates that took the current fact at the top from 7 of 16 to 15 of 16; without the swap the question's keywords simply aren't in the new sentence. Keyword recall (MCP `recall`) lists a replaced match under "Replaced since", with the fact that replaced it. Links a wrap proposed (`[supersedes: ...]` in the continuity) still hide the old episode but are never swapped in, and neither is anything reached through one (or through a link a delete rewired): a wrap model proposes them in bulk, and on a knowledge-update benchmark about 1.4% of them were true. A caller that hides recent episodes from recall (`exclude_recent_minutes`) keeps seeing the old fact until its replacement is older than that window.
-
-**State keys, for updates that share no words.** Many real updates never repeat the old words ("I've been based in Seattle" becomes "settled into my new place in Austin"), so no word-overlap rule can link them. A state key names the slot a fact fills instead: `store.record(text, "observation", state_key="user.home_city")`, CLI `record --state-key KEY`, MCP `record` with `state_key`, or `set_state_key(id, KEY)` / CLI `state KEY --set ID` for an episode already recorded. A slot holds one value at a time: the newest episode in it replaces the others through ordinary links, with no word-overlap check, and a backdated one goes into the history. "Newest" is the time the episode's timestamp names, so pass `timestamp=` when you record a fact late; a keyed episode's timestamp is stored in UTC. For a relation with several values (pets, languages), put the value in the key (`user.pet/archie`) or leave it unkeyed; one shared key would keep only the last value. A keyed episode is replaced only through its key: any explicit, wrap-proposed or team link from it is refused, even to an episode with the same key (record the update with the same key and no link). `anneal-memory state [KEY]` shows each key's current holder and what it replaced, and `state --unset ID` (`clear_state_key`) takes a wrongly keyed episode out of its slot. `unsupersede` alone is not enough for a key: the next keyed write in that slot hides the episode again. On a knowledge-update benchmark's own scenarios (STALE, 100 of them, keys placed on the true old and new facts), the question that names the old state got the old fact 93 times and the new one 0 times; keyed, it got the new fact 93 times and the old one 0. That measures the mechanism with correct keys, not how well an agent assigns them.
-
-The catch is that all of this depends on the link or the key being written. Nothing detects an update on its own, so an update recorded without either still sits beside the old fact the way it always did. I measured one case: a gpt-4o-mini writer, shown the keys already in use, made 199 links across a 100-item test of implicit updates, and none of them linked the pair the test counts as the update. Those updates are implicit (cooking at home, then living out of hotels), so I think a model writing at save time does not see that a slot changed, and the explicit key stays the operator's claim. The word-overlap check is also only a floor, not a judgment that one episode really replaces the other: two episodes that share boilerplate pass it, and a wrong link or key hides a still-valid episode, and now serves its replacement in its place, until it's removed.
-
-## Prospective memory — spores
-
-Everything above is *retrospective*: what already happened, and what was learned from it. Agents also need the opposite — a record of what they intend to do *next*. That's a different kind of object with a different lifecycle, and conflating it with memory corrupts both.
-
-anneal ships **spores** as a separate sibling store (`<stem>.spores.json`) for exactly this: prospective tasks that open, get worked, and *close* — they self-clean when done. Memory accretes and never completes; a spore must complete, or it's noise. Three temporal layers, kept distinct on purpose:
-
-- **Retrospective** — what persisted (episodic + continuity + crystallized). It accretes.
-- **Prospective** — what you intend (spores). It completes and clears.
-- **Methodology** — the procedure you run (your wrap discipline, your recall habits). It operates on the other two.
-
-**Spores are also called intentions.** The same store, under the concept's new name: `IntentionStore` (an alias of `SporeStore`; `id_prefix="intention"` mints `intention-NNN` ids, the default still mints `spore-NNN`), the `intention_*` MCP tools and `anneal-memory intention …` beside the `spore_*` ones. Nothing named `spore` is deprecated, an id of either spelling reads in either, and the file is still `<stem>.spores.json`.
-
-**A store from an earlier release is converted once.** The spore store's stored document keeps its open rows under `"intentions"` (schema 2); a file written by 1.0.7 or earlier keeps them under `"spores"` and is refused, with the command that fixes it: `anneal-memory intention migrate-key` (add `--file PATH` for a store beside no db, `--dry-run` to see what it would do). It copies the file first, byte for byte, and changes nothing about any row.
-
-If you're integrating anneal into an existing agent that already tracks open loops, spores is the typed store those loops route *into* — your methodology *operates* the spore store, it doesn't compete with it.
-
-## The Consolidation Landscape (2026)
-
-Multiple independent groups shipped consolidation-based agent memory architectures in early 2026: anneal-memory (March, citation-graduation multi-tier), [OpenClaw Dreaming](https://docs.openclaw.ai/concepts/dreaming) (April 9, three-phase Light/REM/Deep Sleep), and Anthropic's [KAIROS / autoDream](https://www.deeplearning.ai/the-batch/claude-codes-source-code-leaked-exposing-potential-future-features-kairos-and-autodream/) (leaked March 30 via Claude Code source map, four-phase merge / remove-contradictions / promote-provisional-to-absolute / MEMORY.md index). Convergence on consolidation validates the direction — raw accumulation doesn't scale, and compression at session boundaries is where intelligence emerges.
-
-The groups diverge on one load-bearing question, as of 2026-10: **what gates quality?**
-
-| System | Quality gate | Gate judged by an LLM? |
-|---|---|---|
-| **anneal-memory** | Structural citation evidence (agent cites episode IDs; server verifies) | No for promotion (a lexical check); the compression itself is written by the agent's LLM |
-| **OpenClaw Dreaming** | LLM reflection + six weighted signals: Relevance 0.30, Frequency 0.24, Query diversity 0.15, Recency 0.15, Consolidation 0.10, Conceptual richness 0.06 | Yes — Relevance and Conceptual richness are LLM-judged |
-| **KAIROS / autoDream** | LLM consolidation (merge, remove contradictions, promote tentative observations to absolute facts) | Yes — promotion gate is model-reliant |
-| **Letta sleep-time agents** ([paper](https://arxiv.org/abs/2504.13171)) | A background agent rewrites memory; with [MemFS](https://docs.letta.com/concepts/memfs) every edit is a git commit | Yes — the rewrite is model-judged |
-
-Structural gates ask "do the episodes this pattern cites exist, and does its explanation share their words?" Model-reliant gates ask "does the LLM consider this good?" The difference matters: persistent user memory profiles have been shown to amplify sycophancy 16–45% across models ([Jain et al., CHI 2026](https://arxiv.org/abs/2509.12517); Gemini 2.5 Pro at 45%, others lower). The same RLHF-inherited bias surfaces wherever an LLM evaluates output for the user — including memory-quality scoring. A memory architecture whose quality mechanism runs through an LLM inherits that bias. anneal-memory's citation gate keeps the LLM out of the promotion decision; it does not keep it out of the compression, so the gate narrows that bias rather than removing it.
-
-Write-time source checks exist elsewhere now. [MemTxn](https://arxiv.org/abs/2607.27834) refuses an update unless every value in it appears, in order, in the source it cites. That is a stricter lexical check than anneal's, aimed at extracted facts. anneal's gate is aimed at abstractions: it ranks a pattern by repeated grounded citation and demotes it when a citation fails.
-
-There is a second question beside what gates quality: what stops the consolidator from wearing the memory down? [Useful Memories Become Faulty](https://arxiv.org/abs/2605.12978) documents consolidation degrading the memory it maintains. anneal's answer is the catastrophic-shrink gate (*The Immune System* above), a refusal at save time rather than an instruction to the model. It covers stores that declare an identity layer.
-
-The same shift toward LLM-scored quality is going mainstream at the adjacent evaluation layer (AWS Bedrock AgentCore Evaluations), and the April 2026 multi-layer-memory papers (HeLa-Mem, GAM) mostly inherit it too — the differentiator across the field is increasingly *what gates the consolidation*, not whether consolidation happens.
-
-*The fuller 2026 landscape — OpenClaw Dreaming's signal weights, AWS AgentCore Evaluations, Memori's representation-layer filtering, and the April HeLa-Mem / GAM papers, with where each gates quality → [docs/architecture.md](docs/architecture.md).*
-
-## On LOCOMO
-
-[LOCOMO](https://snap-research.github.io/locomo/) is the de-facto agent-memory benchmark, and anneal-memory has no score on it. That's deliberate. LOCOMO measures conversational recall — remembering facts, holding state across a long dialogue — and anneal is architected around a different axis: citation-validated pattern accumulation for accountability-bearing work, where patterns must be defensibly surfaced, wrong ones must demote, and sycophancy must be structurally bounded. A high LOCOMO score tells you the agent remembered the conversation; it doesn't tell you the memory is sound at the axis that matters when it's informing decisions. anneal will run it as secondary validation when a comparison genuinely calls for it.
-
-*The full rationale, and where anneal sits against the published LOCOMO numbers → [docs/architecture.md](docs/architecture.md).*
-
-## Session Hygiene
-
-Session wraps are the most important thing your agent does with this system. Think of them like sleep.
-
-Neuroscience calls it memory consolidation: during slow-wave sleep, the hippocampus replays the day's experiences while the neocortex integrates them into long-term knowledge. Skip sleep and memories degrade — experiences accumulate without being processed, patterns go unrecognized, and older knowledge doesn't get reinforced or pruned.
-
-anneal-memory works the same way. During a session, episodes accumulate in the episodic store. At session end, the wrap compresses those episodes into the continuity file. This is where the real thinking happens — the agent recognizes patterns, promotes validated knowledge, and lets stale information fade. Without wraps, you just have a growing pile of raw episodes and no intelligence.
-
-**The wrap sequence:**
-
-1. **`prepare_wrap`** — gathers recent episodes, current continuity, stale pattern warnings, and compression instructions
-2. **Agent compresses** — patterns emerge during compression that weren't visible in the raw episodes
-3. **`save_continuity`** — server validates structure, refuses a wrap that collapses a partnership entity's protected felt/identity layers, checks citation evidence, and saves the result
-
-**Rules of thumb:**
-- Always wrap before ending a session. An unwrapped session is like an all-nighter — the experiences happened but they weren't consolidated
-- Wrap exactly once per session. `save_continuity` reporting demoted graduations is the immune system working, not an error — don't re-save to chase a clean report (a second save with no new `prepare_wrap` is refused)
-- The agent-instructions snippets ([MCP](examples/agent-instructions.lean.example), [CLI](examples/agent-instructions.lean.cli.example)) handle this automatically — they teach the agent to detect session-end signals and run the full sequence
-- Short sessions (3-5 episodes) still benefit from wraps. Even a small amount of compression builds the continuity file
-- If `prepare_wrap` says "no episodes" — nothing to compress. That's fine, skip it
-
-The graduation system depends on wraps to function. Patterns can only be promoted (1x -> 2x -> 3x -> ... , up to 9 digits) during compression, citations can only be validated during wraps, and stale patterns can only be detected when the agent reviews what it knows against what it recently experienced. No wraps = no immune system, no cognitive development.
-
-## MCP Tools
+## MCP tools
 
 | Tool | When to call |
 |------|-------------|
-| `record` | When something important happens — a decision, observation, tension, question, outcome, or context change |
-| `recall` | Before making decisions that might have prior context. Query by time, type, keyword, or ID. A multi-word keyword is matched as an exact phrase first, then word by word (ranked) when the phrase misses |
-| `prepare_wrap` | At session end — returns episodes + current continuity + compression instructions |
-| `save_continuity` | After compressing — server validates structure and citations, and saves |
-| `delete_episode` | Remove content that should not exist (PII, sensitive data). The text is overwritten in the database file (`secure_delete`) and the WAL is emptied after the delete (deferred to the next delete or `close()` if another connection is reading at that moment); the tombstone and audit events keep a hash keyed by a per-store salt. Backups, the migration's `.bak` copy and text already consolidated into continuity are not reached; see the CHANGELOG for exactly what is and is not erased. Cascades to any association links formed before 1.0.2. Logged in audit trail (best-effort: the deletion is never failed by an audit-write failure; check `status().audit_write_failures` when the log is your evidence — a loss *recorded* there survives the process, so a later CLI run still sees it; the record itself is best-effort, so not every loss is recorded) |
-| `status` | Check memory health: episode counts, wrap history, continuity size, whether association formation is off (and the metrics of links formed before 1.0.2) |
-| `wrap_cancel` | Abandon a wrap that is open and will not be finished — the escape hatch when `prepare_wrap` refuses with "a wrap is already in progress". Episodes are not deleted; the next `prepare_wrap` picks them up. Optional `wrap_token`: cancel only if that wrap is still the one in progress, refused with no change otherwise. A wrap prepared under the consolidate gate is cancelled without its token only with the preparing `session_id`, or `force: true`. `partial: true` clears partial (corrupt) wrap state only, and refuses if a healthy wrap replaced it |
-| `crystal_recall` | Recall crystallized (graduated, long-term) patterns relevant to a query — the on-demand semantic tier. Keyword scoring is corpus-aware (rare, distinctive terms outweigh common process-words, so recall stays precise on a large store), and recall also follows evidence edges — surfacing a pattern grounded in an episode your query matched even with zero keyword overlap. Pass `mode: "query"` for a question you are asking on purpose (one keyword is enough, weaker matches come back too); the default `"prompt"` stays strict. See [The Memory Architecture](#the-memory-architecture-complementary-learning-systems) |
-| `crystal_index` | The always-on name + one-clause menu of the crystallized store — what graduated wisdom exists, so the agent isn't blind to its own corpus (the bodies fill on cue via `crystal_recall`) |
-| `intention_*` | The same layer under its new name — `intention_add` / `intention_list` / `intention_surface` / `intention_get` / `intention_update` / `intention_touch` / `intention_close` / `intention_promote`. One store file with the `spore_*` tools: an id from either family reads in the other, `intention_add` mints `intention-NNN`. `intention_close` and `intention_promote` are the names for `spore_descend` and `spore_ascend` |
-| `spore_*` | The prospective (spore) layer — open loops that must resolve, distinct from retrospective memory: `spore_add` / `spore_list` / `spore_surface` / `spore_get` / `spore_update` / `spore_touch` / `spore_descend` / `spore_ascend`. See [Prospective memory — spores](#prospective-memory--spores) |
+| `record` | Something happened that would change a later decision: a choice, an observation, a tension, a question, an outcome, a context change. Optional `supersedes`, `state_key`, `trust` |
+| `recall` | Before a decision that may have prior context. Filter by time, type, keyword or id. A multi-word keyword is matched as an exact phrase first, then word by word when the phrase misses |
+| `read_continuity` | At session start: returns the current memory file |
+| `prepare_wrap` | At a session boundary: opens one step, returns the token and the prompt to run in a fresh context |
+| `save_continuity` | With the model's whole reply and the token |
+| `wrap_cancel` | Abandon an open wrap that will not be finished. Optional `wrap_token`, `partial`, `force` |
+| `delete_episode` | Remove content that should not exist (PII, secrets). The text is overwritten in the database file (`secure_delete`) and the WAL is emptied afterwards; the tombstone and audit events keep a hash keyed by a per-store salt. Backups, the migration's `.bak` copy and text already carried into the memory file are not reached; the CHANGELOG says exactly what is and is not erased |
+| `status` | Memory health: episode counts, wraps, file size, whether a wrap is open, audit health |
+| `spore_*`, `intention_*` | The prospective layer: `add`, `list`, `surface`, `get`, `update`, `touch`, and `descend`/`ascend` (`close`/`promote`) |
 
-**25 tools total** (7 memory + 2 crystal + 8 spore + 8 intention, the spore tools' additive new names). The crystallized tier exposes only its **read** surface over MCP (`crystal_recall` / `crystal_index`); crystallizing *out* stays a wrap-time / CLI / library action (it carries the opt-in + decision-channel governance).
+The server also exposes the resource `anneal://continuity` (the current memory file) and `anneal://integrity/manifest` (SHA-256 hashes of the tool descriptions).
 
-**Resources:** `anneal://continuity` — the current continuity file, auto-loaded at session start. `anneal://integrity/manifest` — SHA-256 hashes for host-side tool description verification.
+## Compliance and audit
 
-## Compliance and Audit
+Every memory operation (episode recorded, deleted, wrap started, wrap completed, and so on) is written to an append-only JSONL trail, on by default, where each entry's SHA-256 includes the previous entry's hash. Change or remove an entry and the chain breaks.
 
-The episodic store is a natural audit trail. Every decision, tension, and outcome is timestamped, typed, and append-only — exactly what regulators want to see when they ask "why did the AI do that?"
+- **Actor identity** on every entry.
+- **Content-hash only** by default: the trail proves what happened without storing the content, so deleting an episode leaves a chain that still verifies. The hash and the id of each newly recorded episode are keyed by a per-store salt kept in the database, never in the trail. Episodes recorded before a store was upgraded to that scheme, and episodes imported from a team ledger, carry an unsalted hash and id, which can be guessed for short content.
+- **Weekly rotation with gzip**, with a manifest that allows verification across files.
+- **`on_audit_event` callback** to pipe events to your own systems.
+- **Crash recovery:** incomplete entries are detected and handled on restart.
 
-**Hash-chained JSONL audit trail** (shipped, on by default):
-
-Every memory operation — episode recorded, episode deleted, wrap started, wrap completed — gets logged to an append-only JSONL file where each entry's SHA-256 hash includes the previous entry's hash. Modify or delete an entry and the chain breaks. Verify integrity programmatically or with `jq`.
-
-- **Actor identity** on every entry (who did this — agent, system, admin)
-- **Content-hash-only mode** by default — the audit trail proves *what happened* without storing the content itself: delete the episode and the audit chain still verifies. The hash, and the id of each newly recorded episode, is keyed by a per-store salt kept in the database, never in the audit trail, so a guess at deleted content cannot be checked against the trail alone; episodes recorded before a store was upgraded to this release (and episodes imported from a team ledger) carry an unsalted hash and id, which can be guessed for short content. The trail keeps each event's `source`, time and type in clear. It proves it for the entries that were written — a write the sink refused is reported via `status().audit_write_failures` (lifetime-scoped, and a loss recorded there outlives the process — best-effort, so not every loss is recorded) and as `dropped_before` on the next entry, not by `verify`
-- **Weekly rotation with gzip** — old audit files compress automatically, manifest index enables cross-file chain verification
-- **`on_event` callback** — pipe audit events to your own systems (cloud logging, SIEM, observability)
-- **Crash recovery** — incomplete entries detected and handled on restart
+The trail is best-effort on the write side. `verify` proves the chain for the entries that were written. A write the sink refused is reported by `status().audit_write_failures` and as `dropped_before` on the next entry, not by `verify`.
 
 ```python
 from anneal_memory import Store, AuditTrail
 
-# Audit trail is on by default
-store = Store("./memory.db", project_name="MyAgent")
+store = Store("./memory.db", on_audit_event=lambda entry: print(entry["event"]))
 
-# Verify chain integrity
 result = AuditTrail.verify("./memory.db")
 print(f"Valid: {result.valid}, Entries: {result.total_entries}")
-
-# Stream events to external system
-store = Store("./memory.db", on_audit_event=lambda entry: send_to_siem(entry))
 ```
 
-**EU AI Act relevance:** The Act's Article 12 requires "automatic recording of events" for high-risk AI systems, with provisions for traceability, actor identification, and tamper evidence. This is audit *infrastructure*, not a compliance certification. The hash-chained trail covers the traceability requirements in Articles 12(2)(b,c) — actor identity, tamper evidence, and automatic event recording — without certifying full Act compliance.
+The CLI equivalents are `anneal-memory verify`, `audit --since 7d` and `audit-repair`.
 
-**Provenance, not just timestamps.** anneal-memory ships at the provenance-chain level: every audit entry's hash is linked to its predecessor (modify or remove an entry, the chain breaks), and graduated patterns cite the episode IDs that earned them, so any pattern traces back to the observations behind it — not just *when* it was written. Why that distinction may become a differential compliance gate as the Act's enforcement develops, and why a memory whose quality runs through an LLM can't offer the same chain → [docs/architecture.md](docs/architecture.md).
-
-**What's next:**
-- **Compliance proxy** (Layer 2) — an optional transport-layer capture that extends the same hash-chained, source-tagged audit beyond memory operations, for teams that need a fuller traceability record. Off by default; the memory audit stands on its own.
-- **Multi-agent shared memory** — shared episodic pool with per-agent continuity. Full cross-agent audit trail.
-
-## Continuity Markers
-
-The continuity file uses a simplified marker set for density:
-
-```
-? question needing resolution
-thought: insight worth preserving
-✓ completed item
-
-A -> B                          causation
-A ><[axis] B                    tension on an axis
-
-[decided(rationale, on)]        committed decision
-[blocked(reason, since)]        external dependency
-
-| 1x (2026-04-01)              first observation
-| 2x (2026-04-01) [evidence: abc123 "explanation"]   validated pattern
-
-[contradicts: name]             this pattern conflicts with the named Proven
-[no-contradicts]                contradiction scan run, nothing conflicts
-[provenance: id1, id2]          founding episode ids for a mature top-tier
-                                pattern with no fresh evidence this wrap
-```
-
-The last three are parsed by the immune system, not just prose.
-`[contradicts:]` / `[no-contradicts]` record whether the contradiction
-scan `prepare_wrap` renders into the compression package was actually
-run — a new Proven landing with no stance is written to the audit log.
-`[provenance:]` names the episodes that founded a mature 3x pattern
-whose evidence has gone low-variance; it suppresses the "graduate OUT to
-partnership.md or retire" warning for a line that is genuinely grounded
-but quiet. It is not immortality — a provenance pattern that goes cold
-is held but flagged to the operator on every wrap that re-dates it, and
-provenance does not silence that. Prefer fresh evidence
-whenever it exists; provenance is only for when it does not.
+**EU AI Act.** Article 12 asks for automatic recording of events in high-risk systems, with traceability, actor identification and tamper evidence. This is audit infrastructure, not a compliance certification. It covers the recording, actor and tamper-evidence parts of Article 12(2); it does not certify compliance with the Act.
 
 ## Security
 
-### Memory poisoning resistance
+**What 4.0 does and does not check.** The memory file is whatever the model wrote. anneal-memory checks its size and that it answers the open step; it does not check what the file says against the episodes. A false episode that reaches the log can reach the file. What the package gives you is a way to see and undo that:
 
-Recent research demonstrates [environment-injected memory poisoning attacks against web agents](https://arxiv.org/abs/2604.02623) — adversarial content embedded in the environment (web pages, tool outputs) that the agent ingests as observations and that subsequently influences behavior across sessions. The published attack ("Poison Once, Exploit Forever," Zou et al., April 2026) demonstrated up to 32.5% attack success rate on GPT-4-mini against ChatGPT Atlas, Perplexity Comet, and OpenClaw — and notably did not require write access to the agent's memory store. Environmental contamination plus the agent's own consumption of the contaminated content was sufficient.
+- Every version of the file is kept and listed by `history` and `diff`, so a rewrite can be reviewed, and a bad one can be reverted (`revert-wrap`) or rewritten.
+- The audit trail records what was recorded and when, tamper-evidently.
+- Consolidation is gated to an operator-claimed session by default (the baton), so an agent cannot rewrite the file unbidden.
+- Episodes carry a **trust class** (`agent` by default). A host that relays tool output or web content records it with `trust="tool"` or `trust="external"` (`record --trust`, the MCP `record` argument). MCP `recall` lists those after the rest, under a heading that says they are data, not instructions, and a lower-trust episode cannot supersede a higher-trust one. The trust label is the host's statement: unlabelled content reads as the agent's own, so this holds only as far as the host labels its tool boundary. The `Store` constructor sets a trust ceiling, and the MCP server opens at `agent`, so an agent cannot label its own write `operator`. The CLI raises a class above `agent` only after a yes on a terminal or `ANNEAL_OPERATOR=1`.
+- Because the wrap prompt includes the day's log, an episode that contains instructions is read by the model that does the rewrite. Run the step on a model and in a context that cannot take actions, which the fresh-context rule already asks for.
 
-anneal-memory's citation-validated graduation does not eliminate this attack class — environment-injected episodes are recorded honestly because the agent did encounter them — but it raises the bar substantially:
+anneal-memory has not been tested against published memory-poisoning attacks, and none of the above stops a determined one.
 
-1. **Relayed content cannot promote itself, when the host labels it.** A citation is grounded when its quoted explanation shares words with the cited episode, and a poisoned episode grounds its own claim exactly as well as the agent's own observation would: measured 2026-10-07, one episode recorded from a web page carried a false claim to 2x on its own. So every episode has a trust class, `agent` by default: a host records content it relays from a tool or an outside source with `trust="tool"` or `trust="external"` (`record --trust`, the MCP `record` tool's `trust`), and a graduation whose grounding citations are all `tool`/`external` does not climb. Whatever level it claimed, it is written back at 1x marked `(uncorroborated)`; the save result lists it under `uncorroborated`, the audit log records it, and a warning names it. It climbs once an `agent` or `operator` episode also grounds it. With a quoted explanation, only citations that ground it count, so an unrelated agent episode added to the citation does not vouch; without one, a single `tool`/`external` citation makes the whole line relayed. A lower-trust episode also cannot supersede a higher-trust one, so relayed content cannot hide the agent's or the operator's record either. When `set_trust` lowers an episode that a supersession link owned by a team snapshot touches, the link stays: the team ledger is authoritative (strict) and a human holds it by design (the augmentation exception). The audit event names it under `team_supersessions_left`. Recall labels the lower-trust replacing episode with its trust class and shows what it replaced, so the operator can see it and correct it in the team ledger: `retrieve_relevant` returns it with `ScoredEpisode.trust` and the replaced episode's text in `replaces` (each `ReplacedEpisode` with its own `trust`), and MCP `recall` lists it under "Recorded from tool output / an external source", in its "Replaced since" block too, naming the replaced episode by id. Content derived from relayed content stays relayed: `record(derived_from=[ids])` (`record --derived-from`, the MCP `record` tool's `derived_from`) names the episodes a summary was made from, and for the graduation check an episode counts at most as trusted as its most trusted source, through every level of derivation (`Store.effective_trust_map`), so an agent's summary of an external page cannot corroborate that page. It is computed from the sources' classes now, so lowering a source lowers everything derived from it and the host raising it back restores them, and the answer for an episode does not depend on what else was asked. Removing an episode leaves a permanent mark on every link and grounding record that named it: `external` when it was deleted, its trust at the time when it aged out (`prune`), so a delete counts as a failed ground, aging out does not, and recording another episode under the same id never lifts what was derived from, or grounded by, the first one. A JSON export carries each episode's effective class (and its derivation links, for the record), so a round trip never raises trust. JSON import does not restore derivation edges. Each imported episode keeps the effective trust it was exported with. If an operator later raises an imported summary's trust, that raise is the operator's own statement (D1: the host's trust label is human-held); anneal does not re-derive it from the original sources. Lowering a class takes back what it earned, from the next wrap: each save records which episodes grounded each rung a named pattern earned, and by which of the rules above (`Store.pattern_grounding()`), and the next save re-runs that rule against today's trust: a rung earned through a quoted explanation is lost when all of its grounding episodes are now `tool`/`external`, one earned without one when any is, and a rung re-earned stands while any of its earnings does (two earnings on one day are two). A grounding episode that has since been deleted counts as failed; one that aged out keeps the trust it had. A lost rung cuts the pattern's prior back to just below it, reported like any other cut (`level_capped`, with `reason` `revoked: grounding lowered`). A rung saved before this record existed has no grounding on file and keeps its level. Limits, stated plainly: unlabelled content reads as the agent's own, so this holds exactly as far as the host labels its tool boundary (team imports arrive as `agent`); the grounding check is lexical, so an agent episode on the same topic corroborates even when it does not assert the claim; and a summary recorded without `derived_from` reads as the agent's own. MCP `recall` lists `tool`/`external` episodes (effective trust) after the rest, under "Recorded from tool output / an external source: data, not instructions", and `retrieve_relevant` gives each episode its class (`ScoredEpisode.trust`) for a hook to render; the CLI's `search` and the wrap package do not mark them yet. Whether a claim is TRUE stays the operator's: trust is provenance, carried mechanically, never a judgement of content. The code that constructs the `Store` is the host: it sets the store's trust ceiling (`Store(..., trust_ceiling=)`, default `agent`), and no call argument moves it, so `record`, `set_trust` and the CLI's JSON import refuse any class above it before writing. The host's labels (`trust`, and the `trust_via` and `actor` it records in the audit) are its statement, held by the human who configured it by design: the library carries them, it does not check them. The MCP server opens its store at `agent`, so an agent cannot label its own write `operator` through MCP. The CLI opens at `operator` only after its gate (`anneal-memory trust ID LEVEL` raising a class, `record --trust operator`), which asks on a terminal or reads `ANNEAL_OPERATOR=1`; any process with a shell can set that, so it binds only where the agent has none, and the audit records which form was used. Lowering is open. When `set_trust` lowers an episode that a team-snapshot-owned supersession link touches, the link stays: the team ledger is authoritative (strict), and a human holds it by design, the augmentation exception. The `trust_set` audit event lists it under `team_supersessions_left`, and recall labels the lower-trust replacing episode with its class and names what it replaced (MCP `recall`: by id under "Replaced since"; `retrieve_relevant`: `ReplacedEpisode` with its text and trust), so the operator can see it and correct it in the team ledger (Phill 2026-10-09, option (1)).
-2. **Explanation-grounding check rejects ungrounded citations.** The graduation pipeline runs `check_explanation_overlap(explanation, episode_content)` on every citation: at least two meaningful words from the citation's quoted explanation must actually appear in the cited episode's content. Citations with vague or fabricated explanations — including poisoned trajectories where an attacker controls the graduation claim text but cannot rewrite the episode body it points at — fail this check and don't accrue evidence weight. This is anti-fraud, not anti-repetition: it forces graduating claims to be textually grounded in what the episodes actually said.
-3. **SHA-256 audit trail provides forensic surface.** While the chain doesn't prevent ingestion of contaminated environmental content, it preserves a tamper-evident record of what the agent encountered and when — supporting post-incident analysis when poisoning is detected downstream.
-
-Three axes, named apart. **Authority** is what a principal may assert: the host-set `trust_ceiling`, above which a write is refused. **Origin** is where an episode's content came from, conservatively: the lowest class among the class it was recorded with, its `derived_from` sources' origins, and any `Store.runtime_context(tainted_by=[ids], floor=class)` the host had entered, so a host that mediates tool results can bind origin below what the model declares (`origin-conservative-v1`). Origin is stored for every episode written after the generation-3 migration, and that migration stores it once for every episode already in the store, computed from the trust and sources it had then; a team-imported episode is `external`. It is shown by `status`, beside recall results when it is lower than the trust label, and in the wrap package (`Store.origin_map`, `Store.origin_counts`, `StoreStatus.origin_counts`), and a JSON export carries it so an import can lower it but never raise it. **Corroboration** is how well supported a claim is, and is what graduation's gate uses (`trust-corroborative-v1`, the rule above: the highest source wins). Nothing gates on origin yet. `runtime_context` binds only the Store object it is entered on, and only for code that enters it. The MCP server enters it around its tool calls as the host wiring: at its pinned ceiling alone it changes no origin, and a host that knows what the model has just read is the one that would pass `tainted_by`.
-
-**This is structural inference, not empirical defense.** anneal-memory has not been tested against eTAMP directly. The mechanisms above derive from architectural properties — citation-validated graduation, lexical-overlap explanation-grounding, SHA-256 audit chain — not from a published evaluation. A targeted eTAMP variant could partially or fully bypass these defenses in ways the architecture-level argument doesn't anticipate. Sustained adversarial campaigns with diverse contaminated trajectories can still graduate, and the *Honest scope* section above documents specific gap classes (lexical-overlap exploits, rotated-pair gaming, slow-drift accumulation, contradiction-with-existing-Proven, pattern omission) confirmed reachable under adversarial-agent conditions. Architectures with no graduation gate inherit the full attack surface; anneal-memory inherits a structurally narrower one, pending direct empirical evaluation and the next set of defenses listed in *Honest scope*.
-
-### Tool description integrity
-
-Tool description integrity verification detects [description poisoning](https://github.com/modelcontextprotocol/modelcontextprotocol/discussions/2402) — where manipulated tool descriptions alter LLM behavior without changing tool functionality.
-
-**Two-layer verification:**
-
-1. **Build-time manifest** (`tool-integrity.json`) — SHA-256 hashes of all tool descriptions, shipped with the package and verified at server startup. Detects post-install modification.
-2. **Host-verifiable resource** (`anneal://integrity/manifest`) — the same hashes exposed as an MCP resource, so editors and hosts can compare tool definitions received via `tools/list` against the server's intended definitions. Detects transport-layer description mutation between server and client — the class of attack where descriptions are modified in transit or by middleware without the server's knowledge.
+**Tool description integrity.** Tool descriptions can be changed without changing what a tool does, which alters how a model uses it. Two checks: a build-time manifest (`tool-integrity.json`, SHA-256 hashes of every tool description, shipped with the package and checked at server start), and the same hashes as the MCP resource `anneal://integrity/manifest`, so a host can compare the definitions it received from `tools/list` against the server's own.
 
 ```bash
-anneal-memory --generate-integrity  # Regenerate after description changes
-anneal-memory --skip-integrity      # Bypass for development
+anneal-memory serve --generate-integrity   # regenerate the manifest after changing descriptions
+anneal-memory serve --skip-integrity       # bypass for development
 ```
 
 ## Lineage
 
-anneal-memory's architecture grew from [FlowScript](https://github.com/phillipclapham/flowscript) — a typed reasoning notation that explored compression-as-cognition, temporal graduation, and citation-validated patterns. The core insights proved more powerful than the syntax; anneal-memory delivers them as a zero-dependency memory system where agents use natural language instead of learning notation. The FlowScript notation remains in active daily use for reasoning compression.
+anneal-memory grew out of [FlowScript](https://github.com/phillipclapham/flowscript), a typed reasoning notation. Versions up to 3.x built a layer of graduated patterns on top of the memory file. 4.0 removed it and kept the one thing that was left to do: rewrite one file from one day at a time. [docs/architecture.md](docs/architecture.md) has the longer history and the design reasoning.
 
 ## License
 

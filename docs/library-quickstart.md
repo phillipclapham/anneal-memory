@@ -1,6 +1,6 @@
 # Library Quickstart
 
-anneal-memory's Python library is the core product. The CLI and MCP server are interfaces to it — the library is what you import when building agents in any framework.
+The Python library is the core of anneal-memory. The CLI and the MCP server are thin interfaces over it. This is what you import when you build an agent in any framework.
 
 ## Install
 
@@ -8,30 +8,26 @@ anneal-memory's Python library is the core product. The CLI and MCP server are i
 pip install anneal-memory
 ```
 
-Zero dependencies. Python 3.10+.
+No dependencies. Python 3.10 or newer.
 
-## Basic Usage
+## Record and recall
 
 ```python
 from anneal_memory import Store, EpisodeType
 
-# Create a store (auto-creates DB + directories)
-store = Store("./memory.db", project_name="MyAgent")
+store = Store("./memory.db")   # creates the database and its directories
 
-# Record episodes during work
 store.record("Connection pool is the real bottleneck", EpisodeType.OBSERVATION)
-store.record("Chose PostgreSQL as the database because ACID outweighs speed", EpisodeType.DECISION)
-store.record("Latency vs consistency — can't optimize both", EpisodeType.TENSION)
+store.record("Chose PostgreSQL because ACID outweighs speed", EpisodeType.DECISION)
+store.record("Latency vs consistency: can't optimize both", EpisodeType.TENSION)
 store.record("Should we shard or add read replicas?", EpisodeType.QUESTION)
-store.record("Migration done, 3x query improvement on hot path", EpisodeType.OUTCOME)
+store.record("Migration done, hot-path queries are 3x faster", EpisodeType.OUTCOME)
 store.record("Production DB at 80% capacity, growing 5%/week", EpisodeType.CONTEXT)
 
-# Query episodes
 result = store.recall(keyword="database", limit=10)
 for ep in result.episodes:
     print(f"[{ep.type}] {ep.content}")
 
-# Filter by type, time, source
 decisions = store.recall(episode_type=EpisodeType.DECISION)
 recent = store.recall(since="2026-04-01T00:00:00Z")
 
@@ -40,7 +36,7 @@ store.close()
 
 ### Searching with a multi-word query
 
-`store.recall(keyword=...)` matches the keyword as one exact substring, so `"bank export nightly rows"` finds only an episode containing those words in that order. To match word by word, use `search_episodes`: it reduces the query to its distinctive words, returns every episode that contains at least one, ranks by how many it contains (rarer words count more), and says which words each episode matched. It takes the same `episode_type`, `source`, `since` and `until` filters as `recall`.
+`store.recall(keyword=...)` matches the keyword as one exact substring, so `"bank export nightly rows"` finds only an episode that contains those words in that order. To match word by word, use `search_episodes`. It reduces the query to its distinctive words, returns every episode that contains at least one, ranks by how many it contains (rarer words count more), and says which words each episode matched. It takes the same `episode_type`, `source`, `since` and `until` filters as `recall`.
 
 ```python
 from anneal_memory import search_episodes
@@ -49,147 +45,132 @@ for m in search_episodes(store, "bank export fmt_row64 nightly rows", limit=5):
     print(m.episode.id, m.matched, m.episode.content)
 ```
 
-The MCP `recall` tool does this for you: it tries the exact phrase first, and only when no episode contains it and the keyword has two or more distinctive words does it fall back to `search_episodes` with the same filters and limit. Its reply says when it did.
+The MCP `recall` tool does this for you. It tries the exact phrase first, and only when no episode contains it and the keyword has two or more distinctive words does it fall back to `search_episodes` with the same filters and limit. Its reply says when it did.
 
-`retrieve_relevant` and `retrieve_patterns` take `mode="prompt"` (the default: the precision gates meant for a hook that injects memory on every prompt) or `mode="query"`, for a question asked on purpose, where one keyword and one hit are enough and the score bar and the distinctive-term anchor are dropped. Query mode returns more matches and weaker ones. The MCP `crystal_recall` tool passes the same `mode` through.
+## The wrap
 
-## The Wrap Sequence
+A wrap turns the episodes recorded since the last wrap into an updated memory file. It is one rolling rewrite and there is no other method.
 
-This is the most important part. Wrapping is how raw episodes compress into working memory.
-
-> **Canonical entry points: `prepare_wrap(store)` + `validated_save_continuity(store, text)`.**
-> These are the only functions you should call at session end, and the order is
-> load-bearing: as of **v0.3.1** `validated_save_continuity` requires a wrap in
-> progress. Call `prepare_wrap` first, every session — it creates the wrap
-> snapshot that `validated_save_continuity` consumes. A save with no snapshot
-> raises `ValueError("No wrap in progress…")`.
->
-> The lower-level primitive `store.save_continuity()` is a raw file write (test
-> use only) — it bypasses graduation and wrap metadata.
-> Advanced users driving their own wrap lifecycle should call
-> `store.wrap_started(token=..., episode_ids=[...])` to create the snapshot
-> before `validated_save_continuity`. The deprecated public wrapper
-> `prepare_wrap_package()` was **removed in v0.3.0**; use `prepare_wrap(store, ...)`.
+`prepare_wrap(store)` opens **one step**: the oldest calendar day that has unwrapped episodes. It returns a fixed prompt, filled with the current memory file and that day's log, and a wrap token. You run the prompt in a **fresh context**, one that holds that prompt and nothing else, and pass the model's whole reply to `validated_save_continuity`. anneal-memory calls no model.
 
 ```python
-from anneal_memory import Store, EpisodeType, prepare_wrap, validated_save_continuity
+import anthropic
+from anneal_memory import Store, prepare_wrap, validated_save_continuity
 
-store = Store("./memory.db", project_name="MyAgent")
+client = anthropic.Anthropic()
+MODEL = "your-model-name"   # a mid-size model; the method was measured at low effort
 
-# 1. Get the compression package.
-#    prepare_wrap fetches episodes, loads the current continuity, detects stale
-#    patterns, builds the compression package, and marks the wrap as in
-#    progress.
-wrap = prepare_wrap(store)
 
-# The returned dict has:
-#   wrap["status"]         — "ready" (package built) or "empty" (no new episodes)
-#   wrap["message"]        — human-readable status summary
-#   wrap["episode_count"]  — number of episodes in the wrap window
-#   wrap["package"]        — the compression package (dict, or None if empty)
-#   wrap["assoc_context"]  — always None since 1.0.2 (a save forms no association
-#                            link, so there is no association context to offer). The key
-#                            stays so existing callers do not break.
+def run_model(system: str, user: str) -> str:
+    """One model call, nothing else in the context."""
+    msg = client.messages.create(
+        model=MODEL,
+        max_tokens=16000,
+        system=system,
+        messages=[{"role": "user", "content": user}],
+    )
+    return msg.content[0].text
 
-if wrap["status"] == "ready":
-    package = wrap["package"]
-    # The package dict has:
-    #   package["episodes"]       — recent episodes as formatted text
-    #   package["episode_count"]  — same count as wrap["episode_count"]
-    #   package["continuity"]     — current continuity file (None on first wrap)
-    #   package["stale_patterns"] — patterns that haven't been cited recently
-    #   package["instructions"]   — compression instructions with marker reference
-    #   package["today"]          — current date for timestamps
-    #   package["max_chars"]      — target continuity size
 
-    # 2. Agent compresses (this is YOUR agent's job — the cognitive act).
-    # Feed the package to your LLM and ask it to compress episodes into
-    # an updated continuity file following the instructions.
-    compressed = my_llm_compress(package)  # your compression logic
+store = Store("./memory.db")
 
-    # 3. Save with the full validation pipeline.
-    result = validated_save_continuity(store, compressed)
-# "empty" status = nothing to wrap yet; skip and try again next session.
-
-# validated_save_continuity runs the complete immune system:
-#   - Validates 4-section structure (State, Patterns, Decisions, Context)
-#   - Checks citation evidence on graduations (2x, 3x patterns)
-#   - Demotes ungrounded patterns (the explanation-grounding check)
-#   - Updates metadata and records wrap completion
-#   - Logs everything in the audit trail (best-effort on the write side: an
-#     audit-sink failure never fails the operation that already committed —
-#     see Store.status().audit_write_failures)
-#
-# Returns: dict with episodes_compressed, graduations_validated,
-#          graduations_demoted, wrap_id, etc. (the associations_formed /
-#          _strengthened / _decayed keys are still present and always 0)
+while True:
+    wrap = prepare_wrap(store)
+    if wrap["status"] != "ready":
+        break                      # "empty": nothing waiting. "downgraded": see below
+    step = wrap["step"]
+    print(f"wrapping {step['day']}: {step['episodes']} episodes, "
+          f"{step['steps_remaining']} more step(s) after this one")
+    reply = run_model(step["system"], step["user"])
+    result = validated_save_continuity(store, reply, wrap_token=wrap["wrap_token"])
+    if result["pending_count"] == 0:
+        break
 
 store.close()
 ```
 
-**Why `prepare_wrap(store)` is the canonical entry point.** The store-aware version marks the wrap as in progress, mints the session-handshake token, and freezes the episode-ID snapshot — all signals the immune system relies on to enforce the cognitive loop. As of **v0.3.1** that snapshot is mandatory: `validated_save_continuity` raises `ValueError` when no wrap is in progress, so `prepare_wrap` is not optional — it is the first half of the operation. Advanced users driving their own wrap lifecycle must call `store.wrap_started(token=..., episode_ids=[...])` to create the snapshot before saving; the private `_build_wrap_package()` helper builds a compression package but does NOT create a snapshot, so it cannot stand in for `prepare_wrap`. `store.save_continuity(text)` is a separate low-level file-write primitive — it bypasses graduation and wrap metadata. Don't reach for either of those.
+Any client works in place of `anthropic`; `run_model` only has to return the model's reply text.
 
-## Loading Continuity at Session Start
+### What `prepare_wrap` returns
+
+A dict with `status`, `message`, `episode_count` (episodes in this step), `pending_count` (all episodes waiting), `wrap_token` and `step`.
+
+- `status == "ready"`: a step is open. `wrap_token` and `step` are set.
+- `status == "empty"`: no episodes since the last wrap. Nothing was opened; skip the save.
+- `status == "downgraded"`: the consolidate baton gate declined the call, so it is capture-only. `message` says why and the store is untouched. See "The baton" below.
+
+`step` holds `day`, `chunk` and `chunks` (a day over 400,000 characters of log is cut into slices), `episodes`, `steps_remaining`, `max_chars`, `memory_chars` (the size of the current file), and `system`, `user` and `prompt` (the two messages as one text, for a transport with a single slot).
+
+Pass `tz="America/New_York"` (or any IANA name or `tzinfo`) to cut days in a zone other than the machine's, and `max_chars=` to change the 26,000-character cap. Give the same `max_chars` to the save.
+
+### What the save checks
+
+`validated_save_continuity(store, text, *, wrap_token=None, max_chars=None, ...)` checks that a wrap is open (and is the one the token names), that the caller may commit it, and that `text` is a non-empty string of at most `max_chars` characters. That is all. The file is not parsed and needs no particular layout. A refused save writes nothing and leaves the step open: run the step again and save again, or abandon it with `store.wrap_cancelled()`.
+
+The result has `path`, `chars`, `episodes_compressed`, `pending_count`, `content_hash` and `wrap_result`. If `pending_count` is not zero, the next day's step is owed: prepare again.
+
+A multi-day catch-up is several steps in order. Each step starts from the file the one before it saved. Do not merge days into one log.
+
+### The baton
+
+A store created by `anneal-memory init` requires the consolidate baton: a wrap runs only under a session id the operator has claimed (`anneal-memory baton claim NAME`). On such a store pass `session_id="NAME"` to both calls, and keep the token:
 
 ```python
-store = Store("./memory.db", project_name="MyAgent")
+wrap = prepare_wrap(store, session_id="NAME")
+...
+validated_save_continuity(store, reply, wrap_token=wrap["wrap_token"], session_id="NAME")
+```
 
-continuity = store.load_continuity()
-if continuity:
-    # Feed this to your agent as context — it's the compressed
-    # memory from all prior sessions
-    print(continuity)
+A store you open with `Store(path)` has no such requirement. `status` and the downgrade message say how many episodes are waiting.
+
+### Retries
+
+Pass `idempotency_key=` to both calls to make a retry safe. A retry of a committed save with the same key and text returns its first result (the non-content fields, with `replayed: True`) and writes nothing.
+
+### Recovering an older version
+
+Each saved file is a row in the `identity_versions` table. See [Recovering an older version](../README.md#recovering-an-older-version) in the README.
+
+## Loading the memory file at session start
+
+```python
+store = Store("./memory.db")
+
+text = store.load_continuity()
+if text:
+    print(text)   # feed this to your agent as context
 else:
-    print("First session — no prior memory")
+    print("First session: no memory file yet")
 ```
 
-## Associations (read-only since 1.0.2)
+A store gets its first memory file at its first completed wrap.
 
-A save forms and decays no association link since 1.0.2, and the affect input (`affective_state`) is accepted and ignored until a later MAJOR release removes it (no earlier than 2.0). Links formed by earlier versions stay readable until a later MAJOR release removes them, and `Store.association_formation()` reports whether formation is off on a store (`mode`, `off_at_wrap`, `off_by_version`).
+## Audit trail
 
-```python
-# Statistics for links formed before 1.0.2
-stats = store.association_stats()
-print(f"Total links: {stats.total_links}")
-
-# Find associations for specific episodes
-assocs = store.get_associations(episode_ids=["abc123"], min_strength=0.5)
-for a in assocs:
-    print(f"{a.episode_a} <-> {a.episode_b} strength={a.strength:.2f}")
-```
-
-## Audit Trail
-
-On by default. Verify integrity programmatically:
+On by default. Verify it, or stream its events:
 
 ```python
-from anneal_memory import AuditTrail
+from anneal_memory import AuditTrail, Store
 
 result = AuditTrail.verify("./memory.db")
-print(f"Valid: {result.valid}")
-print(f"Total entries: {result.total_entries}")
+print(f"Valid: {result.valid}, entries: {result.total_entries}")
 if not result.valid:
     print(f"Break at: {result.break_at}")
-```
 
-Stream events to external systems:
 
-```python
 def my_handler(entry):
-    # Send to SIEM, cloud logging, observability, etc.
     print(f"[{entry['event']}] {entry['timestamp']}")
 
-store = Store("./memory.db", project_name="MyAgent", on_audit_event=my_handler)
+
+store = Store("./memory.db", on_audit_event=my_handler)
 ```
 
-## Context Manager
-
-The Store supports context manager usage for automatic cleanup:
+## Context manager
 
 ```python
-with Store("./memory.db", project_name="MyAgent") as store:
+with Store("./memory.db") as store:
     store.record("Something important", EpisodeType.OBSERVATION)
-    # store.close() called automatically
+    # store.close() is called for you
 ```
 
 ## Configuration
@@ -197,37 +178,35 @@ with Store("./memory.db", project_name="MyAgent") as store:
 ```python
 store = Store(
     "./memory.db",
-    project_name="MyAgent",
-    audit=True,                    # Enable audit trail (default: True)
-    on_audit_event=my_handler,     # Optional: stream audit events
+    audit=True,                  # audit trail on (the default)
+    on_audit_event=my_handler,   # optional: stream audit events
 )
 ```
 
-The database path can be absolute or relative. The continuity file lives alongside the database as `{db_name}.continuity.md`. Audit files live in `{db_dir}/audit/`.
+The path can be absolute or relative. The memory file is kept beside the database as `<stem>.continuity.md`, a projection of the newest saved version. Audit files live in `<db dir>/audit/`.
 
-## Error Handling
+## Error handling
 
-The library raises errors in two categories. **`AnnealMemoryError` and everything under it** — the store-failure family (`StoreError` → `StoreDatabaseError`) and the single-writer lifecycle refusal `WrapInProgressError` (a *sibling* of `StoreError`, not a subclass — see the hierarchy below) — catch the base class at your outermost boundary, log, and let it propagate. Branching per subclass is a minority pattern for long-running servers with retry budgets or transport authors writing their own error translation layer. **Plain `ValueError`** is raised by `validated_save_continuity` for caller-contract violations — empty or malformed continuity text, no wrap in progress (`prepare_wrap` not called, or the session already wrapped), a wrong `wrap_token`, or an empty `session_id`. A `ValueError` of that kind is a bug in your wrap flow, not a runtime failure to recover from: fix the call site rather than catching it. Some `ValueError`s are refusals rather than call-site bugs, and each leaves the wrap in progress with nothing saved: the catastrophic-shrink gate (re-wrap preserving the protected sections, or pass `allow_shrink=True` for a deliberate diet), and the consolidate-gate refusals, raised as **`SaveAuthorityError`** (a `ValueError` subclass, exported at the top level and from `anneal_memory.store`; test with `isinstance`, not the message text). A *gated* wrap is one `prepare_wrap` prepared with a `session_id`; the *baton* is the single-consolidator claim an operator makes with `sessions.claim_baton`. Some of these refusals are call-site fixes, so pass what is missing and retry the same save: a gated wrap's save that omits the `wrap_token` its `prepare_wrap` returned; a gated wrap's save that omits the preparing `session_id`; on a store carrying the require-baton policy (`Store.set_consolidate_requires_baton(True)`), a save that omits `session_id` or `wrap_token` (this also catches a wrap prepared without a `session_id` before the policy was turned on); and a wrap prepared with `allow_sole_live=True` by a session that does not hold the baton, whose save does not repeat it (pass the same `allow_sole_live` value to both calls). A save from a session other than the one that prepared a gated wrap is refused even if that session now holds the baton: only the preparing session can commit it, so either it saves, or the wrap is abandoned with `store.wrap_cancelled(expect_token=...)` (which discards the compression) and the new session prepares its own. The rest are authority refusals: a `session_id` that does not, or no longer, hold the baton; under `allow_sole_live`, a session that is no longer authorized, which includes a session registry that cannot be read; and a baton file that is unreadable or corrupt, so the holder cannot be confirmed. For these, re-claim nothing yourself, because the operator decides who holds the baton: surface the refusal so the operator can restore the baton or repair the unreadable coordination file and you retry the same save, or abandon the wrap with `store.wrap_cancelled(expect_token=...)`.
+The library raises errors in two groups.
 
-Note the two *opposite* lifecycle errors: `validated_save_continuity` raises `ValueError` when **no** wrap is in progress, and `prepare_wrap` raises `WrapInProgressError` when one **already** is. The consolidate is single-writer — finish or cancel the open wrap before starting another.
+**`AnnealMemoryError` and its subclasses** are store failures (`StoreError`, then `StoreDatabaseError`) and the wrap-lifecycle refusals `WrapInProgressError`, `WrapOwnershipError` and `WrapCancelGatedError`. Catch the base class at your outermost boundary, log, and let it propagate. Branch per subclass only in a long-running server with a retry budget.
+
+**Plain `ValueError`** is raised by `validated_save_continuity` for a call that cannot succeed as written: no wrap in progress (`prepare_wrap` not called, or the step was already saved), a token that is not the open wrap's, an empty reply, a reply over `max_chars`, or an empty `session_id`. Fix the call. The empty and over-limit cases leave the step open, so you can run it again and save again.
+
+**`SaveAuthorityError`**, a `ValueError` subclass exported at the top level, is the consolidate gate refusing a save. Test for it with `isinstance`, not the message text. Some of these are call fixes: a gated wrap's save that omits the `wrap_token` its `prepare_wrap` returned, or the preparing `session_id`; on a store that requires the baton, a save that omits `session_id` or `wrap_token`; a wrap prepared with `allow_sole_live=True` whose save does not repeat it. The rest are authority refusals: a `session_id` that does not, or no longer, hold the baton, or an unreadable baton file. For these, claim nothing yourself, because the operator decides who holds the baton. Surface the refusal, and either retry the same save once it is fixed or abandon the wrap with `store.wrap_cancelled(expect_token=...)`. A save from a session other than the one that prepared a gated wrap is refused even if that session now holds the baton.
+
+`validated_save_continuity` raises `ValueError` when **no** wrap is open, and `prepare_wrap` raises `WrapInProgressError` when one **already** is. The consolidate is single-writer: finish or cancel the open wrap before starting another.
 
 ### The 80% case
 
 ```python
-from anneal_memory import (
-    AnnealMemoryError,
-    prepare_wrap,
-    validated_save_continuity,
-)
+from anneal_memory import AnnealMemoryError, prepare_wrap, validated_save_continuity
 
 try:
     wrap = prepare_wrap(store)
     if wrap["status"] == "ready":
-        continuity_text = agent_compress(wrap["package"])
-        result = validated_save_continuity(
-            store, continuity_text, wrap_token=wrap["wrap_token"]
-        )
-    # "empty" status — no episodes to compress; nothing to save.
+        reply = run_model(wrap["step"]["system"], wrap["step"]["user"])
+        result = validated_save_continuity(store, reply, wrap_token=wrap["wrap_token"])
 except AnnealMemoryError as err:
     logger.error(
         "anneal-memory failed (op=%s path=%s): %s",
@@ -239,7 +218,7 @@ except AnnealMemoryError as err:
     raise
 ```
 
-`exc_info=True` captures the full traceback including the `__cause__` chain to the underlying `sqlite3` error (if any). That's almost always all you need.
+`exc_info=True` captures the traceback including the `__cause__` chain down to the underlying `sqlite3` error, if any. That is usually all you need.
 
 ### The hierarchy
 
@@ -252,96 +231,74 @@ AnnealMemoryError (Exception)
  └── WrapCancelGatedError
 ```
 
-- **`AnnealMemoryError`** — base class. Catch this at your outermost boundary. anneal-memory deliberately does NOT mirror PEP 249 / DB-API 2.0's nine-class hierarchy: this is a library that consumes a database internally, not a database driver, so callers branch on operational intent (log/retry/escalate), not on vendor-level failure taxonomy.
-- **`StoreError`** — operation-level failure with structured context. Carries an `.operation` field (a `StoreOperation` literal like `"save_continuity"`, `"record"`, `"wrap_completed"`) and a `.path` field pointing at the store DB file. Covers file-write failures (continuity/meta atomic writes) and integrity failures (partial wrap-snapshot state).
-- **`StoreDatabaseError`** — subclass of `StoreError` raised when a SQLite operation fails (locked database, disk full, integrity constraint violations after retries, corruption). The underlying `sqlite3.DatabaseError` is attached as `__cause__` at raise time (not preserved across pickle — see below). Because it subclasses `StoreError`, existing `except StoreError` handlers catch it unchanged.
-- **`WrapOwnershipError`** — a sibling of `WrapInProgressError` (also NOT a `StoreError`). Raised by `Store.wrap_cancelled(expect_token=...)` when the store's current wrap token is not the one the caller claims. Where `WrapInProgressError` stops a second wrap *clobbering* the first, this stops a second session *cancelling* it. Carries `.expected` and `.actual`; **`actual is None` means no wrap is in progress at all** (the caller's wrap already finished — retry-safe) as distinct from a wrap present and owned by someone else (backing off is the right move). The comparison happens inside the same `BEGIN IMMEDIATE` transaction that clears, so it is a true compare-and-swap across connections rather than a read-compare-write with a window. Omitting `expect_token` clears whatever is current, except a wrap prepared under the consolidate gate (see `WrapCancelGatedError`). `.partial_state` marks corrupt lifecycle state; clear that with `expect_partial=True`, which refuses (`.expect_partial` is then `True`) if a healthy wrap has replaced it, rather than a plain cancel that would end that wrap too.
-- **`WrapCancelGatedError`** — also an `AnnealMemoryError`, not a `StoreError`. Raised by `Store.wrap_cancelled()` without `expect_token` when the wrap in progress was prepared under the consolidate gate by a session other than the caller's `session_id`. Nothing is changed. Pass that wrap's token, the preparing `session_id`, or `force=True` when the preparing session is gone. Carries `.gated_session` and `.session_id`; pickle-safe. A partial (corrupt) lifecycle is never gated, so clearing it stays the recovery.
-- **`WrapInProgressError`** — a **sibling** of `StoreError`, NOT a subclass: it is a single-writer precondition refusal, not a store I/O failure, so an `except StoreError` handler deliberately does not swallow it. Raised by `prepare_wrap` (and `Store.wrap_started`) when a wrap is already in progress. Carries `.started_at` (the open wrap's timestamp) and is pickle-safe. Recovery: finish the open wrap (`validated_save_continuity`) or abandon it (`store.wrap_cancelled()`; for a gated wrap also pass the preparing `session_id`, or `force=True`; it returns a `WrapCancelReceipt` describing what it cleared; pass `expect_token=` to abandon it only if that wrap is still the one in progress), then prepare again — or pass `allow_restart=True` to `wrap_started` to deliberately discard it. (Out-of-process callers reach the same two paths as the `save_continuity` / `wrap_cancel` MCP tools and the `save-continuity` / `wrap-cancel` CLI subcommands; the error message names all three.)
-- **`SaveAuthorityError`** — **outside this tree entirely**: a `ValueError` subclass (not an `AnnealMemoryError`), exported at the top level and from `anneal_memory.store`. Raised by `validated_save_continuity` when the consolidate gate refuses a save — see [Error Handling](#error-handling) above for the refusal cases. Test with `isinstance`, not the message text.
+- **`StoreError`**: an operation-level failure. It carries `.operation` (a `StoreOperation` literal such as `"save_continuity"`, `"record"` or `"wrap_completed"`) and `.path`, the database file. It covers file-write failures and integrity failures such as partial wrap-snapshot state.
+- **`StoreDatabaseError`**: a SQLite operation failed (locked database, disk full, integrity violation after retries, corruption). The underlying `sqlite3.DatabaseError` is `__cause__` at raise time, though not across pickle. Existing `except StoreError` handlers still catch it.
+- **`WrapInProgressError`**: a sibling of `StoreError`, not a subclass. `prepare_wrap` (and `Store.wrap_started`) raises it when a wrap is already open. It carries `.started_at`. Recovery: save the open wrap, or abandon it with `store.wrap_cancelled()` (for a gated wrap pass the preparing `session_id`, or `force=True`; pass `expect_token=` to abandon it only if it is still the one open), then prepare again.
+- **`WrapOwnershipError`**: raised by `Store.wrap_cancelled(expect_token=...)` when the open wrap's token is not the one you named. It carries `.expected` and `.actual`; `actual is None` means no wrap is open at all (yours already finished, so it is safe to retry), as opposed to someone else's wrap being there (back off).
+- **`WrapCancelGatedError`**: raised by `Store.wrap_cancelled()` with no `expect_token` when the open wrap was prepared under the baton by another session. Nothing changes. Pass that wrap's token, the preparing `session_id`, or `force=True` if that session is gone.
+- **`SaveAuthorityError`** sits outside this tree, as described above.
 
-### When (and when not) to retry
+### When to retry
 
-`StoreDatabaseError` is **not blanket-retryable**. The subclass wraps every runtime database failure — transient contention AND permanent conditions like disk-full, integrity violations, and corruption. Retrying the non-transient class wastes cycles or makes things worse. Check the cause type and message to decide:
+`StoreDatabaseError` is not blanket-retryable. It wraps transient contention and permanent conditions alike, such as a full disk or corruption. Check the cause:
 
 ```python
 from anneal_memory import StoreDatabaseError
 
-def is_retryable(err: StoreDatabaseError) -> bool:
-    """Return True only for transient contention that a backoff-retry
-    can reasonably clear. sqlite3 doesn't expose SQLite's extended
-    error codes at the Python level (no SQLITE_BUSY constant), so we
-    dispatch on the cause type name and then match the message — the
-    ugly-but-stable approach.
 
-    This helper works both in-process AND after a pickle round-trip
-    because ``cause_type_name`` is a plain string field on the
-    exception instance, not a live ``__cause__`` reference (see the
-    Pickle section below for why that matters for cross-process
-    consumers like ProcessPoolExecutor and pytest-xdist)."""
+def is_retryable(err: StoreDatabaseError) -> bool:
+    """True only for transient contention that a backoff can clear.
+
+    cause_type_name is a plain string on the exception, so this works in
+    process and after a pickle round-trip (ProcessPoolExecutor, pytest-xdist),
+    where __cause__ is dropped.
+    """
     if err.cause_type_name != "OperationalError":
         return False
-    # The wrapped message embeds the sqlite3 error text, so we can
-    # string-match on str(err) regardless of whether __cause__ is
-    # still live.
     msg = str(err).lower()
     return "locked" in msg or "busy" in msg
 ```
 
-Then:
-
 ```python
 try:
-    result = validated_save_continuity(store, text, wrap_token=token)
+    result = validated_save_continuity(store, reply, wrap_token=token)
 except StoreDatabaseError as err:
     if is_retryable(err):
         retry_backoff()
     else:
-        logger.error(
-            "Non-retryable DB failure (op=%s): %s",
-            err.operation, err.__cause__,
-            exc_info=True,
-        )
+        logger.error("Non-retryable DB failure (op=%s): %s", err.operation, err.__cause__, exc_info=True)
         raise
 except StoreError as err:
-    # File I/O or integrity — not retryable; surface to operator.
-    logger.error(
-        "Store failure (op=%s path=%s): %s",
-        err.operation, err.path, err,
-    )
+    # file I/O or integrity: not retryable, surface it to the operator
+    logger.error("Store failure (op=%s path=%s): %s", err.operation, err.path, err)
     alert_operator(err)
-except AnnealMemoryError:
-    raise
 ```
 
-### `.operation` field
+`retry_backoff` and `alert_operator` are yours.
 
-The `.operation` value names the caller-facing unit of work (what you'd retry), not the individual SQL statement that failed. For most public methods it matches the method name exactly (`record`, `recall`, `wrap_completed`, `save_continuity`). Four exceptions surface internal sub-phases of `Store(path)` and `validated_save_continuity`:
+### The `.operation` field
 
-- **`"schema_init"`** — a failure during `Store(path)` construction (connect, schema setup, PRAGMA configuration, or orphan-tmp detection).
-- **`"batch_commit"`** — a failure during the outer commit of the two-phase-commit wrap pipeline. Surfaces to callers through `validated_save_continuity`, not through any method named `batch_commit`.
-- **`"batch_begin"`** — the save could not take its write lock at the start of that pipeline (another writer held it past the busy timeout). Nothing was written; the wrap stays open.
-- **`"supersession_repair"`** — `Store(path)` opened read-write, needed to repair supersession links an older version left dangling, and hit a database error other than lock contention (a corrupt or full disk). Contention is not an error: the repair waits for the next open.
+`.operation` names the unit of work you would retry, not the SQL statement that failed. For most public methods it equals the method name. Four values name internal phases:
+
+- `"schema_init"`: a failure while `Store(path)` was connecting, setting up the schema, or checking for orphan temp files.
+- `"batch_commit"`: the outer commit of the wrap's two-phase pipeline. It surfaces through `validated_save_continuity`.
+- `"batch_begin"`: the save could not take its write lock because another writer held it past the busy timeout. Nothing was written and the wrap stays open.
+- `"supersession_repair"`: `Store(path)` opened read-write to repair supersession links an older version left dangling and hit a database error other than lock contention.
 
 The full list of `StoreOperation` values is exported as a `Literal` from `anneal_memory`.
 
-### Pickle / copy
+### Pickle and copy
 
-Both error classes round-trip cleanly through `pickle`, `copy.copy`, and `copy.deepcopy` with their subclass identity and context fields preserved. The **`__cause__` chain does NOT survive pickle** — this is a standard Python limitation, not a library choice. Cross-process consumers (`ProcessPoolExecutor`, `pytest-xdist`, RPC transports) see a `StoreDatabaseError` with `__cause__ = None`; the cause text is embedded in `str(err)` for human-readable logs but the live sqlite3 exception object is local-scope only.
-
-**Retry decisions in cross-process contexts — use `cause_type_name`, not `__cause__`:** the `is_retryable()` helper above deliberately dispatches on `err.cause_type_name` (a plain string field populated at raise time) rather than `err.__cause__` (the live exception reference). The reason: after a pickle round-trip — which is what every `ProcessPoolExecutor`, `pytest-xdist` worker, or Celery task queue does when propagating exceptions back to a supervisor — Python drops `__cause__`. A helper that checks `isinstance(err.__cause__, sqlite3.OperationalError)` returns `False` for every error after unpickling, regardless of whether the original cause was transient. Silent retry-storm bait.
-
-`cause_type_name` is a plain string on the exception instance, populated by `_db_boundary` at raise time with `type(exc).__name__`. It survives pickle identically because there's no live reference to marshal. The `is_retryable()` example above works both in-process (with a live `__cause__`) and post-pickle (with `__cause__ = None`) via the same code path.
-
-If you need the live exception object (for `errno` access or sqlite3 extended error codes) you still need in-process access — those attributes don't survive pickle and `cause_type_name` doesn't try to preserve them. Cross-process retry decisions should dispatch on type name + message text; in-process callers can additionally drill into `err.__cause__.args` for errno-level detail.
+The error classes round-trip through `pickle`, `copy.copy` and `copy.deepcopy` with their subclass and context fields. The `__cause__` chain does not survive pickle; that is a Python limit. Use `cause_type_name` and the message text for retry decisions across processes.
 
 ### Hash chain verification
 
-`StoreError` / `StoreDatabaseError` are runtime operation errors. To validate the audit-log hash chain itself, run `anneal-memory verify` from the CLI — that walks every entry in the sidecar JSONL and returns an `AuditVerifyResult`.
+`StoreError` and `StoreDatabaseError` are runtime errors. To check the audit log's hash chain itself, run `anneal-memory verify`, which walks every entry in the JSONL and returns an `AuditVerifyResult`.
 
-## Next Steps
+## Next steps
 
-- **Framework integration:** See [integration guides](integrations/) for LangGraph, CrewAI, OpenAI Agents SDK, and 9 more frameworks
-- **MCP setup:** See the [README](../README.md#mcp-server) for editor configuration
-- **CLI usage:** See [`examples/agent-instructions.lean.cli.example`](../examples/agent-instructions.lean.cli.example) for the full agent workflow
-- **Session hygiene:** See the [README](../README.md#session-hygiene) for why wraps matter
+- Framework guides: [docs/integrations](integrations/)
+- MCP setup: the [README](../README.md#mcp-server)
+- Agent workflow snippets: [`examples/agent-instructions.lean.cli.example`](../examples/agent-instructions.lean.cli.example)
+- Session hygiene: the [README](../README.md#session-hygiene)
+- Upgrading from 3.x: [MIGRATING_TO_4.md](../MIGRATING_TO_4.md)

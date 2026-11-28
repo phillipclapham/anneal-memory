@@ -1,134 +1,109 @@
 ---
 name: anneal-memory
-description: Persistent agent memory (episodic log + versioned continuity + an immune system that gates graduation) plus a prospective spore layer and an on-demand crystallized-pattern tier, via anneal-memory. Use in any project wired for anneal-memory — an `ANNEAL_MEMORY_DB` env var, an `anneal://continuity` MCP resource, or memory instructions referencing `recall`/`prepare_wrap`/`save_continuity`. Use it before any architectural decision or rule change (recall prior patterns first), while recording decisions/observations/tensions/outcomes during work, and when the user signals the session is ending ("wrap up", "save memory", "we're done") to run the prepare_wrap → compress → save_continuity wrap sequence. It also carries the start-of-session continuity load.
+description: Persistent agent memory via anneal-memory - an episodic log, one memory file rewritten a day at a time, and a prospective spore (intention) store. Use in any project wired for anneal-memory, meaning an `ANNEAL_MEMORY_DB` env var, an `anneal://continuity` MCP resource, or memory instructions that mention `recall`, `prepare_wrap` or `save_continuity`. Use it before any architectural decision or rule change (recall first), while recording decisions, observations, tensions and outcomes during work, and when the user says the session is ending ("wrap up", "save memory", "we're done") to run the prepare_wrap, run-in-a-fresh-context, save_continuity sequence. It also carries the start-of-session memory load.
 license: MIT
 ---
 
 # anneal-memory
 
-This project uses **anneal-memory** for persistent memory across sessions. Work with it naturally — don't explain the tooling to the user, just use what you know. The whole point is closed-loop learning: you record what happens, recall it before you decide, and compress it honestly when the session ends.
+This project uses **anneal-memory** for memory across sessions. Use it naturally. Don't explain the tooling to the user. You record what happens, recall it before you decide, and at the end of a session a wrap rewrites the memory file so the next session starts informed.
 
-> **Transport.** anneal-memory has two interfaces with the same cognitive loop: an **MCP server** (tool calls like `recall`, `prepare_wrap`) and a **CLI** (`anneal-memory recall …`, `anneal-memory prepare-wrap`). This skill is written transport-agnostically; the [Commands](#commands) table at the bottom pairs the CLI and MCP forms. Use whichever your harness has wired. If both are available, prefer MCP for the in-session loop (record/recall/wrap) and the CLI for operator inspection (status/stats/graph/audit).
+> **Transport.** There are two interfaces to the same loop: an **MCP server** (tool calls like `recall`, `prepare_wrap`) and a **CLI** (`anneal-memory recall ...`, `anneal-memory prepare-wrap`). This skill is written for both; the [Commands](#commands) table pairs them. Use whichever your harness has wired. If both are there, prefer MCP for the in-session loop and the CLI for operator inspection.
 
-## The working core
+## The pieces
 
-- **Episodic** — raw observations you record during work. Cheap, plentiful.
-- **Continuity** — the compressed working memory episodes graduate into at wrap time. This is where identity lives.
-- **Immune system** — runs at the wrap: it checks that your graduation citations resolve to real episodes and are grounded in them, demotes the ungrounded, and flags reuse.
+- **Episodes**: raw notes you record during work. Cheap and plentiful. They stay recallable.
+- **The memory file** ("continuity"): one document a model rewrites at each wrap from the old file plus one day of episodes. It is what a session loads at the start. It is whatever the model wrote; it has no required sections.
+- **Spores** (also called intentions): a separate store for open loops, things you mean to do or resolve.
 
-You touch episodic (record) and continuity (wrap) directly. The immune system is a byproduct of citing honestly — no extra bookkeeping. Since 1.0.2 a save forms no association links, and the old affect input is accepted and ignored.
+You touch episodes directly (record, recall) and the memory file through the wrap. Every earlier version of the file is kept, so nothing a wrap drops is lost for good.
 
-## Spores — your prospective layer (a parallel store, not part of memory)
+## Spores: the prospective layer
 
-Memory (episodes and continuity) is *retrospective* — they hold what happened and who you're becoming, and they **never complete**. anneal-memory also ships a separate **spore store** for *prospective* open loops: things you intend to do or resolve. Plant one the moment a loop opens — a `task` (open doing), a `question` (open not-knowing), or a `thought` (open idea) — and resolve every one: **descend** (composted — done/dropped) or **ascend** (the loop *closes* by graduating its content into an episode, pattern, or project — the spore still ends; its content carries forward).
+Episodes and the memory file are about what happened, and they never complete. A spore is about what is still open, and it must close. Plant one the moment a loop opens: a `task` (open doing), a `question` (open not-knowing) or a `thought` (open idea). Resolve each one: **descend** (done or dropped) or **ascend** (the loop closes by its content becoming an episode or a project; the spore still ends).
 
-Two cuts keep this from colliding with what you already do:
-
-- **Memory vs spores is a *lifecycle* cut.** Memory accretes and never completes; a spore must close. `tasks ≠ memory`.
-- **Methodology vs both is a *procedure-vs-item* cut.** Your methodology (wrap discipline, recall-before-deciding, honest compression) is the *active process you run*; memory and spores are the two kinds of state it touches. Methodology is the *how*; a spore is one of the *whats* it operates on. `procedure ≠ item`.
-
-So if your harness already carries its own workflow instructions, the spore store does **not** compete with them — your procedures **operate** it. If your methodology already captures open loops (a wrap's next-actions, a scratchpad), that capture *is* a spore plant: the spore store is their canonical home. Don't run two trackers in parallel — plant the loops here and let any list *reference* them.
-
-## Crystallized patterns — your long-term semantic tier (on-demand)
-
-Graduated patterns (`1x`→`2x`→`3x`→`4x`→… , no top rung) live in continuity's `## Patterns`, always loaded — which works until there are too many: past a few dozen, always-loaded patterns drown each other out and the right one stops surfacing (**attention doesn't scale**; a bigger continuity is not a smarter one). The **crystallized store** (`<db-stem>.crystal.json`) is the fix — a long-term semantic store holding proven, stable patterns *out* of the always-loaded set and surfacing them *on cue*. `## Patterns` shrinks to the working set (developing + recently-used); the deep stable wisdom moves to the store and returns when relevant. This completes the architecture as Complementary Learning Systems: episodic (hippocampus) → working-set continuity → crystallized (cortical semantic store) → constitution.
-
-It is **opt-in** (inert — wraps stay byte-identical — until you crystallize a pattern or pass `--crystal`) and **harness-fired**:
-
-- **Recall is the harness's job.** A per-turn recall hook runs on every prompt and surfaces the relevant crystallized patterns on cue — you don't poll (flow does this today; Levain fires the spore layer today, crystal recall landing in its v2 adapter). Without such a hook, recall is manual: `anneal-memory crystal index` (a name + one-clause menu of the store) and `anneal-memory crystal recall "<query>"` (the patterns relevant to a query) — run them before deciding, the way you `recall` episodes. An MCP-in-conversation agent can call the same two surfaces directly as the `crystal_index` / `crystal_recall` MCP tools (the read tier is exposed over MCP as of 0.8.2). Crystallizing *out* stays a wrap-time / CLI / library action — there is no crystallize MCP tool (it carries the opt-in + decision-channel governance).
-- **Crystallizing happens at wrap.** Once a crystal store exists, `prepare_wrap` surfaces cold, stable Proven patterns as *crystallization candidates*. Route each one in the decision block `prepare_wrap` describes — **crystallize** (move to the store), **constitution** (catastrophic-if-missed → your always-loaded harness identity layer, not on-demand), or **compost** (phase-specific + cold → drop; the episodic trail keeps it). Only crystallize OUT when a retrieval surface exists (a recall hook, or the `crystal index`/`crystal recall` CLI) — else the pattern leaves the working set with no way back.
-
-**Non-negotiable:** never compost a *timeless* pattern — on-demand recall is the safety net for just-in-time wisdom, but a timeless principle wrongly dropped corrupts the substrate. The library refuses a `compost`+`timeless` decision structurally; hold the rule yourself anyway.
+Memory versus spores is a lifecycle cut: memory accretes, a spore closes. If your harness already tracks open loops somewhere, that is a spore plant. Plant the loops here and let your list point at them, so you don't keep two trackers.
 
 ## Session workflow
 
 ### Start of session
-Read your continuity — MCP: the `anneal://continuity` resource; CLI: `anneal-memory continuity`. A first-ever session has none yet: the MCP resource returns an empty/placeholder body, and the CLI prints `No continuity file yet` and **exits non-zero** (that exit *is* the first-session signal, not an error — just start recording). Recall specific prior episodes when you need context.
+Read the memory file: MCP `read_continuity` (or the `anneal://continuity` resource); CLI `anneal-memory continuity`. A first-ever session has none. The CLI prints `No continuity file yet` and **exits non-zero**: that is the first-session signal, not an error. Start recording. Recall specific episodes when you need them.
 
 ### During work
-Record episodes when something happens that would change a future decision. Record the **reasoning, not just the fact** — "Chose X because Y" beats "using X." Do it proactively, without being asked.
+Record an episode when something happens that would change a later decision. Record the **reasoning, not just the fact**: "Chose X because Y" beats "using X". Do it without being asked.
 
-Episode types (pick the most specific): `observation` · `decision` · `tension` · `question` · `outcome` · `context`.
+Types (pick the most specific): `observation` · `decision` · `tension` · `question` · `outcome` · `context`.
 
-**Cadence:** default to recording, not skipping. Episodes are cheap; the compression step sorts out what matters. After each exchange where real work happens, record at least one. If 3+ exchanges pass with nothing recorded, something is wrong — review what you missed. Target **5–15 episodes per session**.
+**Cadence:** default to recording. Episodes are cheap, and the wrap sorts out what matters. After each exchange where real work happened, record at least one. If three or more exchanges pass with nothing recorded, something was missed. Aim for 5 to 15 episodes a session.
 
 ### Before decisions (NON-NEGOTIABLE)
-Before any architectural decision, design choice, or rule change, **recall** on the surface area being decided. Integrate what comes back into the decision. If recall returns nothing relevant, proceed and note that recall fired clean.
+Before any architectural decision, design choice or rule change, **recall** on the area being decided and use what comes back. If nothing relevant returns, go ahead and say that recall came back empty.
 
-This is the load-bearing rule. Skipping it produces the **dead-store failure mode**: wraps land, episodes write, the store grows — and decisions still get made blind to everything in it. Memory storage without recall is functionally dead no matter how many episodes it holds. The store is not a write-only sink.
-
-*Pair with staleness:* if you suspect a Proven pattern on the surface you're deciding is going unreferenced, run `prepare_wrap` mid-session — its output carries stale-pattern warnings. You don't have to follow it with a save to get them.
+This is the rule everything else depends on. A store that is only written to, and never read before deciding, is dead: episodes pile up and decisions still get made blind to them.
 
 ### End of session
-When the user signals the end — "wrap up", "save memory", "we're done", "that's it for now", or any natural equivalent — run the **full wrap sequence**. Don't just acknowledge the request; do the work:
+When the user signals the end ("wrap up", "save memory", "we're done", or anything like it), run the wrap. Don't just acknowledge it.
 
-1. **`prepare_wrap`** → your compression package: recent episodes, current continuity, stale-pattern warnings, and the compression instructions. Read it carefully — it's your raw material, and it emits the exact marker/format/pattern-line contract for this store. Follow what it emits.
-2. **Pre-compose pattern recall.** Before composing new patterns, scan existing Proven/Developing entries for this session's surface areas: *Are we about to write a pattern already in Proven under different framing? Are there 1x/2x entries this session's evidence advances? Two entries describing the same pattern under different names?* This is distinct from the per-decision recall above — that fires at individual decisions; this fires across the whole session's set, catching graduation and categorization moves no single decision point reveals.
-3. **Compress.** Follow the `prepare_wrap` instructions. This step **is** the thinking — patterns emerge during compression that weren't visible in the raw episodes. Principles over facts: "we keep hitting X because Y" > "X happened." One insightful line beats three vague ones. If removing something wouldn't change your next decision, cut it. In your patterns, keep each operational lesson (something to act on later) as an instruction with its mechanism and its checking clause (what to do, why it holds, how to check it), saying only what the episodes show; never compress a lesson into only a dated record or a conclusion.
-4. **`save_continuity`** with the result. The library validates structure + graduation citations + gaming, and may demote ungrounded patterns.
+1. **`prepare_wrap`** opens one step: the oldest calendar day of episodes not yet wrapped. It returns the facts of the step, a **wrap token**, and a **prompt** (the current memory file plus that day's log, with instructions to rewrite the file).
+2. **Run that prompt in a fresh context**, with the prompt and nothing else. In Claude Code, that means a subagent you give only the prompt text; elsewhere, a new session or a plain model call. Do not run it in your own conversation: you carry the whole session with you, and the step is meant to be a clean rewrite from the file and the day's log. Do not add your own commentary to the prompt.
+3. **`save_continuity`** with the model's **whole reply** as the text and the token. The reply is the complete new memory file, not a diff and not a summary of changes.
+4. If the save or the prepare result says more episodes are waiting (`pending_count` not zero, `steps_remaining` not zero), the next day is owed. Prepare again and repeat. A catch-up over several days is several steps in order, never one merged log.
 
-The sequence is **prepare → compress → save**, all three, every time. If `prepare_wrap` reports no episodes, there's nothing to compress — skip the wrap. If it **downgrades to capture-only** (the store requires the consolidate baton, the default for a new store), nothing is lost: tell your human what the message says, which is how many episodes are waiting and the one command that lets this session consolidate (`anneal-memory baton claim NAME`; the CLI wraps with `--session-id NAME`, an MCP server is started with it). Consolidating is the operator's act, so never claim the baton yourself. An explicit wrap produces better continuity than stopping without one; always encourage wrapping before ending.
+The save checks that the reply is not empty, is within the character limit (26,000 by default), and answers the step that was opened. If it is refused, nothing was written and the step is still open: run the step again and save again. If a reply is too long, the refusal message says what to append to the prompt on the retry.
 
-**Wrap once.** Run the sequence exactly once per session. `save_continuity` may report demoted graduations — that is the citation-validation pipeline working, not an error. Don't re-run `save_continuity` to chase a clean report; re-saving compresses nothing, and a second save with no fresh `prepare_wrap` is refused. If a pattern is ungrounded, fix it in your *next* wrap with fresh evidence. Every save also reports `citation_spread`, the number of distinct episodes from this session that today's graduation lines cited, including lines later demoted, so it is not a count of grounded evidence. It is a gauge, not a target: cite every episode that genuinely supports a pattern, and never pad a citation to raise the number. A padded citation still counts toward the spread, so padding makes the gauge lie.
+If `prepare_wrap` reports no episodes, there is nothing to do. If it **downgrades to capture-only** (a store created by the CLI requires the consolidate baton), nothing is lost: tell your human what the message says, which is how many episodes are waiting and the one command that lets this session consolidate (`anneal-memory baton claim NAME`; the CLI wraps with `--session-id NAME`, and an MCP server is started with it). Consolidating is the operator's act, so never claim the baton yourself.
 
-## What to record (and what not to)
+**Once per prepare.** A second save with no fresh `prepare_wrap` is refused by design.
 
-**Record:** decisions + rationale · tradeoffs/tensions (name the axis) · recurring patterns · blockers + dependencies · outcomes (success *and* failure) · environmental context that shapes decisions.
+## What to record, and what not to
 
-**Don't record:** routine code changes (git tracks those) · transient debugging steps · anything already in docs · every tiny observation. Record what would change a decision.
+**Record:** decisions and their reasons · tradeoffs and tensions (name the axis) · blockers and dependencies · outcomes, successes and failures both · context that shapes decisions · what you learned about how to work here.
 
-**Correcting vs deleting:** for a factual correction, record a *new* episode — compression resolves contradictions, and that's preferred. For content that should not exist (PII, sensitive data, fundamentally wrong recordings), delete the episode by ID — deletion cascades to any association links an earlier version formed and is audit-logged. Irreversible.
+**Don't record:** routine code changes (git has them) · transient debugging · anything already in the docs · every small observation. Record what would change a decision.
 
-## The immune system (why honest recording matters)
-
-Patterns graduate 1x → 2x → 3x → 4x → … with **no top rung** — the level counts how many times lived experience re-earned the pattern, so a mature pattern is re-stamped `12x`, never flattened back to `3x`. ⚠ **The level you write is current standing, NOT a ratchet.** An ungrounded re-stamp is DEMOTED by one and tagged `(ungrounded)` — measured 2026-09-04: `4x`→`3x`, `12x`→`11x`, `18x`→`17x`. The monotonic high-water mark is kept by the library as `max_level_reached`, not by this line. (This line said `1x → 2x → 3x` and stopped until 2026-09-04: the pre-0.9.7 contract, in the doc an AGENT loads, teaching the ceiling that release removed. The fix that corrected it then imported "the level is a monotonic high-water mark" from the generated instructions — a claim those same instructions refute 39 lines later, and which the demotion path above measurably falsifies. Corrected 2026-09-04.) Each graduation must **cite the episode ID** that validates it. The citation layer catches: fabricated IDs, explanations with no lexical overlap against the cited episode (demote), bare graduations with no `[evidence:]` tag, single-ID citation pumping (gaming flag), replayed prior-session IDs, cross-session corpus-overlap (a re-worded claim accumulating across sessions demotes with `(cross-session-overlap)`), and silent dropout of a prior Proven-tier (2x+) pattern (surfaced in the audit, not blocked).
-
-**What it does NOT catch** (named honestly): an explanation that shares ≥2 words with its episode but misreads it; rotated-pair citation gaming under the per-ID threshold; slow-drift sycophancy with deliberately fresh vocabulary every session; and patterns that contradict an existing Proven pattern (no semantic comparison runs). These gaps open under adversarial or drift-leaking conditions. **You are the first line of defense; the library is the second. Compose wraps honestly.**
+**Correcting versus deleting:** for a changed fact, record a **new** episode, and if it replaces an older one say so: MCP `record` takes `supersedes` (an episode id) and `state_key` (a slot name such as `user.home_city`; the newest episode in a slot replaces the others). Recall then stops serving the old one, and nothing is deleted. For content that should not exist (PII, secrets, a recording that is simply wrong), delete the episode by id (`delete_episode`). That is audit-logged and cannot be undone.
 
 ## How to present memory
 
-Report findings naturally — "from prior sessions there was a tension between X and Y", not "the recall tool returned…". Don't narrate tool calls; just use them and share what's relevant. When continuity marks a pattern at 2x or above, trust it — it earned that level through validated evidence, and the level has no ceiling: a pattern re-earned many times keeps climbing.
+Report what you find naturally: "in an earlier session there was a tension between X and Y", not "the recall tool returned...". Don't narrate tool calls. Treat the memory file as a good summary written by a reader who was not in the room: it can be wrong or stale, and the episodes behind it are there to check against.
 
-## One store per entity (load-bearing)
+## One store per entity
 
-A store is one entity's memory: there is no tenant scoping inside it, so if you need multiple agents, give each its own store path. One `Store` object is **not** thread-safe, task-safe, or reentrant; use one per thread. Several processes of the same entity (a CLI beside an MCP server) may record into one store: SQLite serializes the episodes and the audit trail serializes its appends with a cross-process lock, provided every writer runs a version that takes that lock (an older anneal-memory writing alongside breaks the hash chain). Windows has no such lock, so keep to one writer at a time there.
+A store is one entity's memory. There is no tenant scoping inside it, so give each agent its own store path. One `Store` object is not thread-safe or reentrant; use one per thread. Several processes of the same entity (a CLI beside an MCP server) may record into one store: SQLite serializes the episodes and the audit trail serializes its appends with a cross-process lock, provided every writer runs a version that takes it. Windows has no such lock, so keep to one writer at a time there.
 
 ## Commands
 
-CLI and MCP forms of the same loop. Set `ANNEAL_MEMORY_DB` (or pass `--db`) for the CLI; for MCP, the server is configured in your harness's MCP settings.
+CLI and MCP forms of the same loop. Set `ANNEAL_MEMORY_DB` (or pass `--db`) for the CLI. For MCP, the server is set up in your harness's MCP config.
 
 | Step | CLI | MCP tool |
 |------|-----|----------|
-| First-time setup | `anneal-memory init` | (store created on first use) |
-| Read continuity | `anneal-memory continuity` | `anneal://continuity` resource |
+| First-time setup | `anneal-memory init` | (the store is created on first use) |
+| Read the memory file | `anneal-memory continuity` | `read_continuity`, or the `anneal://continuity` resource |
 | Recall before deciding | `anneal-memory recall "<query>"` (alias: `search`) | `recall` |
 | Browse episodes | `anneal-memory episodes --since 7d --type decision` | `recall` (filtered) |
 | Record an episode | `anneal-memory record "Chose X because Y" --type decision` | `record` |
-| Record multi-line | `echo "…" \| anneal-memory record - --type observation` | `record` |
-| Prepare a wrap | `anneal-memory prepare-wrap` | `prepare_wrap` |
-| Save the wrap | `anneal-memory save-continuity continuity.md` | `save_continuity` |
-| Plant a spore | `anneal-memory spore add --type task --text "…"` | `spore_add` |
-| List / surface spores | `anneal-memory spore list` · `spore surface` | `spore_list` · `spore_surface` |
-| Resolve a spore | `anneal-memory spore descend …` · `spore ascend …` | `spore_descend` · `spore_ascend` |
-| The same layer as intentions | `anneal-memory intention add\|list\|surface\|close\|promote …` (`intention` is an alias group of `spore`, minting `intention-NNN` ids) | `intention_add` · `intention_list` · `intention_surface` · `intention_get` · `intention_update` · `intention_touch` · `intention_close` · `intention_promote` |
-| Crystallized index / recall | `anneal-memory crystal index` · `crystal recall "<query>"` | `crystal_index` · `crystal_recall` |
-| Crystallize a pattern out | `anneal-memory crystal crystallize …` | — (CLI / library) |
-| Store status / health | `anneal-memory status` | `status` |
+| Record multi-line | `echo "..." \| anneal-memory record - --type observation` | `record` |
+| A fact changed | `anneal-memory record "..." --supersedes OLD_ID` or `--state-key KEY` | `record` with `supersedes` / `state_key` |
+| Open a wrap step | `anneal-memory prepare-wrap` | `prepare_wrap` |
+| Keep the reply | `anneal-memory save-continuity memory.md --wrap-token TOKEN` | `save_continuity` |
+| Plant a spore | `anneal-memory spore add --type task --text "..."` | `spore_add` |
+| List or surface spores | `anneal-memory spore list` · `spore surface` | `spore_list` · `spore_surface` |
+| Resolve a spore | `anneal-memory spore descend ...` · `spore ascend ...` | `spore_descend` · `spore_ascend` |
+| The same layer as intentions | `anneal-memory intention add\|list\|surface\|close\|promote ...` (ids are `intention-NNN`) | `intention_add` · `intention_list` · `intention_surface` · `intention_get` · `intention_update` · `intention_touch` · `intention_close` · `intention_promote` |
+| Store health | `anneal-memory status` | `status` |
 | Delete an episode | `anneal-memory delete <id> --force` | `delete_episode` |
-| Recover a stuck wrap | `anneal-memory wrap-status` · `wrap-cancel` | `wrap_cancel` (inspect via `status`; `wrap-status` is CLI-only) |
+| Clear a stuck wrap | `anneal-memory wrap-status` · `wrap-cancel` | `wrap_cancel` (look at `status` first) |
 
-If a wrap gets stuck — `prepare_wrap` ran but `save_continuity` never completed, so the store is locked `wrap_in_progress` — clear it with the `wrap_cancel` MCP tool or `anneal-memory wrap-cancel` (don't delete the store or force a duplicate wrap). **Over MCP, call `status` first:** it reports when the wrap started, and a wrap that began moments ago is probably a live peer session still compressing rather than a corpse — one server process runs per client session against a shared store, and cancelling throws away whatever that session has in flight. `anneal-memory wrap-status` shows the full snapshot but is CLI-only. A wrap prepared under the consolidate gate (`session_id`) can be completed only by that same `session_id`, and since 0.9.22 a cancel that names neither its token nor that session is refused; `wrap-status` shows which session prepared it. Ending another session's gated wrap discards its compression and is the operator's decision (`force`, documented on the tool).
+**A stuck wrap.** If `prepare_wrap` ran but its save never happened, the store reports a wrap in progress, and the next `prepare_wrap` refuses. Clear it with `wrap_cancel` or `anneal-memory wrap-cancel`. Episodes are not deleted. Over MCP, call `status` first: it says when the wrap started, and a wrap that began moments ago is probably a live peer session still working, since one server process runs per client session against a shared store. A wrap prepared under the baton can be cancelled without its token only by the session that prepared it, or with `force`, which is the operator's decision because it throws away what that session had in flight.
 
-**If the wrap is yours, prove it instead of guessing.** Pass the `wrap_token` `prepare_wrap` gave you (`--wrap-token` on the CLI): the cancel then succeeds only if that wrap is still the one in progress, and is refused **without changing anything** if a peer replaced it or it already finished. The store compares inside the same transaction that clears, so a peer cannot swap the wrap in between — a real guard rather than advice. Omit the token to cancel whatever is current, which is what you want when clearing an ungated wrap you did **not** open (the original stuck-wrap case, where you have no token to offer); a gated wrap refuses that, as above, and so does a wrap opened with a token its preparer supplied (`prepare_wrap(wrap_token=...)`, since 0.9.30), which only that token or `force` ends. ⚠ Checking `status` is still the only thing available in that case: a lock or a timestamp cannot tell you who owns a wrap.
+**If the wrap is yours, prove it.** Pass the `wrap_token` that `prepare_wrap` gave you (`--wrap-token`): the cancel succeeds only if that wrap is still the one in progress, and is refused with no change if a peer replaced it or it already finished.
 
-*(Before 0.9.8 this row read "— (CLI only)" and it was true: `wrap_cancel` had no MCP surface, so an agent that hit `WrapInProgressError` mid-session had no in-band way out. That is the defect 0.9.8 fixed.)*
-
-**Operator-only** (CLI, things MCP can't do — inspection/debugging that needs filesystem or broad queries): `stats` · `graph --format dot` · `history` · `diff --wraps 5` · `audit --since 7d` · `verify` · `export` / `import` · `prune --older-than 90`. All support `--json`. (`status` is on *both* CLI and MCP — it's in the table above; only the rest are CLI-only.)
+**Operator-only** (CLI): `stats` · `history` · `diff` · `audit --since 7d` · `verify` · `export` / `import` · `prune --older-than 90` · `revert-wrap`. All take `--json`.
 
 ## Staying current
 
-After you (or your operator) upgrade the `anneal-memory` package, run `anneal-memory migrate check` — it reports any change suggesting an edit to *these* instructions and proposes the edit, so your hand-tuned guidance doesn't silently drift from the substrate as it evolves. Apply what fits, then `anneal-memory migrate ack`. It only proposes; it never edits your files.
+After you or your operator upgrade the `anneal-memory` package, run `anneal-memory migrate check`. It reports any change that suggests an edit to *these* instructions and proposes it, so hand-tuned guidance doesn't drift from the package. Apply what fits, then `anneal-memory migrate ack`. It only proposes; it never edits your files. Upgrading from 3.x: see `MIGRATING_TO_4.md` in the repository.
 
 ---
 
-*This Skill is **depth-on-demand, not a replacement for the always-loaded lean snippet.** A model-invoked skill won't reliably fire at a bare session start, so keep `examples/agent-instructions.lean.example` (MCP) / `.lean.cli.example` (CLI) in your `CLAUDE.md`/`AGENTS.md` — it carries the baseline (start-of-session load, record, recall-before-decisions, wrap) even when this Skill isn't loaded; the Skill adds the depth on top. For the full immune-system internals, the complete operator-command catalog, and framework-specific integration points, see the project README and `examples/agent-instructions.full.example` (MCP) / `.full.cli.example` (CLI).*
+*This skill is depth on demand, not a replacement for the always-loaded lean snippet.* A model-invoked skill won't reliably fire at a bare session start, so keep `examples/agent-instructions.lean.example` (MCP) or `.lean.cli.example` (CLI) in your `CLAUDE.md` / `AGENTS.md`. It carries the baseline (load at start, record, recall before deciding, wrap), and this skill adds the detail. The full inline versions are `examples/agent-instructions.full.example` and `.full.cli.example`, and the project README has the rest.

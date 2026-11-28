@@ -1,91 +1,56 @@
-# anneal-memory — lineage, architecture & landscape
+# anneal-memory: how it is put together, and where it came from
 
-This is the depth behind the [README](../README.md): where anneal-memory came from (a notation called FlowScript, and a thesis about language and partnership), why the memory tiers fall out of one problem, where it sits in the 2026 consolidation landscape, why it carries no LOCOMO score, and why a hash-chained provenance trail is a different thing from a timestamped log. The README gives you the working answers; this gives you the reasoning.
+This is the depth behind the [README](../README.md). It covers what is stored where, why consolidation is a single method, what an audit trail does and does not give you, and where the project came from.
 
----
+## What is stored where
 
-## Lineage: from FlowScript to anneal
+One agent, one store. The store is a SQLite database plus a few files beside it.
 
-anneal-memory didn't start as a memory library. It started as a notation.
-
-**FlowScript** was a typed reasoning notation — a small set of semantic markers (`→` for causation, `?` for an open question, `><` for a tension on an axis) you wrote alongside ordinary prose, which compiled to a queryable knowledge graph. The bet underneath it was bigger than "better prompts." It was a thesis about language itself: that the structure of a language determines what can be thought in it. Mathematical notation made calculus thinkable; musical notation made the symphony writable; a notation that made *relationships* first-class and *structure* computable might make a kind of shared human-AI reasoning thinkable that prose can't hold. Stated openly as a thesis, not a finding, the compressed form was **language = consciousness = reality**: give people a better structure to think in, and you change what they can think.
-
-That sounds like philosophy, and it is. What kept it honest is that the notation also turned out to be *infrastructure*. The compiled representation carried exactly what a memory system needs: content-hash IDs (the same idea dedupes itself), provenance (which source, which line, when), schema validation (invariants that can't be left vague), and typed relationships. Tested across six AI architectures, all of them parsed the notation without being shown a spec, which suggested it was catching something structural about how language carries reasoning rather than a quirk of one model's training.
-
-**Then the load-bearing realization: the power was in the insights, not the syntax.** Asking a human to learn 21 markers is a barrier, and a fossilizing one. Ship someone your grown notation and they get your *artifact*, not your practice. But the things that made FlowScript work didn't depend on the notation at all:
-
-- **Compression is cognition.** The reasoning didn't live in the stored markers; it emerged in the act of compressing experience into structure. That's the wrap.
-- **Citation and provenance make memory trustworthy.** A claim is only as good as the evidence chain behind it. That's citation-validated graduation and the hash-chained audit trail.
-- **Temporal graduation.** An idea earns standing by recurring with evidence over time, not by being asserted once. That's `1x → 2x → 3x → 4x → …` — there is no top rung, and a mature pattern keeps counting rather than being flattened back.
-- **Evidence-tier honesty.** FlowScript's founding discipline was to tag every claim `[PROVEN]` / `[EVIDENCED]` / `[HYPOTHESIS]` and never let the three blur. Made structural, that discipline *is* the immune system — and the README's *Honest scope* section is the same reflex: name what you can't catch as loudly as what you can.
-
-anneal-memory is those insights with the notation removed. The agent uses natural language; the system enforces the structure. You don't learn a syntax — you record what happened, and the memory does the grading. The README's one-line version ("the core insights proved more powerful than the syntax") is the whole pivot.
-
-**The deeper why — and why "own + govern" is load-bearing, not a slogan.** The point was never "remember more." It was a hypothesis about a *better kind of collaboration*: that a human and an AI working in a shared, persistent, trustworthy substrate can produce thinking that exceeds either alone. That's the **Third Mind**: observed over months of single-user use, offered as a hypothesis to test rather than a result to believe. What that observation surfaced is the part that matters here: emergence took *two* factors, not one. A technical substrate (persistent, continuous, provenance-tracked memory) was necessary but not sufficient. The other half was relational: a human willing to drop the master/tool frame and meet the AI as an equal-yet-alien intelligence, openly, with real vulnerability and trust.
-
-You can't be vulnerable with a memory you can't trust. You can't extend that trust to a substrate that drifts, that a vendor can revoke, that rewrites your shared identity unbidden, or that quietly amplifies whatever you last wanted to hear. So the technical half of the Third Mind has requirements, and they are exactly anneal's: memory you **own** (local, zero-dependency, no vendor in the loop), memory you **govern** (you decide what graduates; the identity-rewriting consolidation is gated to a human), and memory that is **evidence-validated** (the immune system, so what survives survived for a reason you can inspect). The positioning isn't marketing. It's the precondition the founding hypothesis named, built as a library.
-
-FlowScript the notation is archived ([github.com/phillipclapham/flowscript](https://github.com/phillipclapham/flowscript)); its insights ship here.
-
----
-
-## The Memory Architecture (Complementary Learning Systems)
-
-The immune system in the README answers one question: *is this memory any good?* This section answers a different one: *where does good memory live so it stays usable?* The two are independent, and the second is where most agent-memory architectures quietly fail. The tiers here aren't a feature list. They fall out of one problem — graduated wisdom has to stay *retrievable* without staying *always-loaded* — and the crystallized tier in particular is forced by the one below it, not chosen.
-
-**Storage was never the constraint. Attention is.** Graduation runs one way: a pattern earns 1x → 2x → 3x → … and then it lives in the always-loaded continuity. There was no path back *out*, so the working set only ever grew. That looks like a budget problem — "the continuity file is getting big" — but the budget is the symptom. The disease is that **attention doesn't scale**: past a few dozen always-loaded patterns they drown each other out (the Lost-in-the-Middle effect), and a pattern's value is *firing at the right moment*, not *being present*. A bigger continuity is not a smarter one — the right handful surfaced at the right moment beats a wall of always-on ones.
-
-**The brain already solved this.** Complementary Learning Systems ([McClelland, McNaughton & O'Reilly, 1995](https://pubmed.ncbi.nlm.nih.gov/7624455/)) describes how biological memory avoids exactly this failure: a fast hippocampal store captures experience cheaply, slow consolidation distills it, and — the load-bearing part — the neocortex itself *splits*. You do not hold everything you know in working memory. You hold a small active set and retrieve the relevant piece from a vast long-term store when the context calls for it. Recall is on-cue, not always-on. (This is the same consolidation-as-sleep process described under *Session Hygiene* in the README — here it's the architecture, not the analogy.)
-
-anneal maps onto the first three tiers concretely — each is a real file/mechanism, not a metaphor; the fourth, constitution, completes the CLS model but is the *harness's* always-load layer, not anneal's (named here to make the architecture legible, not to claim it). This is a *different axis* than the working core in the README's *Architecture* section: that is **how the store works** (episodic store, continuity, immune system, crystallized store); these are the **retrieval economy** — *where* graduated wisdom lives relative to the always-loaded budget.
-
-| Tier | Brain analog | Where it lives | Loaded |
-|---|---|---|---|
-| **Episodic** | hippocampus | `episodic.db` (SQLite, typed episodes) | on cue (`recall`) |
-| **Working set** | working memory | continuity `## Patterns` — developing (1x/2x) + recently-used | **always** |
-| **Crystallized** | cortical semantic store | `<stem>.crystal.json` (`CrystalStore`) | **on cue** (harness recall hook) |
-| **Constitution** | core identity / deep priors | the harness's always-load layer | **always** |
-
-The wrap is the consolidation step that moves a pattern between tiers: a cold, stable Proven crystallizes *out* of the working set into the store; a crystal activated recently (crystallized, or marked with `crystal touch`) is surfaced as a re-warm candidate to pull back *in*; recall alone does not activate one.
-
-**The crystallized tier is the piece that completes the architecture.** Before it, anneal had the hippocampus (episodic) and the consolidation act (the wrap) but *no cortical semantic store*. A pattern that graduated to Proven had exactly one place to live: the always-loaded continuity. That conflates working memory with long-term memory — the one thing CLS specifically does *not* do — which is why graduation was a one-way ratchet. `CrystalStore` is that missing store: a JSON sibling of the spore store (same atomic-write + `fcntl` durability, read-time activation tiering, typed lifecycle) that holds every proven-and-stable pattern *retrievably* — out of the always-loaded set, surfaced on cue. The working set shrinks to what's developing or hot; the body of graduated wisdom moves to a store and is recalled when relevant. The ratchet finally has its OUT path. The architecture revealed the gap, and the gap had a known shape.
-
----
-
-## The Consolidation Landscape (2026)
-
-Multiple independent groups shipped consolidation-based agent memory architectures in early 2026: anneal-memory (March, citation-graduation multi-tier), [OpenClaw Dreaming](https://docs.openclaw.ai/concepts/dreaming) (April 9, three-phase Light/REM/Deep Sleep), and Anthropic's [KAIROS / autoDream](https://www.deeplearning.ai/the-batch/claude-codes-source-code-leaked-exposing-potential-future-features-kairos-and-autodream/) (leaked March 30 via Claude Code source map, four-phase merge / remove-contradictions / promote-provisional-to-absolute / MEMORY.md index). Convergence on consolidation validates the direction — raw accumulation doesn't scale, and compression at session boundaries is where intelligence emerges.
-
-The groups diverge on one load-bearing question: **what gates quality?**
-
-| System | Quality gate | Sycophancy-vulnerable? |
+| What | Where | Notes |
 |---|---|---|
-| **anneal-memory** | Structural citation evidence (agent cites episode IDs; server verifies) | No — gate is not LLM-scored |
-| **OpenClaw Dreaming** | LLM reflection + six weighted signals: Relevance 0.30, Frequency 0.24, Query diversity 0.15, Recency 0.15, Consolidation 0.10, Conceptual richness 0.06 | Yes — Relevance and Conceptual richness are LLM-judged |
-| **KAIROS / autoDream** | LLM consolidation (merge, remove contradictions, promote tentative observations to absolute facts) | Yes — promotion gate is model-reliant |
+| Episodes | the database | Typed (`observation`, `decision`, `tension`, `question`, `outcome`, `context`), timestamped, append-only except for `delete` and `prune`. Recall reads these |
+| Supersession links and state keys | the database | They hide an old fact from recall when a newer episode replaces it. Nothing is deleted |
+| The memory file | the database (`identity_versions`), projected to `<stem>.continuity.md` | Every saved version is a row. The file beside the database is a copy of the newest one |
+| Wraps | the database | One row per completed step: when, how many episodes, file size, model |
+| The audit trail | `<db dir>/audit/` | Hash-chained JSONL, rotated weekly |
+| Spores and intentions | `<stem>.spores.json` | The prospective store: open loops that must close |
 
-Structural gates ask "did subsequent episodes cite this?" Model-reliant gates ask "does the LLM consider this good?" The difference matters: persistent user memory profiles have been shown to amplify sycophancy 16–45% across models ([Jain et al., CHI 2026](https://arxiv.org/abs/2509.12517); Gemini 2.5 Pro at 45%, others lower). The same RLHF-inherited bias surfaces wherever an LLM evaluates output for the user — including memory-quality scoring. A memory architecture whose quality mechanism runs through an LLM inherits that bias. anneal-memory's citation-evidence gates bypass it by construction.
+The episode log answers "what happened". The memory file answers "what should the next session know". They are separate on purpose: the file is small and always loaded, and the log is large and searched on demand.
 
-The same architectural choice is going mainstream at the adjacent evaluation layer: [AWS Bedrock AgentCore Evaluations](https://aws.amazon.com/about-aws/whats-new/2026/03/agentcore-evaluations-generally-available/) (GA March 31, 2026) ships 13 built-in LLM-based evaluators for agent response quality, safety, task completion, and tool usage. Different layer (agent output vs. memory graduation), same failure class (LLM-as-judge inherits judge bias). The industry shift toward model-reliant quality infrastructure is real — which is precisely why structural alternatives at the memory layer matter.
+## One consolidation method
 
-A separate, orthogonal axis is **representation-layer quality filtering**: [Memori](https://arxiv.org/abs/2603.19935) (arXiv 2603.19935, March 2026) uses semantic triple extraction and dynamic linking to improve memory signal at the representation layer, reporting 81.95% on LOCOMO as the leading retrieval-based system (ahead of Zep 79.09%, LangMem 78.05%, Mem0 62.47% on its older pipeline). Different theory of quality — where a memory "lives" structurally and whether its graduation is citation-gated are independent choices. Both can be correct at their own axis.
+A wrap is a rolling rewrite. For each calendar day that has unwrapped episodes, oldest first, a model is given the current memory file and that day's log and replies with the whole new file. anneal-memory builds the prompt and keeps the reply. It calls no model, so it works with any.
 
-**April 2026 — adjacent architectures published.** Two papers in the same month explored multi-layer memory architectures with associative linking from different angles. [HeLa-Mem](https://arxiv.org/abs/2604.16839) (Zhu et al., ACL 2026 accepted) implements explicit Hebbian learning dynamics with episodic and semantic memory layers, where a "Reflective Agent" identifies dense memory hubs for consolidation. [GAM](https://arxiv.org/abs/2604.12285) (Wu et al., April 2026 preprint) takes a different architectural path: hierarchical graph-based memory where event progression graphs integrate into a topic network at semantic shifts — graph-based associative linking rather than classical Hebbian dynamics. Different starting points, similar destination at the multi-layer level. Neither has citation-validated quality gates. Multi-layer memory with associative linking is a now-active architectural space; the differentiator is increasingly *what gates the consolidation*, not whether consolidation happens. anneal-memory diverges on the quality gate — HeLa-Mem's Reflective Agent and GAM's integration logic are LLM-mediated, inheriting the same LLM-as-judge bias surface as the OpenClaw Dreaming and KAIROS rows above. Citation-evidence gates run independent of LLM judgment by construction.
+Three decisions follow from that.
 
----
+**The step is one day.** A catch-up over a week is seven steps, each starting from the file the last one saved. Merging the days into one log would make the model decide at once what to do with a week of changes, and it would hide which day changed what. A day over 400,000 characters of log is cut into slices.
 
-## On LOCOMO
+**The step runs in a fresh context.** The model sees the prompt and nothing from the session that asked for the wrap. The agent that did the day's work is attached to it. A fresh reader asks only what the file should say given the log.
 
-[LOCOMO](https://snap-research.github.io/locomo/) is the current de-facto benchmark for agent memory. [Mem0](https://mem0.ai/research) reports 91.6, [MemMachine](https://memmachine.ai/blog/2025/12/memmachine-v0.2-delivers-top-scores-and-efficiency-on-locomo-benchmark/) reports 91.69, [Memori](https://memorilabs.ai/docs/memori-cloud/benchmark/results/) reports 81.95 among retrieval-based systems, and [Backboard](https://github.com/Backboard-io/Backboard-Locomo-Benchmark) ships a dedicated LOCOMO evaluation framework. anneal-memory has no LOCOMO score. This is deliberate.
+**The save checks little.** The reply must be non-empty, at most the character cap (26,000 by default), and must answer the step that was opened. It is not parsed. Whatever the file contains is the model's choice, and the check that matters is a human or a later reader looking at it. That is why every version is kept: a rewrite that dropped something is found with `history` and `diff` and the dropped fact is read back out of `identity_versions`.
 
-LOCOMO measures conversational recall — can the agent remember facts, hold state across turns, maintain coherence across long dialogues? These are real evaluations of a real capability, and they aren't the capability anneal-memory is architected around. anneal-memory's target is citation-validated pattern accumulation that persists across sessions, agents, and contexts for accountability-bearing agent work: patterns must be defensibly surfaced, wrong patterns must demote, cross-agent contamination must be resisted, and sycophancy amplification from persistent-memory RLHF loops must be structurally bounded. A high LOCOMO score tells you the agent remembered the conversation; it doesn't tell you the memory is structurally sound at the axis that matters when the memory is informing downstream decisions.
+Earlier versions asked the model to write a fixed set of sections and checked the result: pattern lines with levels and citations, a catastrophic-shrink gate, a schema. That added a lot of code and a set of rules the model had to satisfy, and 4.0 removed it. The README's [Security](../README.md#security) section says what that means for how far you can trust the file.
 
-anneal-memory will run LOCOMO as secondary validation of a different-question architecture when a comparison genuinely calls for it — a competitor publishing numbers that suggest avoidance, or academic publication requiring it. The score would be reported alongside the axis anneal-memory actually optimizes for, not as a concession that LOCOMO was the right frame.
+## The baton
 
----
+Consolidation rewrites what the agent loads at the start of every session, so it is gated. A store created by the CLI requires the baton: a wrap runs only under a session id the operator claimed with `baton claim`. Agents record freely and cannot claim the baton through MCP. Leases and idempotency keys cover a consolidator that crashes or retries. The gate stops an agent that follows its instructions and parallel sessions overwriting each other. It does not stop an agent with a shell that ignores its instructions.
 
-## Provenance vs timestamps (the compliance argument)
+## Provenance and timestamps
 
-The README's *Compliance and Audit* section ships the hash-chained audit trail and notes its EU AI Act Article 12 relevance. Here's the deeper distinction that may matter as enforcement develops.
+The EU AI Act's Article 12 asks for automatic recording of events in high-risk systems, with traceability. A log can meet that at two levels: timestamps (which entry was written when) or a chain where each entry is bound to the one before it, so that removing or editing one is detectable. The audit trail is the second kind: each entry's SHA-256 includes the previous entry's hash. Episodes are timestamped and typed. Each wrap row records when it ran, how many episodes it covered, the size of the file it saved and, if you passed them, the model and whether it was unattended, and the audit trail records the wrap starting and completing.
 
-Article 12's traceability obligation can be satisfied at two architectural levels: timestamp-only logs (which entry was written when) or **provenance chains** (where this state originated and through what intermediate steps). anneal-memory ships at the provenance-chain level — every audit entry's hash is cryptographically linked to its predecessor (modify or remove an entry, the chain breaks), and graduated patterns carry explicit episode-ID citations as evidence (any pattern is traceable back to the specific observations that earned its promotion). As regulatory guidance and case law develop through August 2026 enforcement and the period after, this distinction may become a differential compliance gate. Memory architectures whose quality mechanism runs through an LLM — the AWS AgentCore evaluation pattern referenced above, plus any system whose answer to "why did this memory survive?" is "the consolidation model thought so" — would struggle to satisfy a provenance-chain interpretation as currently architected. "The LLM thought this was good" is not a chain of evidence. Architecture matters at the compliance layer, not just the inference layer.
+What the chain does not tell you is why the model wrote a given line in the file. In 4.0 nothing links a sentence in the file to a specific episode. The log, the wrap record and the saved version give you the input and the output of each step, which is what you can audit. This is audit infrastructure, not a compliance certification.
+
+## Lineage
+
+anneal-memory did not start as a memory library. It started as **FlowScript**, a typed reasoning notation: a small set of markers (`->` for causation, `?` for an open question, `><` for a tension on an axis) written alongside ordinary prose, compiled to a queryable graph. The bet under it was about language: that the structure of a notation changes what can be thought in it. Stated as a thesis, not a finding, the short form was "language = consciousness = reality".
+
+The notation turned out to carry things a memory system needs: content-hash ids, provenance, schema validation, typed relationships. The part that lasted was not the syntax. Asking someone to learn 21 markers is a barrier, and what you hand them is your artifact, not your practice. What lasted was the idea that compression is where the thinking happens: an agent that rewrites what it knows from what just happened ends up with something it did not have before. anneal-memory is that idea without the notation. FlowScript itself is archived at [github.com/phillipclapham/flowscript](https://github.com/phillipclapham/flowscript).
+
+The version-by-version history, including the graduated-pattern layer that 4.0 removed, is in the [CHANGELOG](../CHANGELOG.md).
+
+The reason for owning the store is the same one it started with. A human and an AI working in a shared, persistent memory can build on each other's thinking, and that is hard to do with a memory you cannot inspect, that a vendor can revoke, or that rewrites itself unbidden. So the store is local, has no dependencies, keeps every version, and is rewritten only under a claim the operator made.
+
+## On benchmarks
+
+anneal-memory has no score on LOCOMO or similar conversational-recall benchmarks. They measure whether an agent can retrieve facts from a long dialogue. anneal-memory's job is narrower: keep a small file current across sessions and keep a record that can be audited. If a comparison calls for a number, it will be run and reported with what it measures.

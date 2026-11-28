@@ -2,8 +2,7 @@
 
 anneal-memory integrates with the OpenAI Agents SDK through **RunHooks** — lifecycle callbacks that fire at agent, tool, and LLM boundaries. The SDK's context object provides natural dependency injection for the Store.
 
-> **Verified:** `anneal-memory` 0.2.0 · `openai-agents` 0.13.6 · Python 3.13
-> (all imports + 5 `RunHooks` lifecycle methods + signature types + `ModelResponse.output` / `RunResult.final_output` fields verified against live classes)
+> The hook wiring was checked against `openai-agents` 0.13.6 on Python 3.13 in April 2026 (the imports, the five `RunHooks` methods and their signatures, and the `ModelResponse.output` and `RunResult.final_output` fields). The anneal-memory calls were updated for 4.0 and not re-run against the Agents SDK.
 
 ## Install
 
@@ -129,17 +128,20 @@ class AnnealMemoryHooks(RunHooks):
     ) -> None:
         """Run wrap sequence when agent finishes."""
         store = context.context.memory
-        wrap = prepare_wrap(store)
-        if wrap["status"] == "ready":
-            package = wrap["package"]
-            # Feed the package to a compression sub-agent. Reusing
-            # Runner.run keeps the compression inside the same SDK runtime:
-            compressed = await Runner.run(
-                compression_agent,  # a simple Agent() you define with compression instructions
-                input=f"{package['instructions']}\n\nEpisodes:\n{package['episodes']}\n\nCurrent continuity:\n{package['continuity'] or ''}",
-                context=context.context,
+        while True:
+            wrap = prepare_wrap(store)
+            if wrap["status"] != "ready":
+                break
+            step = wrap["step"]
+            # A new Agent per step, run with this prompt and nothing from the
+            # run that just ended (no shared context, no session):
+            wrapper = Agent(name="memory-wrapper", instructions=step["system"])
+            out = await Runner.run(wrapper, input=step["user"])
+            result = validated_save_continuity(
+                store, out.final_output, wrap_token=wrap["wrap_token"]
             )
-            validated_save_continuity(store, compressed.final_output)
+            if result["pending_count"] == 0:
+                break
 
 
 # Dynamic instructions that incorporate memory
@@ -191,8 +193,9 @@ class AnnealMemoryTracer(TracingProcessor):
         """Entire agent run completed — trigger consolidation."""
         wrap = prepare_wrap(self.store)
         if wrap["status"] == "ready":
-            # Your compression + validated_save_continuity call here.
-            # See AnnealMemoryHooks.on_agent_end above for the full pattern.
+            # Run wrap["step"]["prompt"] in a fresh context, then
+            # validated_save_continuity(self.store, reply, wrap_token=wrap["wrap_token"]).
+            # See AnnealMemoryHooks.on_agent_end above for the full loop.
             pass
 
     def on_span_start(self, span: Span) -> None:
@@ -237,5 +240,5 @@ result2 = await Runner.run(agent, "Follow up", context=ctx, run_config=config)
 - **RunHooks vs AgentHooks:** `RunHooks` observe the entire run (all agents). `AgentHooks` are per-agent — useful for agent-specific episode recording in multi-agent setups. Both can be used simultaneously.
 - **Context as dependency injection:** The `context` parameter on `Runner.run()` is available in every hook, tool, and dynamic instruction callback. Put the Store there.
 - **Dynamic instructions:** Use `Agent(instructions=callable)` instead of static strings — the callable receives `RunContextWrapper` and can read current continuity.
-- **Session management:** The SDK's built-in `SQLiteSession` handles conversation history (short-term). anneal-memory handles compressed knowledge (long-term). They're complementary.
-- **The cognitive loop:** The tracing approach is passive (recording only). The hooks approach is active (can inject memory into agent state). Use hooks for full integration.
+- **Session management:** The SDK's built-in `SQLiteSession` handles conversation history (short-term). anneal-memory handles the memory file and the episode log (long-term). They're complementary.
+- **Tracing versus hooks:** The tracing approach is passive (recording only). The hooks approach is active (it can inject memory into agent state and run the wrap). Use hooks for full integration.

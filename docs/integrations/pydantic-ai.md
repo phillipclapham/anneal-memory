@@ -2,8 +2,7 @@
 
 anneal-memory integrates with Pydantic AI through a custom **Capability** — a composable unit that bundles hooks, tools, and instructions. Pydantic AI has the richest hook system of any framework (21 hook points), and its dependency injection makes the Store naturally available everywhere.
 
-> **Verified:** `anneal-memory` 0.2.0 · `pydantic-ai` 1.81.0 · Python 3.13
-> (all imports + 5 lifecycle hooks + hook callback signatures + `ModelResponse.parts`/`TextPart.content`/`AgentRunResult.output`/`ToolDefinition.name` fields verified against live classes)
+> The hook wiring was checked against `pydantic-ai` 1.81.0 on Python 3.13 in April 2026 (the imports, the five lifecycle hooks and their signatures, and the `ModelResponse.parts`, `TextPart.content`, `AgentRunResult.output` and `ToolDefinition.name` fields). The anneal-memory calls were updated for 4.0 and not re-run against Pydantic AI.
 
 ## Install
 
@@ -104,19 +103,25 @@ async def wrap_session(ctx: RunContext[Deps], *, result):
     AfterRunHookFunc signature is ``(ctx, *, result) -> AgentRunResult``.
     The ``result`` parameter is keyword-only.
     """
-    store = ctx.deps.memory
-    wrap = prepare_wrap(store)
-    if wrap["status"] == "ready":
-        package = wrap["package"]
-        # Reuse the agent's model for compression. Any pydantic-ai Agent
-        # with compression instructions works — define a dedicated one
-        # to keep compression deterministic:
-        compressed = await compression_agent.run(
-            f"{package['instructions']}\n\nEpisodes:\n{package['episodes']}\n\nCurrent continuity:\n{package['continuity'] or ''}",
-            deps=ctx.deps,
-        )
-        validated_save_continuity(store, compressed.output)
+    await wrap_all(ctx.deps.memory)
     return result
+
+
+WRAP_MODEL = "your-provider:your-model"   # any pydantic-ai model string
+
+
+async def wrap_all(store):
+    """One fresh agent run per step: the step's prompt and nothing else."""
+    while True:
+        wrap = prepare_wrap(store)
+        if wrap["status"] != "ready":
+            return
+        step = wrap["step"]
+        wrapper = Agent(WRAP_MODEL, instructions=step["system"])
+        out = await wrapper.run(step["user"])
+        saved = validated_save_continuity(store, out.output, wrap_token=wrap["wrap_token"])
+        if saved["pending_count"] == 0:
+            return
 
 
 # Memory recall as a tool
@@ -189,16 +194,8 @@ async def memory_middleware(ctx: RunContext[Deps], *, handler):
     # — it takes no arguments. Do not pass ctx.
     result = await handler()
 
-    # After: wrap session. See wrap_session() above for the full
-    # compression + validated_save_continuity pattern.
-    wrap = prepare_wrap(store)
-    if wrap["status"] == "ready":
-        package = wrap["package"]
-        compressed = await compression_agent.run(
-            f"{package['instructions']}\n\n{package['episodes']}",
-            deps=ctx.deps,
-        )
-        validated_save_continuity(store, compressed.output)
+    # After: wrap the session with the wrap_all() helper defined above.
+    await wrap_all(store)
 
     return result
 ```
@@ -239,5 +236,5 @@ class AnnealMemoryCapability(AbstractCapability):
 - **Dependency injection:** The `deps` parameter on `agent.run()` is the natural home for the Store. It's available in every hook, tool, and instruction callback.
 - **21 hook points:** Pydantic AI's hook system is the richest available. You can intercept at run, node, model request, tool validation, and tool execution levels — each with before/after/wrap/error variants.
 - **No built-in memory:** Pydantic AI deliberately leaves memory to the user. anneal-memory fills this gap cleanly through the deps + hooks pattern.
-- **Message history:** Pass `message_history` to `agent.run()` for conversation continuity (short-term). anneal-memory handles compressed knowledge (long-term). They're complementary.
-- **The cognitive loop:** Use the `after_run` hook to trigger compression, but the compression itself should involve an LLM — agent judgment during compression is where identity forms.
+- **Message history:** Pass `message_history` to `agent.run()` for conversation continuity (short-term). anneal-memory handles the memory file and the episode log (long-term). They're complementary.
+- **The wrap:** Use the `after_run` hook to trigger it, and run each step's prompt on a new `Agent` so it sees nothing from the run, as `wrap_all` does.

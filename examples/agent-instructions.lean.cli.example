@@ -1,56 +1,54 @@
-# anneal-memory CLI — LEAN Agent-Instructions Snippet
+# anneal-memory CLI - LEAN Agent-Instructions Snippet
 #
 # Paste the section below into your harness's agent-instructions file
-# (CLAUDE.md / AGENTS.md / GEMINI.md). This is the always-loaded MINIMUM —
-# the workflow an agent needs to act correctly. For the full reference
-# (immune-system internals, operator commands),
-# install the anneal-memory SKILL (skill/anneal-memory/SKILL.md), which
-# loads on-demand, or see examples/agent-instructions.full.cli.example.
+# (CLAUDE.md / AGENTS.md / GEMINI.md). This is the always-loaded MINIMUM:
+# the workflow an agent needs to act correctly. For more detail, install the
+# anneal-memory SKILL (skill/anneal-memory/SKILL.md), which loads on demand,
+# or see examples/agent-instructions.full.cli.example.
 #
 # Requires: pip install anneal-memory; set ANNEAL_MEMORY_DB (or use --db).
 
 ## Memory (anneal-memory CLI)
 
-This project uses anneal-memory for persistent memory across sessions —
-retrospective memory (episodes compress into continuity, and an immune
-system decides what graduates) plus a **spore** store for
-prospective open loops (`task`/`question`/`thought`, planted then
-resolved) and an on-demand **crystallized** tier that holds proven, stable
-patterns *out* of always-loaded context and surfaces them on cue (opt-in +
-harness-fired — see the SKILL or full snippet). Use memory naturally; don't
-narrate the tooling.
+This project uses anneal-memory for memory across sessions. Episodes you
+record are rewritten into one memory file, a day at a time, at each wrap.
+A separate **spore** store holds open loops (`task` / `question` /
+`thought`, planted when they open and resolved when they end). Use memory
+naturally; don't narrate the tooling.
 
 **Start:** `anneal-memory continuity` (run `anneal-memory init` first if
 the DB doesn't exist). If it prints "No continuity file yet" and exits
-non-zero, this is the first session — just start recording (not an error).
+non-zero, this is the first session: just start recording (not an error).
 
-**During work:** record as things happen — the *reasoning*, not just the
-fact:
+**During work:** record as things happen, the *reasoning* and not just
+the fact:
   anneal-memory record "Chose X because Y" --type decision
-Types: decision · observation · tension · question · outcome · context.
-Record proactively; target 5–15 episodes a session. Plant a spore the
-moment a loop opens: `anneal-memory spore add --type task --text "…"`.
+Types: decision / observation / tension / question / outcome / context.
+Record proactively; aim for 5-15 episodes a session. When a fact changes,
+add `--supersedes OLD_ID` or `--state-key KEY`. Plant a spore the moment a
+loop opens: `anneal-memory spore add --type task --text "..."`.
 
-**Before decisions (NON-NEGOTIABLE):** `anneal-memory recall "<surface
-area>"` and integrate what comes back. If nothing returns, proceed and
-note recall fired clean. Skipping this is the dead-store failure mode —
-the store grows while decisions get made blind to it.
+**Before decisions (NON-NEGOTIABLE):** `anneal-memory recall "<area>"` and
+use what comes back. If nothing returns, go ahead and say so. A store that
+is never read before deciding is dead.
 
-**Wrap (at "wrap up" / "save memory" / "we're done"):** run the full
-sequence, once — `anneal-memory prepare-wrap` → compress per its
-instructions (this step IS the thinking; principles over facts) →
-`anneal-memory save-continuity continuity.md`. Demoted graduations are
-the validation pipeline working, not an error; don't re-run to chase a
-clean report. Cite real episode IDs honestly — you are the first line of
-defense, the library is the second.
-Wrap with `--session-id` if your operator gave you one. If the wrap
-downgrades to capture-only (exit 3), nothing is lost: tell your human
-what it says (episodes waiting, and the one claim command).
-Consolidating is the operator's act; never run `baton claim` yourself.
+**Wrap (at "wrap up" / "save memory" / "we're done"):**
+1. `anneal-memory prepare-wrap` opens one step (the oldest unwrapped day).
+   It prints a "Wrap token:" line and a prompt.
+2. Run that prompt in a FRESH context with nothing else (a subagent given
+   only the prompt text, or a new session). Not in this conversation. Write
+   the model's whole reply to a file.
+3. `anneal-memory save-continuity memory.md --wrap-token TOKEN`
+If episodes from later days are still waiting, prepare again and repeat.
+A refused save writes nothing; run the step again. Wrap with `--session-id`
+if your operator gave you one. If the wrap downgrades to capture-only
+(exit 3), nothing is lost: tell your human what it says (episodes waiting,
+and the one claim command). Consolidating is the operator's act; never run
+`baton claim` yourself.
 
-**Operator inspection:** `status` · `stats` · `graph` · `history` ·
-`audit` · `verify` · `export` (all support `--json`).
+**Operator inspection:** `status` / `stats` / `history` / `diff` /
+`audit` / `verify` / `export` (all support `--json`).
 
 **Staying current:** after upgrading the package, run `anneal-memory
-migrate check` — it proposes edits to *these* instructions so they don't
-drift from the substrate (it never edits your files); then `migrate ack`.
+migrate check`. It proposes edits to *these* instructions so they don't
+drift from the package (it never edits your files). Then `migrate ack`.

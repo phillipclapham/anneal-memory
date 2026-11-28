@@ -8,7 +8,7 @@ Your data is safe. **No table is dropped and no row is deleted.** A 3.x store op
 
 `prepare_wrap` opens one step: the oldest calendar day of episodes that are not wrapped yet. It returns a fixed prompt filled with the current memory file and that day's log. You run the prompt in a fresh context, and you pass the model's whole reply to `validated_save_continuity`. A catch-up over several days is several steps in order. The README section "How the wrap works" has the full description.
 
-The save checks that the reply is a non-empty string, at most 26,000 characters, and answers the step that was opened (the wrap token). It checks nothing else. Every earlier version of the file is kept, so a dropped fact can be recovered.
+The save checks that the reply is a non-empty string, at most 26,000 characters, and answers the step that was opened (the wrap token, which is required: without it a save cannot tell which step the reply answers). It checks nothing else. Every earlier version of the file is kept, so a dropped fact can be recovered.
 
 ## Who has to change what
 
@@ -30,7 +30,7 @@ The save checks that the reply is a non-empty string, at most 26,000 characters,
 2. **Upgrade the package.** `pip install -U anneal-memory`, or let `uvx` fetch it. `anneal-memory --version` shows what runs.
 3. **Look at the store.** `anneal-memory status` and `anneal-memory continuity` open it as it is. Nothing is migrated by reading.
 4. **Cancel a wrap that 3.x left open.** `anneal-memory wrap-status` says whether one is in progress. If it is, 4.0 refuses to prepare a new step until it is closed, and a wrap that 3.x opened was built from the 3.x prompt, so cancel it instead of finishing it. Run `anneal-memory wrap-cancel`. Its episodes are released, not deleted, and the next `prepare-wrap` picks them up. On a baton-protected store a wrap prepared under the baton needs `--session-id` of the session that prepared it, or `--force` if that session is gone.
-5. **Update what calls the wrap.** Change library calls, scripts and agent instructions as described below. `anneal-memory migrate check` lists the edits it proposes to your instruction files, and never edits them. Copy the new snippets from `examples/` if you prefer.
+5. **Update what calls the wrap.** Change library calls, scripts and agent instructions as described below. `anneal-memory migrate check` lists the edits it proposes to your instruction files, and never edits them. While the 4.0.0 entry is pending it lists only that one, because it retires every earlier entry (they teach tools and sections 4.0 removed). Copy the new snippets from `examples/` if you prefer.
 6. **Run the first wrap by hand.** `anneal-memory prepare-wrap` (with `--session-id NAME` if the store requires the baton and you have claimed it). Run the prompt in a fresh context, see below, write the model's reply to a file, and `anneal-memory save-continuity FILE --wrap-token TOKEN` (with the same `--session-id`). The token is also printed by `anneal-memory wrap-token-current`. The step covers the oldest day of episodes the last 3.x wrap did not reach; if several days are waiting, repeat until `pending_count` is 0.
 7. **Read the result.** `anneal-memory continuity` prints the new file. `anneal-memory diff` shows what the wrap changed against the old file, and `anneal-memory history` lists the wraps, the 3.x ones included.
 8. **Record that you are up to date.** `anneal-memory migrate ack`.
@@ -174,7 +174,7 @@ anneal-memory save-continuity out.md --session-id me --wrap-token "$WRAP_TOKEN"
 ```
 
 - `prepare-wrap` takes `--max-chars`, `--tz` and `--session-id`. `--json` gives `step.system`, `step.user` and `wrap_token` as fields. It still exits 3 when the wrap is downgraded.
-- `save-continuity` takes `--wrap-token`, `--max-chars`, `--model`, `--unattended` and `--session-id`. `--allow-shrink`, `--allow-unlinked`, `--crystal`, `--require-rederive`, `--affect-tag` and `--affect-intensity` are gone, and `prepare-wrap` lost `--staleness-days` and `--crystal`.
+- `save-continuity` takes `--wrap-token` (required), `--max-chars` (leave it out: the step keeps the cap `prepare-wrap` was given and the save uses it; a different value is refused), `--model`, `--unattended` and `--session-id`. `--allow-shrink`, `--allow-unlinked`, `--crystal`, `--require-rederive`, `--affect-tag` and `--affect-intensity` are gone, and `prepare-wrap` lost `--staleness-days` and `--crystal`.
 - Removed commands: `crystal` (all of its subcommands), `associations`, `pattern-associations`, `graph`, `outcome`, `worth`, `probe` (with `add`, `list`, `retire` and `status`), `derive` (with `allow`, `revoke` and `status`), `set-schema`. Removed options: `init --schema`, `continuity --rederive` and `continuity --ref`.
 - `--json` keys that went with them: `status` lost `association_stats`; `stats` lost `associations` and the graduation, demotion and association totals; `history` lost the graduation, pattern, citation and association counts per wrap; `diff` lost the same, and now gives `lines_added`, `lines_removed`, `delta` and, for the newest wrap, `text_diff`.
 - Re-based: `history`, `diff` and `stats` now report what each wrap changed in the file (size, lines, a text diff), never graduation or association numbers. They read the same rows 3.x wrote.
@@ -188,8 +188,10 @@ The tools are `record`, `recall`, `read_continuity`, `prepare_wrap`, `save_conti
 
 ## What the memory file looks like now
 
+**What the step shows the model.** The log lines carry only the time, the type and the text. An episode recorded with a lower trust class (`external`, `tool`) is not marked as such in the prompt (3.x tagged them), and whatever the model writes becomes the memory every session loads. Record only what you would put in the memory, and read each new memory file before it is loaded (`history` and `diff` show what changed).
+
 The file is whatever the model wrote. There are no required `## State`, `## Patterns` or `## Decisions` sections, and the markers that 3.x parsed (level counts, `[evidence: ...]`, `[decided(...)]`) are no longer parsed or checked. A 3.x file that has them keeps them until a rewrite drops them, and the prompt does not ask for them. If your tooling reads those sections out of the file, it will find them only as long as the model keeps writing them.
 
 ## Recovering an earlier version
 
-Every saved file is a row in the `identity_versions` table. `anneal-memory history` lists the wraps and `anneal-memory diff` shows what the newest ones changed. To undo the newest wrap whole: `anneal-memory revert-wrap WRAP_ID --reason "..."`, where `WRAP_ID` is the id `history` shows for it. The file goes back to the version before it, saved as a new version, and that wrap's episodes are offered to the next step again. To read any older version, call `store.wrap_identity_texts([wrap_id, ...])` or query the table (the README section "Recovering an older version" has the code). To put one fact back, record it again as an episode so that the next wrap sees it.
+Every saved file is a row in the `identity_versions` table. `anneal-memory history` lists the wraps and `anneal-memory diff` shows what the newest ones changed, against the version in force just before each. To undo the newest wrap whole: `anneal-memory revert-wrap WRAP_ID --reason "..."`, where `WRAP_ID` is the id `history` shows for it. The file goes back to the version before it, saved as a new version, and that wrap's episodes are offered to the next step again. To read any older version, call `store.wrap_identity_texts([wrap_id, ...])` or query the table (the README section "Recovering an older version" has the code). To put one fact back, record it again as an episode so that the next wrap sees it.

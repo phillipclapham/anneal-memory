@@ -101,11 +101,11 @@ A dict with `status`, `message`, `episode_count` (episodes in this step), `pendi
 
 `step` holds `day`, `chunk` and `chunks` (a day over 400,000 characters of log is cut into slices), `episodes`, `steps_remaining`, `max_chars`, `memory_chars` (the size of the current file), and `system`, `user` and `prompt` (the two messages as one text, for a transport with a single slot).
 
-Pass `tz="America/New_York"` (or any IANA name or `tzinfo`) to cut days in a zone other than the machine's, and `max_chars=` to change the 26,000-character cap. Give the same `max_chars` to the save.
+Pass `tz="America/New_York"` (or any IANA name or `tzinfo`) to cut days in a zone other than the machine's, and `max_chars=` to change the 26,000-character cap. The step keeps that cap and the save enforces it: leave `max_chars` out of the save (a different value is refused).
 
 ### What the save checks
 
-`validated_save_continuity(store, text, *, wrap_token=None, max_chars=None, ...)` checks that a wrap is open (and is the one the token names), that the caller may commit it, and that `text` is a non-empty string of at most `max_chars` characters. That is all. The file is not parsed and needs no particular layout. A refused save writes nothing and leaves the step open: run the step again and save again, or abandon it with `store.wrap_cancelled()`.
+`validated_save_continuity(store, text, *, wrap_token=None, max_chars=None, ...)` checks that a wrap is open and is the one `wrap_token` names (the token is required; `None` is the signature's default only so the call can be refused with a clear message), that the caller may commit it, and that `text` is a non-empty string of at most the step's `max_chars` characters (the cap `prepare_wrap` was given). That is all. The file is not parsed and needs no particular layout. A refused save writes nothing and leaves the step open: run the step again and save again, or abandon it with `store.wrap_cancelled()`.
 
 The result has `path`, `chars`, `episodes_compressed`, `pending_count`, `content_hash` and `wrap_result`. If `pending_count` is not zero, the next day's step is owed: prepare again.
 
@@ -191,7 +191,7 @@ The library raises errors in two groups.
 
 **`AnnealMemoryError` and its subclasses** are store failures (`StoreError`, then `StoreDatabaseError`) and the wrap-lifecycle refusals `WrapInProgressError`, `WrapOwnershipError` and `WrapCancelGatedError`. Catch the base class at your outermost boundary, log, and let it propagate. Branch per subclass only in a long-running server with a retry budget.
 
-**Plain `ValueError`** is raised by `validated_save_continuity` for a call that cannot succeed as written: no wrap in progress (`prepare_wrap` not called, or the step was already saved), a token that is not the open wrap's, an empty reply, a reply over `max_chars`, or an empty `session_id`. Fix the call. The empty and over-limit cases leave the step open, so you can run it again and save again.
+**Plain `ValueError`** is raised by `validated_save_continuity` for a call that cannot succeed as written: no wrap in progress (`prepare_wrap` not called, or the step was already saved), no token, or one that is not the open wrap's, a `max_chars` that is not the step's, an empty reply, a reply over the step's limit, or an empty `session_id`. Fix the call. The empty and over-limit cases leave the step open, so you can run it again and save again.
 
 **`SaveAuthorityError`**, a `ValueError` subclass exported at the top level, is the consolidate gate refusing a save. Test for it with `isinstance`, not the message text. Some of these are call fixes: a gated wrap's save that omits the `wrap_token` its `prepare_wrap` returned, or the preparing `session_id`; on a store that requires the baton, a save that omits `session_id` or `wrap_token`; a wrap prepared with `allow_sole_live=True` whose save does not repeat it. The rest are authority refusals: a `session_id` that does not, or no longer, hold the baton, or an unreadable baton file. For these, claim nothing yourself, because the operator decides who holds the baton. Surface the refusal, and either retry the same save once it is fixed or abandon the wrap with `store.wrap_cancelled(expect_token=...)`. A save from a session other than the one that prepared a gated wrap is refused even if that session now holds the baton.
 

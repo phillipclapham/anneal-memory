@@ -18,13 +18,13 @@ anneal-memory calls no model itself. It builds the prompt, you run it on whateve
 
 There is one consolidation method, a rolling rewrite.
 
-1. `prepare_wrap` opens **one step**: the oldest calendar day that has episodes not yet wrapped. A day is cut in the machine's time zone, or in the zone you pass (`--tz`, `tz=`). A very long day is cut into slices. It returns a fixed prompt, filled with the current memory file and that day's log, and a wrap token.
+1. `prepare_wrap` opens **one step**: the oldest calendar day that has episodes not yet wrapped. A day is cut in the machine's time zone, or in the zone you pass (`--tz`, `tz=`). A day whose log is longer than 400,000 characters is cut into several steps. It returns a fixed prompt, filled with the current memory file and that day's log, and a wrap token.
 2. You run that prompt in a **fresh context** that holds the prompt and nothing else: a subagent, a new session, or a plain model call. The prompt is fixed text, written for a mid-size model at low effort that sees the memory file and one day's log and nothing else. Run it as it is. The only addition is the retry line that a save refused as too long asks you to append.
 3. You pass the model's **whole reply** to `save_continuity`, with the token.
 
 A catch-up over several days is several steps in order, each one starting from the file the last one saved. It is never one merged log. After a save, `pending_count` says how many episodes are still waiting; if it is not zero, prepare the next step.
 
-The save checks three things: the reply is not empty, it is at most 26,000 characters (`--max-chars` / `max_chars` changes the cap), and it answers the step that `prepare_wrap` opened. That is all. There is no required section layout and nothing is parsed out of the file. The prompt asks the model to keep what changes how the assistant should work with this user, drop what is finished or superseded, and stay under the limit. What the file looks like is the model's call.
+The save checks three things: the reply is not empty, it is at most 26,000 characters (set `--max-chars` / `max_chars` on `prepare_wrap`; the step keeps that cap and the save enforces the same one), and it carries the token of the step that `prepare_wrap` opened. The token is required: without it a save cannot tell which step the reply answers. That is all. There is no required section layout and nothing is parsed out of the file. The prompt asks the model to keep what changes how the assistant should work with this user, drop what is finished or superseded, and stay under the limit. What the file looks like is the model's call.
 
 A refused save writes nothing and leaves the step open, so you run it again. Every previous version of the file stays in the database (`history` and `diff` show them), so a fact that a rewrite dropped can be found and put back. See [Recovering an older version](#recovering-an-older-version).
 
@@ -33,6 +33,8 @@ A refused save writes nothing and leaves the step open, so you run it again. Eve
 ```
 pip install anneal-memory
 ```
+
+On Windows, and in a slim container, a named zone (`--tz America/New_York`) needs the `tzdata` package (`pip install tzdata`); the default zone and `UTC` do not.
 
 ### Python library
 
@@ -265,7 +267,7 @@ Reading needs nothing special. To put a fact back, record it again as a new epis
 | `recall` | Before a decision that may have prior context. Filter by time (`since`, `until`), `episode_type`, `source` or `keyword`. A multi-word keyword is matched as an exact phrase first, then word by word when the phrase misses |
 | `read_continuity` | At session start: returns the current memory file, or a note that there is none yet |
 | `prepare_wrap` | At a session boundary: opens one step, returns the token and the prompt to run in a fresh context. Optional `max_chars`, `tz` |
-| `save_continuity` | With the model's whole reply as `text` and the token as `wrap_token`. Optional `max_chars` |
+| `save_continuity` | With the model's whole reply as `text` and the token as `wrap_token` (both required). The limit is the step's, so leave `max_chars` out |
 | `wrap_cancel` | Abandon an open wrap that will not be finished. Optional `wrap_token`, `session_id`, `partial`, `force` |
 | `delete_episode` | Remove content that should not exist (PII, secrets). The text is overwritten in the database file (`secure_delete`) and the WAL is emptied afterwards; the tombstone and audit events keep a hash keyed by a per-store salt. Backups, the migration's `.bak` copy and text already carried into the memory file are not reached; the CHANGELOG says exactly what is and is not erased |
 | `status` | Memory health: episode counts, wraps, file size, whether a wrap is open, audit health |
@@ -302,8 +304,9 @@ The CLI equivalents are `anneal-memory verify`, `audit --since 7d` and `audit-re
 
 **What 4.0 does and does not check.** The memory file is whatever the model wrote. anneal-memory checks its size and that it answers the open step; it does not check what the file says against the episodes. A false episode that reaches the log can reach the file. What the package gives you is a way to see and undo that:
 
-- Every version of the file is kept and listed by `history` and `diff`, so a rewrite can be reviewed, and a bad one can be reverted (`revert-wrap`) or rewritten.
+- Every version of the file is kept and listed by `history` and `diff`, so a rewrite can be reviewed, and a bad one can be reverted (`revert-wrap`, from the second wrap on, or on any store that already had a memory file) or rewritten.
 - The audit trail records what was recorded and when, tamper-evidently.
+- **What the step shows the model.** The log lines carry only the time, the type and the text. An episode recorded with a lower trust class (`external`, `tool`) is not marked as such in the prompt, and whatever the model writes becomes the memory every session loads. Record only what you would put in the memory, and read each new memory file before it is loaded (`history` and `diff` show what changed).
 - Consolidation is gated to an operator-claimed session by default (the baton), so an agent cannot rewrite the file unbidden.
 - Episodes carry a **trust class** (`agent` by default). A host that relays tool output or web content records it with `trust="tool"` or `trust="external"` (`record --trust`, the MCP `record` argument). MCP `recall` lists those after the rest, under a heading that says they are data, not instructions, and a lower-trust episode cannot supersede a higher-trust one. The trust label is the host's statement: unlabelled content reads as the agent's own, so this holds only as far as the host labels its tool boundary. The `Store` constructor sets a trust ceiling, and the MCP server opens at `agent`, so an agent cannot label its own write `operator`. The CLI raises a class above `agent` only after a yes on a terminal or `ANNEAL_OPERATOR=1`.
 - Because the wrap prompt includes the day's log, an episode that contains instructions is read by the model that does the rewrite. Run the step on a model and in a context that cannot take actions, which the fresh-context rule already asks for.

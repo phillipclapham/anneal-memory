@@ -2285,44 +2285,56 @@ _TAIL_MARKER_RE = re.compile(
     rf"|{_STATE_PAREN_RE.pattern}",
     re.ASCII | re.IGNORECASE,
 )
-# The name, with its bullet or marker prefix, of a second pattern marker that follows on
-# the same line: it sits just before that marker's ``|`` and is that marker's, not prose.
-_MAX_MARKER_CANDIDATES = 64
-_MARKER_NAME_WINDOW = 256
+# What the CUT may leave behind a failed tail: a second pattern marker that is nothing
+# but a marker. Its name carries the bullet or FlowScript marker a pattern line needs
+# (``_NAMED_PATTERN_RE``) and is followed by ``| Nx (date)``, then at most one evidence
+# tag and the markers of :data:`_TAIL_MARKER_RE`. Text after the date that is not one of
+# those is prose and goes with the cut. One character class per step, so a run of ``!``
+# has one way to match.
 _DATED_LEVEL_TOKEN_RE = re.compile(r"\|[ \t]*[0-9]+x[ \t]*\([0-9]{4}-[0-9]{2}-[0-9]{2}\)")
-# A second marker's name carries the bullet or FlowScript marker a pattern line needs
-# (``_NAMED_PATTERN_RE``), so a word in a sentence that happens to precede ``| 2x (date)``
-# is not one. One character class per step, so a run of ``!`` has one way to match.
 _NEXT_MARKER_NAME_RE = re.compile(
     r"(?:^|(?<=[ \t]))(?:[-*•>!?✓][ \t]*)+[A-Za-z][A-Za-z0-9_.\-]*[ \t]*$"
 )
+_SECOND_MARKER_RE = re.compile(
+    r"(?:[-*•>!?✓][ \t]*)+[A-Za-z][A-Za-z0-9_.\-]*[ \t]*"
+    r"\|[ \t]*[0-9]+x[ \t]*\([0-9]{4}-[0-9]{2}-[0-9]{2}\)"
+    r'(?:[ \t]*\[evidence:(?:[^\]"]|"[^"]*"){0,4096}\])?'
+    rf"(?:[ \t]*(?:{_TAIL_MARKER_RE.pattern}))*[ \t]*",
+    re.ASCII | re.IGNORECASE,
+)
+_MARKER_NAME_WINDOW = 256
+_MAX_SPLIT_TAIL = 4096
 
 
 def _split_tail(line: str, match: "re.Match[str]") -> tuple[str, str]:
     """``(own, rest)`` for the text after the evidence tag of ``match``, for the CUT
-    only: ``own`` is what a failed check removes, and ``rest`` is a second marker's
-    name and everything from its level token on, which the cut leaves whole. The check
-    never splits: it reads the entire tail, second marker included, so nothing placed
-    behind a fake second marker escapes it.
+    only: ``own`` is what a failed check removes, and ``rest`` is a second pattern
+    marker, whole, that the cut leaves in place. The check never splits: it reads the
+    entire tail, second marker included, so nothing placed behind a fake second marker
+    escapes it.
 
-    A second marker is a complete one: a name with its bullet or marker, then a level
-    token that carries a date. A bare ``| 2x``, or one after a plain word, is prose and
-    goes with ``own``. The candidates tried are bounded, and the name is looked for in
-    a bounded window before its token, so a hostile line costs a bounded scan."""
+    ``rest`` is a second marker only when everything from its name to the end of the
+    tail is one (:data:`_SECOND_MARKER_RE`); a bare ``| 2x``, a plain word before the
+    token, or a claim after the date is prose and goes with ``own``. A tail longer than
+    ``_MAX_SPLIT_TAIL`` is all ``own``, and the name is looked for in a window of
+    ``_MARKER_NAME_WINDOW`` characters before its token, so a hostile line costs a
+    bounded scan."""
     tail = line[match.end():]
+    if len(tail) > _MAX_SPLIT_TAIL:
+        return tail, ""
     pos = 0
-    for _ in range(_MAX_MARKER_CANDIDATES):
+    while True:
         cut = pos + _next_level_token(tail[pos:])
         if cut >= len(tail):
-            break
+            return tail, ""
         if _DATED_LEVEL_TOKEN_RE.match(tail, cut):
             lo = max(0, cut - _MARKER_NAME_WINDOW)
             m = _NEXT_MARKER_NAME_RE.search(tail[lo:cut])
             if m and (lo == 0 or m.start() > 0):
                 start = lo + m.start()
-                return tail[:start], tail[start:]
+                if _SECOND_MARKER_RE.fullmatch(tail, start):
+                    return tail[:start], tail[start:]
         pos = cut + 1
-    return tail, ""
 
 
 def _trailing_prose(line: str, match: "re.Match[str]") -> str:

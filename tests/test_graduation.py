@@ -3941,3 +3941,16 @@ class TestTrailingProseIsGrounded:
         res = self._run(" ! " * 2000 + " | 2x (2026-05-21)" * 2000)
         assert time.perf_counter() - t < 5.0
         assert res.validated == 0
+
+    # -- L3 round 5 --
+
+    def test_the_cut_does_not_spare_a_fake_second_marker_that_carries_a_claim(self):
+        res = self._warm_run(" - x | 2x (2026-05-21) totally unsupported claim")
+        assert res.validated == 0
+        assert "unsupported" not in res.text
+
+    def test_a_genuine_second_marker_after_many_invalid_tokens_is_kept(self):
+        junk = " | 2x" * 200
+        res = self._run(f" — nothing grounded here{junk} - beta | 2x (2026-05-21)")
+        assert (res.validated, res.demoted) == (0, 1)
+        assert "(ungrounded) - beta | 2x (2026-05-21)\n" in res.text

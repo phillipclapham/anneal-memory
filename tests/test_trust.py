@@ -250,7 +250,9 @@ class TestGraduationRule:
         r = self._run(["aaaa0001"], {"aaaa0001": "external"}, level=claimed)
         assert "| 1x (2026-10-08) (uncorroborated)" in r.text
         # Item 7 (1008+3, run): a demotion strips the line's evidence tag by
-        # design, but a two-tag line kept its second tag. Now every tag goes.
+        # design, but a two-tag line kept its second tag. Now every tag goes, and the
+        # prose after the tags goes with them: the second tag reads as prose to the
+        # suffix check and no admitted citation grounds it.
         two = validate_graduations(
             text="## Patterns\n" + _line(["aaaa0001"], level=claimed)
                  + f' [evidence: aaaa0002 "{EXPLANATION}"] — felt\n',
@@ -259,7 +261,7 @@ class TestGraduationRule:
             trust_of=lambda cid: "external",
         )
         assert two.text.splitlines()[1] == (
-            "- eiffel_in_lyon | 1x (2026-10-08) (uncorroborated) — felt")
+            "- eiffel_in_lyon | 1x (2026-10-08) (uncorroborated)")
         assert "[evidence:" not in two.text
         # codex r3 #7: a quoted "| 2x" inside the second tag is text, not the
         # next marker; the whole tag goes, the real next marker's tag stays.

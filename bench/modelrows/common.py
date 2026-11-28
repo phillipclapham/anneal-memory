@@ -14,7 +14,6 @@ import re
 from pathlib import Path
 
 from anneal_memory import EpisodeType, Store, prepare_wrap, validated_save_continuity
-from anneal_memory.continuity import format_wrap_package_text
 
 from .ant import BudgetExceeded, Client, Ledger  # noqa: F401
 
@@ -47,7 +46,7 @@ ANSWER_SYSTEM = (
 )
 NO_MEMORY = "(you have no memory of earlier conversations with this user)"
 
-CACHE_HEAD_ANCHOR = "Existing Proven to scan against:"
+MAX_STEPS = 8  # steps one wrap pass runs at most (a session's episodes are one day: normally one)
 
 
 def exchanges(session: dict) -> list[str]:
@@ -74,52 +73,51 @@ def record_session(store: Store, session: dict) -> list[str]:
 
 def new_wrap_stats() -> dict:
     return {"compose_calls": 0, "saved": 0, "cancelled": 0, "refusals": [], "not_ready": [],
-            "finish_not_stop": [], "graduations_demoted": 0, "chars": []}
+            "finish_not_stop": [], "chars": []}
 
 
 def wrap_session(store: Store, client: Client, stats: dict, where: dict | None = None) -> None:
-    """One real anneal wrap: prepare_wrap -> LLM compose -> validated_save_continuity. A refused
-    save is fed back once; a second refusal cancels the wrap (the episodes roll into the next)."""
-    wrap = prepare_wrap(store)
-    if wrap["status"] != "ready":
-        stats["not_ready"].append(wrap["status"])
-        return
-    prompt = format_wrap_package_text(wrap)
-    instructions = wrap["package"]["instructions"]
-    if not prompt.startswith(instructions):
-        raise RuntimeError("wrap prompt no longer opens with package['instructions']")
-    msg = {"role": "user", "content": prompt}
-    head = max(instructions.find(CACHE_HEAD_ANCHOR), 0)
-    if head:
-        msg["cache_prefix"] = head
-    messages = [msg]
-    for attempt in range(2):
-        text, finish = client.chat(messages, role="wrap", max_completion_tokens=WRAP_MAX)
-        stats["compose_calls"] += 1
-        if finish != "stop":
-            stats["finish_not_stop"].append(finish)
-        try:
-            if finish != "stop":
-                raise ValueError(f"the output was cut off (finish reason {finish!r}); nothing was saved")
-            res = validated_save_continuity(store, text, wrap_token=wrap["wrap_token"])
-        except ValueError as e:  # includes SaveAuthorityError and the shrink gate
-            m = str(e)
-            stats["refusals"].append(m[:300])
-            stats.setdefault("refusal_log", []).append(
-                {**(where or {}), "attempt": attempt, "finish": finish, "message": m[:300],
-                 "recovered": attempt == 0})
-            if attempt == 0:
-                messages += [{"role": "assistant", "content": text},
-                             {"role": "user", "content": "The save was refused:\n" + m
-                              + "\n\nReturn the corrected full continuity file. Return ONLY the markdown."}]
-                continue
-            store.wrap_cancelled(expect_token=wrap["wrap_token"])
-            stats["cancelled"] += 1
+    """One real anneal wrap pass: prepare_wrap opens a step, the model runs that step's
+    prompt, validated_save_continuity keeps the reply; repeated while a step is owed (a
+    long day is more than one step). A refused save is fed back once; a second refusal
+    cancels the wrap (the episodes roll into the next)."""
+    for _ in range(MAX_STEPS):
+        wrap = prepare_wrap(store)
+        if wrap["status"] != "ready":
+            stats["not_ready"].append(wrap["status"])
             return
+        step = wrap["step"]
+        messages = [{"role": "system", "content": step["system"]},
+                    {"role": "user", "content": step["user"]}]
+        saved = None
+        for attempt in range(2):
+            text, finish = client.chat(messages, role="wrap", max_completion_tokens=WRAP_MAX)
+            stats["compose_calls"] += 1
+            if finish != "stop":
+                stats["finish_not_stop"].append(finish)
+            try:
+                if finish != "stop":
+                    raise ValueError(f"the output was cut off (finish reason {finish!r}); nothing was saved")
+                saved = validated_save_continuity(store, text, wrap_token=wrap["wrap_token"])
+            except ValueError as e:  # includes SaveAuthorityError
+                m = str(e)
+                stats["refusals"].append(m[:300])
+                stats.setdefault("refusal_log", []).append(
+                    {**(where or {}), "attempt": attempt, "finish": finish, "message": m[:300],
+                     "recovered": attempt == 0})
+                if attempt == 0:
+                    messages += [{"role": "assistant", "content": text},
+                                 {"role": "user", "content": "The save was refused:\n" + m
+                                  + "\n\nReturn the corrected full memory file. Return ONLY the file."}]
+                    continue
+                store.wrap_cancelled(expect_token=wrap["wrap_token"])
+                stats["cancelled"] += 1
+                return
+            break
         stats["saved"] += 1
-        stats["graduations_demoted"] += res.get("graduations_demoted", 0)
-        stats["chars"].append(res.get("chars", 0))
-        return
+        stats["chars"].append(saved.get("chars", 0))
+        if not saved.get("pending_count"):
+            return
 
 
 def probe_update(memory: str, session: dict, client: Client, stats: dict) -> str:

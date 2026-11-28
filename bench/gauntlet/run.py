@@ -11,8 +11,7 @@ import sys
 import tempfile
 import traceback
 
-ROWS = ["rotated_pairs", "audit_multiwriter", "poisoning_graduation", "false_demotion",
-        "contradiction_surfacing", "paired_gain"]
+ROWS = ["audit_multiwriter", "paired_gain"]
 NOT_BUILT = [("sycophancy_drift", "needs a model call")]
 OPS = {"==": operator.eq, "!=": operator.ne, "<=": operator.le, ">=": operator.ge,
        "<": operator.lt, ">": operator.gt}

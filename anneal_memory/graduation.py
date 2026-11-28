@@ -2378,10 +2378,11 @@ def _has_non_ascii_letter(text: str) -> bool:
 
 def _cut_tail(line: str, match: "re.Match[str]") -> str:
     """``line`` with the prose after ``match``'s evidence tag removed: the declarative
-    markers stay, as written; a second marker's name and everything after it stay
-    untouched; every other character of the tail goes."""
+    markers stay, as written, unless they sit inside another evidence tag's quoted
+    explanation, which is text; a second pattern marker that is nothing but a marker stays
+    whole; every other character of the tail goes."""
     own, rest = _split_tail(line, match)
-    found = [m.group(0) for m in _KEPT_MARKER_RE.finditer(own)]
+    found = [m.group(0) for m in _KEPT_MARKER_RE.finditer(_ANY_EVIDENCE_TAG_RE.sub(" ", own))]
     kept = (" " + " ".join(found)) if found else ""
     sep = " " if rest and not rest[0].isspace() and not kept.endswith(" ") else ""
     return line[:match.end()] + kept + sep + rest

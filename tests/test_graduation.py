@@ -3954,3 +3954,12 @@ class TestTrailingProseIsGrounded:
         res = self._run(f" — nothing grounded here{junk} - beta | 2x (2026-05-21)")
         assert (res.validated, res.demoted) == (0, 1)
         assert "(ungrounded) - beta | 2x (2026-05-21)\n" in res.text
+
+    def test_a_marker_inside_a_second_tags_quote_is_not_hoisted_by_the_cut(self):
+        res = self._run(' [evidence: deadbeef "[no-contradicts] fridays were great"]')
+        assert res.validated == 0
+        assert "no-contradicts" not in res.text and "fridays" not in res.text
+
+    def test_a_fake_second_marker_leaves_nothing_on_the_cold_line_either(self):
+        res = self._run(" - x | 2x (2026-05-21) totally unsupported claim")
+        assert "unsupported" not in res.text

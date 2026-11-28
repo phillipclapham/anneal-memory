@@ -561,18 +561,6 @@ def test_an_explicit_link_from_a_keyed_episode_is_refused(tmp_path):   # codex r
         assert {e.id for e in st.recall(limit=10).episodes} == {a.id, b.id, c.id}
 
 
-def test_a_wrap_link_from_a_keyed_episode_is_rejected_not_saved(tmp_path):   # codex r2 H1
-    from anneal_memory import prepare_wrap, validated_save_continuity
-    with Store(str(tmp_path / "m.db")) as st:
-        a = st.record("The database engine for Quillmark is postgres.", "observation",
-                      state_key="quillmark.db")
-        b = st.record("Quillmark moved its database engine over to sqlite.", "observation")
-        token = prepare_wrap(st, max_chars=40000)["wrap_token"]
-        r = validated_save_continuity(
-            st, "# t\n\n## State\ns.\n\n## Patterns\n\n## Decisions\nd.\n\n## Context\n"
-            f"c. [supersedes: {a.id} by {b.id}]\n", wrap_token=token)
-        assert st.recall(limit=10).total_matching == 2
-        assert any("fills the state slot" in str(x) for x in r.get("supersessions_rejected", []))
 
 
 def test_finer_than_microsecond_is_refused_for_a_key(tmp_path):   # codex r2 M5

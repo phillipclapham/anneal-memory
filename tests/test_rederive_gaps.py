@@ -67,56 +67,10 @@ def test_rederive_that_checked_nothing_is_not_a_clean_exit(project):
     assert json.loads(off_json.stdout)["rederive"]["enabled"] is False
 
 
-def test_save_can_require_rederive(project, tmp_path):
-    store, _repo = project
-    _save(store, _continuity(TRUE_STATE))
-    store.record("next session", "observation")
-    prep = prepare_wrap(store)
-    revoke_store(store.path)  # the trust goes between the caller's check and the save
-
-    with pytest.raises(ValueError, match="re-derive is not enabled"):
-        validated_save_continuity(
-            store, _continuity(TRUE_STATE), wrap_token=prep["wrap_token"], require_rederive=True
-        )
-    assert store.load_wrap_snapshot() is not None  # refused before anything was written
-
-    doc = tmp_path / "c.md"
-    doc.write_text(_continuity(TRUE_STATE))
-    cli = _cli(store, "save-continuity", str(doc), "--wrap-token", prep["wrap_token"], "--require-rederive")
-    assert cli.returncode == 1
-    assert "re-derive is not enabled" in cli.stderr
-
-    # Without the requirement the same save still goes through (static checks only).
-    validated_save_continuity(store, _continuity(TRUE_STATE), wrap_token=prep["wrap_token"])
 
 
-def test_prepare_wrap_shows_the_composer_the_stale_flags(project):
-    store, repo = project
-    _save(store, _continuity(TRUE_STATE))
-    (repo / "app.py").write_text('VERSION = "1.4.0"\n')  # the planted drift
-    store.record("next session", "observation")
-
-    result = prepare_wrap(store)
-    package = result["package"]
-    assert package is not None
-    flagged = TRUE_STATE[0] + "  ⚠ STALE (now '0', claimed '1')"
-    assert flagged in package["continuity"]
-    assert package["unconfirmed_state"] == ["line 7: ⚠ STALE (now '0', claimed '1')"]
-    assert flagged in format_wrap_package_text(result)
-    assert "⚠" not in store.load_continuity()  # the stored text is untouched
 
 
-def test_prepare_wrap_says_when_state_was_not_checked(project):
-    store, _repo = project
-    _save(store, _continuity(TRUE_STATE))
-    revoke_store(store.path)
-    store.record("next session", "observation")
-
-    package = prepare_wrap(store)["package"]
-    assert package is not None
-    assert "[anneal re-derive]" not in package["continuity"]
-    assert "unconfirmed_state" not in package
-    assert "no State line was checked" in package["instructions"]
 
 
 JUDGED_ONLY = ["- Notes read well [judged: t, 2026-09-30, against the draft]"]
@@ -131,30 +85,8 @@ def test_an_enabled_store_where_no_command_ran_is_not_a_clean_exit(project):
     assert _cli(store, "continuity", "--rederive").returncode == 3
 
 
-def test_require_rederive_refuses_a_save_where_no_command_ran(project):
-    store, _repo = project
-    _save(store, _continuity(TRUE_STATE))
-    store.record("next session", "observation")
-    prep = prepare_wrap(store)
-    with pytest.raises(ValueError, match="no State command ran"):
-        validated_save_continuity(
-            store, _continuity(JUDGED_ONLY), wrap_token=prep["wrap_token"], require_rederive=True
-        )
 
 
-def test_the_composer_is_never_handed_a_header_line(project):
-    """L1 + L3 r2 (spore-1233): a header handed to the composer could be moved
-    anywhere and persist a load-time verdict, so prepare_wrap hands over only
-    the flagged State lines, opted in or not."""
-    store, repo = project
-    _save(store, _continuity(TRUE_STATE))
-    (repo / "app.py").write_text('VERSION = "1.4.0"\n')
-    store.record("next session", "observation")
-    on = prepare_wrap(store)
-    assert on["package"] is not None
-    assert "[anneal re-derive]" not in on["package"]["continuity"]
-    assert "⚠ STALE" in on["package"]["continuity"]
-    assert "[anneal re-derive]" not in format_wrap_package_text(on)
 
 
 def test_a_store_whose_commands_all_failed_before_running_checked_nothing(project):

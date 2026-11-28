@@ -1003,19 +1003,15 @@ class TestWrapLifecycle:
         store.wrap_completed(
             episodes_compressed=5,
             continuity_chars=3000,
-            graduations_validated=2,
-            graduations_demoted=1,
-            citation_reuse_max=1,
-            patterns_extracted=8,
         )
         row = store._conn.execute(
             "SELECT * FROM wraps ORDER BY id DESC LIMIT 1"
         ).fetchone()
         assert row["episodes_compressed"] == 5
         assert row["continuity_chars"] == 3000
-        assert row["graduations_validated"] == 2
-        assert row["graduations_demoted"] == 1
-        assert row["patterns_extracted"] == 8
+        # the 3.x graduation columns stay in the table and read 0 on a new wrap
+        assert row["graduations_validated"] == 0
+        assert row["patterns_extracted"] == 0
 
     def test_multiple_wraps_tracked(self, store):
         store.wrap_completed(episodes_compressed=3, continuity_chars=1000)
@@ -2522,102 +2518,23 @@ class TestValidatedSaveContinuity:
     """Tests for the library-level validated_save_continuity function."""
 
     def test_validated_save_runs_full_pipeline(self, store):
-        """validated_save_continuity should validate, save, form associations, and record wrap.
-
-        Also serves as the integration test that graduation is not
-        silently bypassed. Prior to Apr 10 2026 this test used a
-        hardcoded ``2026-04-09`` date that drifted out of sync with
-        the pipeline's internal wall-clock ``today``, silently turning
-        any future 2x citation into a no-op (Diogenes Finding #3). Now
-        uses ``date.today().isoformat()`` and cites a real episode so
-        graduation actually runs.
-        """
+        """validated_save_continuity keeps the model's whole memory file and records the wrap."""
         from anneal_memory import validated_save_continuity
 
-        today = date.today().isoformat()
+        store.record("Database is slow under load", EpisodeType.OBSERVATION)
+        store.record("Chose caching to improve latency", EpisodeType.DECISION)
+        prep = prepare_wrap(store)
+        text = "# Test — Memory\n\nWorking on performance. Chose caching.\n"
+        result = validated_save_continuity(store, text, wrap_token=prep["wrap_token"])
 
-        # Record some episodes first
-        ep1 = store.record("Database is slow under load", EpisodeType.OBSERVATION)
-        ep2 = store.record("Chose caching to improve latency", EpisodeType.DECISION)
-
-        # Mark wrap as in progress
-        seed_prior_levels(store, {'thought: database slow under load triggers caching': 1})
-        prepare_wrap(store)
-
-        # Build continuity with a real 2x citation so graduation fires. Co-cite
-        # BOTH episodes (the slow-load observation AND the caching decision), since
-        # both genuinely support it; the graduation then forms a Hebbian link.
-        text = (
-            f"# Test — Memory (v1)\n\n"
-            f"## State\nWorking on performance.\n\n"
-            f"## Patterns\n"
-            f"thought: database slow under load triggers caching"
-            f" | 2x ({today})"
-            f" [evidence: {ep1.id[:8]}, {ep2.id[:8]} \"the slow-load"
-            f" observation and the caching decision both validate this\"]\n\n"
-            f"## Decisions\n"
-            f"[decided(rationale: \"speed\", on: \"{today}\")] Use caching\n\n"
-            f"## Context\nOptimizing database layer.\n"
-        )
-
-        # L3 r1 R1, then B3 L3 r1 U1: a save_meta another writer commits after
-        # the prepare is a new identity version, so the save is refused
-        # (version_moved), never a revert of it; the other writer's meta is kept
-        # and a re-prepared wrap applies its own changes to that copy.
-        from anneal_memory import LeaseFencedError
-        other = Store(store.path)
-        real_load_meta = store.load_meta
-        raced = []
-
-        def racing_load_meta():
-            out = real_load_meta()
-            if not raced:
-                raced.append(1)
-                other.save_meta({"sessions_produced": 99, "custom": "new"})
-            return out
-
-        store.load_meta = racing_load_meta
-        try:
-            with pytest.raises(LeaseFencedError) as moved:
-                validated_save_continuity(store, text)
-        finally:
-            del store.load_meta
-            other.close()
-        assert raced and moved.value.reason == "version_moved"
-        assert store.status().wrap_in_progress
-        store.wrap_cancelled()
-        prepare_wrap(store)
-        result = validated_save_continuity(store, text)
-        assert {k: store.load_meta().get(k) for k in ("sessions_produced", "custom")} \
-            == {"sessions_produced": 100, "custom": "new"}
-
-        # Should have saved
-        assert store.load_continuity() is not None
+        assert store.load_continuity().strip() == text.strip()
         assert result["path"] is not None
         assert result["episodes_compressed"] == 2
-
-        # Graduation immune system must have actually fired — this is
-        # the assertion Diogenes wanted: the integration path can no
-        # longer silently bypass graduation validation.
-        assert result["graduations_validated"] >= 1
-
-        # Wrap should be recorded
         status = store.status()
         assert status.total_wraps >= 1
         assert not status.wrap_in_progress
+        assert store.load_meta()["sessions_produced"] >= 1
 
-        # Metadata should be updated
-        meta = store.load_meta()
-        assert meta["sessions_produced"] >= 1
-
-    def test_validated_save_rejects_missing_sections(self, store):
-        """Should raise ValueError for malformed continuity."""
-        from anneal_memory import validated_save_continuity
-
-        store.record("Something", EpisodeType.OBSERVATION)
-        prepare_wrap(store)
-        with pytest.raises(ValueError, match="must contain all sections"):
-            validated_save_continuity(store, "Just some text without sections")
 
     def test_validated_save_rejects_empty_text(self, store):
         """Should raise ValueError for empty text (with a wrap in progress)."""
@@ -2628,30 +2545,6 @@ class TestValidatedSaveContinuity:
         with pytest.raises(ValueError, match="empty"):
             validated_save_continuity(store, "")
 
-    def test_validated_save_with_affective_state(self, store):
-        """Should accept and pass through affective state.
-
-        Focus is affective state passthrough; graduation integration
-        coverage lives in TestValidatedSaveContinuityReturnContract and
-        test_validated_save_runs_full_pipeline above.
-        """
-        from anneal_memory import validated_save_continuity, AffectiveState
-
-        today = date.today().isoformat()
-        store.record("Interesting finding", EpisodeType.OBSERVATION)
-
-        text = (
-            "# Test — Memory (v1)\n\n"
-            "## State\nExploring.\n\n"
-            f"## Patterns\nthought: interesting | 1x ({today})\n\n"
-            "## Decisions\nNone yet.\n\n"
-            "## Context\nFirst session.\n"
-        )
-
-        affect = AffectiveState(tag="curious", intensity=0.8)
-        prepare_wrap(store)
-        result = validated_save_continuity(store, text, affective_state=affect)
-        assert result["episodes_compressed"] == 1
 
 
 # -- Status --
@@ -2823,15 +2716,12 @@ class TestWrapResult:
         result = store.wrap_completed(
             episodes_compressed=3,
             continuity_chars=2000,
-            graduations_validated=2,
-            graduations_demoted=1,
         )
         assert isinstance(result, WrapResult)
         assert result.saved is True
         assert result.chars == 2000
         assert result.episodes_compressed == 3
-        assert result.graduations_validated == 2
-        assert result.graduations_demoted == 1
+        assert result.graduations_validated == 0
 
 
 # -- LIKE Wildcard Escaping --
@@ -3044,35 +2934,6 @@ class TestValidatedSaveContinuityReturnContract:
     gaming_suspects, citation_reuse_max, and sections.
     """
 
-    def test_return_dict_has_all_widened_keys(self, store):
-        from anneal_memory import validated_save_continuity
-
-        store.record("Observation A", EpisodeType.OBSERVATION)
-
-        prepare_wrap(store)
-        result = validated_save_continuity(
-            store, _valid_continuity_text(date.today().isoformat())
-        )
-
-        # Core pipeline results
-        assert "path" in result
-        assert "chars" in result  # top-level convenience key (10.5c.1 review fix)
-        assert "episodes_compressed" in result
-        assert "wrap_result" in result
-        # Graduation breakdown (the Diogenes Finding #1 fix)
-        assert "graduations_validated" in result
-        assert "graduations_demoted" in result
-        assert "demoted" in result
-        assert "bare_demoted" in result
-        assert "citation_reuse_max" in result
-        assert "gaming_suspects" in result
-        # Association metrics
-        assert "associations_formed" in result
-        assert "associations_strengthened" in result
-        assert "associations_decayed" in result
-        # Section measurement (used by CLI text output)
-        assert "sections" in result
-        assert isinstance(result["sections"], dict)
 
     def test_chars_top_level_matches_wrap_result(self, store):
         """Top-level chars must match wrap_result["chars"] and the actual save.
@@ -3100,176 +2961,10 @@ class TestValidatedSaveContinuityReturnContract:
             Path(result["path"]).read_text(encoding="utf-8")
         )
 
-    def test_wrap_result_section_sizes_is_populated(self, store):
-        """wrap_result["section_sizes"] must contain the real section data.
 
-        Prior to the 10.5c.1 cleanup, ``wrap_completed()`` passed
-        ``section_sizes={}`` unconditionally, so library users who
-        accessed ``result["wrap_result"]["section_sizes"]`` got an
-        empty dict — the type definition advertised a field that was
-        structurally always empty. The fix wires ``section_sizes``
-        through from ``validated_save_continuity`` to
-        ``wrap_completed``. As of 10.5c.3 ``wrap_result`` is a plain
-        dict via ``asdict(WrapResult)``; access is subscript, not
-        attribute.
-        """
-        from anneal_memory import validated_save_continuity
 
-        store.record("Observation", EpisodeType.OBSERVATION)
-        prepare_wrap(store)
-        result = validated_save_continuity(
-            store, _valid_continuity_text(date.today().isoformat())
-        )
 
-        wrap_result = result["wrap_result"]
-        section_sizes = wrap_result["section_sizes"]
-        # Populated, not the empty dict of the pre-fix era
-        assert section_sizes
-        assert isinstance(section_sizes, dict)
-        # Must contain the 4 canonical section names (plus _header)
-        assert "State" in section_sizes
-        assert "Patterns" in section_sizes
-        assert "Decisions" in section_sizes
-        assert "Context" in section_sizes
-        # Must match the top-level sections key (same measurement,
-        # two paths to it)
-        assert section_sizes == result["sections"]
 
-    def test_today_parameter_pins_graduation_date(self, store):
-        """Passing an explicit ``today`` pins graduation to that date.
-
-        This removes wall-clock dependency from tests and enables
-        reproducible experiment runs. Without the pin, graduation
-        uses ``date.today()`` internally and a test written with a
-        specific date in the continuity text would silently skip
-        citation validation as time drifts — the exact Diogenes
-        Finding #3 class of bug.
-        """
-        from anneal_memory import validated_save_continuity
-
-        # Use a pinned date that is NOT today's wall clock date.
-        # With the today parameter, graduation must still fire
-        # because the citation date matches the pinned value.
-        pinned_today = "2026-06-15"
-
-        ep1 = store.record("database slow under load", EpisodeType.OBSERVATION)
-
-        text = (
-            f"# Test — Memory (v1)\n\n"
-            f"## State\nPinned-date test.\n\n"
-            f"## Patterns\n"
-            f"thought: slow database impacts throughput"
-            f" | 2x ({pinned_today})"
-            f" [evidence: {ep1.id[:8]} \"database slow under load\"]\n\n"
-            f"## Decisions\n"
-            f"[decided(rationale: \"speed\", on: \"{pinned_today}\")] "
-            f"Use caching\n\n"
-            f"## Context\nPinned-date determinism test.\n"
-        )
-
-        seed_prior_levels(store, {'thought: slow database impacts throughput': 1})
-        prepare_wrap(store)
-        result = validated_save_continuity(store, text, today=pinned_today)
-
-        # Graduation fired even though the citation date isn't today's
-        # wall-clock date, because the pipeline used the pinned value.
-        assert result["graduations_validated"] >= 1
-
-    def test_today_parameter_defaults_to_wall_clock(self, store):
-        """Omitting ``today`` falls back to ``date.today().isoformat()``."""
-        from anneal_memory import validated_save_continuity
-
-        ep1 = store.record("fresh observation today", EpisodeType.OBSERVATION)
-        today = date.today().isoformat()
-
-        text = (
-            f"# Test — Memory (v1)\n\n"
-            f"## State\nDefault date test.\n\n"
-            f"## Patterns\n"
-            f"thought: fresh observation drives today's decision"
-            f" | 2x ({today})"
-            f" [evidence: {ep1.id[:8]} \"fresh observation today\"]\n\n"
-            f"## Decisions\nNone.\n\n"
-            f"## Context\nDefault wall-clock path.\n"
-        )
-
-        # No today= parameter → falls back to wall clock
-        seed_prior_levels(store, {"thought: fresh observation drives today's decision": 1})
-        prepare_wrap(store)
-        result = validated_save_continuity(store, text)
-        assert result["graduations_validated"] >= 1
-
-    def test_graduations_demoted_includes_bare_demoted(self, store):
-        """graduations_demoted must equal demoted + bare_demoted.
-
-        This is the exact divergence Diogenes caught: the library used
-        grad_result.demoted only, while MCP and CLI used
-        demoted + bare_demoted. After Session 10.5c.1 the library is
-        canonical — all three produce the same wrap metric.
-        """
-        from anneal_memory import validated_save_continuity
-
-        # Set citations_seen=True so bare graduations get demoted
-        meta = store.load_meta()
-        meta["citations_seen"] = True
-        store.save_meta(meta)
-
-        today = date.today().isoformat()
-
-        # Record one episode so there's at least something to compress
-        store.record("Triggering observation", EpisodeType.OBSERVATION)
-
-        # Build a continuity with a bare 2x graduation (no evidence tag)
-        # — should be demoted due to citations_seen=True
-        text = (
-            "# Test — Memory (v1)\n\n"
-            "## State\nWorking.\n\n"
-            "## Patterns\n"
-            f"thought: unsupported claim | 2x ({today})\n\n"
-            "## Decisions\nNone.\n\n"
-            "## Context\nFirst pass.\n"
-        )
-
-        prepare_wrap(store)
-        result = validated_save_continuity(store, text)
-
-        # graduations_demoted is the combined total
-        assert result["graduations_demoted"] == (
-            result["demoted"] + result["bare_demoted"]
-        )
-        # At least one bare demotion should have fired
-        assert result["bare_demoted"] >= 1
-
-    def test_wrap_metric_matches_return_dict(self, store):
-        """The wraps table row must match the returned graduations_demoted.
-
-        If the library under-reports to wrap_completed() but over-reports
-        in the return dict (or vice versa), downstream history/diff/stats
-        CLI output diverges from what the caller saw at save time.
-        """
-        from anneal_memory import validated_save_continuity
-
-        # citations_seen=True so bare grads get demoted
-        meta = store.load_meta()
-        meta["citations_seen"] = True
-        store.save_meta(meta)
-
-        store.record("Observation", EpisodeType.OBSERVATION)
-        today = date.today().isoformat()
-        text = (
-            "# Test — Memory (v1)\n\n"
-            "## State\nWorking.\n\n"
-            "## Patterns\n"
-            f"thought: bare claim | 2x ({today})\n\n"
-            "## Decisions\nNone.\n\n"
-            "## Context\nFirst pass.\n"
-        )
-        prepare_wrap(store)
-        result = validated_save_continuity(store, text)
-
-        history = store.get_wrap_history()
-        assert len(history) == 1
-        assert history[0].graduations_demoted == result["graduations_demoted"]
 
 
 # -- 10.5c.6 SQLite error wrapping (Store._db_boundary) --
@@ -3398,15 +3093,9 @@ class TestDbBoundaryErrorWrapping:
     # -- wrap lifecycle ------------------------------------------
 
     def test_wrap_started_wraps_sqlite_error(self, store, monkeypatch):
-        from anneal_memory import DEFAULT_SCHEMA
         self._flaky_execute(store, monkeypatch)
         with pytest.raises(StoreDatabaseError) as exc_info:
-            # Pass section_schema (the canonical prepare_wrap path always does)
-            # so the freeze uses the pure validate_schema path: the first DB
-            # touch is then wrap_started's own boundary. AM-SCHEMASNAPSHOT's
-            # None branch instead reads the live schema first (surfacing as the
-            # "section_schema" op), covered by the section_schema boundary tests.
-            store.wrap_started(token="a" * 32, episode_ids=[], section_schema=DEFAULT_SCHEMA)
+            store.wrap_started(token="a" * 32, episode_ids=[])
         self._assert_wrapped(exc_info.value, "wrap_started")
 
     def test_wrap_cancelled_wraps_sqlite_error(self, store, monkeypatch):

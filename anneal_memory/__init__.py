@@ -95,11 +95,9 @@ from .rederive import (
 )
 from .durable import DROP_DURABLE_RE, DurableFact, parse_durable_facts, section_chars
 from .continuity import (
-    ContinuityValidationError,
     felt_currency,
     format_wrap_package_text,
     prepare_wrap,
-    validate_structure,
     validated_save_continuity,
 )
 from . import sessions
@@ -209,7 +207,6 @@ __all__ = [
     "StoreError",
     "StoreOperation",
     "WrapInProgressError",
-    "ContinuityValidationError",
     "WrapCancelBoundError",
     "WrapCancelGatedError",
     "OriginKeyConflict",
@@ -279,7 +276,6 @@ __all__ = [
     "heading_marker",
     "DurableFact",
     "parse_durable_facts",
-    "validate_structure",
     "prepare_wrap",
     "felt_currency",
     "format_wrap_package_text",

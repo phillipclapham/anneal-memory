@@ -34,7 +34,7 @@ def _wrap(store: Store, n: int) -> list[str]:
     """One real prepare -> save; returns the episode ids the wrap consumed."""
     prep = prepare_wrap(store)
     ids = list(store.load_wrap_snapshot()["episode_ids"])
-    validated_save_continuity(store, _text(n), wrap_token=prep["wrap_token"], today=TODAY)
+    validated_save_continuity(store, _text(n), wrap_token=prep["wrap_token"])
     return ids
 
 
@@ -60,7 +60,7 @@ def test_the_reverted_days_episodes_are_offered_again_and_a_new_wrap_takes_them(
 
         prep = prepare_wrap(store)
         assert set(store.load_wrap_snapshot()["episode_ids"]) == set(day2)
-        validated_save_continuity(store, _text(2), wrap_token=prep["wrap_token"], today=TODAY)
+        validated_save_continuity(store, _text(2), wrap_token=prep["wrap_token"])
         # The reverted id is never handed to a later wrap, and the retry of the old revert is told so.
         assert [w.id for w in store.get_wrap_history()] == [1, 3]
         again = store.revert_wrap(2, reason="retry", actor="test")
@@ -180,7 +180,7 @@ def _graduation_store(tmp_path) -> Store:
     validated_save_continuity(
         store, f"## State\nw1.\n\n## Patterns\n- alpha_proven | 1x ({TODAY})\n\n"
         "## Decisions\n- d.\n\n## Context\n- c.\n",
-        wrap_token=prep["wrap_token"], today=TODAY)
+        wrap_token=prep["wrap_token"])
     for i in range(4):
         store.record(
             f"baseline episode d{i}: substrate observation about discipline rotation "
@@ -188,35 +188,6 @@ def _graduation_store(tmp_path) -> Store:
     return store
 
 
-def test_the_pattern_record_is_put_back_so_the_same_episodes_graduate_on_reworded_evidence(tmp_path):
-    """Reviewers L1 and L2 reproduced: a revert that left pattern_levels and the
-    pattern_history corpus as the wrap wrote them demoted the redo (cross-session-overlap)."""
-    store = _graduation_store(tmp_path)
-    try:
-        prep = prepare_wrap(store)
-        ep = store.load_wrap_snapshot()["episode_ids"][0]
-        validated_save_continuity(
-            store, _graduating(store, ep, "baseline substrate observation about discipline rotation memory tracking"),
-            wrap_token=prep["wrap_token"], today=TODAY)
-        assert store.get_pattern_history("alpha_proven") is not None
-        assert store.saved_pattern_levels()[("name", "alpha_proven")] == 2
-
-        receipt = store.revert_wrap(2, reason="r")
-        assert store.get_pattern_history("alpha_proven") is None
-        assert store.saved_pattern_levels()[("name", "alpha_proven")] == 1
-        undone = json.loads(store._conn.execute(
-            "SELECT undone_json FROM wrap_reverts WHERE id = ?", (receipt.revert_id,)).fetchone()[0])
-        assert undone["pattern_history_exact"] == 1 and undone["pattern_levels_exact"] >= 1
-
-        prep = prepare_wrap(store)
-        ep = store.load_wrap_snapshot()["episode_ids"][0]
-        result = validated_save_continuity(
-            store, _graduating(store, ep, "episode substrate observation discipline rotation memory tracking topic"),
-            wrap_token=prep["wrap_token"], today=TODAY)
-        assert result["graduations_validated"] == 1 and result["graduations_demoted"] == 0
-        assert f"alpha_proven | 2x ({TODAY})" in store.load_continuity()
-    finally:
-        store.close()
 
 
 def test_reverting_two_wraps_in_a_row_and_a_save_retry_after_a_revert(tmp_path):
@@ -225,14 +196,14 @@ def test_reverting_two_wraps_in_a_row_and_a_save_retry_after_a_revert(tmp_path):
         store.record("day three", "observation")
         prep = prepare_wrap(store)
         validated_save_continuity(
-            store, _text(3), wrap_token=prep["wrap_token"], today=TODAY, idempotency_key="save-3")
+            store, _text(3), wrap_token=prep["wrap_token"], idempotency_key="save-3")
         store.revert_wrap(3, reason="r")
         store.revert_wrap(2, reason="r")  # was identity_moved: the latest version carries wrap 2's own text
         assert store.load_continuity() == _text(1)
         assert [w.id for w in store.get_wrap_history()] == [1]
         prep = prepare_wrap(store)
         retried = validated_save_continuity(
-            store, _text(3), wrap_token=prep["wrap_token"], today=TODAY, idempotency_key="save-3")
+            store, _text(3), wrap_token=prep["wrap_token"], idempotency_key="save-3")
         assert not retried.get("replayed"), "a retry after the revert was told the reverted wrap succeeded"
     finally:
         store.close()
@@ -289,24 +260,6 @@ def test_a_later_meta_save_with_the_same_text_and_pruned_episodes_both_refuse(tm
         store.close()
 
 
-def test_a_supersession_link_the_wrap_recorded_goes_with_it(tmp_path):
-    """L3 r1 (codex MED): the wrap's [supersedes: A by B] decision outlived its rollback."""
-    store = Store(tmp_path / "m.db", project_name="t")
-    try:
-        store.record("seed", "observation")
-        _wrap(store, 1)
-        old = store.record("the old note", "observation").id
-        new = store.record("the newer note", "observation").id
-        prep = prepare_wrap(store)
-        validated_save_continuity(
-            store, _text(2) + f"\n[supersedes: {old} by {new}]\n",
-            wrap_token=prep["wrap_token"], today=TODAY)
-        assert store.supersession_exists(old_id=old, new_id=new)
-        store.revert_wrap(2, reason="r")
-        assert not store.supersession_exists(old_id=old, new_id=new)
-        assert {e.id for e in store.episodes_since_wrap()} >= {old, new}
-    finally:
-        store.close()
 
 
 def test_a_revert_that_loses_the_race_still_repairs_the_projection(tmp_path):
@@ -330,44 +283,3 @@ def test_a_revert_that_loses_the_race_still_repairs_the_projection(tmp_path):
         store.close()
 
 
-def test_a_prune_between_a_compost_and_its_revert_marks_the_restored_grounding_as_aged_out(tmp_path):
-    """Diogenes 11-01: a compost's grounding rows live only as JSON in wrap_undo, so a prune
-    between the wrap and its revert could not mark them; the revert then put them back with
-    gone_trust NULL for a gone episode, which reads as a retraction. Reproduced run: the
-    composting wrap's restored row came back None where a non-composting control read 'agent'."""
-    def run(compost: bool) -> list[tuple[str, str | None]]:
-        sub = tmp_path / ("c" if compost else "k")
-        sub.mkdir()
-        store = _graduation_store(sub)
-        try:
-            prep = prepare_wrap(store)
-            ep = store.load_wrap_snapshot()["episode_ids"][0]
-            validated_save_continuity(
-                store, _graduating(store, ep, "baseline substrate observation about discipline rotation memory tracking"),
-                wrap_token=prep["wrap_token"], today=TODAY)
-            grounded = [r[0] for r in store._conn.execute(
-                "SELECT DISTINCT episode_id FROM pattern_grounding WHERE name = 'alpha_proven'")]
-            assert grounded
-            store.record("day three thing", "observation")
-            prep = prepare_wrap(store)
-            keep = "" if compost else f"- alpha_proven | 1x ({TODAY})\n"
-            validated_save_continuity(
-                store,
-                f"## State\nw3.\n\n## Patterns\n{keep}- beta | 1x ({TODAY})\n\n## Decisions\n- d.\n\n## Context\n- c.\n",
-                wrap_token=prep["wrap_token"], today=TODAY, compost=["alpha_proven"] if compost else None)
-            full = [r[0] for r in store._conn.execute(
-                "SELECT id FROM episodes WHERE substr(id, 1, 8) IN (%s)" % ",".join("?" * len(grounded)), grounded)]
-            store._conn.execute(
-                "UPDATE episodes SET timestamp = '2000-01-01T00:00:00Z' WHERE id IN (%s)" % ",".join("?" * len(full)), full)
-            store._conn.commit()
-            assert store.prune(older_than_days=30) >= 1
-            store.revert_wrap(3, reason="r")
-            return [(r[0], r[1]) for r in store._conn.execute(
-                "SELECT episode_id, gone_trust FROM pattern_grounding WHERE name = 'alpha_proven'")]
-        finally:
-            store.close()
-
-    control = run(compost=False)
-    composted = run(compost=True)
-    assert control and all(trust is not None for _, trust in control)
-    assert composted and all(trust is not None for _, trust in composted), composted

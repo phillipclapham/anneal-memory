@@ -90,25 +90,6 @@ def three(tmp_path, monkeypatch):
     store.close()
 
 
-def test_a_rebind_during_compose_refuses_the_save_and_the_wrap_recovers(three):
-    store, b, c = three
-    res = prepare_wrap(store)
-    assert store.wrap_derive_roots() == root_identities(trusted_roots(store.path))
-    allow_store(store.path, c, label="other", visibility="public")  # the operator rebinds
-    with pytest.raises(ValueError, match=r"roots changed after prepare_wrap \(label 'other'") as e:
-        _save(store, _continuity([_LINE]), res["wrap_token"])
-    # the recovery names this wrap's token, never a tokenless cancel (L2)
-    assert f"--wrap-token {res['wrap_token']}" in str(e.value)
-    # nothing written, and the wrap is still the one prepare opened
-    assert store.load_continuity() is None
-    assert store.load_wrap_snapshot()["token"] == res["wrap_token"]
-    # the documented recovery: cancel, prepare against the new map, save
-    store.wrap_cancelled()
-    res2 = prepare_wrap(store)
-    assert store.wrap_derive_roots()["other"].endswith(":" + str(c.resolve()))
-    _save(store, _continuity([_LINE]), res2["wrap_token"])
-    assert "[derive@other:" in store.load_continuity()
-    assert store._get_metadata("wrap_derive_roots") == ""  # the completed wrap cleared it (L1 W1)
 
 
 def test_an_unchanged_map_saves(three):
@@ -118,70 +99,16 @@ def test_an_unchanged_map_saves(three):
     _save(store, _continuity([_LINE]), res["wrap_token"])
 
 
-def test_a_label_bound_during_compose_refuses_the_save(three):
-    store, _, c = three
-    res = prepare_wrap(store)
-    allow_store(store.path, c, label="late", visibility="public")
-    with pytest.raises(ValueError, match=r"label 'late': unbound -> "):
-        _save(store, _continuity(["- late [derive@late: git describe --tags --abbrev=0 @REF => v2.0.0]"]), res["wrap_token"])
 
 
-def test_a_revoke_during_compose_is_left_to_the_existing_gates(three):
-    # A removal certifies nothing, so the compare does not refuse it: a revoked
-    # label reads UNBOUND and refuses on its own, and with every root revoked no
-    # command runs (require_rederive is the caller's way to insist on a check;
-    # tests/test_rederive_gaps.py::test_save_can_require_rederive).
-    store, _, _ = three
-    res = prepare_wrap(store)
-    revoke_store(store.path, label="other")
-    with pytest.raises(ValueError, match="UNBOUND"):
-        _save(store, _continuity([_LINE]), res["wrap_token"])
 
 
-def test_a_wrap_that_froze_no_map_refuses_only_when_a_root_is_bound(three):
-    store, _, _ = three
-    store.wrap_started(token="t" * 32, episode_ids=[])  # an older prepare, or a direct caller
-    assert store.wrap_derive_roots() is None
-    with pytest.raises(ValueError, match="recorded no re-derive root map"):
-        _save(store, _continuity([_LINE]), "t" * 32)
-    # judged-only text runs nothing, so nothing is at risk
-    _save(store, _continuity(["- j [judged: x]"]), "t" * 32)
 
 
-def test_cancel_clears_the_frozen_map(three):
-    store, _, _ = three
-    prepare_wrap(store)
-    assert store._get_metadata("wrap_derive_roots")
-    store.wrap_cancelled()
-    assert store._get_metadata("wrap_derive_roots") == ""
 
 
-def test_an_unreadable_frozen_map_fails_closed(three):
-    store, _, _ = three
-    res = prepare_wrap(store)
-    tok = res["wrap_token"]
-    for bad in (
-        "{not json",
-        json.dumps([["other", "/x"]]),  # the pre-token shape
-        json.dumps({"token": tok, "roots": {"other": "/x"}}),
-        json.dumps({"token": tok, "roots": [["other", "/x"], ["other", "/y"]]}),
-    ):
-        store._conn.execute("UPDATE metadata SET value=? WHERE key='wrap_derive_roots'", (bad,))
-        store._conn.commit()
-        with pytest.raises(StoreError):
-            store.wrap_derive_roots()
-        with pytest.raises(StoreError):
-            _save(store, _continuity([_LINE]), res["wrap_token"])
 
 
-def test_a_store_without_derived_state_freezes_nothing(tmp_path, monkeypatch):
-    monkeypatch.setenv("ANNEAL_MEMORY_DERIVE_TRUST", str(tmp_path / "trust.json"))
-    store = Store(tmp_path / "m.db", project_name="S")
-    store.record("e", "observation")
-    prepare_wrap(store)
-    assert store._get_metadata("wrap_derive_roots") == ""
-    assert store.wrap_derive_roots() is None
-    store.close()
 
 
 def test_direct_callers_of_the_gate_are_unchanged(three):
@@ -191,30 +118,10 @@ def test_direct_callers_of_the_gate_are_unchanged(three):
     check_state_for_save(_continuity([_LINE]), PROJECT_SCHEMA, store.path)
 
 
-def test_a_directory_replaced_at_the_same_path_refuses_the_save(three):
-    # L2 2026-10-01, reproduced: the path alone passed while the repository at
-    # it was a different one.
-    store, b, c = three
-    res = prepare_wrap(store)
-    _replace(b, c)
-    with pytest.raises(ValueError, match="was replaced by a different directory at the same path"):
-        _save(store, _continuity([_LINE]), res["wrap_token"])
 
 
-def test_a_dot_git_replaced_inside_the_same_root_refuses_the_save(three):
-    store, b, c = three
-    res = prepare_wrap(store)
-    _replace(b / ".git", c / ".git")
-    with pytest.raises(ValueError, match="was replaced"):
-        _save(store, _continuity([_LINE]), res["wrap_token"])
 
 
-def test_a_full_revoke_during_compose_saves_but_says_nothing_was_checked(three):
-    store, _, _ = three
-    res = prepare_wrap(store)
-    revoke_store(store.path)
-    with pytest.warns(UserWarning, match="no State line was checked at this save"):
-        validated_save_continuity(store, _continuity([_LINE]), wrap_token=res["wrap_token"])
 
 
 def test_an_unrelated_label_bound_during_compose_does_not_refuse(three):
@@ -225,55 +132,12 @@ def test_an_unrelated_label_bound_during_compose_does_not_refuse(three):
     _save(store, _continuity([_LINE]), res["wrap_token"])
 
 
-def test_a_map_frozen_under_another_token_is_not_this_wraps(three):
-    # L1 W3: an older binary that does not clear the key leaves it behind; the
-    # next wrap must not read it as its own. It reads as "froze none", which
-    # refuses while a derive line would run.
-    store, _, _ = three
-    res = prepare_wrap(store)
-    leftover = store._get_metadata("wrap_derive_roots")
-    store.wrap_cancelled(expect_token=res["wrap_token"])
-    store.wrap_started(token="u" * 32, episode_ids=[])  # the older binary's prepare
-    store._conn.execute("UPDATE metadata SET value=? WHERE key='wrap_derive_roots'", (leftover,))
-    store._conn.commit()
-    assert store.wrap_derive_roots() is None
-    with pytest.raises(ValueError, match="recorded no re-derive root map"):
-        _save(store, _continuity([_LINE]), "u" * 32)
 
 
-def test_a_legacy_wrap_and_a_full_revoke_still_say_nothing_was_checked(three):
-    # codex L3 r1: a wrap that froze no map took the silent path.
-    store, _, _ = three
-    store.wrap_started(token="t" * 32, episode_ids=[])
-    revoke_store(store.path)
-    with pytest.warns(UserWarning, match="no State line was checked at this save"):
-        validated_save_continuity(store, _continuity([_LINE]), wrap_token="t" * 32)
 
 
-def test_a_root_replaced_while_its_commands_run_refuses(three, monkeypatch):
-    # codex L3 r1: the identity is taken again after the commands ran.
-    import anneal_memory.rederive as rd
-
-    store, b, c = three
-    res = prepare_wrap(store)
-    real = rd.rederive_text
-
-    def swap_then_run(text, schema, roots, **kw):
-        report = real(text, schema, roots, **kw)
-        _replace(b, c)
-        return report
-
-    monkeypatch.setattr(rd, "rederive_text", swap_then_run)
-    with pytest.raises(ValueError, match="changed while its commands ran"):
-        _save(store, _continuity([_LINE]), res["wrap_token"])
 
 
-def test_the_map_is_read_against_the_snapshot_token(three):
-    # complement L3 r1: a map frozen under another token is not this snapshot's.
-    store, _, _ = three
-    res = prepare_wrap(store)
-    assert store.wrap_derive_roots(expect_token=res["wrap_token"]) is not None
-    assert store.wrap_derive_roots(expect_token="x" * 32) is None
 
 
 def test_a_leftover_map_on_an_idle_store_is_not_a_partial_wrap(three):
@@ -286,24 +150,3 @@ def test_a_leftover_map_on_an_idle_store_is_not_a_partial_wrap(three):
     assert store._get_metadata("wrap_derive_roots") == ""
 
 
-def test_a_root_replaced_while_prepares_flags_run_refuses_the_save(three, monkeypatch):
-    # codex L3 r1: prepare took identities after its flags ran, so a root
-    # replaced in between was frozen as the replacement.
-    import anneal_memory.continuity as co
-
-    store, b, c = three
-    res = prepare_wrap(store)
-    _save(store, _continuity([_LINE]), res["wrap_token"])  # a continuity to flag
-    store.record("e2", "observation")
-    real = co.rederive_text
-
-    def flag_then_swap(text, schema, roots, **kw):
-        report = real(text, schema, roots, **kw)
-        _replace(b, c)
-        return report
-
-    monkeypatch.setattr(co, "rederive_text", flag_then_swap)
-    res2 = prepare_wrap(store)
-    monkeypatch.setattr(co, "rederive_text", real)
-    with pytest.raises(ValueError, match="was replaced by a different directory"):
-        _save(store, _continuity([_LINE]), res2["wrap_token"])

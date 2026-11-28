@@ -36,7 +36,7 @@ def test_episode_recorded_during_an_open_wrap_survives_every_cycle(tmp_path):
             prep = prepare_wrap(store)
             late = store.record(f"late {cycle}", "observation")
             validated_save_continuity(
-                store, _text(cycle), wrap_token=prep["wrap_token"], today=TODAY
+                store, _text(cycle), wrap_token=prep["wrap_token"]
             )
             window = {e.id for e in store.episodes_since_wrap()}
             assert late.id in window, f"cycle {cycle}: late episode stranded"
@@ -61,7 +61,7 @@ def test_record_cannot_stamp_a_session_a_concurrent_wrap_just_closed(tmp_path):
                 prep = prepare_wrap(other)
                 snapshot.extend(other.load_wrap_snapshot()["episode_ids"])
                 validated_save_continuity(
-                    other, _text(1), wrap_token=prep["wrap_token"], today=TODAY
+                    other, _text(1), wrap_token=prep["wrap_token"]
                 )
             finally:
                 other.close()
@@ -72,7 +72,7 @@ def test_record_cannot_stamp_a_session_a_concurrent_wrap_just_closed(tmp_path):
         # Get past the first wrap, so records are session-stamped, not NULL.
         store.record("seed", "observation")
         first = prepare_wrap(store)
-        validated_save_continuity(store, _text(0), wrap_token=first["wrap_token"], today=TODAY)
+        validated_save_continuity(store, _text(0), wrap_token=first["wrap_token"])
         store.record("in-window", "observation")
 
         saver = threading.Thread(target=wrap_on_another_connection)
@@ -147,37 +147,30 @@ def test_a_wrap_completed_during_prepare_is_not_overwritten(tmp_path):
     then opened a wrap whose save overwrote the completed one. The episode
     only that wrap had compressed was lost."""
     from anneal_memory import continuity as C
-    from anneal_memory.schema import PROJECT_SCHEMA
-
     def text(tag: str) -> str:
-        return "\n".join([
-            "# t — Memory (v1)", "", "## Plan", f"- plan {tag}", "",
-            "## State", f"- state {tag} [judged: t, {TODAY}, x]", "",
-            "## Decisions", "- d", "", "## Open", "- o", "",
-            "## Lessons", "- none yet", "", "## History", f"- {tag}", "",
-        ])
+        return f"# t — Memory\n\n{tag}\n"
 
     db = tmp_path / "m.db"
-    a = Store(db, project_name="t", section_schema=PROJECT_SCHEMA)
+    a = Store(db, project_name="t")
     errors: list[BaseException] = []
 
     def other_wrap() -> None:
         try:
-            b = Store(db, project_name="t", section_schema=PROJECT_SCHEMA)
+            b = Store(db, project_name="t")
             try:
                 b.record("late, only the other wrap sees it", "observation")
                 prep = C.prepare_wrap(b)
                 b.record("after the other wrap's snapshot", "observation")
-                C.validated_save_continuity(b, text("B"), wrap_token=prep["wrap_token"], today=TODAY)
+                C.validated_save_continuity(b, text("B"), wrap_token=prep["wrap_token"])
             finally:
                 b.close()
         except BaseException as exc:
             errors.append(exc)
 
-    real = C.rederive_text
+    real = C.rolling.plan_steps
     fired: list[int] = []
 
-    def rederive_while_another_wrap_completes(*args, **kwargs):
+    def plan_while_another_wrap_completes(*args, **kwargs):
         if not fired:
             fired.append(1)
             t = threading.Thread(target=other_wrap)
@@ -188,19 +181,19 @@ def test_a_wrap_completed_during_prepare_is_not_overwritten(tmp_path):
     try:
         a.record("e0", "observation")
         first = C.prepare_wrap(a)
-        C.validated_save_continuity(a, text("W1"), wrap_token=first["wrap_token"], today=TODAY)
+        C.validated_save_continuity(a, text("W1"), wrap_token=first["wrap_token"])
         a.record("early", "observation")
-        C.rederive_text = rederive_while_another_wrap_completes  # type: ignore[assignment]
+        C.rolling.plan_steps = plan_while_another_wrap_completes  # type: ignore[assignment]
         try:
             result = C.prepare_wrap(a)
         finally:
-            C.rederive_text = real  # type: ignore[assignment]
+            C.rolling.plan_steps = real  # type: ignore[assignment]
         assert errors == []
         assert result["status"] != "ready"  # told to retry, no wrap opened
         # codex L3 r1: the retry result must count what is still pending, not 0.
-        assert result["episode_count"] == len(a.episodes_since_wrap()) == 1
+        assert result["pending_count"] == len(a.episodes_since_wrap()) == 1
         assert a.load_wrap_snapshot() is None
-        assert "- B" in (a.load_continuity() or "")
+        assert "B" in (a.load_continuity() or "")
         assert a.status().total_wraps == 2
     finally:
         a.close()
@@ -253,7 +246,7 @@ def test_a_mid_wrap_episode_with_a_replayed_timestamp_reaches_the_next_window(
         # Past the first wrap, so records are session-stamped, not NULL.
         store.record("seed", "observation")
         first = prepare_wrap(store)
-        validated_save_continuity(store, _text(0), wrap_token=first["wrap_token"], today=TODAY)
+        validated_save_continuity(store, _text(0), wrap_token=first["wrap_token"])
 
         store.record("in-window", "observation")
         prep = prepare_wrap(store)
@@ -272,7 +265,7 @@ def test_a_mid_wrap_episode_with_a_replayed_timestamp_reaches_the_next_window(
         before = parsed(late.timestamp) < parsed(in_window.timestamp)
         assert before == (offset_days < 0)
 
-        validated_save_continuity(store, _text(1), wrap_token=prep["wrap_token"], today=TODAY)
+        validated_save_continuity(store, _text(1), wrap_token=prep["wrap_token"])
 
         assert late.id in {e.id for e in store.episodes_since_wrap()}
         prepare_wrap(store)

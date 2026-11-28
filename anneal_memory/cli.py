@@ -89,11 +89,11 @@ def _audit_file_names(audit_dir: Path, stem: str) -> frozenset[str] | None:
     except OSError:
         return None
 from .continuity import (
-    _matching_required_headings,
     format_wrap_package_text,
     prepare_wrap as _lib_prepare_wrap,
     validated_save_continuity as _lib_validated_save_continuity,
 )
+from .durable import match_headings as _matching_required_headings
 from .migration import (
     _ack_key,
     _version_tuple,
@@ -2052,8 +2052,6 @@ def cmd_revert_wrap(args: argparse.Namespace) -> None:
           f"window holds {receipt.window_after}")
     if receipt.identity_version is not None:
         print(f"  identity restored as version {receipt.identity_version}")
-    if not receipt.pattern_state_exact:
-        print("  pattern history was left as the wrap wrote it (no undo record)")
 
 
 def cmd_wrap_token_current(args: argparse.Namespace) -> None:

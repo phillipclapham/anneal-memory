@@ -338,45 +338,6 @@ class TestMcpRecallFallback:
 # -- MCP crystal_recall: mode ---------------------------------------------------
 
 
-class TestMcpCrystalRecallMode:
-    def _seed(self, server):
-        CrystalStore(server._crystal_path).crystallize(
-            name="fmt_row52_rounding", level=2,
-            explanation="the bank export rounds to whole cents", tags=[],
-        )
-
-    def test_schema_declares_mode(self):
-        cr = next(t for t in TOOLS if t["name"] == "crystal_recall")
-        mode = cr["inputSchema"]["properties"]["mode"]
-        assert mode["enum"] == ["prompt", "query"] and mode["default"] == "prompt"
-
-    def test_default_mode_keeps_the_gates(self, server):
-        self._seed(server)
-        assert _text(_call(server, "crystal_recall", {"query": "fmt_row52"})) == (
-            "No crystallized patterns matched (query too thin — give it at least 2 "
-            "distinctive keywords, or check crystal_index for what exists)."
-        )
-        assert _text(_call(server, "crystal_recall",
-                           {"query": "fmt_row52", "mode": "prompt"})).startswith(
-            "No crystallized patterns matched")
-
-    def test_query_mode_surfaces_the_single_keyword_pattern(self, server):
-        self._seed(server)
-        text = _text(_call(server, "crystal_recall",
-                           {"query": "fmt_row52", "mode": "query"}))
-        assert "fmt_row52_rounding" in text
-
-    def test_query_mode_with_associative_off(self, server):
-        self._seed(server)
-        text = _text(_call(server, "crystal_recall",
-                           {"query": "fmt_row52", "mode": "query", "associative": False}))
-        assert "fmt_row52_rounding" in text
-
-    @pytest.mark.parametrize("bad", ["Query", "", "open", 1, True, None, ["query"]])
-    def test_bad_mode_is_an_error_result(self, server, bad):
-        r = _call(server, "crystal_recall", {"query": "fmt_row52 rounding", "mode": bad})
-        assert r.get("isError") is True
-        assert "mode must be one of" in _text(r)
 
 
 # -- fix round -------------------------------------------------------------------
@@ -580,26 +541,6 @@ class TestAlsoMatchingByWords:
         assert tail.count("\n- (") == 5
 
 
-class TestCrystalRecallDescriptions:
-    def test_mode_description_is_agent_language_with_no_hardcoded_gates(self):
-        cr = next(t for t in TOOLS if t["name"] == "crystal_recall")
-        mode = cr["inputSchema"]["properties"]["mode"]["description"]
-        assert mode == (
-            "'query': for a question you are asking on purpose; one keyword is "
-            "enough, and weaker matches come back too. 'prompt' (default): strict, "
-            "built for automatic per-turn injection; may return nothing."
-        )
-        assert not any(ch.isdigit() for ch in mode)
-
-    def test_main_description_does_not_contradict_query_mode(self):
-        cr = next(t for t in TOOLS if t["name"] == "crystal_recall")
-        d = cr["description"]
-        assert "In the default 'prompt' mode it is precision-biased" in d
-        assert "Pass mode='query' when you are asking explicitly." in d
-
-    def test_thin_query_message_grammar_in_query_mode(self, server):
-        text = _text(_call(server, "crystal_recall", {"query": "the", "mode": "query"}))
-        assert "at least 1 distinctive keyword, or check crystal_index" in text
 
 
 class TestEvidenceEdgeKeepsThePromptBar:

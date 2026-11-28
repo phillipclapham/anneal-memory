@@ -15,7 +15,7 @@ from datetime import timezone
 
 import pytest
 
-from anneal_memory import Store, rolling
+from anneal_memory import Store, register_writer_schema, rolling
 from anneal_memory.continuity import prepare_wrap, validated_save_continuity
 from anneal_memory.integrity import TOOLS
 from anneal_memory.server import Server
@@ -75,7 +75,7 @@ def test_a_catch_up_is_one_step_per_day_never_one_merged_log(store):
     assert [s.day for s in rolling.plan_steps(rows, tz=timezone.utc)] == ["2026-03-01", "2026-03-02"]
     assert [s.day for s in rolling.plan_steps(rows, tz=rolling.resolve_tz("Asia/Tokyo"))] == ["2026-03-02"]
     long_day = [(f"e{i}", f"2026-03-01T10:00:{i:02d}Z", "observation", "z" * 100) for i in range(5)]
-    sliced = rolling.plan_steps(long_day, tz=timezone.utc, chunk_max=250)
+    sliced = rolling.plan_steps(long_day, tz=timezone.utc, chunk_max=300)
     assert [len(s.episode_ids) for s in sliced] == [2, 2, 1] and sliced[0].chunks == 3
 
 
@@ -131,6 +131,7 @@ def test_an_old_store_opens_and_its_file_seeds_the_first_rolling_wrap(tmp_path):
     old.save_continuity("# T — Memory (v1)\n\n## Patterns\nsome_pattern | 3x\n")
     old.close()
     conn = sqlite3.connect(db)
+    register_writer_schema(conn)
     conn.execute(
         "INSERT INTO pattern_history (pattern_name, max_level_reached, last_seen_at) "
         "VALUES ('some_pattern', 3, '2026-03-01')"

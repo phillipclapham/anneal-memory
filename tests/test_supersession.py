@@ -97,40 +97,6 @@ def test_an_ungrounded_link_records_nothing(tmp_path):
         assert st.recall(keyword="quillmark").episodes[0].id == old.id
 
 
-def test_wrap_proposed_link_is_validated_and_idempotent(tmp_path):
-    with Store(str(tmp_path / "m.db")) as st:
-        old = st.record(OLD, "observation", timestamp="2026-01-05T10:00:00Z")
-        assert prepare_wrap(st)["status"] == "ready"
-        validated_save_continuity(st, _continuity())
-        new = st.record(NEW, "observation", timestamp="2026-02-10T10:00:00Z")
-        # No CONTEXT here: that shared boilerplate alone clears the two-word
-        # grounding floor (measured while writing this test), so a stranger that
-        # carried it would ground. The floor is lexical, not a judgment.
-        stranger = st.record("An unrelated note about the parser fixtures, nothing else.",
-                             "observation", timestamp="2026-02-11T10:00:00Z")
-
-        assert prepare_wrap(st)["status"] == "ready"
-        marks = (f"[supersedes: {old.id} by {new.id}]\n"
-                 f"[supersedes: {new.id} by {old.id}]\n"     # NEW not in this wrap
-                 f"[supersedes: {old.id} by {stranger.id}]")  # does not ground
-        res = validated_save_continuity(st, _continuity(marks))
-        assert res["supersessions_recorded"] == 1
-        # The link recorded BEFORE the two rejections must survive them: a
-        # rejection raised inside the save batch once rolled it back (and with
-        # it the batch's association writes), reproduced while writing this.
-        assert st.supersession_exists(old_id=old.id, new_id=new.id)
-        reasons = {(r["old_id"], r["new_id"]) for r in res["supersessions_rejected"]}
-        assert reasons == {(new.id, old.id), (old.id, stranger.id)}
-        assert [e.id for e in st.recall(keyword="quillmark").episodes] == [new.id]
-
-        # The marker carried forward into the next wrap: the recorded link is
-        # skipped silently; nothing is re-rejected for it.
-        st.record("A later observation about something else." + CONTEXT, "observation")
-        assert prepare_wrap(st)["status"] == "ready"
-        again = validated_save_continuity(
-            st, _continuity(f"[supersedes: {old.id} by {new.id}]"))
-        assert again["supersessions_recorded"] == 0
-        assert again["supersessions_rejected"] == []
 
 
 def test_read_only_recall_on_a_store_without_the_table(tmp_path):
@@ -203,33 +169,8 @@ def test_record_refusal_inside_a_batch_keeps_the_batch(tmp_path):
         assert st.get(kept.id) is not None
 
 
-def test_a_superseded_episode_is_not_citable_evidence(tmp_path):
-    """codex L3: a 2x citing only the replaced fact validated, including when
-    the link was proposed in the same save."""
-    with Store(str(tmp_path / "m.db")) as st:
-        old = st.record(OLD, "observation", timestamp="2026-01-05T10:00:00Z")
-        new = st.record(NEW, "observation", timestamp="2026-02-10T10:00:00Z")
-        assert prepare_wrap(st)["status"] == "ready"
-        line = (f"- quillmark_storage | 2x (2026-02-10) "
-                f'[evidence: {old.id} "the database engine for Quillmark is postgres"]')
-        with pytest.warns(UserWarning, match="cite only superseded episodes"):
-            res = validated_save_continuity(
-                st,
-                "## State\nx\n" + f"[supersedes: {old.id} by {new.id}]\n\n## Patterns\n"
-                + line + "\n\n## Decisions\n\n## Context\nx\n",
-                today="2026-02-10",
-            )
-        assert res["supersessions_recorded"] == 1
-        assert res["graduations_validated"] == 0
 
 
-def test_wrap_marks_superseded_and_reports_unparsed_markers(tmp_path):
-    with Store(str(tmp_path / "m.db")) as st:
-        _pair(st)
-        wrap = prepare_wrap(st)
-        assert "[superseded by" in wrap["package"]["episodes"]
-        res = validated_save_continuity(st, _continuity("[Supersedes: abc → def]"))
-        assert [r["reason"][:15] for r in res["supersessions_rejected"]] == ["unparsed marker"]
 
 
 def test_export_keeps_superseded_episodes(tmp_path, capsys, monkeypatch):
@@ -269,19 +210,6 @@ def test_the_floor_is_a_ratio_not_a_word_count(tmp_path):
 
 # --- built from the fix-diff L3's reproduced failures (2026-10-02 night) ---
 
-def test_conflicting_proposals_leave_the_survivor_citable(tmp_path):
-    with Store(str(tmp_path / "m.db")) as st:
-        a = st.record(OLD, "observation", timestamp="2026-02-10T10:00:00Z")
-        b = st.record(NEW, "observation", timestamp="2026-02-10T10:00:00Z")
-        seed_prior_levels(st, {'quillmark_storage': 1})
-        assert prepare_wrap(st)["status"] == "ready"
-        line = (f"- quillmark_storage | 2x (2026-02-10) "
-                f'[evidence: {b.id} "Quillmark switched its storage over to sqlite"]')
-        res = validated_save_continuity(
-            st, f"## State\nx\n[supersedes: {a.id} by {b.id}]\n[supersedes: {b.id} by {a.id}]\n\n"
-                f"## Patterns\n{line}\n\n## Decisions\n\n## Context\nx\n", today="2026-02-10")
-        assert (res["supersessions_recorded"], len(res["supersessions_rejected"])) == (1, 1)
-        assert res["graduations_validated"] == 1
 
 
 @pytest.mark.skipif(sys.version_info < (3, 11), reason="Connection.setlimit is 3.11+")
@@ -317,42 +245,6 @@ def test_open_repairs_links_an_older_version_left_dangling(tmp_path):
         assert [(l["old_id"], l["new_id"]) for l in st.supersession_links()] == [(a.id, c.id)]
 
 
-def test_a_link_racing_the_save_refuses_it_and_the_wrap_survives(tmp_path):
-    db = str(tmp_path / "m.db")
-    st = Store(db)
-    try:
-        a = st.record(OLD, "observation", timestamp="2026-02-10T09:00:00Z")
-        b = st.record(NEW, "observation", timestamp="2026-02-10T10:00:00Z")
-        seed_prior_levels(st, {'quillmark_storage': 1})
-        assert prepare_wrap(st)["status"] == "ready"
-        real = st.superseded_by_map
-        fired: list[int] = []
-
-        def racing(ids):
-            out = real(ids)
-            if not fired:
-                fired.append(1)
-                with Store(db) as other:
-                    other.supersede(old_id=a.id, new_id=b.id)
-            return out
-
-        st.superseded_by_map = racing  # type: ignore[method-assign]
-
-        def text(ep: str, why: str) -> str:
-            return (f"## State\nx\n\n## Patterns\n- quillmark_storage | 2x (2026-02-10) "
-                    f'[evidence: {ep} "{why}"]\n\n## Decisions\n\n## Context\nx\n')
-
-        with pytest.raises(SupersessionError, match="superseded by another writer"):
-            validated_save_continuity(
-                st, text(a.id, "the database engine for Quillmark is postgres"),
-                today="2026-02-10")
-        assert st.status().wrap_in_progress
-        st.superseded_by_map = real  # type: ignore[method-assign]
-        res = validated_save_continuity(
-            st, text(b.id, "Quillmark switched its storage over to sqlite"), today="2026-02-10")
-        assert res["graduations_validated"] == 1
-    finally:
-        st.close()
 
 
 # --- One transaction for the save (1002+20 design, project_memory/save_txn_design_1002.md) ---
@@ -363,46 +255,6 @@ def _text(ep: str, why: str) -> str:
             f'[evidence: {ep} "{why}"]\n\n## Decisions\n\n## Context\nx\n')
 
 
-def test_the_in_batch_recheck_holds_the_write_lock(tmp_path, monkeypatch):
-    """complement: _batch issued no BEGIN, so the recheck was locked only if
-    some DML ran first. Measured 1002+20: today the association decay always
-    writes first, so the lock held by accident. With a decay that writes
-    nothing (a no-op stand-in for "skip decay when there is nothing to
-    decay"), a link committed right after the recheck let the pattern
-    graduate on the replaced fact."""
-    monkeypatch.setattr(Store, "decay_associations", lambda self, *a, **k: 0)
-    db = str(tmp_path / "m.db")
-    st = Store(db)
-    other = Store(db)
-    try:
-        a = st.record(OLD, "observation", timestamp="2026-02-10T09:00:00Z")
-        b = st.record(NEW, "observation", timestamp="2026-02-10T10:00:00Z")
-        seed_prior_levels(st, {'quillmark_storage': 1})
-        assert prepare_wrap(st)["status"] == "ready"
-        other._conn.execute("PRAGMA busy_timeout=200")
-        real = st.superseded_by_map
-        calls: list[str] = []
-
-        def racing(ids):
-            out = real(ids)
-            calls.append("x")
-            if len(calls) == 2:  # the in-batch recheck
-                try:
-                    other.supersede(old_id=a.id, new_id=b.id)
-                    calls.append("peer-linked")
-                except Exception:
-                    calls.append("peer-locked-out")
-            return out
-
-        st.superseded_by_map = racing  # type: ignore[method-assign]
-        res = validated_save_continuity(
-            st, _text(a.id, "the database engine for Quillmark is postgres"),
-            today="2026-02-10")
-        assert "peer-locked-out" in calls, calls
-        assert res["graduations_validated"] == 1
-    finally:
-        other.close()
-        st.close()
 
 
 def _dangling_store(db: str):
@@ -543,35 +395,6 @@ def test_wrap_cancelled_inside_a_batch_fails_loud(tmp_path):
         assert st.status().wrap_in_progress
 
 
-def test_a_busy_batch_entry_leaves_the_store_usable(tmp_path):
-    """Guard for the lock at batch entry: a BUSY there must not leave
-    _defer_commit set (the next save would read as a nested batch)."""
-    from anneal_memory.store import StoreDatabaseError
-
-    db = str(tmp_path / "m.db")
-    st = Store(db)
-    try:
-        a = st.record(OLD, "observation", timestamp="2026-02-10T09:00:00Z")
-        seed_prior_levels(st, {'quillmark_storage': 1})
-        assert prepare_wrap(st)["status"] == "ready"
-        st._conn.execute("PRAGMA busy_timeout=50")
-        holder = sqlite3.connect(db, timeout=0.05)
-        holder.execute("BEGIN IMMEDIATE")
-        try:
-            with pytest.raises(StoreDatabaseError):
-                validated_save_continuity(
-                    st, _text(a.id, "the database engine for Quillmark is postgres"),
-                    today="2026-02-10")
-        finally:
-            holder.rollback()
-            holder.close()
-        assert st._defer_commit is False
-        res = validated_save_continuity(
-            st, _text(a.id, "the database engine for Quillmark is postgres"),
-            today="2026-02-10")
-        assert res["graduations_validated"] == 1
-    finally:
-        st.close()
 
 
 def test_the_floor_is_tight_against_the_probe_minimum():

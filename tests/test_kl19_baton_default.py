@@ -117,7 +117,7 @@ def test_mcp_wrap_consolidates_only_after_the_operator_claims_for_its_id(init_db
         assert store.status().wrap_in_progress is False
 
         ready = _text(desk._tool_prepare_wrap({}))
-        token = ready.rsplit("Wrap token: ", 1)[1].strip()
+        token = ready.split("Wrap token: ", 1)[1].split()[0]
         saved = desk._tool_save_continuity({"text": _WRAP_TEXT, "wrap_token": token})
         assert not saved.get("isError"), _text(saved)
         assert len(store.get_wrap_history()) == 1

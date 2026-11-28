@@ -1107,86 +1107,9 @@ class TestTeacherCoversReaderRange:
     These assertions derive from the generator's OWN OUTPUT, so they cannot be
     satisfied by editing a fixture."""
 
-    def test_teaching_covers_the_readers_level_range(self):
-        """The taught example set must show a level above the retired 3x cap."""
-        import re as _re
 
-        from anneal_memory.continuity import _marker_reference
 
-        ref = _marker_reference("2026-08-31")
-        levels = {int(m) for m in _re.findall(r"\|\s*(\d+)x", ref)}
-        assert levels, "generator emitted no level examples at all"
-        assert max(levels) > 3, (
-            "the generated instructions teach a closed level set whose maximum is "
-            f"{max(levels)}x, while _GRADUATION_RE accepts 2-and-up with NO ceiling "
-            "(AM-LEVELCAP, 0.9.7). An agent following its own instructions can never "
-            "write a 4x line, so the practice re-caps itself even though the code "
-            "does not."
-        )
 
-    def test_teaching_never_calls_the_VISIBLE_level_monotonic(self):
-        """⛔ A REFUTED CLAIM THAT THE GENERATOR ITSELF REFUTED 39 LINES LATER.
-
-        The generated instructions said, at the ladder section, *"the level is a
-        monotonic high-water mark"* — and, at the LEVEL/RECENCY note, the truth:
-        *"the level you WRITE is not immutable... the visible `Nx` is current
-        standing, not a ratchet. The monotonic high-water mark is kept by the
-        library (`max_level_reached`), not by this line."* **Both shipped in the
-        same package handed to the composing agent every wrap.**
-
-        MEASURED 2026-09-04 against ``validate_graduations``: an ungrounded
-        re-stamp DECREMENTS the visible level — ``4x``→``3x``, ``12x``→``11x``,
-        ``18x``→``17x``, tagged ``(ungrounded)``. So the ladder-section claim was
-        false, and the 2026-09-04 SKILL.md fix IMPORTED it from here — a
-        correction propagating a refutation because the source it copied from
-        contradicted itself.
-
-        This pins the property at the GENERATOR, which is the surface the agent
-        actually obeys. Its sibling in ``tests/test_integrity.py`` pins SKILL.md.
-        One claim, both of its sites — that is the whole lesson of the finding
-        that produced it.
-        """
-        import re as _re
-
-        from anneal_memory.continuity import _marker_reference
-
-        ref = _marker_reference("2026-09-04")
-        # "monotonic" is allowed ONLY in a sentence that also names the field
-        # that actually is monotonic. Anything else is the refuted claim.
-        for sentence in _re.split(r"(?<=[.!?])\s+", ref):
-            if "monotonic" not in sentence:
-                continue
-            assert "max_level_reached" in sentence, (
-                "the generated instructions call a level 'monotonic' without "
-                "naming max_level_reached as the field that is. The VISIBLE "
-                "level is decremented on an ungrounded re-stamp (measured: "
-                "4x->3x, 12x->11x, 18x->17x), so this teaches the composing "
-                f"agent a property the library refutes. Sentence: {sentence!r}"
-            )
-
-    def test_teaching_does_not_name_a_closed_level_enumeration(self):
-        """A closed enumeration is the specific shape that re-imposes the cap."""
-        from anneal_memory.continuity import _marker_reference
-
-        ref = _marker_reference("2026-08-31")
-        assert (
-            "1, 2, or 3" not in ref
-        ), "the retired closed level enumeration is back in the generated instructions"
-
-    def test_teaching_covers_the_readers_salience_range(self):
-        """The taught marker set must show a run of ``!`` longer than ``!!``."""
-        import re as _re
-
-        from anneal_memory.continuity import _marker_reference
-
-        ref = _marker_reference("2026-08-31")
-        runs = {len(m) for m in _re.findall(r"-\s+(!+)\s", ref)}
-        assert runs, "generator emitted no salience-prefix examples at all"
-        assert max(runs) > 2, (
-            f"the generated instructions teach at most {'!' * max(runs)} while the "
-            "reader takes ANY run of '!' (spore-447, 0.9.7) and flow's own neocortex "
-            "writes '!!!' today"
-        )
 
     def test_a_level_above_the_retired_cap_round_trips(self):
         """Behavioural floor under the three assertions above: the reader really
@@ -1209,88 +1132,9 @@ class TestTeacherCoversReaderRange:
 
         return _build_wrap_instructions("proj", None, today)
 
-    def test_delivered_instructions_carry_no_ceiling_language(self):
-        """NEGATIVE assertion — the shapes that re-impose a cap must be absent
-        from the DELIVERED text, not merely absent from one component."""
-        delivered = self._delivered()
-        for banned in (
-            "1, 2, or 3",
-            "graduations (2x and 3x)",
-            "to 2x or 3x",
-            "Patterns at 3x:",
-            "highest urgency",
-        ):
-            assert banned not in delivered, (
-                f"ceiling language {banned!r} is back in the delivered wrap "
-                "instructions — an agent obeying them re-caps a library that does not"
-            )
 
-    def test_lesson_instruction_sits_in_the_graduating_bullet_of_every_schema(self):
-        """The lesson-keeping instruction is part of the graduating section's own
-        how-to-compress bullet (not the document-wide Quality block, which reaches
-        derived-state and durable sections), for every named schema."""
-        from anneal_memory.continuity import _build_wrap_instructions
-        from anneal_memory.schema import SCHEMA_NAMES, schema_by_name
 
-        for name in SCHEMA_NAMES:
-            schema = schema_by_name(name)
-            delivered = _build_wrap_instructions("proj", None, "2026-08-31", schema)
-            for section in (s for s in schema if s["role"] == "graduating"):
-                start = delivered.index(f"- {section['heading']}: Extract principles")
-                bullet = delivered[start:].split("\n- ", 1)[0].split("\n\n", 1)[0]
-                assert "mechanism and its checking clause" in bullet, name
-                assert "never compress a lesson into only a dated record" in bullet, name
-            quality = delivered.split("**Quality:**", 1)[1]
-            assert "checking clause" not in quality, name
 
-    def test_delivered_instructions_show_a_level_above_the_cap(self):
-        import re as _re
-
-        levels = {int(m) for m in _re.findall(r"\|\s*(\d+)x", self._delivered())}
-        assert max(levels) > 3, f"delivered instructions top out at {max(levels)}x"
-
-    def test_marker_kinds_taught_are_exactly_the_kinds_the_reader_accepts(self):
-        """codex L3 MED: the KINDS are a closed set; only the ``!`` RUN is open.
-        Teaching 'not a closed set' invites a marker the reader silently drops."""
-        import re as _re
-
-        delivered = self._delivered()
-        for accepted in ("`?`", "`✓`", "`*`"):
-            assert accepted in delivered, f"reader accepts {accepted}, teaching omits it"
-        # and the reader really does drop an unlisted glyph
-        assert extract_pattern_names(
-            '## Patterns\n- ~ p | 2x (2026-08-31) [evidence: abc12345 "x"]\n'
-        ) == {}
-
-        # ⭐ THE CONVERSE — the direction this test is NAMED for and did not check.
-        # "EXACTLY" is a two-way claim, but the body only proved accepted ⊆ taught.
-        # The docstring names the risk as "teaching a marker the reader silently
-        # drops", which is the OTHER direction: taught ⊆ accepted. That half was
-        # missing, so the test certified an equality while checking an inclusion.
-        # Diogenes carried it as "the EXACTLY test checking one direction".
-        # Behaviour, not text: every glyph the instructions teach must survive a
-        # real round-trip through the reader.
-        # ⚠ SCOPED TO THE TEACHING SHAPE, NOT EVERY BACKTICKED GLYPH. A naive
-        # scan over-matches and fails on correct text: the instructions also
-        # backtick the markdown bullet `-`, the level separator `|`, and `~` as
-        # an explicit NON-marker ("silently ignored"). Same over-matching trap
-        # as the SKILL.md "CLI only" guard. A marker is taught by a bullet that
-        # both names the glyph AND shows it in a pattern line, which is exactly
-        # the form an agent copies.
-        taught_markers = _re.findall(
-            r"^- `([^\w\s`])` [^\n]*→ `- \1 pattern_name", delivered, _re.M
-        )
-        assert taught_markers, "no marker teaching found — has the format changed?"
-        for taught in taught_markers:
-            line = (
-                "## Patterns\n"
-                f'- {taught} probe | 2x (2026-08-31) [evidence: abc12345 "x"]\n'
-            )
-            assert extract_pattern_names(line) == {"probe": 2}, (
-                f"the delivered instructions teach the marker {taught!r}, but the "
-                f"reader SILENTLY DROPS a pattern line carrying it — an agent "
-                f"obeying the teaching loses the pattern with no error"
-            )
 
     def test_a_long_bang_run_is_read_at_a_high_level(self):
         """Behaviour, not text: pins BOTH open axes at once, so the salience

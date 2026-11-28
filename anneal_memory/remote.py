@@ -514,7 +514,7 @@ def _pending_block(recs: list[dict[str, Any]], args: dict[str, Any]) -> str:
 # The stdio tools exposed remotely. Each name maps to the Server method that
 # implements it in :meth:`RemoteSession._bind`; the only other tool is ``capture``
 # (outbox only, never the store), and only with ``--outbox``.
-_SERVER_READ_TOOLS = ("recall", "crystal_recall", "crystal_index")
+_SERVER_READ_TOOLS = ("recall",)
 REMOTE_TOOLS = ("orient", *_SERVER_READ_TOOLS, "read_continuity")
 
 

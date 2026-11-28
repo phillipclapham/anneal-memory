@@ -356,7 +356,7 @@ def test_gate_downgrades_unbatoned_parallel(store):
     sessions.register_session(store.continuity_path, "other")
     result = prepare_wrap(store, session_id="me")
     assert result["status"] == "downgraded"
-    assert result["package"] is None
+    assert result["step"] is None
     assert result["wrap_token"] is None
     assert "downgraded" in result["message"].lower()
     # the store is left UNTOUCHED — no wrap marked in progress
@@ -416,7 +416,7 @@ def test_felt_currency_current_after_consolidate(store):
     store.record("obs", EpisodeType.OBSERVATION)
     r = prepare_wrap(store)
     validated_save_continuity(
-        store, _WRAP_TEXT, wrap_token=r["wrap_token"], today="2026-06-27"
+        store, _WRAP_TEXT, wrap_token=r["wrap_token"]
     )
     fc = felt_currency(store)
     assert fc["sealed_at"] is not None
@@ -429,7 +429,7 @@ def test_felt_currency_stale_after_post_consolidate_capture(store):
     store.record("obs", EpisodeType.OBSERVATION)
     r = prepare_wrap(store)
     validated_save_continuity(
-        store, _WRAP_TEXT, wrap_token=r["wrap_token"], today="2026-06-27"
+        store, _WRAP_TEXT, wrap_token=r["wrap_token"]
     )
     store.record("work captured after the consolidate", EpisodeType.OBSERVATION)
     fc = felt_currency(store)
@@ -591,7 +591,7 @@ def test_policy_downgrades_a_caller_with_no_session_id(store):
     result = prepare_wrap(store)
     assert result["status"] == "downgraded"
     assert "downgraded-baton-required" in result["message"]
-    assert result["wrap_token"] is None and result["package"] is None
+    assert result["wrap_token"] is None and result["step"] is None
     assert not store.status().wrap_in_progress  # store untouched
 
 
@@ -685,8 +685,8 @@ def test_cli_prepare_wrap_exits_3_on_every_downgrade_reason(tmp_path, monkeypatc
     Store(db).close()
     message = f"Consolidate downgraded to capture-only ({reason}): test"
     monkeypatch.setattr(cli, "_lib_prepare_wrap", lambda *a, **k: {
-        "status": "downgraded", "message": message, "package": None,
-        "wrap_token": None, "episode_count": 0,
+        "status": "downgraded", "message": message, "step": None,
+        "wrap_token": None, "episode_count": 0, "pending_count": 1,
     })
     argv = ["anneal-memory", "--db", db, "prepare-wrap"] + (["--json"] if as_json else [])
     monkeypatch.setattr(sys, "argv", argv)
@@ -1270,14 +1270,14 @@ def test_a_baton_taken_during_the_package_build_does_not_start_a_wrap(store, mon
 
     store.record("obs", EpisodeType.OBSERVATION)
     sessions.claim_baton(store.continuity_path, "A")
-    real = continuity._build_wrap_package
+    real = continuity.rolling.plan_steps
 
     def build_then_lose_the_baton(*a, **kw):
         out = real(*a, **kw)
         sessions.claim_baton(store.continuity_path, "B", take=True)
         return out
 
-    monkeypatch.setattr(continuity, "_build_wrap_package", build_then_lose_the_baton)
+    monkeypatch.setattr(continuity.rolling, "plan_steps", build_then_lose_the_baton)
     result = prepare_wrap(store, session_id="A")
     assert result["status"] == "downgraded" and result["wrap_token"] is None
     assert not store.status().wrap_in_progress  # wrap_started never ran

@@ -193,27 +193,3 @@ class TestMcpRecallFacts:
         assert "Durable facts matching your words" in recall["description"]
 
 
-class TestMcpCrystalRecallFacts:
-    def test_facts_listed_first_with_patterns(self, server, store):
-        save_cont(store, _continuity(ALLERGY))
-        CrystalStore(server._crystal_path).crystallize(
-            name="dinner_menu_discipline", level=2,
-            explanation="check the dinner menu against every allergy", tags=[])
-        text = _text(_call(server, "crystal_recall", {"query": "dinner menu allergy check"}))
-        assert text.startswith("Durable facts matching your words:\n- tree nut allergy (cue:")
-        assert "Found 1 crystallized pattern(s):" in text
-        assert "dinner_menu_discipline" in text
-
-    def test_a_fact_with_no_pattern_replaces_no_match(self, server, store):
-        save_cont(store, _continuity(ALLERGY))
-        text = _text(_call(server, "crystal_recall", {"query": "restaurant", "mode": "query"}))
-        assert text == ("Durable facts matching your words:\n- tree nut allergy (cue: restaurant)"
-                        "\n\nNo crystallized patterns matched.")
-
-    def test_no_section_is_unchanged(self, server, store):
-        assert _text(_call(server, "crystal_recall", {"query": "restaurant dinner"})) == \
-            "No crystallized patterns matched."
-
-    def test_description_mentions_the_facts_block(self):
-        cr = next(t for t in TOOLS if t["name"] == "crystal_recall")
-        assert "Durable facts matching your words" in cr["description"]

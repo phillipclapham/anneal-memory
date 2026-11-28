@@ -20,7 +20,6 @@ from anneal_memory import (
     CrystalStore,
     parse_crystal_decisions,
 )
-from anneal_memory.continuity import _crystallization_block
 
 
 # --------------------------------------------------------------------------- #
@@ -310,37 +309,14 @@ def _candidate(content: str, days_stale: int = 9):
     }
 
 
-def test_instruction_teaches_the_fenced_block():
-    block = _crystallization_block([_candidate("- foo | 3x (2026-05-20) — bar")], None)
-    assert "```crystal-decisions" in block
-    assert "name | route | permanence | activation_mode" in block
 
 
-def test_instruction_enum_vocab_matches_parser_constants():
-    # Every enum value the parser accepts must appear in the instruction the agent
-    # reads — else the channel teaches a vocabulary the parser rejects (drift).
-    block = _crystallization_block([_candidate("- foo | 3x (2026-05-20) — bar")], None)
-    for value in VALID_ROUTES + VALID_PERMANENCE + VALID_ACTIVATION_MODES:
-        assert value in block, f"instruction missing enum value {value!r}"
 
 
-def test_instruction_states_the_forget_gate():
-    block = _crystallization_block([_candidate("- foo | 3x (2026-05-20) — bar")], None)
-    low = block.lower()
-    assert "compost" in low and "timeless" in low and "refused" in low
 
 
-def test_no_decision_channel_when_no_out_candidates():
-    # Only re-warm candidates (nothing routing OUT) → no decision-channel teaching.
-    block = _crystallization_block(None, ["some_hot_pattern"])
-    assert "```crystal-decisions" not in block
 
 
-def test_instruction_header_matches_crystaldecision_field_order():
-    # Pin the taught column order to the tuple structurally (L2) — reordering
-    # CrystalDecision's fields without updating the instruction would fail here.
-    block = _crystallization_block([_candidate("- foo | 3x (2026-05-20) — bar")], None)
-    assert " | ".join(CrystalDecision._fields[:4]) in block
 
 
 # --------------------------------------------------------------------------- #

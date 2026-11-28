@@ -14,7 +14,6 @@ from pathlib import Path
 import pytest
 
 from anneal_memory import Store, prepare_wrap, validated_save_continuity
-from anneal_memory.continuity import format_episodes_for_wrap
 from anneal_memory.retrieval import retrieve_relevant
 from anneal_memory.server import Server
 from anneal_memory.store import (
@@ -488,43 +487,8 @@ def test_recall_labels_an_episode_whose_origin_is_below_its_trust(store):
     assert labels.get(summary.id) == "external"
 
 
-def test_the_wrap_view_tags_origin_and_graduation_is_unchanged_by_it(store):
-    # L2-F3 (3) and decision 3: the composer sees [origin: external], while the
-    # gate stays trust-corroborative-v1: an agent-declared episode whose origin a
-    # runtime context capped at external still grounds a graduation as agent.
-    head = "# T — Memory (v1)\n\n## State\nActive.\n\n"
-    tail = "## Decisions\nNone.\n\n## Context\nSession.\n"
-    expl = "nightly export runs at 02:00 and needs two reviewers"
-    store.record("Session start.", OBS)
-    prepare_wrap(store)
-    validated_save_continuity(store, head + "## Patterns\n- deploy_gate | 1x (2026-10-07)\n\n"
-                              + tail, today="2026-10-07")
-    # Both grounds are capped: were the gate reading origin, this would be an
-    # external-only graduation, held at 1x (test_trust's
-    # test_an_external_only_graduation_is_held_at_1x).
-    with store.runtime_context(floor="external"):
-        capped = store.record(f"I checked it: {expl}.", OBS)
-        other = store.record(f"Confirmed again: {expl}.", OBS)
-    plain = store.record("an unrelated agent note", OBS)
-    assert store.origin_map([capped.id, other.id]) == {capped.id: "external",
-                                                       other.id: "external"}
-    package = prepare_wrap(store)["package"]
-    assert package is not None
-    assert f"({capped.id}) I checked it: {expl}. [origin: external]" in package["episodes"]
-    assert f"({plain.id}) an unrelated agent note\n" in package["episodes"] + "\n"
-    assert "[origin: agent]" not in package["episodes"]
-    result = validated_save_continuity(
-        store, head + "## Patterns\n"
-        + f'- deploy_gate | 2x (2026-10-08) [evidence: {capped.id}, {other.id} "{expl}"]'
-        + "\n\n" + tail, today="2026-10-08")
-    assert result["graduations_validated"] == 1
-    assert result["pattern_trust"] == {"deploy_gate": "agent"}
-    assert result["uncorroborated"] == []
 
 
-def test_format_episodes_for_wrap_without_origins_is_unchanged(store):
-    ep = store.record("plain", OBS)
-    assert format_episodes_for_wrap([ep]) == f"\n### Observations (1)\n- ({ep.id}) plain"
 
 
 def test_tainted_by_refuses_a_non_string_element(store):

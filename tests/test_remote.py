@@ -135,10 +135,6 @@ def test_recall_round_trip_writes_nothing(served):
     assert "the replica answers from argushub over funnel" in r["result"]["content"][0]["text"]
     _s, r = call("/mcp", _tool("read_continuity"), f"Bearer {a}")
     assert "remote test state" in r["result"]["content"][0]["text"]
-    _s, r = call("/mcp", _tool("crystal_index"), f"Bearer {a}")
-    assert "funnel_pattern" in r["result"]["content"][0]["text"]
-    _s, r = call("/mcp", _tool("crystal_recall", {"query": "replica funnel"}), f"Bearer {a}")
-    assert r["result"].get("isError") is not True
     after = {p.name: p.stat().st_mtime_ns for p in path.iterdir()}
     assert after == before
 

@@ -76,19 +76,16 @@ def test_t4_an_idempotency_key_reused_for_another_request_is_refused(tmp_path):
             mock.patch.object(Store, "get_wrap_started_at", return_value=None):
         assert prepare_wrap(s, idempotency_key="prep-1")["wrap_token"] == p["wrap_token"]
     saved = validated_save_continuity(
-        s, _TEXT, wrap_token=p["wrap_token"], today="2026-10-23",
-        compost=iter(["gone_pattern"]), idempotency_key="save-1")
-    assert saved["composted"] == {"gone_pattern": 0}  # r1 U6: the iterator was hashed, not spent
+        s, _TEXT, wrap_token=p["wrap_token"], idempotency_key="save-1")
     again = validated_save_continuity(
-        s, _TEXT, wrap_token=p["wrap_token"], today="2026-10-23",
-        compost=["gone_pattern"], idempotency_key="save-1")
-    assert again["wrap_id"] == saved["wrap_id"] and again["replayed"] is True
+        s, _TEXT, wrap_token=p["wrap_token"], idempotency_key="save-1")
+    assert again["wrap_id"] == saved["wrap_result"]["wrap_id"] and again["replayed"] is True
     # B3 L3 r2 V3: the replay is the allowlist, nothing more.
     assert set(again) == set(SaveContinuityReplayResult.__annotations__)
     with pytest.raises(IdempotencyConflictError):
         validated_save_continuity(
             s, _TEXT.replace("Active.", "Other."), wrap_token=p["wrap_token"],
-            today="2026-10-23", compost=["gone_pattern"], idempotency_key="save-1")
+            idempotency_key="save-1")
     assert (_count(s, "wraps"), _count(s, "identity_versions")) == (1, 1)
     assert s.load_continuity() == _TEXT
     with pytest.raises(IdempotencyConflictError) as closed:  # r1 T4: never a stale package
@@ -119,7 +116,7 @@ def test_t5_a_save_prepared_under_an_expired_lease_is_fenced(tmp_path):
 
     def save(store, token, text=_TEXT, wrap=pa["wrap_token"]):
         return validated_save_continuity(
-            store, text, wrap_token=wrap, today="2026-10-23", lease_token=token)
+            store, text, wrap_token=wrap, lease_token=token)
 
     # r1 T1: with A's lease live, another writer presenting no token or the wrong
     # one cannot commit A's wrap (draft 1 checked it as the preparer and let B in).
@@ -147,7 +144,7 @@ def test_t5_a_save_prepared_under_an_expired_lease_is_fenced(tmp_path):
     with pytest.raises(LeaseFencedError):  # the wrap token is not ownership
         save(b, gb.token, text=_TEXT.replace("Active.", "B's text."))
     with pytest.raises(LeaseFencedError):
-        validated_save_continuity(b, _TEXT, wrap_token=pa["wrap_token"], today="2026-10-23")
+        validated_save_continuity(b, _TEXT, wrap_token=pa["wrap_token"])
     assert (_count(a, "wraps"), _count(a, "identity_versions")) == (0, 0)
     with pytest.raises(LeaseFencedError):
         a.lease_acquire("A", ttl_seconds=60)
@@ -161,38 +158,8 @@ def test_t5_a_save_prepared_under_an_expired_lease_is_fenced(tmp_path):
         assert uncancelled.value.reason == "token_mismatch"
         b.wrap_cancelled(lease_token=gb.token)
     pb = prepare_wrap(b, lease_token=gb.token)
-    # Integration L3 I1: a leased wrap records the crystal document. The holder's
-    # own crystal change (its token) moves the record with it; a change outside
-    # the fence refuses the save (version_moved).
-    from anneal_memory import CrystalStore
-
-    CrystalStore(tmp_path / "lease.crystal.json").crystallize(
-        name="the_wraps_own", level=2, explanation="crystallized mid-wrap",
-        lease_token=gb.token)
-    own = a._conn.execute("SELECT content_hash FROM crystal_document").fetchone()[0]
-    a._conn.execute("UPDATE crystal_document SET content_hash = 'elsewhere'")
-    a._conn.commit()
-    with pytest.raises(LeaseFencedError) as moved:
-        save(b, gb.token, wrap=pb["wrap_token"])
-    assert moved.value.reason == "version_moved"
-    a._conn.execute("UPDATE crystal_document SET content_hash = ?", (own,))
-    a._conn.commit()
-    assert save(b, gb.token, wrap=pb["wrap_token"])["wrap_id"] == 1
+    assert save(b, gb.token, wrap=pb["wrap_token"])["wrap_result"]["wrap_id"] == 1
     assert (_count(a, "wraps"), _count(a, "identity_versions")) == (1, 1)
-    # Integration L3 r2 (codex MED, reproduced 10-24): the holder folds receipts
-    # under its own lease; a fold presenting no token is refused, folding nothing.
-    from anneal_memory.worth import fold_surfaced
-
-    receipts = tmp_path / "receipts.jsonl"
-    receipts.write_text(
-        '{"event_id": "e1", "ts": "2026-10-02T10:00:00Z", "exposed": '
-        '[{"pattern": "the_wraps_own", "rank": 0, "source": "evidence_edge"}]}\n')
-    crystal = CrystalStore(tmp_path / "lease.crystal.json")
-    with pytest.raises(LeaseFencedError) as unfolded:
-        fold_surfaced(crystal, [receipts])
-    assert unfolded.value.reason == "lease_held"
-    assert fold_surfaced(crystal, [receipts], lease_token=gb.token).exposures_counted == 1
-
     # B3 L3 r1 U1: every save carries the identity version it was prepared on,
     # leased or not, so an unleased wrap never overwrites a later version.
     assert b.lease_release(gb.token)
@@ -207,17 +174,3 @@ def test_t5_a_save_prepared_under_an_expired_lease_is_fenced(tmp_path):
     b.close()
 
 
-def test_a_corrupt_crystal_store_degrades_a_keyed_prepare_never_aborts_it(tmp_path):
-    # Integration L3 r6 (complement + codex MED, reproduced 10-24): the crystal pin
-    # added in r5 ran outside the degrade path, so a corrupt crystal file aborted the
-    # prepare. It must warn and compose without crystals, as before.
-    from anneal_memory import CrystalStore
-
-    s = Store(str(tmp_path / "m.db"), project_name="T")
-    (tmp_path / "m.crystal.json").write_text("{not json")
-    s.record("an observation", EpisodeType.OBSERVATION)
-    with pytest.warns(UserWarning, match="crystal store unreadable"):
-        p = prepare_wrap(s, crystal_store=CrystalStore(tmp_path / "m.crystal.json"),
-                         idempotency_key="k-corrupt")
-    assert p["status"] == "ready"
-    s.close()

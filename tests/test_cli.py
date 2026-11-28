@@ -242,19 +242,6 @@ class TestCmdInitSchema:
         ns = build_parser().parse_args(["init"])
         assert ns.schema == "default"
 
-    def test_cli_partnership_yields_schema_budget(self, base_args):
-        # Closes the loop: `init --schema partnership` must yield the FLOW_SCHEMA
-        # budget (25500) through the real CLI-created store + prepare_wrap, not
-        # only via a library-constructed Store(section_schema=FLOW_SCHEMA).
-        from anneal_memory.continuity import prepare_wrap
-        base_args.schema = "partnership"
-        base_args.no_baton = True  # KL-19: this test wraps with no session id
-        cmd_init(base_args)
-        store = Store(base_args.db)
-        store.record("a session episode", "observation")
-        result = prepare_wrap(store)
-        store.close()
-        assert result["package"]["max_chars"] == 25500
 
     def test_default_init_byte_identical_to_plain_store(self, tmp_path):
         # LOW-3 (codex L3): a no-`--schema` init must persist a byte-identical
@@ -2533,7 +2520,7 @@ class TestCmdDiff:
             store.record("ep1", episode_type="observation")
             store.wrap_completed(1, 100)
             store.record("ep2", episode_type="observation")
-            store.wrap_completed(1, 150, graduations_validated=1)
+            store.wrap_completed(1, 150)
 
         args = Namespace(db=db, project_name="Agent", json=False, wraps=5)
         cmd_diff(args)
@@ -2668,7 +2655,7 @@ class TestCmdStats:
         db = str(tmp_path / "test.db")
         with Store(db) as store:
             store.record("ep1", episode_type="observation")
-            store.wrap_completed(1, 100, graduations_validated=2, graduations_demoted=1)
+            store.wrap_completed(1, 100)
             store.record("ep2", episode_type="decision")
             store.wrap_completed(1, 150)
 
@@ -2677,8 +2664,6 @@ class TestCmdStats:
         captured = capsys.readouterr()
         data = json.loads(captured.out)
         assert data["wraps"]["total_wraps"] == 2
-        assert data["wraps"]["total_graduations"] == 2
-        assert data["wraps"]["total_demotions"] == 1
 
 
 # -- cmd_history tests --
@@ -2704,7 +2689,7 @@ class TestCmdHistory:
             store.record("ep1", episode_type="observation")
             store.wrap_completed(1, 100)
             store.record("ep2", episode_type="observation")
-            store.wrap_completed(1, 150, associations_formed=3, associations_decayed=1)
+            store.wrap_completed(1, 150)
 
         args = Namespace(db=db, project_name="Agent", json=False, limit=20)
         cmd_history(args)
@@ -3239,8 +3224,8 @@ class TestCmdPrepareWrap:
         cmd_prepare_wrap(base_args_with_data)
         captured = capsys.readouterr()
         # Should contain the compression instructions and episodes
-        assert "Compress your session episodes" in captured.out
-        assert "Episodes This Session (4)" in captured.out
+        assert "WORK LOG FOR" in captured.out
+        assert "Wrap token:" in captured.out
         assert "Found a pattern" in captured.out
 
     def test_prepare_wrap_json(self, base_args_with_data, capsys):
@@ -3250,9 +3235,9 @@ class TestCmdPrepareWrap:
         cmd_prepare_wrap(base_args_with_data)
         captured = capsys.readouterr()
         data = json.loads(captured.out)
-        assert data["episode_count"] == 4
-        assert "instructions" in data
-        assert "episodes" in data
+        assert data["status"] == "ready"
+        assert data["step"]["episodes"] == 4
+        assert "Found a pattern" in data["step"]["user"]
 
     def test_prepare_wrap_sets_in_progress(self, base_args_with_data, capsys):
         base_args_with_data.max_chars = 20000
@@ -3262,21 +3247,6 @@ class TestCmdPrepareWrap:
         with Store(base_args_with_data.db, project_name="TestProject") as store:
             assert store.status().wrap_in_progress is True
 
-    def test_omitted_max_chars_uses_schema_aware_budget(self, tmp_path, capsys):
-        """AM-SCHEMA-BUDGET (0.4.2) M1: --max-chars omitted (None) must derive
-        the schema-aware budget for the persisted schema (FLOW_SCHEMA -> 25500),
-        NOT the flat 20000 the CLI used to inject as the argparse default."""
-        from anneal_memory.schema import FLOW_SCHEMA
-        db = str(tmp_path / "flow.db")
-        store = Store(db, project_name="flow", section_schema=FLOW_SCHEMA)
-        store.record("a substrate observation worth compressing",
-                     episode_type="observation")
-        store.close()
-        args = Namespace(db=db, project_name="flow", json=True,
-                         max_chars=None, staleness_days=7)
-        cmd_prepare_wrap(args)
-        data = json.loads(capsys.readouterr().out)
-        assert data["max_chars"] == 25500
 
     def test_prepare_wrap_in_progress_exits_cleanly(self, base_args_with_data, capsys):
         """AM-PREPARE-GUARD (0.4.2): a second prepare-wrap while a wrap is
@@ -3299,24 +3269,8 @@ class TestCmdPrepareWrap:
 class TestCmdSaveContinuity:
     @staticmethod
     def _valid_continuity(today: str | None = None) -> str:
-        """Build a minimal valid 4-section continuity with dynamic date.
-
-        Uses ``date.today().isoformat()`` by default so that
-        ``validated_save_continuity`` — which reads wall-clock ``today``
-        internally — does not silently skip graduation validation on
-        citation date mismatch. Previously a hardcoded ``2026-04-09``
-        string caused this test fixture to decay silently against the
-        pipeline's internal clock (Diogenes Finding #3, Apr 10 2026).
-        """
-        if today is None:
-            today = date.today().isoformat()
-        return (
-            "# Agent — Memory (v1)\n\n"
-            "## State\nTest state\n\n"
-            f"## Patterns\nthought: test | 1x ({today})\n\n"
-            f"## Decisions\n[decided(rationale: \"test\", on: \"{today}\")] Test\n\n"
-            "## Context\nTest context\n"
-        )
+        """A memory file: any non-empty text within the limit is saved."""
+        return "# Agent — Memory\n\nTest state.\nTest context.\n"
 
     def test_save_from_file(self, base_args_with_data, tmp_path, capsys):
         # First prepare wrap to set the in-progress flag
@@ -3334,7 +3288,7 @@ class TestCmdSaveContinuity:
         base_args_with_data.affect_intensity = 0.5
         cmd_save_continuity(base_args_with_data)
         captured = capsys.readouterr()
-        assert "Continuity saved" in captured.out
+        assert "Memory file saved" in captured.out
         assert "Episodes compressed: 4" in captured.out
 
     def test_save_from_stdin(self, base_args_with_data, tmp_path, capsys):
@@ -3349,7 +3303,7 @@ class TestCmdSaveContinuity:
         with mock.patch("sys.stdin", StringIO(self._valid_continuity())):
             cmd_save_continuity(base_args_with_data)
         captured = capsys.readouterr()
-        assert "Continuity saved" in captured.out
+        assert "Memory file saved" in captured.out
 
     def test_save_json_output(self, base_args_with_data, tmp_path, capsys):
         base_args_with_data.max_chars = 20000
@@ -3369,36 +3323,17 @@ class TestCmdSaveContinuity:
         data = json.loads(captured.out)
         assert data["saved"] is True
         assert data["episodes_compressed"] == 4
-        assert "sections" in data
+        assert data["wrap_id"] is not None
 
-    def test_save_with_affect(self, base_args_with_data, tmp_path, capsys):
+    def test_save_empty_file_is_refused(self, base_args_with_data, tmp_path, capsys):
         base_args_with_data.max_chars = 20000
-        base_args_with_data.staleness_days = 7
-        cmd_prepare_wrap(base_args_with_data)
-        capsys.readouterr()
-
-        cont_file = tmp_path / "continuity.md"
-        cont_file.write_text(self._valid_continuity(), encoding="utf-8")
-
-        base_args_with_data.file = str(cont_file)
-        base_args_with_data.affect_tag = "engaged"
-        base_args_with_data.affect_intensity = 0.8
-        cmd_save_continuity(base_args_with_data)
-        captured = capsys.readouterr()
-        assert "Continuity saved" in captured.out
-
-    def test_save_invalid_structure(self, base_args_with_data, tmp_path, capsys):
-        base_args_with_data.max_chars = 20000
-        base_args_with_data.staleness_days = 7
         cmd_prepare_wrap(base_args_with_data)
         capsys.readouterr()
 
         cont_file = tmp_path / "bad.md"
-        cont_file.write_text("# No sections here\nJust text.", encoding="utf-8")
+        cont_file.write_text("   \n", encoding="utf-8")
 
         base_args_with_data.file = str(cont_file)
-        base_args_with_data.affect_tag = None
-        base_args_with_data.affect_intensity = 0.5
         with pytest.raises(SystemExit):
             cmd_save_continuity(base_args_with_data)
 
@@ -3461,19 +3396,12 @@ class TestParserPrepareWrapSaveContinuity:
         # library derives a schema-aware budget (was a flat 20000, which
         # silently defeated schema-aware budgeting through the CLI).
         assert args.max_chars is None
-        assert args.staleness_days == 7
 
     def test_save_continuity_command(self):
         parser = build_parser()
         args = parser.parse_args(["save-continuity", "cont.md"])
         assert args.command == "save-continuity"
         assert args.file == "cont.md"
-
-    def test_save_continuity_with_affect(self):
-        parser = build_parser()
-        args = parser.parse_args(["save-continuity", "cont.md", "--affect-tag", "curious", "--affect-intensity", "0.7"])
-        assert args.affect_tag == "curious"
-        assert args.affect_intensity == 0.7
 
     def test_save_continuity_stdin(self):
         parser = build_parser()
@@ -3644,7 +3572,7 @@ class TestCLICrossProcessTOCTOU:
             "TOCTOU episode did not survive to the next wrap — "
             "cross-process snapshot filter is broken"
         )
-        assert "TOCTOU leak attempt" in next_payload.get("episodes", "")
+        assert "TOCTOU leak attempt" in next_payload["step"]["user"]
 
     def test_wrong_token_across_process_boundary_rejected(self, tmp_path):
         """Passing the wrong --wrap-token across a process boundary
@@ -4249,17 +4177,6 @@ class TestCrystalOptInGate:
         assert not (tmp_path / "mem.crystal.json").exists()
         assert _open_crystal_store_for_wrap(self._args(tmp_path)) is None
 
-    def test_argparse_wires_crystal_flag_to_helper(self, tmp_path):
-        # complement L3 MEDIUM-1: close the argparse->helper wiring gap end-to-end.
-        from anneal_memory.cli import build_parser
-        db = str(tmp_path / "mem.db")
-        parser = build_parser()
-        ns = parser.parse_args(["--db", db, "prepare-wrap", "--crystal"])
-        assert ns.crystal is True
-        assert isinstance(_open_crystal_store_for_wrap(ns), CrystalStore)
-        ns2 = parser.parse_args(["--db", db, "prepare-wrap"])
-        assert ns2.crystal is False
-        assert _open_crystal_store_for_wrap(ns2) is None
 
 
 class TestCrystalIndexAndRecallCLI:

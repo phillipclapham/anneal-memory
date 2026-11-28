@@ -409,7 +409,6 @@ StoreOperation = Literal[
     "count_episodes_since_wrap",
     "consolidate_requires_baton",
     "wrap_gated_session",
-    "wrap_derive_roots",
     "wrap_bound_token",
     "wrap_today",
     "set_consolidate_requires_baton",
@@ -826,10 +825,7 @@ class WrapRevertReceipt(NamedTuple):
     episode recorded while the revert ran counts only if it was already in the
     window. ``identity_version`` is the generation-3 identity version the
     revert appended (the prior text carried forward), or ``None`` when it
-    restored none. ``pattern_state_exact`` is False when the wrap's undo rows
-    were not there (a wrap saved before they existed, or a second revert in a
-    row): ``pattern_history`` was left as the wrap wrote it, and a redo of the same
-    episodes on reworded evidence can be demoted ``cross-session-overlap``.
+    restored none.
     """
 
     wrap_id: int
@@ -839,7 +835,6 @@ class WrapRevertReceipt(NamedTuple):
     last_wrap_id_after: int
     already_reverted: bool
     identity_version: int | None
-    pattern_state_exact: bool = True
 
 
 class WrapRevertRefused(AnnealMemoryError):
@@ -8148,11 +8143,9 @@ class Store:
         *,
         token: str,
         episode_ids: list[str],
-        section_schema: list[SectionSpec] | None = None,
         allow_restart: bool = False,
         gated_session_id: str | None = None,
         expect_last_wrap_id: int | None = None,
-        derive_roots: dict[str | None, str] | None = None,
         token_bound: bool = False,
         today: str | None = None,
         expect_continuity_sha256: str | None = None,
@@ -8198,16 +8191,16 @@ class Store:
         discards a gated or token-bound wrap too: neither bound applies.
 
         Writes the ``wrap_started_at`` flag, the session-handshake
-        token, the frozen episode-ID snapshot, and the frozen section
-        schema (AM-SCHEMASNAPSHOT) so :meth:`validated_save_continuity`
-        can verify the token, filter its re-fetched episode set to
-        exactly the frozen list, and validate/graduate against the same
-        schema ``prepare_wrap`` built the package with.
+        token and the frozen episode-ID snapshot, so
+        :meth:`validated_save_continuity` can verify the token and filter its
+        re-fetched episode set to exactly the frozen list. (4.0: the section
+        schema and re-derive roots are gone; their metadata keys are reset to
+        empty so a restart over a 3.x wrap leaves no stale value.)
 
         The wrap-lifecycle metadata writes happen inside a single SQL transaction
         (one ``INSERT OR REPLACE`` per key, one commit at the end) so a
         crash mid-write cannot leave the store with a timestamp but no
-        token, a token but no episode list, or episodes but no schema.
+        token or a token but no episode list.
 
         Args:
             token: Session-handshake token (uuid4().hex from
@@ -8217,20 +8210,6 @@ class Store:
                 (caller explicitly starting a wrap with no snapshot
                 content). Stored JSON-encoded in the
                 ``wrap_episode_ids`` metadata key.
-            section_schema: The section schema to freeze for the wrap's
-                duration (AM-SCHEMASNAPSHOT). ``prepare_wrap`` passes the
-                exact schema it read to build the package; ``None`` (a
-                direct caller's convenience) freezes the current live
-                schema instead. Validated + normalized before encoding,
-                stored JSON-encoded in ``wrap_section_schema``;
-                :meth:`section_schema_for_wrap` returns it for the
-                wrap's duration.
-            derive_roots: The re-derive root map (label, ``None`` for the
-                default root, to a string naming the root) the caller showed
-                the composer, frozen so the save can refuse a map that changed
-                meanwhile (spore-1282; read back with :meth:`wrap_derive_roots`).
-                ``prepare_wrap`` freezes :func:`anneal_memory.rederive.root_identities`.
-                ``None`` freezes nothing.
             expect_continuity_sha256: SHA-256 of the continuity text the caller
                 composed from (:meth:`load_continuity`, ``""`` for no file).
                 Compared under this call's write lock, which
@@ -8338,43 +8317,8 @@ class Store:
                 "wrap_started: gated_session_id must be None or a non-empty str, "
                 f"got {gated_session_id!r}."
             )
-        if derive_roots is not None and not (
-            isinstance(derive_roots, dict)
-            and all(
-                (k is None or isinstance(k, str)) and isinstance(v, str)
-                for k, v in derive_roots.items()
-            )
-        ):
-            raise TypeError(
-                "wrap_started: derive_roots must be None or a dict of "
-                "label (str or None) to root (str)."
-            )
-        # The token rides inside the value, so a map left behind by a binary
-        # that does not clear this key never reads as another wrap's (L1 W3).
-        derive_roots_json = (
-            ""
-            if derive_roots is None
-            else json.dumps({
-                "token": token,
-                "roots": sorted(
-                    derive_roots.items(), key=lambda kv: (kv[0] is not None, kv[0] or "")
-                ),
-            })
-        )
         ids_list = list(episode_ids)
         ids_json = json.dumps(ids_list)
-        # AM-SCHEMASNAPSHOT: freeze the section schema for the wrap's duration.
-        # prepare_wrap passes the EXACT schema it read to build the package, so
-        # the frozen value is byte-identical to what the agent compresses
-        # against; a direct caller that omits it freezes the current live schema.
-        # A passed schema is compared with the live one under the write lock
-        # below, so a set_section_schema that committed after the caller's read
-        # refuses the wrap. An omitted schema is read under that same lock. section_schema_for_wrap()
-        # returns this for the rest of the wrap so save cannot read a different
-        # (concurrently-changed) live schema.
-        passed_schema = (
-            validate_schema(section_schema) if section_schema is not None else None
-        )
         # Batch the wrap-lifecycle metadata writes into a single commit so a
         # crash mid-write cannot leave the store with a partial
         # snapshot (e.g. timestamp set but token blank, which would
@@ -8459,9 +8403,6 @@ class Store:
                 actual = self._last_wrap_id()
                 if actual != expect_last_wrap_id:
                     raise WrapWindowMovedError(expect_last_wrap_id, actual)
-            live_schema = self._load_section_schema(strict=True)
-            if passed_schema is not None and live_schema != passed_schema:
-                raise WrapSchemaMovedError()
             if expect_continuity_sha256 is not None:
                 now_text = self.load_continuity() or ""
                 if hashlib.sha256(now_text.encode("utf-8")).hexdigest() != expect_continuity_sha256:
@@ -8481,8 +8422,6 @@ class Store:
                 self._lease_gate("prepare_wrap", None, None)
                 lease_json = json.dumps({
                     "token": token, "identity_version": self._latest_identity_version()})
-            frozen_schema = live_schema
-            frozen_schema_json = json.dumps(frozen_schema)
             self._conn.execute(
                 "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
                 ("wrap_started_at", _now_utc()),
@@ -8497,7 +8436,7 @@ class Store:
             )
             self._conn.execute(
                 "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
-                ("wrap_section_schema", frozen_schema_json),
+                ("wrap_section_schema", ""),
             )
             self._conn.execute(
                 "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
@@ -8505,7 +8444,7 @@ class Store:
             )
             self._conn.execute(
                 "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
-                ("wrap_derive_roots", derive_roots_json),
+                ("wrap_derive_roots", ""),
             )
             self._conn.execute(
                 "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
@@ -8523,22 +8462,11 @@ class Store:
                 "wrap_token": token,
                 "wrap_episode_count": len(ids_list),
                 "wrap_episode_ids": ids_list,
-                # Full normalized schema (heading + role), not just headings:
-                # roles are load-bearing (the felt-gate keys on the
-                # narrative-timeless role), so headings alone are not full
-                # chain-of-custody for which schema this wrap froze. (codex
-                # L3 LOW-2.)
-                "wrap_section_schema": frozen_schema,
                 # Who prepared the wrap under the consolidate gate (None when
                 # ungated): the chain of custody for who may commit it.
                 "wrap_gated_session": gated_session_id,
                 # The token came from the caller, so a tokenless cancel is refused.
                 "wrap_token_bound": token_bound,
-                # The root map the save will compare against (spore-1282).
-                "wrap_derive_roots": (
-                    None if derive_roots is None
-                    else {("" if k is None else k): v for k, v in derive_roots.items()}
-                ),
             }
             boxed = False
             if idempotency is not None:
@@ -9093,55 +9021,6 @@ class Store:
             return bound
         return None
 
-    def wrap_derive_roots(self, *, expect_token: str | None = None) -> dict[str | None, str] | None:
-        """The re-derive root map frozen by the in-progress wrap (spore-1282),
-        or ``None`` when no wrap is in progress or this wrap froze none. A map
-        frozen under another wrap's token (left behind by a binary that does
-        not clear it) is not this wrap's, and reads as ``None``; so does one
-        frozen under a token other than ``expect_token`` when it is given (the
-        token of the snapshot the caller already holds).
-
-        Raises :class:`StoreError` when the frozen value is present but
-        unreadable: a save must not fall back to "nothing frozen" on a value
-        it cannot read. Recovery is cancelling the wrap and a new prepare_wrap.
-        """
-        with self._db_boundary("wrap_derive_roots"):
-            rows = self._conn.execute(
-                "SELECT key, value FROM metadata WHERE key IN (?, ?, ?)",
-                ("wrap_started_at", "wrap_token", "wrap_derive_roots"),
-            ).fetchall()
-        meta = {row["key"]: row["value"] for row in rows}
-        raw = meta.get("wrap_derive_roots", "")
-        if not meta.get("wrap_started_at") or not raw:
-            return None
-        try:
-            frozen = json.loads(raw)
-            if not isinstance(frozen, dict) or not isinstance(frozen.get("token"), str):
-                raise ValueError("not a {token, roots} object")
-            if frozen["token"] != meta.get("wrap_token") or (
-                expect_token is not None and frozen["token"] != expect_token
-            ):
-                return None
-            pairs = frozen.get("roots")
-            if not isinstance(pairs, list) or not all(
-                isinstance(p, list) and len(p) == 2
-                and (p[0] is None or isinstance(p[0], str)) and isinstance(p[1], str)
-                for p in pairs
-            ):
-                raise ValueError("not a list of [label, root] pairs")
-            out = {k: v for k, v in pairs}
-            if len(out) != len(pairs):
-                raise ValueError("a label is repeated")
-        except (ValueError, TypeError, RecursionError) as exc:
-            raise StoreError(
-                "The re-derive root map frozen by the wrap in progress is unreadable. "
-                f"Cancel it with its token (wrap-cancel --wrap-token; a gated wrap "
-                f"refuses a plain cancel) and re-run prepare_wrap. ({exc})",
-                operation="wrap_derive_roots",
-                path=str(self.path),
-            ) from exc
-        return out
-
     @property
     def created(self) -> bool:
         """True when this open created the store; False when it opened an
@@ -9376,14 +9255,6 @@ class Store:
         self,
         episodes_compressed: int,
         continuity_chars: int,
-        graduations_validated: int = 0,
-        graduations_demoted: int = 0,
-        citation_reuse_max: int = 0,
-        patterns_extracted: int = 0,
-        associations_formed: int = 0,
-        associations_strengthened: int = 0,
-        associations_decayed: int = 0,
-        section_sizes: dict[str, int] | None = None,
         *,
         episode_ids: list[str] | None = None,
         wrap_token: str | None = None,
@@ -9573,13 +9444,7 @@ class Store:
                     _now_utc(),
                     episodes_compressed,
                     continuity_chars,
-                    graduations_validated,
-                    graduations_demoted,
-                    citation_reuse_max,
-                    patterns_extracted,
-                    associations_formed,
-                    associations_strengthened,
-                    associations_decayed,
+                    0, 0, 0, 0, 0, 0, 0,  # the 3.x graduation/association counts: always 0 now
                     content_hash,
                     pair_id,
                     1 if unattended else 0,
@@ -9710,12 +9575,6 @@ class Store:
         audit_payload: dict[str, Any] = {
             "episodes_compressed": episodes_compressed,
             "continuity_chars": continuity_chars,
-            "graduations_validated": graduations_validated,
-            "graduations_demoted": graduations_demoted,
-            "patterns_extracted": patterns_extracted,
-            "associations_formed": associations_formed,
-            "associations_strengthened": associations_strengthened,
-            "associations_decayed": associations_decayed,
         }
         # Chain-of-custody link: the token ties this completion
         # event to the earlier wrap_started audit event that carried
@@ -9782,16 +9641,9 @@ class Store:
         return WrapResult(
             saved=True,
             chars=continuity_chars,
-            section_sizes=dict(section_sizes) if section_sizes else {},
-            graduations_validated=graduations_validated,
-            graduations_demoted=graduations_demoted,
-            citation_reuse_max=citation_reuse_max,
-            patterns_extracted=patterns_extracted,
+            section_sizes={},
             episodes_compressed=episodes_compressed,
             pruned_count=pruned,
-            associations_formed=associations_formed,
-            associations_strengthened=associations_strengthened,
-            associations_decayed=associations_decayed,
             wrap_id=wrap_row_id,
         )
 
@@ -9820,15 +9672,6 @@ class Store:
         - the ``wraps`` row, and its ``wrap_graduations`` and ``drift_results``;
         - the ``pattern_grounding`` rungs the wrap earned (matched on the wrap
           token's first 12 characters, which the wraps row's ``pair_id`` keeps);
-        - the pattern state the wrap's save changed outside the identity, as
-          :meth:`_revert_wrap_derived` decides. It is put back from the
-          ``wrap_undo`` rows the save wrote (bar the aged-out mark a prune puts
-          on a restored ``pattern_grounding`` row). A wrap saved before those
-          rows existed, or one that is no longer the newest wrap's save (a
-          second revert in a row), has none: only ``pattern_levels`` is then
-          adjusted from the two texts and the rest is left as it is
-          (``undone["pattern_history_exact"]`` is 0 and the receipt's
-          ``pattern_state_exact`` is False);
         - a save-idempotency record whose stored result names the wrap;
         - the identity: a new ``identity_versions`` row (source ``raw_save``)
           carries the text and meta of the version before the wrap's, and the files
@@ -9973,27 +9816,8 @@ class Store:
 
                 window_before = self._count_episodes_since_wrap()
                 undone: dict[str, int] = {}
-                token12 = (row["pair_id"] or "")[:12] if "pair_id" in row.keys() else ""
-                if len(token12) != 12:
-                    undone["wrap_token_missing"] = 1
-                undone["wrap_graduations"] = self._conn.execute(
-                    "DELETE FROM wrap_graduations WHERE wrap_id = ?", (wrap_id,)).rowcount
-                undone["drift_results"] = self._conn.execute(
-                    "DELETE FROM drift_results WHERE wrap_id = ?", (wrap_id,)).rowcount
-                undone["pattern_grounding"] = (
-                    self._conn.execute(
-                        "DELETE FROM pattern_grounding WHERE substr(earning, 1, 12) = ?",
-                        (token12,)).rowcount if len(token12) == 12 else 0)
-                undone["pattern_history_last_wrap"] = self._conn.execute(
-                    "UPDATE pattern_history SET last_wrap_id = NULL WHERE last_wrap_id = ?",
-                    (wrap_id,)).rowcount
-                undone.update(self._revert_wrap_derived(
-                    token12, restored_text, reverted_text))
                 undone["idempotency_keys"] = self._revert_wrap_idempotency(wrap_id)
                 self._conn.execute("DELETE FROM wraps WHERE id = ?", (wrap_id,))
-                if len(token12) == 12:
-                    self._conn.execute(
-                        "DELETE FROM wrap_undo WHERE token12 = ?", (token12,))
                 window_after = self._count_episodes_since_wrap()
                 reoffered = max(0, window_after - window_before)
                 compressed = row["episodes_compressed"] or 0
@@ -10042,8 +9866,7 @@ class Store:
         return WrapRevertReceipt(
             wrap_id=wrap_id, revert_id=revert_id, episodes_reoffered=reoffered,
             window_after=window_after, last_wrap_id_after=last_after,
-            already_reverted=False, identity_version=restored_version,
-            pattern_state_exact=bool(undone.get("pattern_state_exact", 1)))
+            already_reverted=False, identity_version=restored_version)
 
     def _already_reverted_receipt(self, wrap_id: int) -> WrapRevertReceipt | None:
         """The receipt for a wrap a revert already undid, or ``None``; read-only."""
@@ -10052,93 +9875,11 @@ class Store:
             "WHERE wrap_id = ?", (wrap_id,)).fetchone()
         if row is None:
             return None
-        try:
-            exact = bool(json.loads(row["undone_json"]).get("pattern_state_exact", 1))
-        except (TypeError, ValueError, AttributeError):
-            exact = True
         return WrapRevertReceipt(
             wrap_id=wrap_id, revert_id=int(row["id"]), episodes_reoffered=0,
             window_after=self._count_episodes_since_wrap(),
             last_wrap_id_after=self._last_wrap_id(), already_reverted=True,
-            identity_version=row["identity_version_restored"], pattern_state_exact=exact)
-
-    def _revert_wrap_derived(
-        self, token12: str, restored_text: str | None, reverted_text: str | None,
-    ) -> dict[str, int]:
-        """The part of :meth:`revert_wrap` that puts back what the wrap's save
-        changed outside the identity, inside its transaction. What it restores is
-        what the code below does for each ``wrap_undo`` kind, from the rows the save
-        wrote when there are any (exact, bar the aged-out mark a prune puts on a
-        restored ``pattern_grounding`` row; see the ``wrap_undo`` schema comment).
-        Without them only ``pattern_levels`` is adjusted from the two texts, and
-        ``pattern_state_exact`` is 0."""
-        from .continuity import _pattern_levels  # continuity imports store
-
-        out = {"pattern_levels_exact": 0, "pattern_history_exact": 0,
-               "pattern_state_exact": 0, "supersessions": 0}
-        have_levels = self._has_pattern_levels_table()
-        marker = len(token12) == 12 and self._conn.execute(
-            "SELECT 1 FROM wrap_undo WHERE token12 = ? AND kind = 'pattern_levels' "
-            "AND key = ''", (token12,)).fetchone() is not None
-        if marker and have_levels:
-            out["pattern_state_exact"] = 1
-            self._conn.execute("DELETE FROM pattern_levels")
-            rows = [json.loads(r["prior_json"]) for r in self._conn.execute(
-                "SELECT prior_json FROM wrap_undo WHERE token12 = ? "
-                "AND kind = 'pattern_levels' AND key != ''", (token12,)).fetchall()]
-            self._conn.executemany(
-                "INSERT INTO pattern_levels (kind, key, level, saved_at) VALUES (?, ?, ?, ?)",
-                [(r["kind"], r["key"], r["level"], r["saved_at"]) for r in rows])
-            out["pattern_levels_exact"] = len(rows)
-        elif (have_levels and restored_text is not None and reverted_text is not None):
-            schema = self.section_schema
-            now_levels = _pattern_levels(restored_text, schema)
-            for name in set(_pattern_levels(reverted_text, schema)) - set(now_levels):
-                self._conn.execute(
-                    "DELETE FROM pattern_levels WHERE kind = 'name' AND key = ?", (name,))
-            for name, level in now_levels.items():
-                self._conn.execute(
-                    "UPDATE pattern_levels SET level = ? "
-                    "WHERE kind = 'name' AND key = ? AND level > ?", (level, name, level))
-        if len(token12) != 12:
-            return out
-        for row in self._conn.execute(
-                "SELECT key, prior_json FROM wrap_undo WHERE token12 = ? "
-                "AND kind = 'pattern_history'", (token12,)).fetchall():
-            self._conn.execute(
-                "DELETE FROM pattern_history WHERE pattern_name = ?", (row["key"],))
-            if row["prior_json"] is not None:
-                prior = json.loads(row["prior_json"])
-                cols = sorted(prior)
-                self._conn.execute(
-                    f"INSERT INTO pattern_history ({', '.join(cols)}) "
-                    f"VALUES ({', '.join('?' * len(cols))})",
-                    [prior[c] for c in cols])
-            out["pattern_history_exact"] += 1
-        # A wrap's [renamed:] moved grounding to a name that had none: take it off
-        # that name before the old name's rows are put back (AM-PATTERN-ALIAS).
-        for row in self._conn.execute(
-                "SELECT key FROM wrap_undo WHERE token12 = ? "
-                "AND kind = 'pattern_grounding_moved'", (token12,)).fetchall():
-            self._conn.execute(
-                "DELETE FROM pattern_grounding WHERE name = ?", (row["key"],))
-        for row in self._conn.execute(
-                "SELECT prior_json FROM wrap_undo WHERE token12 = ? "
-                "AND kind = 'pattern_grounding'", (token12,)).fetchall():
-            prior = json.loads(row["prior_json"])
-            cols = sorted(prior)
-            self._conn.execute(
-                f"INSERT OR IGNORE INTO pattern_grounding ({', '.join(cols)}) "
-                f"VALUES ({', '.join('?' * len(cols))})", [prior[c] for c in cols])
-        if self._has_supersessions_table():
-            for row in self._conn.execute(
-                    "SELECT key FROM wrap_undo WHERE token12 = ? AND kind = 'supersession'",
-                    (token12,)).fetchall():
-                old_id, _, new_id = row["key"].partition(":")
-                out["supersessions"] += self._conn.execute(
-                    "DELETE FROM supersessions WHERE old_id = ? AND new_id = ? "
-                    "AND source = 'wrap'", (old_id, new_id)).rowcount
-        return out
+            identity_version=row["identity_version_restored"])
 
     def _revert_wrap_idempotency(self, wrap_id: int) -> int:
         """Delete the save-idempotency records whose stored result names

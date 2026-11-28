@@ -44,176 +44,27 @@ def store(tmp_path):
     s.close()
 
 
-def test_a_slow_shrink_over_several_saves_is_refused(store):
-    """Each save keeps ~80% of the one before, which the floor accepts on its own;
-    the second lands below the floor's share of the largest: refused, and the wrap
-    stays open."""
-    _save(store, _doc(3000), "2026-11-01")
-    _save(store, _doc(2400), "2026-11-02")
-    before = store.load_continuity()
-    with pytest.raises(ValueError, match="reference floor") as exc:
-        _save(store, _doc(1900), "2026-11-03")
-    assert "Understanding" in str(exc.value) and "allow_shrink" in str(exc.value)
-    assert store.get_wrap_started_at() is not None
-    assert store.load_continuity() == before
 
 
-def test_allow_shrink_passes_the_floor_and_resets_only_that_section(store):
-    """The override saves; the felt layer's record restarts from that save, so the
-    next ordinary save at the new size is not refused against the pre-diet size.
-    Nothing here belongs to another section."""
-    _save(store, _doc(3000), "2026-11-01")
-    _save(store, _doc(2400), "2026-11-02")
-    _save(store, _doc(1900), "2026-11-03", allow_shrink=True)
-    log = store.load_meta()["section_mass_log"]
-    felt = [e["m"]["narrative-timeless"] for e in log if "narrative-timeless" in e["m"]]
-    assert len(felt) == 1  # only the saved size is left of the felt layer's record
-    _save(store, _doc(1900), "2026-11-04")  # no override needed
 
 
-def test_only_the_felt_layer_is_floored(store):
-    """Patterns and Context fall hard across saves without a refusal: the floor is
-    the felt layer's alone (the identity layer keeps the save-to-save check)."""
-    _save(store, _doc(3000, patterns=3000, context=3000), "2026-11-01")
-    _save(store, _doc(3000, patterns=2100, context=2000), "2026-11-02")
-    _save(store, _doc(3000, patterns=1500, context=1000), "2026-11-03")
-    _save(store, _doc(3000, patterns=1100, context=100), "2026-11-04")
 
 
-def test_the_mass_log_is_bounded_and_a_burst_of_saves_cannot_flush_it():
-    """One entry per date (the day's largest mass), at most the cap kept: 200 saves in
-    one day leave the history in place, so shrinking after them is still checked."""
-    big, small = _doc(3000), _doc(2000)
-    log: object = C._updated_mass_log(None, None, big, FLOW_SCHEMA, None, "2026-11-01")
-    for _ in range(200):
-        log = C._updated_mass_log(log, big, big, FLOW_SCHEMA, None, "2026-11-02")
-    log = C._updated_mass_log(log, big, small, FLOW_SCHEMA, None, "2026-11-02")
-    assert [e["d"] for e in log] == ["2026-11-01", "2026-11-02"]
-    assert C._reference_mass(log, "narrative-timeless", "2026-11-03",
-                             _masses(small)["narrative-timeless"], 0)[0] >= 3000
-    many: object = None
-    days = [f"2026-{1 + day // 28:02d}-{1 + day % 28:02d}"
-            for day in range(C._MASS_LOG_MAX_ENTRIES * 2)]
-    for d in days:
-        many = C._updated_mass_log(many, big, big, FLOW_SCHEMA, None, d)
-    assert len(many) <= C._MASS_LOG_MAX_ENTRIES
-    assert many[-1]["d"] == days[-1] and days[0] not in {e["d"] for e in many}  # the oldest go
 
 
-def test_a_hostile_stored_log_is_read_and_rewritten_within_bounds():
-    """A meta that already carries a huge list of wide entries costs the bound, not
-    its own size: only the tail is read, only the floor roles survive, and a size
-    above the cap is not a size."""
-    wide = {"d": "2026-11-20", "m": {f"role{i}": 5 for i in range(500)} | {"narrative-timeless": 4000}}
-    hostile = [wide] * 5000 + [{"d": "2026-11-21", "m": {"narrative-timeless": 10**30}}]
-    kept = C._updated_mass_log(hostile, None, _doc(3000), FLOW_SCHEMA, None, "2026-11-22")
-    assert len(kept) <= C._MASS_LOG_MAX_ENTRIES
-    assert all(set(e["m"]) <= set(C._REFERENCE_FLOOR_ROLES) for e in kept)
-    assert all(v <= C._MASS_LOG_MAX_MASS for e in kept for v in e["m"].values())
 
 
-def test_a_layer_that_shrank_to_under_the_size_floor_is_still_checked():
-    """The per-save gate skips a prior under 500 chars; the reference floor must not."""
-    log = [{"d": "2026-11-01", "m": {"narrative-timeless": 3000, "graduating": 900}}]
-    prior, new = _doc(450), _doc(300)
-    assert _masses(prior)["narrative-timeless"] < 500
-    with pytest.raises(ValueError, match="reference floor"):
-        C._check_no_catastrophic_shrink(
-            prior, new, FLOW_SCHEMA, allow_shrink=False,
-            mass_log=log, today="2026-11-20")
 
 
-def test_a_pattern_crystallized_out_since_is_not_counted_against_the_floor():
-    """A forward guard, not a path a save reaches today: the felt layer earns no
-    crystallize-out credit (only ``graduating`` does, and it is not floored). If a
-    crystallizing role joins ``_REFERENCE_FLOOR_ROLES``, what moved to the crystal
-    store since the largest entry must leave the reference."""
-    log = [
-        {"d": "2026-11-01", "m": {"narrative-timeless": 3000}},
-        {"d": "2026-11-10", "m": {"narrative-timeless": 2400}, "c": {"narrative-timeless": 600}},
-    ]
-    ref, _ = C._reference_mass(log, "narrative-timeless", "2026-11-20", prior_mass=2400,
-                               credit_now=0)
-    assert ref == 2400  # 3000 at the largest, less the 600 credited since
-    uncredited = [{"d": e["d"], "m": e["m"]} for e in log]
-    assert C._reference_mass(uncredited, "narrative-timeless", "2026-11-20", 2400, 0)[0] == 3000
-    # a malformed or out-of-window log is ignored, never raised on
-    for bad in (None, "x", [1, {"d": 5}, {"d": "no", "m": {}}],
-                [{"d": "2020-01-01", "m": {"narrative-timeless": 99999}}]):
-        assert C._reference_mass(bad, "narrative-timeless", "2026-11-20", 2400, 0)[0] == 2400
 
 
-def test_a_future_dated_entry_is_not_a_reference_and_a_bad_today_keeps_the_log():
-    """A hand-edited or clock-skewed entry dated after today does not pin the
-    reference, and a ``today`` the window cannot be counted from drops nothing."""
-    future = [{"d": "2099-01-01", "m": {"narrative-timeless": 99999}}]
-    assert C._reference_mass(future, "narrative-timeless", "2026-11-20", 2400, 0)[0] == 2400
-    log = [{"d": "2026-11-01", "m": {"narrative-timeless": 3000}}]
-    kept = C._updated_mass_log(log, None, _doc(3000), FLOW_SCHEMA, None,
-                               "2026-11-24T10:00")
-    assert kept == log
 
 
-def test_a_save_that_crystallizes_out_the_same_day_does_not_leave_the_old_peak_standing():
-    """A forward guard (see the test above: no floored role earns credit today).
-    Two saves on one date, the second moving 1000 characters to the crystal store:
-    the day's entry must not count them, or the next unchanged save is refused."""
-    log = C._updated_mass_log(None, None, _doc(3000), FLOW_SCHEMA, None, "2026-11-01")
-    before = _masses(_doc(3000))["narrative-timeless"]
-    after = _masses(_doc(2000))["narrative-timeless"]
-    log = C._updated_mass_log(
-        log, _doc(3000), _doc(2000), FLOW_SCHEMA,
-        {"narrative-timeless": before - after}, "2026-11-01")
-    ref, _ = C._reference_mass(log, "narrative-timeless", "2026-11-02", after, 0)
-    assert ref == after and not C._below_floor(after, ref)
 
 
-def test_saves_on_alternating_dates_cannot_evict_the_maximum():
-    """A pinned or backward clock alternating between two dates must leave ONE entry
-    per date: the original maximum stays, so a later cut is still checked."""
-    big, small = _doc(3000), _doc(2400)
-    log: object = C._updated_mass_log(None, None, big, FLOW_SCHEMA, None, "2026-11-01")
-    for i in range(C._MASS_LOG_MAX_ENTRIES * 2):
-        log = C._updated_mass_log(log, small, small, FLOW_SCHEMA, None,
-                                  "2026-11-02" if i % 2 else "2026-11-03")
-    assert len({e["d"] for e in log}) == len(log)
-    ref, _ = C._reference_mass(log, "narrative-timeless", "2026-11-04",
-                               _masses(small)["narrative-timeless"], 0)
-    assert ref >= _masses(big)["narrative-timeless"]
 
 
-def test_the_prior_size_is_recorded_under_today_even_when_the_log_already_holds_that_mass():
-    """A log holding this exact mass from an expired date must not stop today's prior
-    from being recorded: the window would otherwise lose the layer's real maximum."""
-    big = _doc(3000)
-    old = [{"d": "2026-09-01", "m": _masses(big)}]
-    log = C._updated_mass_log(old, big, _doc(2400), FLOW_SCHEMA, None, "2026-11-01")
-    today = [e for e in log if e["d"] == "2026-11-01"]
-    assert today and today[0]["m"]["narrative-timeless"] == _masses(big)["narrative-timeless"]
 
 
-def test_one_calendar_date_is_one_entry_whatever_spelling_the_log_or_the_caller_uses():
-    from datetime import date
-    try:
-        date.fromisoformat("20261101")
-    except ValueError:
-        pytest.skip("this Python reads only YYYY-MM-DD")
-    big = _doc(3000)
-    log = [{"d": "20261101", "m": _masses(big)}]
-    kept = C._updated_mass_log(log, big, _doc(2400), FLOW_SCHEMA, None, "2026-11-01")
-    assert [e["d"] for e in kept] == ["2026-11-01"]
 
 
-def test_the_refusal_footer_states_the_window_the_constant_holds(monkeypatch):
-    """The footer and the offender line both name the window; changing the constant
-    must change both, or one message states two windows."""
-    monkeypatch.setattr(C, "_REFERENCE_WINDOW_DAYS", 45)
-    log = [{"d": "2026-11-01", "m": {"narrative-timeless": 3000}}]
-    prior, new = _doc(450), _doc(300)
-    with pytest.raises(ValueError, match="reference floor") as exc:
-        C._check_no_catastrophic_shrink(
-            prior, new, FLOW_SCHEMA, allow_shrink=False,
-            mass_log=log, today="2026-11-20")
-    msg = str(exc.value)
-    assert "the last 45 days, not only with the save before this one" in msg
-    assert "30 days" not in msg

@@ -129,40 +129,6 @@ def test_read_rules_drop_what_allow_would_refuse(two):
     assert "other" not in trusted_roots(store.path)  # nested in the default root
 
 
-def test_lines_run_in_their_root_and_unbound_refuses_the_save(two):
-    store, main, other, _ = two
-    allow_store(store.path, main, visibility="public")
-    allow_store(store.path, other, label="other", visibility="public")
-    state = [
-        "- main tag [derive: git describe --tags --abbrev=0 @REF => v1.0.0]",
-        "- other tag [derive@other: git describe --tags --abbrev=0 @REF => v2.0.0]",
-        "- other stale [derive@other: git describe --tags --abbrev=0 @REF => v1.0.0]",
-        "- nobody bound this [derive@site: test -f index.html]",
-        "- bad label [derive@Bad_X: test -f a.txt]",
-    ]
-    r = rederive_text(_continuity(state), PROJECT_SCHEMA, trusted_roots(store.path))
-    assert [x.status for x in r.results] == ["ok", "ok", "stale", "unbound", "refused"]
-    assert set(r.refs) == {None, "other"} and all(r.refs.values())
-    # the multi-root header is the line drop_header removes, and nothing else
-    assert r.text.startswith("> [anneal re-derive]") and "; other in " in r.text.split("\n")[0]
-    assert drop_header(r.text).startswith("# S — Memory (v1)")
-    with pytest.raises(ValueError, match="refused"):
-        check_state_for_save(_continuity(state), PROJECT_SCHEMA, store.path)
-    with pytest.raises(ValueError, match="UNBOUND"):
-        check_state_for_save(_continuity(state[:4]), PROJECT_SCHEMA, store.path)
-
-    # a real wrap: the composer sees the flags, the save keeps labels, never flags
-    store.record("e", "observation")
-    res = prepare_wrap(store)
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
-        validated_save_continuity(store, _continuity(state[:3]), wrap_token=res["wrap_token"])
-    saved = Path(store.continuity_path).read_text()
-    assert saved.count("[derive@other:") == 2 and "  ✓" not in saved and "[anneal re-derive]" not in saved
-    store.record("e2", "observation")
-    pkg = prepare_wrap(store)
-    assert any("STALE" in u for u in pkg["package"].get("unconfirmed_state", []))
-    store.wrap_cancelled()
 
 
 def test_exit_1_after_partial_output_is_an_error(two):

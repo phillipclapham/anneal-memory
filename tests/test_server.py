@@ -80,13 +80,8 @@ class TestPing:
 class TestToolsList:
     def test_returns_all_tools(self, server):
         result = server._handle_tools_list({})
-        assert len(result["tools"]) == 25  # 7 core + 2 crystal + 8 spore + 8 intention tools
+        assert len(result["tools"]) == len(TOOLS)
 
-    def test_crystal_tools_registered(self, server):
-        names = {t["name"] for t in server._handle_tools_list({})["tools"]}
-        assert {"crystal_recall", "crystal_index"} <= names
-        # every advertised tool has a dispatch handler (no schema-without-handler)
-        assert names == set(server._tool_handlers.keys())
 
     def test_tools_match_integrity_definitions(self, server):
         result = server._handle_tools_list({})
@@ -124,9 +119,8 @@ class TestResourcesRead:
         assert "record" in manifest["tools"]
         assert "delete_episode" in manifest["tools"]
         assert "spore_add" in manifest["tools"]
-        assert "crystal_recall" in manifest["tools"]
-        assert "crystal_index" in manifest["tools"]
-        assert len(manifest["tools"]) == 25  # 7 core + 2 crystal + 8 spore + 8 intention tools
+        assert "read_continuity" in manifest["tools"]
+        assert len(manifest["tools"]) == len(TOOLS)
 
     def test_unknown_uri_returns_empty(self, server):
         result = server._handle_resources_read({"uri": "anneal://unknown"})
@@ -522,20 +516,17 @@ class TestToolPrepareWrap:
         text = _text_from_result(result)
         assert "No episodes since last wrap" in text
 
-    def test_returns_episodes_and_instructions(self, server):
+    def test_returns_the_step_and_the_token(self, server):
         server._tool_record({"content": "Pattern noticed", "episode_type": "observation"})
         server._tool_record({"content": "Chose SQLite", "episode_type": "decision"})
         result = server._tool_prepare_wrap({})
         text = _text_from_result(result)
         assert not _is_error(result)
-        # Should contain instructions
-        assert "## State" in text
-        assert "## Patterns" in text
-        # Should contain episodes
+        assert "Wrap token:" in text
+        assert "WORK LOG FOR" in text
         assert "Pattern noticed" in text
         assert "Chose SQLite" in text
-        # Should mention first wrap
-        assert "first wrap" in text.lower() or "No existing continuity" in text
+        assert "no memory file yet" in text
 
     def test_wrap_in_progress_returns_is_error(self, server):
         """AM-PREPARE-GUARD (0.4.2): a second prepare_wrap while a wrap is
@@ -553,46 +544,19 @@ class TestToolPrepareWrap:
         assert "a wrap is already in progress" in _text_from_result(result)
 
     def test_includes_existing_continuity(self, server, store):
-        continuity = (
-            "# TestProject — Memory (v1)\n"
-            "## State\nActive\n"
-            "## Patterns\nthought: something | 1x (2026-03-31)\n"
-            "## Decisions\n"
-            "## Context\nDid stuff.\n"
-        )
+        continuity = "# TestProject — Memory\nthought: something\n"
         store.save_continuity(continuity)
-        # Need to complete a wrap so episodes_since_wrap works correctly
         store.wrap_completed(episodes_compressed=0, continuity_chars=len(continuity))
-        # Record new episodes
         server._tool_record({"content": "New finding", "episode_type": "observation"})
-        result = server._tool_prepare_wrap({})
-        text = _text_from_result(result)
-        assert "Current Continuity File" in text
+        text = _text_from_result(server._tool_prepare_wrap({}))
+        assert "CURRENT MEMORY FILE" in text
         assert "thought: something" in text
 
     def test_custom_max_chars(self, server):
         server._tool_record({"content": "Test", "episode_type": "observation"})
         result = server._tool_prepare_wrap({"max_chars": 5000})
         text = _text_from_result(result)
-        assert "5000" in text
-
-    def test_omitted_max_chars_uses_schema_aware_budget(self, tmp_path):
-        """AM-SCHEMA-BUDGET (0.4.2) M1: omitting max_chars over MCP must
-        derive the schema-aware budget (FLOW_SCHEMA -> 25500), NOT inject a
-        flat 20000 default in the transport. The instruction text surfaces
-        the budget ('Stay within N characters')."""
-        from anneal_memory.schema import FLOW_SCHEMA
-        flow_store = Store(path=tmp_path / "flow.db", project_name="flow",
-                           section_schema=FLOW_SCHEMA)
-        try:
-            srv = Server(flow_store)
-            srv._tool_record({"content": "a substrate observation",
-                              "episode_type": "observation"})
-            text = _text_from_result(srv._tool_prepare_wrap({}))  # no max_chars
-            assert "Stay within 25500 characters" in text
-            assert "Stay within 20000 characters" not in text
-        finally:
-            flow_store.close()
+        assert "5,000" in text
 
 
 # -- Tool: save_continuity --
@@ -601,18 +565,12 @@ class TestToolPrepareWrap:
 class TestToolSaveContinuity:
     def test_save_valid_continuity(self, server):
         server._tool_record({"content": "Test obs", "episode_type": "observation"})
-        text = (
-            "# TestProject — Memory (v1)\n"
-            "## State\nActive on test\n"
-            "## Patterns\nthought: testing works | 1x (2026-03-31)\n"
-            "## Decisions\n[decided(rationale: \"test\", on: \"2026-03-31\")] Use SQLite\n"
-            "## Context\nFirst session. Tested things.\n"
-        )
+        text = "# TestProject — Memory\n\nActive on test.\n"
         server._tool_prepare_wrap({})
         result = server._tool_save_continuity({"text": text})
         assert not _is_error(result)
         output = _text_from_result(result)
-        assert "Continuity saved" in output
+        assert "Memory file saved" in output
         assert "Episodes compressed: 1" in output
 
     def test_save_empty_text_fails(self, server):
@@ -623,133 +581,14 @@ class TestToolSaveContinuity:
         result = server._tool_save_continuity({})
         assert _is_error(result)
 
-    def test_save_invalid_structure_fails(self, server):
+    def test_save_over_the_limit_fails_and_keeps_the_step_open(self, server, store):
         server._tool_record({"content": "Test obs", "episode_type": "observation"})
         server._tool_prepare_wrap({})
-        result = server._tool_save_continuity({"text": "# Just a title\nNo sections."})
+        result = server._tool_save_continuity({"text": "x" * 30000})
         assert _is_error(result)
-        assert "must contain all sections" in _text_from_result(result)
+        assert "over the" in _text_from_result(result)
+        assert store.status().wrap_in_progress
 
-    def test_save_missing_one_section_fails(self, server):
-        server._tool_record({"content": "Test obs", "episode_type": "observation"})
-        server._tool_prepare_wrap({})
-        text = (
-            "# Test\n"
-            "## State\nActive\n"
-            "## Patterns\n"
-            "## Decisions\n"
-            # Missing ## Context
-        )
-        result = server._tool_save_continuity({"text": text})
-        assert _is_error(result)
-
-    def test_allow_unlinked_is_reported_as_a_deprecated_no_op(self, server):
-        """The AM-LINKGATE refusal was removed in 0.9.26; an MCP caller passing
-        allow_unlinked must be TOLD it did nothing (a UserWarning never reaches it)."""
-        server._tool_record({"content": "Test obs", "episode_type": "observation"})
-        text = (
-            "# TestProject — Memory (v1)\n"
-            "## State\nActive on test\n"
-            "## Patterns\nthought: testing works | 1x (2026-03-31)\n"
-            "## Decisions\n[decided(rationale: \"test\", on: \"2026-03-31\")] Use SQLite\n"
-            "## Context\nFirst session. Tested things.\n"
-        )
-        server._tool_prepare_wrap({})
-        result = server._tool_save_continuity({"text": text, "allow_unlinked": True})
-        assert not _is_error(result)
-        output = _text_from_result(result)
-        assert "Continuity saved" in output
-        assert "allow_unlinked is deprecated and did nothing" in output
-
-    def test_association_warning_reaches_the_mcp_result_text(self, server, monkeypatch):
-        """AM-WARN is a post-commit UserWarning, which never reaches an MCP client;
-        the result text must carry it (codex L3 MED, 0.9.26)."""
-        import anneal_memory.server as srv
-        real = srv._lib_validated_save_continuity
-
-        def with_warning(*a, **k):
-            res = real(*a, **k)
-            res["association_warning"] = "Co-citation pairs were available this wrap but 0 associations formed"
-            return res
-
-        monkeypatch.setattr(srv, "_lib_validated_save_continuity", with_warning)
-        server._tool_record({"content": "Test obs", "episode_type": "observation"})
-        text = (
-            "# TestProject — Memory (v1)\n"
-            "## State\nActive on test\n"
-            "## Patterns\n\n"
-            "## Decisions\n\n"
-            "## Context\nFirst session.\n"
-        )
-        server._tool_prepare_wrap({})
-        output = _text_from_result(server._tool_save_continuity({"text": text}))
-        assert "Association warning: Co-citation pairs were available" in output
-
-    def test_save_without_allow_unlinked_has_no_deprecation_line(self, server):
-        server._tool_record({"content": "Test obs", "episode_type": "observation"})
-        text = (
-            "# TestProject — Memory (v1)\n"
-            "## State\nActive on test\n"
-            "## Patterns\n\n"
-            "## Decisions\n\n"
-            "## Context\nFirst session.\n"
-        )
-        server._tool_prepare_wrap({})
-        output = _text_from_result(server._tool_save_continuity({"text": text}))
-        assert "allow_unlinked" not in output
-
-    def test_save_updates_store(self, server, store):
-        server._tool_record({"content": "Test", "episode_type": "observation"})
-        text = (
-            "# TestProject — Memory (v1)\n"
-            "## State\nActive\n"
-            "## Patterns\n\n"
-            "## Decisions\n\n"
-            "## Context\nDid a thing.\n"
-        )
-        server._tool_prepare_wrap({})
-        server._tool_save_continuity({"text": text})
-        # Verify stored
-        saved = store.load_continuity()
-        assert saved is not None
-        assert "Active" in saved
-        # Verify wrap recorded
-        status = store.status()
-        assert status.total_wraps == 1
-
-    def test_save_reports_section_sizes(self, server):
-        server._tool_record({"content": "Test", "episode_type": "observation"})
-        text = (
-            "# TestProject — Memory (v1)\n"
-            "## State\nVery active on important work\n"
-            "## Patterns\nthought: deep insight | 1x (2026-03-31)\n"
-            "## Decisions\n[decided(rationale: \"yes\", on: \"2026-03-31\")] Choice\n"
-            "## Context\nLong narrative about what happened in the session.\n"
-        )
-        server._tool_prepare_wrap({})
-        result = server._tool_save_continuity({"text": text})
-        output = _text_from_result(result)
-        assert "Section sizes:" in output
-
-    def test_save_without_prepare_wrap_is_refused(self, server, store):
-        """save_continuity with no wrap in progress is refused (v0.3.1).
-
-        Before v0.3.1 a no-prepare save fell through to a
-        skipped_prepare path and warned; v0.3.1 makes it a hard error
-        — the structural fix for phantom re-saves.
-        """
-        server._tool_record({"content": "Test", "episode_type": "observation"})
-        text = (
-            "# TestProject — Memory (v1)\n"
-            "## State\nActive\n"
-            "## Patterns\n\n"
-            "## Decisions\n\n"
-            "## Context\nFirst session.\n"
-        )
-        result = server._tool_save_continuity({"text": text})
-        assert _is_error(result)
-        assert "No wrap in progress" in _text_from_result(result)
-        assert store.status().total_wraps == 0
 
 
 # -- 0.9.8: MCP wrap_cancel (AM-MCP-WRAPCANCEL) --
@@ -1419,56 +1258,7 @@ class TestGraduationValidation:
         from datetime import date
         return date.today().isoformat()
 
-    def test_valid_citation_passes(self, server, store):
-        """A 2x graduation citing a real episode ID should validate."""
-        result = server._tool_record({
-            "content": "SQLite handles concurrent reads well via WAL mode",
-            "episode_type": "observation",
-        })
-        ep_id = _text_from_result(result).split("(")[1].split(")")[0]
-        today = self._get_today()
 
-        text = (
-            "# TestProject — Memory (v1)\n"
-            "## State\nActive\n"
-            f'## Patterns\nthought: SQLite WAL is reliable | 2x ({today}) '
-            f'[evidence: {ep_id} "concurrent reads WAL mode"]\n'
-            "## Decisions\n\n"
-            "## Context\nTested SQLite.\n"
-        )
-        seed_prior_levels(store, {'thought: SQLite WAL is reliable': 1})
-        server._tool_prepare_wrap({})
-        result = server._tool_save_continuity({"text": text})
-        assert not _is_error(result)
-        output = _text_from_result(result)
-        assert "Citations validated: 1" in output
-
-    def test_fake_citation_gets_demoted(self, server, store):
-        """A 2x graduation citing a non-existent episode ID should be demoted."""
-        server._tool_record({"content": "Real episode", "episode_type": "observation"})
-        today = self._get_today()
-
-        text = (
-            "# TestProject — Memory (v1)\n"
-            "## State\nActive\n"
-            f'## Patterns\nthought: bogus claim | 2x ({today}) '
-            f'[evidence: deadbeef "fabricated evidence"]\n'
-            "## Decisions\n\n"
-            "## Context\nTest.\n"
-        )
-        server._tool_prepare_wrap({})
-        # The fabricated citation resolves to zero episodes, so AM-WARN
-        # (0.4.2) fires. Assert it (and keep the suite warning-clean).
-        with pytest.warns(UserWarning, match="resolved to ZERO episodes"):
-            result = server._tool_save_continuity({"text": text})
-        assert not _is_error(result)
-        output = _text_from_result(result)
-        assert "Citations demoted (bad evidence): 1" in output
-
-        # Verify the saved text was actually modified (demoted to 1x)
-        saved = store.load_continuity()
-        assert "| 1x" in saved
-        assert "(ungrounded)" in saved
 
     def test_1x_pattern_needs_no_citation(self, server):
         """1x patterns don't need citations — they're first observations."""
@@ -1490,28 +1280,6 @@ class TestGraduationValidation:
         assert "Citations validated" not in output
         assert "demoted" not in output
 
-    def test_explanation_overlap_required(self, server, store):
-        """Citation explanation must reference actual episode content."""
-        result = server._tool_record({
-            "content": "PostgreSQL chosen for ACID compliance in production",
-            "episode_type": "decision",
-        })
-        ep_id = _text_from_result(result).split("(")[1].split(")")[0]
-        today = self._get_today()
-
-        # Explanation references completely different content
-        text = (
-            "# TestProject — Memory (v1)\n"
-            "## State\nActive\n"
-            f'## Patterns\nthought: Redis is fast | 2x ({today}) '
-            f'[evidence: {ep_id} "Redis caching performance benchmarks"]\n'
-            "## Decisions\n\n"
-            "## Context\nTest.\n"
-        )
-        server._tool_prepare_wrap({})
-        result = server._tool_save_continuity({"text": text})
-        output = _text_from_result(result)
-        assert "demoted" in output
 
 
 # -- Stale Wrap Recovery --
@@ -1863,210 +1631,8 @@ def _seed_crystal(server) -> CrystalStore:
     return CrystalStore(server._crystal_path)
 
 
-class TestToolCrystalRecall:
-    """crystal_recall — the on-demand graduated tier's MCP read surface."""
-
-    def test_empty_store_returns_no_match(self, server):
-        r = _call(server, "crystal_recall", {"query": "anything relevant at all here"})
-        assert not _is_error(r)
-        assert _text_from_result(r) == "No crystallized patterns matched."
-
-    def test_keyword_hit_formats_pattern(self, server):
-        _seed_crystal(server).crystallize(
-            name="structural_invariants_beat_discipline",
-            level=3,
-            explanation="make the guard structurally unskippable rather than trusting a contract",
-            tags=["design"],
-        )
-        r = _call(server, "crystal_recall",
-                  {"query": "structural invariants guard contract discipline"})
-        assert not _is_error(r)
-        text = _text_from_result(r)
-        assert "structural_invariants_beat_discipline" in text
-        assert "3x" in text          # level rendered
-        assert "[design]" in text    # tags rendered
-
-    def test_associative_default_reaches_via_evidence(self, server, store):
-        """Default associative=True surfaces a pattern with ZERO query-keyword
-        overlap on its OWN text, reached through the evidence-cited episode."""
-        ep = store.record(
-            content="Decided the quarterly revenue projections spreadsheet needs "
-                    "forecasting headcount and fiscal planning before the board review.",
-            episode_type="decision", source="agent")
-        _seed_crystal(server).crystallize(
-            name="verify_before_acting_on_cached_state",
-            level=2,
-            explanation="continuity is a snapshot; on conflict with ground truth verify or surface",
-            evidence=[ep.id],
-        )
-        # query matches the EPISODE, not the pattern's name/explanation
-        r = _call(server, "crystal_recall",
-                  {"query": "quarterly revenue forecasting spreadsheet fiscal headcount"})
-        assert not _is_error(r)
-        assert "verify_before_acting_on_cached_state" in _text_from_result(r)
-
-    def test_no_associative_misses_evidence_only_reach(self, server, store):
-        """associative=False is pure keyword scoring on the pattern's own text —
-        the evidence-only pattern is NOT reached (proves the routing fork)."""
-        ep = store.record(
-            content="Decided the quarterly revenue projections spreadsheet needs "
-                    "forecasting headcount and fiscal planning before the board review.",
-            episode_type="decision", source="agent")
-        _seed_crystal(server).crystallize(
-            name="verify_before_acting_on_cached_state",
-            level=2,
-            explanation="continuity is a snapshot; on conflict with ground truth verify or surface",
-            evidence=[ep.id],
-        )
-        r = _call(server, "crystal_recall",
-                  {"query": "quarterly revenue forecasting spreadsheet fiscal headcount",
-                   "associative": False})
-        assert not _is_error(r)
-        assert _text_from_result(r) == "No crystallized patterns matched."
-
-    def test_missing_query_fails(self, server):
-        r = _call(server, "crystal_recall", {})
-        assert _is_error(r)
-        assert "query must be a non-empty string" in _text_from_result(r)
-
-    def test_whitespace_query_fails(self, server):
-        r = _call(server, "crystal_recall", {"query": "   "})
-        assert _is_error(r)
-        assert "query must be a non-empty string" in _text_from_result(r)
-
-    def test_non_string_query_fails(self, server):
-        # a JSON number/list must be rejected, not coerced via str() into the backend
-        for bad in [123, ["a", "b"], {"x": 1}]:
-            r = _call(server, "crystal_recall", {"query": bad})
-            assert _is_error(r), f"query={bad!r} should be rejected"
-            assert "query must be a non-empty string" in _text_from_result(r)
-
-    def test_max_patterns_bool_rejected(self, server):
-        # bool is an int subclass — must be rejected explicitly, not coerced
-        r = _call(server, "crystal_recall", {"query": "x y z", "max_patterns": True})
-        assert _is_error(r)
-        assert "max_patterns must be an integer" in _text_from_result(r)
-
-    def test_max_patterns_string_rejected(self, server):
-        r = _call(server, "crystal_recall", {"query": "x y z", "max_patterns": "3"})
-        assert _is_error(r)
-        assert "max_patterns must be an integer" in _text_from_result(r)
-
-    def test_associative_non_bool_rejected(self, server):
-        # a JSON-stringy "false" must be rejected, NOT coerced to truthy (which would
-        # silently STAY associative — the opposite of the caller's intent)
-        for bad in ["false", 0, 1, "true"]:
-            r = _call(server, "crystal_recall", {"query": "x y z", "associative": bad})
-            assert _is_error(r), f"associative={bad!r} should be rejected"
-            assert "associative must be a boolean" in _text_from_result(r)
-
-    def test_thin_query_disambiguates_empty_result(self, server):
-        _seed_crystal(server).crystallize(
-            name="some_pattern", level=3, explanation="a non-empty corpus exists")
-        # a one-keyword query is below MIN_KEYWORDS → the message tells the agent to
-        # rephrase rather than implying the corpus is empty
-        r = _call(server, "crystal_recall", {"query": "the"})
-        assert not _is_error(r)
-        assert "query too thin" in _text_from_result(r)
-
-    def test_max_patterns_zero_returns_no_match_without_touching_store(self, server, store):
-        """max_patterns<=0 short-circuits to empty WITHOUT opening the episodic
-        store (no spurious degrade breadcrumb on a no-op recall)."""
-        _seed_crystal(server).crystallize(
-            name="some_pattern", level=3, explanation="present but capped out")
-        for mp in (0, -1):  # the short-circuit is `<= 0`, not just `== 0`
-            with patch.object(server, "_crystal_recall_associative") as assoc:
-                r = _call(server, "crystal_recall",
-                          {"query": "some pattern present", "max_patterns": mp})
-            assoc.assert_not_called()
-            assert not _is_error(r)
-            assert _text_from_result(r) == "No crystallized patterns matched."
-
-    def test_episodic_fault_degrades_to_keyword(self, server, monkeypatch, caplog):
-        """A StoreError from the associative backend degrades QUIETLY to keyword-only
-        recall (best-effort augmentation), not an error — AND leaves a logged
-        breadcrumb so the degrade isn't invisible (the invisible_infrastructure_failure
-        guard the helper's docstring names)."""
-        _seed_crystal(server).crystallize(
-            name="degrade_target_pattern",
-            level=3,
-            explanation="surfaces on the keyword fallback after an episodic fault",
-            tags=["x"],
-        )
-        import logging
-        import anneal_memory.server as srv_mod
-
-        def _boom(*a, **k):
-            raise StoreError("episodic db exploded", operation="recall")
-
-        monkeypatch.setattr(srv_mod, "retrieve_relevant", _boom)
-        with caplog.at_level(logging.WARNING, logger="anneal-memory"):
-            r = _call(server, "crystal_recall",
-                      {"query": "degrade target pattern keyword fallback"})
-        assert not _is_error(r)  # degraded, not failed
-        assert "degrade_target_pattern" in _text_from_result(r)
-        # the breadcrumb fired (the guard against a silent forever-keyword degrade)
-        assert any("degraded to keyword-only" in rec.message for rec in caplog.records)
-
-    def test_crystal_fault_fails_closed(self, server, monkeypatch):
-        """A CrystalError (crystal corruption) is fail-CLOSED — an error result,
-        never a silent empty or a keyword degrade."""
-        import anneal_memory.server as srv_mod
-
-        def _boom(*a, **k):
-            raise CrystalError("crystal store corrupt")
-
-        monkeypatch.setattr(srv_mod, "retrieve_relevant", _boom)
-        r = _call(server, "crystal_recall", {"query": "x y z distinctive words"})
-        assert _is_error(r)
-        assert "crystal store corrupt" in _text_from_result(r)
 
 
-class TestToolCrystalIndex:
-    """crystal_index — the always-on name + one-clause menu."""
-
-    def test_empty_store(self, server):
-        r = _call(server, "crystal_index", {})
-        assert not _is_error(r)
-        assert _text_from_result(r) == "No crystallized patterns."
-
-    def test_lists_name_and_clause_sorted(self, server):
-        cs = _seed_crystal(server)
-        cs.crystallize(name="zeta_pattern", level=3, explanation="the last one alphabetically")
-        cs.crystallize(name="alpha_pattern", level=2, explanation="the first one alphabetically")
-        r = _call(server, "crystal_index", {})
-        assert not _is_error(r)
-        text = _text_from_result(r)
-        assert "alpha_pattern: the first one alphabetically" in text
-        assert "zeta_pattern: the last one alphabetically" in text
-        # sorted by name → alpha before zeta
-        assert text.index("alpha_pattern") < text.index("zeta_pattern")
-        # thin menu: no level/activation/score leaked into the index
-        assert "3x" not in text and "score=" not in text
-
-    def test_clause_truncated_at_100(self, server):
-        long_clause = "w " * 200  # 400 chars
-        _seed_crystal(server).crystallize(
-            name="long_pattern", level=3, explanation=long_clause.strip())
-        r = _call(server, "crystal_index", {})
-        line = _text_from_result(r)
-        assert line.endswith("...")
-        # "name: " + truncated(100) — clause portion is exactly 100 chars
-        clause = line.split(": ", 1)[1]
-        assert len(clause) == 100
-
-    def test_crystal_fault_fails_closed(self, server, monkeypatch):
-        """A corrupt/unreadable crystal store is fail-CLOSED on the index path too
-        (an error result), parity with crystal_recall."""
-        import anneal_memory.crystal as crys_mod
-
-        def _boom(*a, **k):
-            raise CrystalError("crystal store corrupt")
-
-        monkeypatch.setattr(crys_mod.CrystalStore, "active", _boom)
-        r = _call(server, "crystal_index", {})
-        assert _is_error(r)
-        assert "crystal store corrupt" in _text_from_result(r)
 
 
 class TestWrapCancelOwnershipOverMCP:

@@ -390,37 +390,6 @@ class TestStoreIntegration:
 
 # -- End-to-end: co-graduation seeding through the real wrap pipeline --
 
-class TestWrapPipelineSeeding:
-    """Until 1.0.2 a save seeded a weak pattern link between the patterns that
-    graduated together. Since 1.0.2 it seeds nothing (Phill's cut, 2026-10-23)."""
-
-    def test_two_graduations_seed_no_pattern_link(self, tmp_path):
-        from anneal_memory.continuity import validated_save_continuity, prepare_wrap
-
-        s = Store(str(tmp_path / "m.db"), project_name="test")
-        e1 = s.record("first grounding episode about the alpha mechanism", "observation").id
-        e2 = s.record("second grounding episode about the beta mechanism", "observation").id
-        today = "2026-06-12"
-        text = (
-            "## State\n\ncurrent focus.\n\n"
-            "## Patterns\n\n"
-            f"- alpha_mechanism_pattern | 2x ({today}) [evidence: {e1} \"first grounding episode alpha mechanism\"]\n"
-            f"- beta_mechanism_pattern | 2x ({today}) [evidence: {e2} \"second grounding episode beta mechanism\"]\n"
-            "\n## Decisions\n\nnone.\n"
-            "\n## Context\n\nwrap.\n"
-        )
-        seed_prior_levels(s, {'alpha_mechanism_pattern': 1, 'beta_mechanism_pattern': 1})
-
-        def _boom(*a, **k):
-            raise AssertionError("a 1.0.2 save must not seed pattern links")
-
-        s.seed_pattern_co_graduation = _boom  # type: ignore[method-assign]
-        prep = prepare_wrap(s)
-        result = validated_save_continuity(s, text, today=today, wrap_token=prep["wrap_token"])
-        assert result["graduations_validated"] == 2  # both graduated
-        assert _pair(s, "alpha_mechanism_pattern", "beta_mechanism_pattern", today=today) is None
-        assert s._conn.execute("SELECT COUNT(*) FROM pattern_associations").fetchone()[0] == 0
-        s.close()
 
 
 class TestProjectionMeta:

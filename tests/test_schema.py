@@ -34,9 +34,7 @@ from anneal_memory.schema import (
 )
 from anneal_memory.store import Store, StoreError
 from anneal_memory.continuity import (
-    _build_wrap_instructions,
     prepare_wrap,
-    validate_structure,
     validated_save_continuity,
 )
 from anneal_memory.graduation import extract_pattern_names
@@ -136,120 +134,6 @@ class TestNamedSchemas:
 # -- schema module --
 
 
-class TestSchemaSnapshot:
-    """AM-SCHEMASNAPSHOT: the section schema is frozen for a wrap's duration so
-    prepare and save agree even if the live schema changes mid-wrap."""
-
-    def _raw_set_live_schema(self, store, schema):
-        # Change the LIVE persisted schema directly, bypassing set_section_schema
-        # (whose guard refuses mid-wrap) — simulates the concurrent/cross-process
-        # writer that the freeze defends against.
-        store._conn.execute(
-            "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
-            ("section_schema", json.dumps(schema)),
-        )
-        store._conn.commit()
-
-    def test_frozen_schema_used_during_wrap(self, tmp_path):
-        store = Store(tmp_path / "s.db", section_schema=FLOW_SCHEMA)
-        store.wrap_started(token="a" * 32, episode_ids=[], section_schema=FLOW_SCHEMA)
-        # A concurrent writer flips the LIVE schema to ops mid-wrap:
-        self._raw_set_live_schema(store, DEFAULT_SCHEMA)
-        # section_schema_for_wrap still returns the FROZEN partnership schema...
-        wrap_headings = [s["heading"] for s in store.section_schema_for_wrap()]
-        assert "Understanding" in wrap_headings
-        # ...while the plain live read reflects the change (proves they diverged
-        # and the freeze is what protected the wrap).
-        live_headings = [s["heading"] for s in store.section_schema]
-        assert "Understanding" not in live_headings
-        store.close()
-
-    def test_frozen_schema_cleared_on_complete(self, tmp_path):
-        store = Store(tmp_path / "s.db", section_schema=FLOW_SCHEMA)
-        ep = store.record("e", "observation")
-        store.wrap_started(token="b" * 32, episode_ids=[ep.id], section_schema=FLOW_SCHEMA)
-        store.wrap_completed(episodes_compressed=1, continuity_chars=10,
-                             wrap_token="b" * 32, episode_ids=[ep.id])
-        # Wrap done -> no freeze; a live change is now reflected by section_schema_for_wrap.
-        self._raw_set_live_schema(store, DEFAULT_SCHEMA)
-        assert [s["heading"] for s in store.section_schema_for_wrap()] == \
-            [s["heading"] for s in DEFAULT_SCHEMA]
-        store.close()
-
-    def test_frozen_schema_cleared_on_cancel(self, tmp_path):
-        store = Store(tmp_path / "s.db", section_schema=FLOW_SCHEMA)
-        store.wrap_started(token="c" * 32, episode_ids=[], section_schema=FLOW_SCHEMA)
-        store.wrap_cancelled()
-        self._raw_set_live_schema(store, DEFAULT_SCHEMA)
-        assert [s["heading"] for s in store.section_schema_for_wrap()] == \
-            [s["heading"] for s in DEFAULT_SCHEMA]
-        store.close()
-
-    def test_no_frozen_schema_fails_closed(self, tmp_path):
-        # A wrap started by a pre-AM-SCHEMASNAPSHOT version (wrap_started_at set,
-        # wrap_section_schema empty) FAILS CLOSED rather than silently reverting
-        # to the live schema (codex L3 LOW-1) — an invariant, not a discipline.
-        store = Store(tmp_path / "s.db", section_schema=FLOW_SCHEMA)
-        store.wrap_started(token="d" * 32, episode_ids=[], section_schema=FLOW_SCHEMA)
-        store._conn.execute(
-            "INSERT OR REPLACE INTO metadata (key, value) VALUES ('wrap_section_schema', '')"
-        )
-        store._conn.commit()
-        with pytest.raises(StoreError, match="predates AM-SCHEMASNAPSHOT"):
-            store.section_schema_for_wrap()
-        store.close()
-
-    def test_allow_restart_overwrites_frozen_schema(self, tmp_path):
-        # B (L1): a restart over an in-flight wrap must OVERWRITE the prior
-        # freeze, not leave the old wrap's schema stranded.
-        store = Store(tmp_path / "s.db", section_schema=FLOW_SCHEMA)
-        store.wrap_started(token="a" * 32, episode_ids=[], section_schema=FLOW_SCHEMA)
-        # wrap_started refuses a passed schema that is not the live one (0.9.29), so
-        # the live schema moves first; the restart must then freeze the new one.
-        self._raw_set_live_schema(store, DEFAULT_SCHEMA)
-        store.wrap_started(token="b" * 32, episode_ids=[],
-                           section_schema=DEFAULT_SCHEMA, allow_restart=True)
-        assert [s["heading"] for s in store.section_schema_for_wrap()] == \
-            [s["heading"] for s in DEFAULT_SCHEMA]
-        store.close()
-
-    def test_save_enforces_frozen_schema_after_live_flip(self, tmp_path):
-        # C (L1): the load-bearing end-to-end claim — validated_save_continuity
-        # validates against the FROZEN schema, not the live one. Freeze
-        # partnership, flip live to ops mid-wrap, then a save with ops-only
-        # content (missing Active Threads + Understanding) must be REJECTED
-        # because the wrap is still held to the frozen partnership schema.
-        from anneal_memory.continuity import validated_save_continuity
-        store = Store(tmp_path / "s.db", section_schema=FLOW_SCHEMA)
-        store.record("a session episode", "observation")
-        prepare_wrap(store)  # freezes partnership
-        self._raw_set_live_schema(store, DEFAULT_SCHEMA)  # concurrent flip to ops
-        ops_only = "# C\n## State\n.\n## Patterns\n.\n## Decisions\n.\n## Context\n.\n"
-        with pytest.raises(ValueError, match="(?i)section|structure|required|understanding"):
-            validated_save_continuity(store, ops_only)
-        store.close()
-
-    def test_corrupt_frozen_schema_fails_closed(self, tmp_path):
-        store = Store(tmp_path / "s.db", section_schema=FLOW_SCHEMA)
-        store.wrap_started(token="e" * 32, episode_ids=[], section_schema=FLOW_SCHEMA)
-        store._conn.execute(
-            "UPDATE metadata SET value='{not valid json' WHERE key='wrap_section_schema'"
-        )
-        store._conn.commit()
-        with pytest.raises(StoreError, match="Frozen wrap section_schema"):
-            store.section_schema_for_wrap()
-        store.close()
-
-    def test_prepare_wrap_freezes_the_read_schema(self, tmp_path):
-        # End-to-end: prepare_wrap freezes the partnership schema it read, and a
-        # concurrent live flip does not change what the wrap sees.
-        store = Store(tmp_path / "s.db", section_schema=FLOW_SCHEMA)
-        store.record("a session episode", "observation")
-        result = prepare_wrap(store)
-        assert result["status"] == "ready"
-        self._raw_set_live_schema(store, DEFAULT_SCHEMA)
-        assert "Understanding" in [s["heading"] for s in store.section_schema_for_wrap()]
-        store.close()
 
 
 class TestSchemaModule:
@@ -443,109 +327,11 @@ FLOW_TEXT = (
 )
 
 
-class TestValidateStructureSchema:
-    def test_default_behavior_unchanged(self):
-        assert validate_structure(DEFAULT_TEXT) is True
-        assert validate_structure(DEFAULT_TEXT, DEFAULT_SCHEMA) is True
-        assert validate_structure("## State only") is False
-
-    def test_flow_schema_requires_all_six_including_understanding(self):
-        assert validate_structure(FLOW_TEXT, FLOW_SCHEMA) is True
-        missing_understanding = FLOW_TEXT.replace("## Understanding\nf\n", "")
-        assert validate_structure(missing_understanding, FLOW_SCHEMA) is False
-
-    def test_default_text_fails_flow_schema(self):
-        # Missing Active Threads + Understanding.
-        assert validate_structure(DEFAULT_TEXT, FLOW_SCHEMA) is False
-
-    def test_multiword_heading_matches(self):
-        sch = [
-            {"heading": "Active Threads", "role": "graduating"},
-        ]
-        assert validate_structure("## Active Threads\nx", sch) is True
-        assert validate_structure("## State\nx", sch) is False
-
-    def test_regex_special_heading_matches(self):
-        # Headings ending in non-word chars must match (codex M2 — `\b` fails on
-        # `## C++`; the `(?<!\w)…(?!\w)` form handles it).
-        sch = [{"heading": "C++", "role": "graduating"}]
-        assert validate_structure("## C++\nnotes", sch) is True
-        assert validate_structure("## C\nnotes", sch) is False
-
-    def test_extra_descriptive_words_preserved(self):
-        # Historical leniency preserved: a descriptive header satisfies the
-        # required section; an embedded substring does not.
-        sch = [{"heading": "State", "role": "graduating"}]
-        assert validate_structure("## State of the Project\nx", sch) is True
-        assert validate_structure("## Interstate\nx", sch) is False
 
 
 # -- _build_wrap_instructions --
 
 
-class TestWrapInstructionsSchema:
-    def test_default_preserves_required_substrings(self):
-        d = _build_wrap_instructions("MyProj", 20000, "2026-03-31")
-        assert d.startswith("Compress your session episodes")
-        for sub in ["MyProj", "2026-03-31", "thought:", "1x", "2x", "[evidence:",
-                    "`## State`", "`## Context`"]:
-            assert sub in d
-        # default has a narrative section (Context) -> PM discipline block present
-        assert "Compression discipline" in d
-        assert "Implementation-claims guardrail" in d
-
-    def test_flow_schema_includes_timeless_guidance(self):
-        f = _build_wrap_instructions("flow", 20000, "2026-03-31", FLOW_SCHEMA)
-        for sub in ["`## Active Threads`", "`## Understanding`", "TIMELESS",
-                    "knowing someone, not a dossier", "FULL arc of the partnership"]:
-            assert sub in f
-
-    def test_default_omits_timeless_guidance(self):
-        d = _build_wrap_instructions("MyProj", 20000, "2026-03-31")
-        assert "knowing someone, not a dossier" not in d
-
-    def test_custom_graduating_section_in_marker_reference(self):
-        # The pattern-line marker reference must point at the schema's actual
-        # graduating section, not a hardcoded ## Patterns (codex M4).
-        sch = [
-            {"heading": "State", "role": "live-state"},
-            {"heading": "Proven", "role": "graduating"},
-            {"heading": "Context", "role": "narrative"},
-        ]
-        instr = _build_wrap_instructions("e", 20000, "2026-03-31", sch)
-        assert "Pattern lines in `## Proven`" in instr
-        assert "Pattern lines in `## Patterns`" not in instr
-
-    def test_contradiction_scan_emitted_with_proven(self):
-        """AM-CONTRASCAN-EMIT (v0.4.3): a non-empty uncovered_proven list +
-        a graduating schema emits the scan block — names + marker contract."""
-        out = _build_wrap_instructions(
-            "p", 20000, "2026-06-02", None, ["alpha_proven", "beta_proven"]
-        )
-        assert "Contradiction Scan" in out
-        assert "alpha_proven" in out and "beta_proven" in out
-        assert "[contradicts:" in out and "[no-contradicts]" in out
-
-    def test_contradiction_scan_absent_when_no_proven_or_omitted(self):
-        """No scan block when uncovered_proven is omitted (default None) or
-        empty — backward-compatible for direct callers + first wraps."""
-        none_out = _build_wrap_instructions("p", 20000, "2026-06-02")
-        empty_out = _build_wrap_instructions("p", 20000, "2026-06-02", None, [])
-        assert "Contradiction Scan" not in none_out
-        assert "Contradiction Scan" not in empty_out
-
-    def test_contradiction_scan_absent_without_graduating_section(self):
-        """A schema with no graduating section emits no scan block even when
-        Proven names are passed — there is no Proven tier to graduate into,
-        so the scan discipline does not apply."""
-        sch = [
-            {"heading": "State", "role": "live-state"},
-            {"heading": "Context", "role": "narrative"},
-        ]
-        out = _build_wrap_instructions(
-            "p", 20000, "2026-06-02", sch, ["alpha_proven"]
-        )
-        assert "Contradiction Scan" not in out
 
 
 # -- Tier 2: graduation gate honors the schema --
@@ -611,71 +397,6 @@ FLOW_CONTINUITY = (
 )
 
 
-class TestFlowSchemaEndToEnd:
-    def test_prepare_wrap_describes_flow_schema(self, tmp_path):
-        s = Store(str(tmp_path / "flow.db"), project_name="flow",
-                  section_schema=FLOW_SCHEMA)
-        s.record("did a thing", EpisodeType.OBSERVATION)
-        pkg = prepare_wrap(s)
-        assert pkg["status"] == "ready"
-        instr = pkg["package"]["instructions"]
-        assert "`## Understanding`" in instr
-        assert "`## Active Threads`" in instr
-        assert "knowing someone, not a dossier" in instr
-        s.close()
-
-    def test_full_wrap_cycle_saves_flow_continuity(self, tmp_path):
-        s = Store(str(tmp_path / "flow.db"), project_name="flow",
-                  section_schema=FLOW_SCHEMA)
-        s.record("did a thing", EpisodeType.OBSERVATION)
-        prepare_wrap(s)
-        result = validated_save_continuity(s, FLOW_CONTINUITY, today="2026-05-31")
-        assert result is not None
-        saved = s.load_continuity()
-        assert saved is not None
-        assert "## Understanding" in saved
-        assert "## Active Threads" in saved
-        s.close()
-
-    def test_default_store_rejects_flow_text_missing_sections(self, tmp_path):
-        # A default-schema store must still reject a 4-section save that omits
-        # nothing — but a 6-section flow text saved to a default store is fine
-        # (default only REQUIRES its four; extras are allowed).
-        s = Store(str(tmp_path / "d.db"), project_name="ops")
-        s.record("x", EpisodeType.OBSERVATION)
-        prepare_wrap(s)
-        # missing ## Context -> rejected under default schema
-        bad = "# M\n## State\na\n## Patterns\nb\n## Decisions\nc\n"
-        with pytest.raises(ValueError, match="must contain all sections"):
-            validated_save_continuity(s, bad, today="2026-05-31")
-        s.close()
-
-    def test_custom_graduating_section_full_wrap_cycle(self, tmp_path):
-        # End-to-end with a NON-Patterns graduating section: prepare_wrap's
-        # instructions point at ## Proven, and a full save cycle succeeds with
-        # the graduating section named Proven (Tier 2 routing, end to end).
-        custom_schema = [
-            {"heading": "State", "role": "live-state"},
-            {"heading": "Proven", "role": "graduating"},
-            {"heading": "Decisions", "role": "decisions"},
-            {"heading": "Context", "role": "narrative"},
-        ]
-        custom_continuity = (
-            "# e — Memory (v1)\n\n"
-            "## State\nx\n\n"
-            "## Proven\n- a_principle | 1x (2026-05-31)\n\n"
-            '## Decisions\n[decided(rationale: "r", on: "2026-05-31")] d\n\n'
-            "## Context\nshape, not transcript\n"
-        )
-        s = Store(str(tmp_path / "c.db"), project_name="e",
-                  section_schema=custom_schema)
-        s.record("y", EpisodeType.OBSERVATION)
-        pkg = prepare_wrap(s)
-        assert "Pattern lines in `## Proven`" in pkg["package"]["instructions"]
-        validated_save_continuity(s, custom_continuity, today="2026-05-31")
-        saved = s.load_continuity()
-        assert saved is not None and "## Proven" in saved
-        s.close()
 
 
 # -- AM-SCHEMA-BUDGET (v0.4.2): schema-aware default max_chars --
@@ -729,32 +450,8 @@ class TestDefaultMaxChars:
         ])
         assert default_max_chars(sch) == 21000  # 20000 + 1000
 
-    def test_prepare_wrap_default_uses_schema_budget(self, tmp_path):
-        # No explicit max_chars -> schema-aware default flows into the package.
-        flow = Store(str(tmp_path / "flow.db"), project_name="flow",
-                     section_schema=FLOW_SCHEMA)
-        flow.record("did a thing", EpisodeType.OBSERVATION)
-        assert prepare_wrap(flow)["package"]["max_chars"] == 25500
-        flow.close()
 
-        ops = Store(str(tmp_path / "ops.db"), project_name="ops")
-        ops.record("did a thing", EpisodeType.OBSERVATION)
-        assert prepare_wrap(ops)["package"]["max_chars"] == 20000  # byte-compat
-        ops.close()
 
-    def test_prepare_wrap_explicit_max_chars_overrides(self, tmp_path):
-        flow = Store(str(tmp_path / "flow.db"), project_name="flow",
-                     section_schema=FLOW_SCHEMA)
-        flow.record("did a thing", EpisodeType.OBSERVATION)
-        assert prepare_wrap(flow, max_chars=9999)["package"]["max_chars"] == 9999
-        flow.close()
-
-    def test_build_wrap_instructions_none_resolves_per_schema(self):
-        # None max_chars resolves to the schema-aware default at the instruction layer.
-        d = _build_wrap_instructions("ops", None, "2026-06-02")
-        assert "within 20000 characters" in d
-        f = _build_wrap_instructions("flow", None, "2026-06-02", FLOW_SCHEMA)
-        assert "within 25500 characters" in f
 
 
 class TestSchemaRoleWarning:

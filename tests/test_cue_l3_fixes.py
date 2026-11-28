@@ -140,48 +140,8 @@ class TestCrlfContinuity:
             _retrieval.continuity_hash(c)
         assert _retrieval.continuity_hash(a) != _retrieval.continuity_hash("x\ny")
 
-    def test_a_crlf_save_passes_its_own_check_on_reload(self, store):
-        _episodes(store)
-        save(store, default_text(FACT, "- b — cues: hotfix").replace("\n", "\r\n"))
-        key = stored_key(store)
-        assert key["continuity_hash"] == _retrieval.continuity_hash(store.load_continuity())
-        assert "deploy" in key["tokens"]
-        assert retrieve_relevant(store, None, "deploy", max_episodes=0).facts == []
-        assert [f.matched for f in retrieve_relevant(store, None, "hotfix", max_episodes=0).facts] \
-            == [("hotfix",)]
 
 
-class TestFailClosed:
-    def test_a_failed_computation_removes_the_old_key(self, store, monkeypatch):
-        _episodes(store)
-        save(store, default_text(FACT))
-        assert stored_key(store) is not None
-        monkeypatch.setattr(_continuity_mod, "compute_durable_inert_tokens",
-                            lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")))
-        store.record("another episode before the second wrap", EpisodeType.OBSERVATION)
-        _result, _msgs = save(store, default_text(FACT, "- b — cues: hotfix"))
-        assert stored_key(store) is None
-        assert retrieve_relevant(store, None, "hotfix", max_episodes=0).facts == []
-
-    def test_a_cold_store_still_serves_facts_through_its_valid_empty_key(self, store):
-        _episodes(store, n=10)
-        save(store, default_text(FACT))
-        assert stored_key(store)["tokens"] == []
-        assert [f.matched for f in retrieve_relevant(store, None, "deploy", max_episodes=0).facts] \
-            == [("deploy",)]
-
-    def test_mcp_recall_and_crystal_recall_follow_the_same_rule(self, store):
-        store.save_continuity(_continuity(FACT))  # no key
-        server = Server(store)
-        assert "Durable facts" not in _text(_call(server, "recall", {"keyword": "rollback"}))
-        assert "Durable facts" not in _text(
-            _call(server, "crystal_recall", {"query": "rollback", "mode": "query"}))
-        write_inert_key(store)
-        assert _text(_call(server, "recall", {"keyword": "rollback"})).startswith(
-            "Durable facts matching your words:")
-        assert _text(_call(server, "crystal_recall",
-                           {"query": "rollback", "mode": "query"})).startswith(
-            "Durable facts matching your words:")
 
 
 class TestPagingNormalisedOnce:
@@ -203,13 +163,6 @@ class TestPagingNormalisedOnce:
         assert _text(_call(server, "recall", {"keyword": "restaurant", "limit": -2})) == \
             "No matching episodes found."
 
-    def test_the_descriptions_say_zero_returns_nothing_facts_included(self):
-        recall = next(t for t in TOOLS if t["name"] == "recall")["description"]
-        crystal = next(t for t in TOOLS if t["name"] == "crystal_recall")["description"]
-        assert "limit=0 returns nothing at all, facts included" in recall
-        assert "max_patterns=0 returns nothing at all, facts included" in crystal
-        assert "two distinctive words of its text" in recall
-        assert "two distinctive words of its text" in crystal
 
 
 class TestLongPromptCountSkipsInertTokens:

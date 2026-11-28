@@ -31,7 +31,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import stale_probe as sp  # noqa: E402
 
-from anneal_memory.graduation import _meaningful_words as _words  # noqa: E402
+from anneal_memory.store import _meaningful_words as _words  # noqa: E402
 from anneal_memory.store import SUPERSEDE_MIN_OVERLAP_RATIO  # noqa: E402
 
 

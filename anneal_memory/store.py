@@ -69,7 +69,6 @@ _WRAP_TOKEN_RE = re.compile(r"^[0-9a-f]{32}$")
 
 from ._sqlkeys import json_each_available, key_list
 from .associations import (
-    ASSOCIATIONS_SCHEMA,
     association_stats as _association_stats,
     canonical_pair,
     decay_associations as _decay_associations,
@@ -80,7 +79,6 @@ from .associations import (
 )
 from ._fsdir import _fsync_dir
 from .audit import AuditTrail
-from .graduation import _meaningful_words, canonical_continuity_text
 from .origin import ORIGIN_KEY_CHECK_SQL, validate_origin_key
 
 #: SQLite's own write-lock message grammar, for the Python 3.10 fallback in
@@ -245,7 +243,6 @@ def _reject_reserved_audit_kwargs(kwargs: dict[str, Any]) -> dict[str, Any]:
 # cannot be the only one.
 _LOG = logging.getLogger("anneal-memory")
 from .pattern_associations import (
-    PATTERN_ASSOCIATIONS_SCHEMA,
     _aggregate_events as _aggregate_co_surface_events,
     drain_co_surface_events as _drain_co_surface_events,
     gc_pattern_associations as _gc_pattern_associations,
@@ -2642,14 +2639,111 @@ BEGIN
 END;
 """
 
-# Appended separately so existing DBs get the new table via CREATE IF NOT EXISTS
-_ASSOCIATIONS_SCHEMA_SQL = ASSOCIATIONS_SCHEMA
+# Inert legacy DDL (4.0): the episode ``associations`` table. Nothing writes it
+# any more; it stays so an older store still opens and a new store has the same
+# tables. Appended separately so existing DBs get the table via CREATE IF NOT EXISTS.
+_ASSOCIATIONS_SCHEMA_SQL = """
+CREATE TABLE IF NOT EXISTS associations (
+    episode_a TEXT NOT NULL,
+    episode_b TEXT NOT NULL,
+    strength REAL NOT NULL DEFAULT 1.0,
+    first_linked TEXT NOT NULL,
+    last_strengthened TEXT NOT NULL,
+    co_citations INTEGER NOT NULL DEFAULT 1,
+    affective_tag TEXT,
+    affective_intensity REAL NOT NULL DEFAULT 0.0,
+    PRIMARY KEY (episode_a, episode_b),
+    CHECK (episode_a < episode_b),
+    FOREIGN KEY (episode_a) REFERENCES episodes(id) ON DELETE CASCADE,
+    FOREIGN KEY (episode_b) REFERENCES episodes(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_assoc_a ON associations(episode_a);
+CREATE INDEX IF NOT EXISTS idx_assoc_b ON associations(episode_b);
+CREATE INDEX IF NOT EXISTS idx_assoc_strength ON associations(strength DESC);
+"""
 
 # Pattern-level cortical association graph (AM-LINKGATE-DECAY, Slice B). A
 # SEPARATE table set from the episode `associations` above — pattern names and
 # episode ids are different namespaces with different lifecycles. Appended the
 # same way so existing DBs upgrade additively via CREATE IF NOT EXISTS.
-_PATTERN_ASSOCIATIONS_SCHEMA_SQL = PATTERN_ASSOCIATIONS_SCHEMA
+# Inert legacy DDL (4.0), as above: the pattern graph table set.
+_PATTERN_ASSOCIATIONS_SCHEMA_SQL = """
+CREATE TABLE IF NOT EXISTS pattern_associations (
+    name_a TEXT NOT NULL,
+    name_b TEXT NOT NULL,
+    strength REAL NOT NULL DEFAULT 0.0,
+    -- ACT-R fan-effect affordance: v1 treats edges as undirected, but the
+    -- column exists NOW so a directed/asymmetric Sji can be added without a
+    -- migration. 'undirected' until Slice C measures whether direction pays.
+    direction TEXT NOT NULL DEFAULT 'undirected',
+    first_linked_at TEXT NOT NULL,        -- ISO date (logical clock)
+    last_strengthened_at TEXT NOT NULL,   -- ISO date — last reinforcement (any source)
+    last_co_surfaced_at TEXT NOT NULL,    -- ISO date — last co-RETRIEVAL (telemetry)
+    last_decay_at TEXT NOT NULL,          -- ISO date — strength is materialized as-of THIS date
+    co_surface_count INTEGER NOT NULL DEFAULT 0,         -- raw co-surface events
+    co_surface_session_count INTEGER NOT NULL DEFAULT 0, -- distinct sessions (burst-damped)
+    formation_source TEXT NOT NULL,       -- 'co_graduation' | 'co_surface' | 'co_touch'
+    PRIMARY KEY (name_a, name_b),
+    CHECK (name_a < name_b)
+);
+
+CREATE INDEX IF NOT EXISTS idx_pattern_assoc_a ON pattern_associations(name_a);
+CREATE INDEX IF NOT EXISTS idx_pattern_assoc_b ON pattern_associations(name_b);
+CREATE INDEX IF NOT EXISTS idx_pattern_assoc_strength ON pattern_associations(strength DESC);
+
+-- Rename / generation aliases. A pattern rename is first-class: the old name
+-- aliases to the canonical (current) name so its earned edges follow the
+-- rename instead of dangling. ``generation`` disambiguates the HOMONYM case
+-- (the killer catch): re-crystallizing the SAME name for a DIFFERENT concept
+-- mints a new generation, so the old concept's edges never silently re-attach
+-- to the new one (semantic_homonym_edge_contamination — worse than a dead id
+-- because it looks valid). ``canonical_name`` is NULL for a generation-bump
+-- row (a tombstone marking "names at gen < N are a different concept").
+CREATE TABLE IF NOT EXISTS pattern_aliases (
+    alias TEXT NOT NULL,
+    canonical_name TEXT,
+    generation INTEGER NOT NULL DEFAULT 1,
+    kind TEXT NOT NULL,                   -- 'rename' | 'generation'
+    created_at TEXT NOT NULL,             -- ISO date (logical clock)
+    PRIMARY KEY (alias, generation)
+);
+
+-- Idempotency backstop for the wrap drain. Records every co-surface event_id
+-- already applied to the graph, so a re-fed spool (harness truncation crashed
+-- between drain-commit and spool-clear) cannot double-count. Inserted in the
+-- SAME transaction as the strengthening — atomic all-or-nothing.
+CREATE TABLE IF NOT EXISTS processed_co_surface_events (
+    event_id TEXT PRIMARY KEY,
+    drained_at TEXT NOT NULL              -- ISO date (logical clock) — for retention pruning
+);
+
+CREATE INDEX IF NOT EXISTS idx_processed_cosurface_drained ON processed_co_surface_events(drained_at);
+
+-- Projection checkpoint for the pattern graph as a CQRS read-model (spore-104
+-- dep-1). A retrieval receipt stamps (projection_version, high_water_mark) at
+-- recall time so the Slice-C offline A/B replay harness can PIN which graph
+-- state produced it (bucket receipts by graph generation; detect/exclude
+-- receipts logged against a different snapshot than the one the harness replays
+-- against). Single row (id = 1, CHECK-guarded), lazily inserted on the first
+-- mutation/read — keeping a logical date out of this static schema string.
+--   * high_water_mark — a monotonic REVISION counter, +1 inside the SAME
+--     transaction as any committed graph-EDGE mutation (drain / seed / rename /
+--     sever / gc). Two receipts share an hwm iff they saw the same stored graph;
+--     recall is read-only so it never advances it. (Effective strengths still
+--     vary with the query date via lazy decay — a pure function of stored state
+--     × today — so (version, hwm, today) fully determines the effective graph.)
+--   * projection_version — the projection GENERATION, bumped only by a future
+--     blue/green REBUILD (the CQRS "remainder"; deliberately DEFERRED — see the
+--     module docstring). It is stamped now (constant 1) so the receipt corpus is
+--     forward-distinguishable once a rebuild starts bumping it.
+CREATE TABLE IF NOT EXISTS pattern_graph_projection_meta (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    projection_version INTEGER NOT NULL DEFAULT 1,
+    high_water_mark INTEGER NOT NULL DEFAULT 0,
+    updated_at TEXT NOT NULL DEFAULT ''
+);
+"""
 
 # SQLite PRIMARY result codes for lock contention. The low byte of any
 # extended code is its primary code, so these two cover every SQLITE_BUSY_*
@@ -2932,6 +3026,25 @@ def _canonical_utc(ts: str) -> str | None:
     if key[0] != 0:
         return None
     return key[1].strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+
+
+# Stop words for the supersession floor's overlap check (moved here from
+# ``graduation`` in 4.0: the floor is the one kept reader of them).
+_STOP_WORDS = frozenset(
+    "a an the is are was were be been being have has had do does did "
+    "will would shall should may might can could this that these those "
+    "it its he she they we you i me my our his her their in on at to "
+    "for of by with from and or but not no nor so if as".split()
+)
+
+
+def _meaningful_words(text: str, *, stop: frozenset[str] = _STOP_WORDS) -> set[str]:
+    """The meaningful-word set of a text: lowercased alnum tokens of length >2,
+    minus stop words."""
+    return {
+        w for w in re.split(r"[^a-zA-Z0-9]+", text.lower())
+        if len(w) > 2 and w not in stop
+    }
 
 
 def _supersession_grounds(new_text: str, old_text: str) -> bool:
@@ -11742,13 +11855,7 @@ class Store:
         Returns:
             The continuity text, or None if no continuity file exists.
 
-        The text is CANONICAL (``graduation.canonical_continuity_text``): this
-        is the one load point every reader goes through (the wrap's prepare
-        and save, re-derive, recall's durable facts, the CLI, the MCP server),
-        so a file written outside the gate (a raw ``save_continuity``, an older
-        anneal, a hand edit) is read in the same grammar the gate enforces
-        (Phill 2026-10-08 "(A)": nothing un-canonical enters; gradgate L3 r9
-        found prepare_wrap's own load parsed raw).
+        The text is returned verbatim as stored (4.0: no canonicalisation).
 
         Generation 3: the text is the latest ``identity_versions`` row's. On a
         write-capable handle a continuity file that differs from it is
@@ -11760,9 +11867,7 @@ class Store:
             text = self._identity_text()
         if text is None:
             return None
-        # The raw text keeps the file's line endings; translate them as the
-        # generation-2 ``read_text`` did.
-        return canonical_continuity_text(text.replace("\r\n", "\n").replace("\r", "\n"))
+        return text
 
     def save_continuity(self, text: str, *, lease_token: str | None = None) -> str:
         """Low-level continuity file write. **Bypasses the immune system** and the

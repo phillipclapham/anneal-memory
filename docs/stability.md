@@ -31,6 +31,17 @@ The first deprecation was `allow_unlinked` (an argument of `validated_save_conti
 
 **4.0.0 is a MAJOR release and removed public names without a deprecation period**, because the features they belonged to were removed outright (graduation, patterns, crystals, section schemas, rederive, the worth and outcome log, associations). What was removed and what replaced it is in [MIGRATING_TO_4.md](../MIGRATING_TO_4.md). The deprecation rule above applies to every release after it.
 
+## What 4.0 froze and what it removed
+
+**Frozen at 4.0.0.** The public surface is the list below. From 4.0.0 it follows the rules above: an addition is a MINOR change, and a removal or an incompatible change is a MAJOR one.
+
+- **Python.** The names in `anneal_memory.__all__` of the 4.0.0 release. In the wrap, that is `prepare_wrap` and `validated_save_continuity` with the signatures in [MIGRATING_TO_4.md](../MIGRATING_TO_4.md), and the result types `PrepareWrapResult` (`status`, `message`, `episode_count`, `pending_count`, `wrap_token`, `step`), `SaveContinuityResult` (`path`, `chars`, `episodes_compressed`, `pending_count`, `content_hash`, `wrap_result`) and `SaveContinuityReplayResult`. It also covers `Store` and its methods, `EpisodeType`, `search_episodes`, the audit and integrity names, the spore and intention names, and the exceptions that remain. `WrapResult` and `WrapRecord` keep their old count fields, which are always 0 for a wrap made under 4.0, so that wraps written by 3.x still read.
+- **Command line.** `init`, `status`, `episodes`, `supersede`, `unsupersede`, `get`, `continuity`, `record`, `state`, `trust`, `search` (alias `recall`), `delete`, `prune`, `verify`, `audit-repair`, `prepare-wrap`, `save-continuity`, `baton`, `wrap-status`, `wrap-cancel`, `revert-wrap`, `wrap-token-current`, `serve`, `export`, `import`, `team-import`, `team-status`, `team-forget-key`, `audit`, `diff`, `stats`, `history`, `spore`, `intention` and `migrate`, with their flags and `--json` keys.
+- **MCP.** The tools `record`, `recall`, `read_continuity`, `prepare_wrap`, `save_continuity`, `wrap_cancel`, `delete_episode`, `status`, the `spore_*` family and the `intention_*` family, with their input schemas.
+- **Files.** The database and its tables (none was dropped), `<stem>.continuity.md` as a projection of the newest `identity_versions` row, the audit files, the baton file and `<stem>.spores.json`.
+
+**Removed in 4.0.0.** Everything that only served the earlier consolidation: graduation and pattern state, crystals, the Decisions wall and evidence tags, drift probes, the worth and outcome log, rederive, section schemas and section edit, the durable-fact sections, and associations. That includes the MCP tools `crystal_recall` and `crystal_index`, the CLI commands `crystal`, `associations`, `pattern-associations`, `graph`, `probe`, `outcome`, `worth`, `derive` and `set-schema`, and the matching Python names. [MIGRATING_TO_4.md](../MIGRATING_TO_4.md) lists them one by one. Their tables and files stay on disk, unread.
+
 ## Supported environments
 
 - **Python 3.10 or newer.** `pyproject.toml` sets `requires-python = ">=3.10"`.

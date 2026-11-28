@@ -12,8 +12,9 @@ One agent, one store. The store is a SQLite database plus a few files beside it.
 | Supersession links and state keys | the database | They hide an old fact from recall when a newer episode replaces it. Nothing is deleted |
 | The memory file | the database (`identity_versions`), projected to `<stem>.continuity.md` | Every saved version is a row. The file beside the database is a copy of the newest one |
 | Wraps | the database | One row per completed step: when, how many episodes, file size, model |
-| The audit trail | `<db dir>/audit/` | Hash-chained JSONL, rotated weekly |
+| The audit trail | `<stem>.audit.jsonl` beside the database | Hash-chained JSONL, rotated weekly into gzip files with a manifest (`<stem>.audit.manifest.json`) |
 | Spores and intentions | `<stem>.spores.json` | The prospective store: open loops that must close |
+| The baton | `<stem>.continuity.md.baton` | The session id the operator has claimed for consolidation, and when |
 
 The episode log answers "what happened". The memory file answers "what should the next session know". They are separate on purpose: the file is small and always loaded, and the log is large and searched on demand.
 
@@ -29,7 +30,7 @@ Three decisions follow from that.
 
 **The save checks little.** The reply must be non-empty, at most the character cap (26,000 by default), and must answer the step that was opened. It is not parsed. Whatever the file contains is the model's choice, and the check that matters is a human or a later reader looking at it. That is why every version is kept: a rewrite that dropped something is found with `history` and `diff` and the dropped fact is read back out of `identity_versions`.
 
-Earlier versions asked the model to write a fixed set of sections and checked the result: pattern lines with levels and citations, a catastrophic-shrink gate, a schema. That added a lot of code and a set of rules the model had to satisfy, and 4.0 removed it. The README's [Security](../README.md#security) section says what that means for how far you can trust the file.
+Earlier versions asked the model to write a fixed set of sections and checked the result against rules about its layout and contents, including a shrink gate. That added a lot of code and a set of rules the model had to satisfy, and 4.0 removed it. The README's [Security](../README.md#security) section says what that means for how far you can trust the file.
 
 ## The baton
 
@@ -47,7 +48,7 @@ anneal-memory did not start as a memory library. It started as **FlowScript**, a
 
 The notation turned out to carry things a memory system needs: content-hash ids, provenance, schema validation, typed relationships. The part that lasted was not the syntax. Asking someone to learn 21 markers is a barrier, and what you hand them is your artifact, not your practice. What lasted was the idea that compression is where the thinking happens: an agent that rewrites what it knows from what just happened ends up with something it did not have before. anneal-memory is that idea without the notation. FlowScript itself is archived at [github.com/phillipclapham/flowscript](https://github.com/phillipclapham/flowscript).
 
-The version-by-version history, including the graduated-pattern layer that 4.0 removed, is in the [CHANGELOG](../CHANGELOG.md).
+The version-by-version history, including what 4.0 removed, is in the [CHANGELOG](../CHANGELOG.md).
 
 The reason for owning the store is the same one it started with. A human and an AI working in a shared, persistent memory can build on each other's thinking, and that is hard to do with a memory you cannot inspect, that a vendor can revoke, or that rewrites itself unbidden. So the store is local, has no dependencies, keeps every version, and is rewritten only under a claim the operator made.
 

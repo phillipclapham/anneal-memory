@@ -8,7 +8,7 @@
 
 **Memory for AI agents: a log of what happened, and one memory file that gets rewritten a day at a time.**
 
-An agent records episodes as it works (decisions, observations, open questions, outcomes). Now and then a model rewrites one memory file from the old file plus one day of those episodes. The agent loads that file at the start of every session. A local SQLite store, no dependencies beyond the Python standard library, no vendor in the loop, and every version of the file is kept.
+An agent records episodes as it works (decisions, observations, open questions, outcomes). Now and then a model rewrites one memory file from the old file plus one day of those episodes. The agent loads that file at the start of every session. The store is a local SQLite file with no dependencies beyond the Python standard library. Every version of the memory file is kept.
 
 anneal-memory calls no model itself. It builds the prompt, you run it on whatever model you like, and it keeps the reply.
 
@@ -19,7 +19,7 @@ anneal-memory calls no model itself. It builds the prompt, you run it on whateve
 There is one consolidation method, a rolling rewrite.
 
 1. `prepare_wrap` opens **one step**: the oldest calendar day that has episodes not yet wrapped. A day is cut in the machine's time zone, or in the zone you pass (`--tz`, `tz=`). A very long day is cut into slices. It returns a fixed prompt, filled with the current memory file and that day's log, and a wrap token.
-2. You run that prompt in a **fresh context** that holds the prompt and nothing else: a subagent, a new session, or a plain model call. The prompt is the one the method was measured with: a mid-size model at low effort, given the memory file and one day's log, nothing else.
+2. You run that prompt in a **fresh context** that holds the prompt and nothing else: a subagent, a new session, or a plain model call. The prompt is fixed text, written for a mid-size model at low effort that sees the memory file and one day's log and nothing else. Run it as it is. The only addition is the retry line that a save refused as too long asks you to append.
 3. You pass the model's **whole reply** to `save_continuity`, with the token.
 
 A catch-up over several days is several steps in order, each one starting from the file the last one saved. It is never one merged log. After a save, `pending_count` says how many episodes are still waiting; if it is not zero, prepare the next step.
@@ -44,7 +44,7 @@ store = Store("./memory.db")
 store.record("Connection pool is the real bottleneck", EpisodeType.OBSERVATION)
 store.record("Chose PostgreSQL because ACID outweighs speed", EpisodeType.DECISION)
 
-result = store.recall(episode_type=EpisodeType.DECISION, keyword="database")
+result = store.recall(episode_type=EpisodeType.DECISION, keyword="PostgreSQL")
 for ep in result.episodes:
     print(f"[{ep.type}] {ep.content}")
 
@@ -78,8 +78,9 @@ anneal-memory search "database"
 anneal-memory baton claim me
 
 anneal-memory prepare-wrap --session-id me
-# Prints "Wrap token: <hex>" and the prompt. Run the prompt in a fresh context,
-# write the model's whole reply to memory.md, then:
+# Prints "Wrap token: <hex>" and the prompt. Run the prompt in a fresh context
+# and write the model's whole reply to memory.md. The token is also printed by:
+WRAP_TOKEN=$(anneal-memory wrap-token-current)
 anneal-memory save-continuity memory.md --session-id me --wrap-token "$WRAP_TOKEN"
 
 anneal-memory continuity        # print the current memory file
@@ -87,9 +88,9 @@ anneal-memory history           # the wraps so far
 anneal-memory diff              # how recent wraps changed the file
 ```
 
-`prepare-wrap --json` returns the same thing as an object (`step.system`, `step.user`, `wrap_token`), which is easier to script. `prepare-wrap` exits 3 when the wrap was downgraded to capture-only; see below.
+`prepare-wrap --json` returns the same thing as an object (`step.system`, `step.user`, `wrap_token`), which is easier to script. `prepare-wrap` exits 3 when the wrap was downgraded to capture-only; see below. `history` lists each wrap with its episode count and the size of the file it saved. `diff` shows the last few wraps (`--wraps N`) with the change in size and lines, and the text diff of the newest one against the file before it. `stats` adds counts by episode type, age and source.
 
-Other commands: `status`, `episodes`, `get`, `supersede`, `unsupersede`, `state`, `trust`, `delete`, `prune`, `verify`, `audit-repair`, `wrap-status`, `wrap-cancel`, `revert-wrap`, `wrap-token-current`, `audit`, `stats`, `export`, `import`, `team-import`, `team-status`, `team-forget-key`, and the `spore` and `intention` groups. `anneal-memory --help` is the list for your installed version. Every command takes `--json`.
+Other commands: `status`, `episodes`, `get`, `supersede`, `unsupersede`, `state`, `trust`, `delete`, `prune`, `verify`, `audit-repair`, `wrap-status`, `wrap-cancel`, `revert-wrap`, `wrap-token-current`, `baton`, `audit`, `stats`, `export`, `import`, `team-import`, `team-status`, `team-forget-key`, `migrate`, and the `spore` and `intention` groups. `anneal-memory --help` is the list for your installed version. Every command takes `--json`.
 
 ### MCP server
 
@@ -137,7 +138,7 @@ Then add one of the [agent-instruction snippets](#agent-harnesses-skill-and-snip
 
 **What the agent does at a wrap over MCP:** call `prepare_wrap`, run the prompt it returns in a fresh context (in Claude Code, a subagent that is given only that prompt), then call `save_continuity` with the subagent's whole reply and the token. The agent that did the day's work is the wrong place to run the prompt, because it carries the whole session with it.
 
-**Consolidation is yours.** Agents record freely. Rewriting the memory file is the operator's act, so a new store consolidates only through a server whose `--session-id` you have claimed the baton for, once, from your own shell: `anneal-memory baton claim claude-code`. Until then the agent's `prepare_wrap` downgrades to capture-only, and both that message and the `status` tool say how many episodes are waiting and the command to run. Set the id in the client's config as above, not in a shell profile. Every conversation started from one config shares its id, so the claim designates a client, not one conversation. Move the baton with `baton claim NAME --take`; see who holds it with `baton status`. A store created before this policy, or with `init --no-baton`, ignores `--session-id` and wraps without it.
+**Consolidation is yours.** Agents record freely. Rewriting the memory file is the operator's act, so a store the server or `init` creates consolidates only through a session id you have claimed the baton for, once, from your own shell: `anneal-memory baton claim claude-code`. Until then the agent's `prepare_wrap` downgrades to capture-only, and both that message and the `status` tool say how many episodes are waiting and the command to run. Set the id in the client's config as above, not in a shell profile. Every conversation started from one config shares its id, so the claim designates a client, not one conversation. Move the baton with `baton claim NAME --take`; see who holds it with `baton status`. A store created before this policy, or with `init --no-baton`, ignores `--session-id` and wraps without it.
 
 The gate stops an agent that follows its instructions from consolidating on its own initiative, and stops parallel sessions from each rewriting the memory file. It is not a lock against an agent with a shell that ignores its instructions: such an agent can run `baton claim` itself. Keeping the baton with you is part of the operator's job.
 
@@ -159,6 +160,7 @@ The CLI and the MCP server are thin adapters over the library. All three call th
 |---|---|---|---|
 | **Record** | `store.record(content, type)` | `record "..." --type T` | `record` |
 | **Recall** | `store.recall(keyword=...)` | `search "..."` | `recall` |
+| **Read the memory file** | `store.load_continuity()` | `continuity` | `read_continuity` |
 | **Open a step** | `prepare_wrap(store)` | `prepare-wrap` | `prepare_wrap` |
 | **Keep the reply** | `validated_save_continuity(store, text, wrap_token=...)` | `save-continuity FILE` | `save_continuity` |
 | **Best for** | Frameworks, custom agents | Agents with a shell, operators | MCP-enabled editors |
@@ -167,7 +169,7 @@ A recall reads one committed state, as of its start. An episode deleted before t
 
 ## Framework integrations
 
-Each guide shows where the library calls go in a framework's lifecycle. They show patterns from each framework's API at the time they were written; the wrap code uses the 4.0 calls above and was not re-run against every framework.
+Each guide shows where the library calls go in a framework's lifecycle. They show how each framework's API looked when they were written; the wrap code uses the 4.0 calls above and was not re-run against every framework. On a store that requires the baton, pass `session_id=` to both wrap calls (see the [library quickstart](docs/library-quickstart.md#the-baton)).
 
 | Framework | Integration point | Guide |
 |-----------|------------------|-------|
@@ -207,7 +209,7 @@ Two limits. Nothing detects an update on its own: an update recorded with neithe
 
 ## Prospective memory: spores and intentions
 
-Episodes and the memory file are about what already happened. An agent also needs a record of what it means to do next, and that has a different lifecycle: it must close. anneal keeps these in a separate store beside the database (`<stem>.spores.json`): a `task` (open doing), a `question` (open not-knowing) or a `thought` (open idea), planted when the loop opens and resolved when it ends (`descend`: done or dropped; `ascend`: its content graduates into a project or an episode).
+Episodes and the memory file are about what already happened. An agent also needs a record of what it means to do next, and that has a different lifecycle: it must close. anneal keeps these in a separate store beside the database (`<stem>.spores.json`): a `task` (open doing), a `question` (open not-knowing) or a `thought` (open idea), planted when the loop opens and resolved when it ends (`descend`: done or dropped; `ascend`: its content moves into an episode, a project or another record, which you name with `--kind` and `--ref`).
 
 The same store is also called **intentions**: `IntentionStore` is an alias of `SporeStore`, the `intention_*` MCP tools and `anneal-memory intention ...` sit beside the `spore_*` ones, and `intention_close` and `intention_promote` are the names for `spore_descend` and `spore_ascend`. An id of either spelling reads in either. Nothing named `spore` is deprecated.
 
@@ -221,38 +223,50 @@ Wrap at the end of a session, or when episodes have piled up, and check that the
 - **Several days waiting means several steps.** Keep preparing until `pending_count` is 0.
 - **`prepare_wrap` says "empty"** when nothing is waiting. Skip the save.
 - **A stuck wrap.** If `prepare_wrap` refuses because a wrap is already open and that wrap will not be finished, clear it with `wrap_cancel` (MCP) or `anneal-memory wrap-cancel`. Episodes are not deleted. Check `status` first: a wrap that began moments ago may be a live session still working. Pass `--wrap-token` to cancel only your own wrap.
-- **A wrap you want back.** `anneal-memory revert-wrap WRAP_ID --reason "..."` undoes the newest completed wrap so its episodes are offered again.
+- **A wrap you want back.** `anneal-memory revert-wrap WRAP_ID --reason "..."` undoes the newest completed wrap: the file goes back to what it was before (saved as a new version, so the history stays whole) and the wrap's episodes are offered again. `WRAP_ID` must be the newest wrap's id, the number `history` shows.
+- **A wrap left open by 3.x.** A wrap that was open when you upgraded blocks `prepare_wrap` until it is cancelled with `anneal-memory wrap-cancel`. Its episodes are released, not deleted.
 - **Short sessions are fine.** A few episodes still make a useful step.
 
 ### Recovering an older version
 
-Every saved file is a row in the `identity_versions` table of the store's SQLite database, and `history` and `diff` list the wraps. To read an older one:
+Every saved file is a row in the `identity_versions` table of the store's SQLite database. `history` and `diff` list the wraps and show what the newest ones changed. To read the file a wrap saved, from the library:
+
+```python
+from anneal_memory import Store
+
+store = Store("./memory.db", read_only=True)
+texts = store.wrap_identity_texts([1, 2, 3])   # {wrap id: the file that wrap saved}
+store.close()
+```
+
+A wrap without a saved version (one from an old store) is left out of the result. To list every version, with the `wrap_id` that ties it to its wrap, read the table directly:
 
 ```python
 import sqlite3
 
 con = sqlite3.connect("./memory.db")
-for version, created_at, chars in con.execute(
-    "SELECT version, created_at, length(text) FROM identity_versions ORDER BY version DESC LIMIT 10"
+for version, wrap_id, source, created_at, chars in con.execute(
+    "SELECT version, wrap_id, source, created_at, length(text) "
+    "FROM identity_versions ORDER BY version DESC LIMIT 10"
 ):
-    print(version, created_at, chars)
+    print(version, wrap_id, source, created_at, chars)
 
 old = con.execute("SELECT text FROM identity_versions WHERE version = ?", (1,)).fetchone()[0]
 con.close()
 ```
 
-Reading needs nothing special. To put a fact back, record it again as a new episode so the next wrap sees it.
+Reading needs nothing special. To put a fact back, record it again as a new episode so the next wrap sees it. To undo the newest wrap whole, use `revert-wrap`. A revert adds a row with `source` `raw_save`, and a store upgraded from 3.x keeps the versions 3.x wrote, with `source` values such as `section_edit`, `migration` and `adopted_file`.
 
 ## MCP tools
 
 | Tool | When to call |
 |------|-------------|
-| `record` | Something happened that would change a later decision: a choice, an observation, a tension, a question, an outcome, a context change. Optional `supersedes`, `state_key`, `trust` |
-| `recall` | Before a decision that may have prior context. Filter by time, type, keyword or id. A multi-word keyword is matched as an exact phrase first, then word by word when the phrase misses |
-| `read_continuity` | At session start: returns the current memory file |
-| `prepare_wrap` | At a session boundary: opens one step, returns the token and the prompt to run in a fresh context |
-| `save_continuity` | With the model's whole reply and the token |
-| `wrap_cancel` | Abandon an open wrap that will not be finished. Optional `wrap_token`, `partial`, `force` |
+| `record` | Something happened that would change a later decision: a choice, an observation, a tension, a question, an outcome, a context change. Takes `content` and `episode_type`; optional `source`, `supersedes`, `state_key`, `derived_from`, `trust`, `metadata` |
+| `recall` | Before a decision that may have prior context. Filter by time (`since`, `until`), `episode_type`, `source` or `keyword`. A multi-word keyword is matched as an exact phrase first, then word by word when the phrase misses |
+| `read_continuity` | At session start: returns the current memory file, or a note that there is none yet |
+| `prepare_wrap` | At a session boundary: opens one step, returns the token and the prompt to run in a fresh context. Optional `max_chars`, `tz` |
+| `save_continuity` | With the model's whole reply as `text` and the token as `wrap_token`. Optional `max_chars` |
+| `wrap_cancel` | Abandon an open wrap that will not be finished. Optional `wrap_token`, `session_id`, `partial`, `force` |
 | `delete_episode` | Remove content that should not exist (PII, secrets). The text is overwritten in the database file (`secure_delete`) and the WAL is emptied afterwards; the tombstone and audit events keep a hash keyed by a per-store salt. Backups, the migration's `.bak` copy and text already carried into the memory file are not reached; the CHANGELOG says exactly what is and is not erased |
 | `status` | Memory health: episode counts, wraps, file size, whether a wrap is open, audit health |
 | `spore_*`, `intention_*` | The prospective layer: `add`, `list`, `surface`, `get`, `update`, `touch`, and `descend`/`ascend` (`close`/`promote`) |
@@ -305,7 +319,7 @@ anneal-memory serve --skip-integrity       # bypass for development
 
 ## Lineage
 
-anneal-memory grew out of [FlowScript](https://github.com/phillipclapham/flowscript), a typed reasoning notation. Versions up to 3.x built a layer of graduated patterns on top of the memory file. 4.0 removed it and kept the one thing that was left to do: rewrite one file from one day at a time. [docs/architecture.md](docs/architecture.md) has the longer history and the design reasoning.
+anneal-memory grew out of [FlowScript](https://github.com/phillipclapham/flowscript), a typed reasoning notation. Versions up to 3.x checked the memory file against a set of rules about its layout and contents. 4.0 removed those and kept the one thing left to do: rewrite one file from one day at a time. [docs/architecture.md](docs/architecture.md) has the longer history and the design reasoning.
 
 ## License
 

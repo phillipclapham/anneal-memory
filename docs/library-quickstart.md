@@ -24,7 +24,7 @@ store.record("Should we shard or add read replicas?", EpisodeType.QUESTION)
 store.record("Migration done, hot-path queries are 3x faster", EpisodeType.OUTCOME)
 store.record("Production DB at 80% capacity, growing 5%/week", EpisodeType.CONTEXT)
 
-result = store.recall(keyword="database", limit=10)
+result = store.recall(keyword="PostgreSQL", limit=10)
 for ep in result.episodes:
     print(f"[{ep.type}] {ep.content}")
 
@@ -58,7 +58,7 @@ import anthropic
 from anneal_memory import Store, prepare_wrap, validated_save_continuity
 
 client = anthropic.Anthropic()
-MODEL = "your-model-name"   # a mid-size model; the method was measured at low effort
+MODEL = "your-model-name"   # a mid-size model at low effort is what the prompt is written for
 
 
 def run_model(system: str, user: str) -> str:
@@ -121,11 +121,11 @@ wrap = prepare_wrap(store, session_id="NAME")
 validated_save_continuity(store, reply, wrap_token=wrap["wrap_token"], session_id="NAME")
 ```
 
-A store you open with `Store(path)` has no such requirement. `status` and the downgrade message say how many episodes are waiting.
+A store you create with `Store(path)` has no such requirement, and there you leave `session_id` out. The CLI and the MCP server drop the id on such a store, but the library does not: a library call that passes `session_id=` is checked against the baton and downgrades unless that session holds it. `store.status()` and the downgrade message say how many episodes are waiting.
 
 ### Retries
 
-Pass `idempotency_key=` to both calls to make a retry safe. A retry of a committed save with the same key and text returns its first result (the non-content fields, with `replayed: True`) and writes nothing.
+Pass an `idempotency_key=` to make a retry safe. A key belongs to one operation, so give `prepare_wrap` and `validated_save_continuity` different keys. A retry of a committed save with the same key and text returns a short result (`wrap_id`, `chars`, `path`, `content_hash`, `episodes_compressed`, `replayed: True`) and writes nothing. A retry of `prepare_wrap` with its key returns the same step while that wrap is still open. Once the wrap is saved or cancelled, the retry raises `IdempotencyConflictError`; prepare again with a new key. The same key with a different request raises it too.
 
 ### Recovering an older version
 
@@ -155,7 +155,7 @@ from anneal_memory import AuditTrail, Store
 result = AuditTrail.verify("./memory.db")
 print(f"Valid: {result.valid}, entries: {result.total_entries}")
 if not result.valid:
-    print(f"Break at: {result.break_at}")
+    print(f"Break at entry {result.chain_break_at} in {result.chain_break_file}")
 
 
 def my_handler(entry):
@@ -183,7 +183,7 @@ store = Store(
 )
 ```
 
-The path can be absolute or relative. The memory file is kept beside the database as `<stem>.continuity.md`, a projection of the newest saved version. Audit files live in `<db dir>/audit/`.
+The path can be absolute or relative. The memory file is kept beside the database as `<stem>.continuity.md`, a projection of the newest saved version. The audit trail is `<stem>.audit.jsonl` beside the database, with its weekly rotated files and manifest next to it.
 
 ## Error handling
 
@@ -225,11 +225,14 @@ except AnnealMemoryError as err:
 ```
 AnnealMemoryError (Exception)
  ├── StoreError
- │    └── StoreDatabaseError
+ │    ├── StoreDatabaseError
+ │    └── IdempotencyConflictError
  ├── WrapInProgressError
  ├── WrapOwnershipError
  └── WrapCancelGatedError
 ```
+
+Other `AnnealMemoryError` subclasses are exported for narrower cases (`BatonHeldError`, `LeaseFencedError`, `WrapCancelBoundError`, `WrapRevertRefused`, `WrapContinuityMovedError`, `WrapWindowMovedError`, `ContinuityLockUnavailable`, `PostconditionFailed`, and the supersession, spore and intention errors). `IdempotencyConflictError` is raised when an idempotency key is reused for a different request.
 
 - **`StoreError`**: an operation-level failure. It carries `.operation` (a `StoreOperation` literal such as `"save_continuity"`, `"record"` or `"wrap_completed"`) and `.path`, the database file. It covers file-write failures and integrity failures such as partial wrap-snapshot state.
 - **`StoreDatabaseError`**: a SQLite operation failed (locked database, disk full, integrity violation after retries, corruption). The underlying `sqlite3.DatabaseError` is `__cause__` at raise time, though not across pickle. Existing `except StoreError` handlers still catch it.
@@ -260,6 +263,8 @@ def is_retryable(err: StoreDatabaseError) -> bool:
 ```
 
 ```python
+from anneal_memory import StoreError, validated_save_continuity
+
 try:
     result = validated_save_continuity(store, reply, wrap_token=token)
 except StoreDatabaseError as err:

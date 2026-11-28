@@ -4,6 +4,8 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
 
 ## [Unreleased]
 
+## [3.0.2] — 2026-11-27
+
 ### Changed
 - The compression guidance `prepare_wrap` delivers for the graduating (Patterns) section, and the bundled skill, gain one instruction: keep each operational lesson as an instruction with its mechanism and its checking clause (what to do, why it holds, how to check it), saying only what the episodes show, and never compressing a lesson into only a dated record or a conclusion. The line adds no format rule: where a lesson's words sit in a pattern line is unchanged, and the evidence checks read the same text they did before. An adopter who copied the skill into their own skills directory re-copies it to get the line. No store, format or API changes.
 

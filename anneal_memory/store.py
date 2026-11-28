@@ -430,7 +430,7 @@ _EPISODE_VERSION_COVERED: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
 }
 # Tables that name episodes and are deliberately NOT versioned, with the reason.
 _EPISODE_VERSION_EXCLUDED: dict[str, str] = {
-    "associations": "Hebbian strengths every wrap changes; recall weights, not content",
+    "associations": "a 3.x legacy table; nothing writes it in 4.0",
     "tombstones": "rows about episodes already deleted",
     "retired_origin_keys": "keys of episodes already deleted",
     "episode_origin": "a provenance fact written once (with its episode, or by "
@@ -1252,8 +1252,8 @@ def _reconstruct_wrap_cancel_bound_error(session_id: str | None) -> "WrapCancelB
     return WrapCancelBoundError(session_id=session_id)
 
 
-# Version names of the rules that read an episode's class. Graduation's gate
-# stays on the corroborative rule; origin is the conservative one. Changing
+# Version names of the rules that read an episode's class. The effective trust
+# read stays on the corroborative rule; origin is the conservative one. Changing
 # either is a new name, not an edit of the old one.
 TRUST_RULE_CORROBORATIVE = "trust-corroborative-v1"
 ORIGIN_RULE_CONSERVATIVE = "origin-conservative-v1"
@@ -2054,9 +2054,9 @@ BEGIN
 END;
 
 -- CAP-08 D3 (C#11): the episodes an episode was derived from (an agent's
--- summary of a page it fetched). For the graduation trust check an episode
--- counts at most as trusted as the most trusted of its sources, so a summary of
--- an external page cannot corroborate that page. Written with the episode, in
+-- summary of a page it fetched). An episode's effective trust is at most that of
+-- the most trusted of its sources, so a summary of an external page cannot
+-- read as more trusted than that page. Written with the episode, in
 -- its transaction; a row leaves with its derived episode. gone_trust is NULL
 -- while the source lives (its trust is then computed, never stored) and is set,
 -- for good, when the source is removed (episode_gone_marks_rows below; prune sets
@@ -2130,8 +2130,7 @@ BEGIN
     DELETE FROM state_keys WHERE episode_id = OLD.id;
 END;
 
--- CAP-06 drift probes: what the operator declared must survive consolidation, and
--- each save's verdict on it. Additive; an older binary ignores both tables.
+-- Legacy tables (3.x drift probes); nothing writes them in 4.0, and they stay for old stores.
 CREATE TABLE IF NOT EXISTS drift_probes (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     kind TEXT NOT NULL,
@@ -2152,8 +2151,7 @@ CREATE TABLE IF NOT EXISTS drift_results (
     PRIMARY KEY (wrap_id, probe_id)
 );
 
--- What each save graduated at 2x and up with a validated citation: the operator's
--- review worklist for truth and contradiction (CAP-06). Additive.
+-- Legacy table (3.x graduations per save); nothing writes it in 4.0.
 CREATE TABLE IF NOT EXISTS wrap_graduations (
     wrap_id INTEGER NOT NULL,
     name TEXT NOT NULL,
@@ -2260,19 +2258,7 @@ CREATE TABLE IF NOT EXISTS rewire_origin (
     PRIMARY KEY (old_id, new_id, standin_old, standin_new)
 );
 
--- Cross-session graduation history per pattern name. Closes the
--- slow-drift sycophantic-accumulation gap surfaced by Bold Stand
--- Phase 1b probe #1 (2026-05-21): without per-pattern history,
--- the library validates each graduation in isolation and cannot
--- distinguish multi-faceted evidence accumulation from rephrased
--- repetition of the same claim. Each row tracks the most recent
--- graduation event for a pattern: the explanation text used (so
--- subsequent graduations can be checked for sycophantic vocabulary
--- reuse), the highest level the pattern has ever reached, and a
--- pointer to the wrap that recorded it. Schema is additive — existing
--- stores upgrade safely via CREATE TABLE IF NOT EXISTS; the table
--- starts empty and the cross-session check correctly treats "no
--- prior history" as "first graduation allowed."
+-- Legacy table (3.x pattern history); nothing writes it in 4.0.
 CREATE TABLE IF NOT EXISTS pattern_history (
     pattern_name TEXT PRIMARY KEY,
     max_level_reached INTEGER NOT NULL,
@@ -2294,15 +2280,7 @@ CREATE TABLE IF NOT EXISTS pattern_history (
     FOREIGN KEY (last_wrap_id) REFERENCES wraps(id)
 );
 
--- The level each pattern line held when this store last SAVED it (1007+29): the
--- prior state the graduation bound measures a new continuity against, written by
--- the save itself in the wrap's transaction. A named pattern dropped from the
--- file keeps its row (its tombstone), so re-adding it returns to the level it was
--- saved at, never to a high-water mark it was later demoted from. A freeform line
--- has no identity across rewording, so its rows are replaced every save. One
--- ('init', 'since') row marks that the store has saved under the bound, so an
--- empty record is told apart from no record (codex + complement L3 r1).
--- Additive: an older binary ignores the table.
+-- Legacy table (3.x pattern levels); nothing writes it in 4.0.
 CREATE TABLE IF NOT EXISTS pattern_levels (
     kind TEXT NOT NULL CHECK (kind IN ('name', 'text', 'init')),
     key TEXT NOT NULL,
@@ -2311,16 +2289,8 @@ CREATE TABLE IF NOT EXISTS pattern_levels (
     PRIMARY KEY (kind, key)
 );
 
--- CAP-08 D2 (C#11): the episodes that grounded each rung a named pattern
--- earned, written by the save in the wrap's transaction beside pattern_levels.
--- When every episode recorded for a rung has since been lowered to tool or
--- external, the graduation bound cuts the pattern's prior back below that rung
--- at the next wrap. One group of rows per time a rung was earned (`earning`;
--- earned_on is the wrap's day), each under the rule check 4 admitted it by: 'checked' (a quoted
--- explanation named which citations ground it; revoked when ALL of them are now
--- tool/external) or 'unchecked' (nothing did; revoked when ANY is). A rung stands
--- while any of its groups does. A rung saved before the table has no rows and is
--- never revoked. Additive.
+-- Legacy table (3.x grounding of a pattern's rungs); nothing writes it in 4.0. Its rows still
+-- name episodes, so an episode's version change reaches them (_EPISODE_VERSION_COVERED).
 CREATE TABLE IF NOT EXISTS pattern_grounding (
     name TEXT NOT NULL,
     level INTEGER NOT NULL,
@@ -2416,8 +2386,7 @@ CREATE TABLE IF NOT EXISTS idempotency_keys (
 -- origin-conservative-v1-backfill, Store._backfill_episode_origin); an episode
 -- with no row was written into the file by an older build afterwards and reads
 -- its origin by the same rule over today's rows (Store.origin_map).
--- Authority (trust_ceiling), origin (this) and corroboration (the graduation
--- gate) are three separate axes.
+-- Authority (trust_ceiling) and origin (this) are separate axes.
 CREATE TABLE IF NOT EXISTS episode_origin (
     episode_id TEXT PRIMARY KEY,
     origin TEXT NOT NULL CHECK (origin IN ('external', 'tool', 'agent', 'operator')),
@@ -2484,11 +2453,7 @@ CREATE INDEX IF NOT EXISTS idx_assoc_b ON associations(episode_b);
 CREATE INDEX IF NOT EXISTS idx_assoc_strength ON associations(strength DESC);
 """
 
-# Pattern-level cortical association graph (AM-LINKGATE-DECAY, Slice B). A
-# SEPARATE table set from the episode `associations` above — pattern names and
-# episode ids are different namespaces with different lifecycles. Appended the
-# same way so existing DBs upgrade additively via CREATE IF NOT EXISTS.
-# Inert legacy DDL (4.0), as above: the pattern graph table set.
+# Inert legacy DDL (4.0): the pattern graph table set (3.x). Nothing writes it.
 _PATTERN_ASSOCIATIONS_SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS pattern_associations (
     name_a TEXT NOT NULL,
@@ -2513,14 +2478,7 @@ CREATE INDEX IF NOT EXISTS idx_pattern_assoc_a ON pattern_associations(name_a);
 CREATE INDEX IF NOT EXISTS idx_pattern_assoc_b ON pattern_associations(name_b);
 CREATE INDEX IF NOT EXISTS idx_pattern_assoc_strength ON pattern_associations(strength DESC);
 
--- Rename / generation aliases. A pattern rename is first-class: the old name
--- aliases to the canonical (current) name so its earned edges follow the
--- rename instead of dangling. ``generation`` disambiguates the HOMONYM case
--- (the killer catch): re-crystallizing the SAME name for a DIFFERENT concept
--- mints a new generation, so the old concept's edges never silently re-attach
--- to the new one (semantic_homonym_edge_contamination — worse than a dead id
--- because it looks valid). ``canonical_name`` is NULL for a generation-bump
--- row (a tombstone marking "names at gen < N are a different concept").
+-- Legacy table (3.x pattern renames); nothing writes it in 4.0.
 CREATE TABLE IF NOT EXISTS pattern_aliases (
     alias TEXT NOT NULL,
     canonical_name TEXT,
@@ -2735,18 +2693,6 @@ class _IdempotentReplay(Exception):
         self.result_json = result_json
 
 
-def _today_local() -> str:
-    """Local calendar date (YYYY-MM-DD) — the SAME clock the wrap pipeline uses
-    (continuity.py defaults ``today`` to ``date.today().isoformat()``). The
-    pattern-graph (AM-LINKGATE-DECAY) Store wrappers default to THIS, not
-    ``_now_utc()[:10]``: co-graduation seeding threads the wrap's local
-    ``today_str`` while the co-surface drain / rename / sever / gc take the
-    wrapper default, so both must anchor decay to the SAME day. UTC would diverge
-    from the local wrap date in the evening-UTC-rollover window (the spore-081
-    class, one layer out — codex L3 MED)."""
-    return datetime.now().strftime("%Y-%m-%d")
-
-
 # Supersession grounding floor: the meaningful words two episodes share, as a
 # fraction of the SHORTER episode's meaningful words. Derived 2026-10-02 by
 # scripts/supersede_floor.py: it equals the probe updates' minimum ratio (tight,
@@ -2830,8 +2776,7 @@ def _canonical_utc(ts: str) -> str | None:
     return key[1].strftime("%Y-%m-%dT%H:%M:%S.%fZ")
 
 
-# Stop words for the supersession floor's overlap check (moved here from
-# ``graduation`` in 4.0: the floor is the one kept reader of them).
+# Stop words for the supersession floor's overlap check.
 _STOP_WORDS = frozenset(
     "a an the is are was were be been being have has had do does did "
     "will would shall should may might can could this that these those "
@@ -3709,7 +3654,8 @@ class Store:
                 "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, '1')",
                 (_CONSOLIDATE_REQUIRES_BATON_KEY,),
             )
-        # Migrate wraps table to include association metric columns
+        # Migrate wraps table to include the legacy association count columns
+        # (kept so an old and a new store share one shape; 4.0 writes 0 in them)
         self._migrate_wraps_association_columns(commit=False)
         # Migrate wraps table to include the durable recovery-oracle columns
         # (AM-SNAPSHOT ①). Runs after the association migration and BEFORE
@@ -3858,10 +3804,10 @@ class Store:
         # held from the re-check above through to that single commit.
 
     def _migrate_wraps_association_columns(self, *, commit: bool = True) -> None:
-        """Add association metric columns to existing wraps tables.
+        """Add the legacy association count columns to existing wraps tables.
 
-        Safe to call on tables that already have the columns (checks first).
-        Added post-Session 9.5 to track per-wrap association activity.
+        Safe to call on tables that already have the columns (checks first). Kept so
+        every store has the same ``wraps`` shape; a 4.0 wrap writes 0 in them.
         """
         cursor = self._conn.execute("PRAGMA table_info(wraps)")
         existing_cols = {row[1] for row in cursor.fetchall()}
@@ -4042,8 +3988,8 @@ class Store:
             trust: Where the content came from (``types.TRUST_LEVELS``):
                 ``agent`` (default), ``tool`` (a tool result the agent relays),
                 ``external`` (a web page, a document, another party), or
-                ``operator``. A graduation whose grounding citations are all
-                ``tool``/``external`` does not climb (CAP-08). Stored with the
+                ``operator``. Content classed ``tool`` or ``external`` is relayed:
+                recall marks it as data, not instruction. Stored with the
                 episode in one transaction; :meth:`set_trust` changes it later.
                 Refused above the Store's ``trust_ceiling``.
             trust_via: How the host's gate vouched for ``trust`` (the CLI passes
@@ -4053,8 +3999,8 @@ class Store:
             derived_from: Ids of the episodes this content was derived from (an
                 agent's summary of a page it recorded as ``external``). Each must
                 exist; on refusal nothing is recorded. Stored with the episode in
-                one transaction. For the graduation trust check the episode counts
-                at most as trusted as its most trusted source
+                one transaction. The episode counts at most as trusted as its
+                most trusted source
                 (:meth:`effective_trust_map`).
             origin_key: The episode's immutable key (:mod:`anneal_memory.origin`
                 grammar). Omitted, the store mints one. Given and already stored, the
@@ -6084,9 +6030,9 @@ class Store:
                 f"supersede: {new_id!r} already leads, through recorded links, to "
                 f"{old_id!r}; this link would close a cycle and hide every episode on it"
             )
-        # Effective trust, as graduation reads it (L3 r1 1009+22, run): compared on
-        # the stored class, an agent summary derived from an external page hid an
-        # agent fact while graduation counted the summary as external.
+        # Effective trust (L3 r1 1009+22, run): compared on the stored class, an agent
+        # summary derived from an external page hid an agent fact although the summary
+        # reads as external.
         eff = self.effective_trust_map([old_id] if new_id is None else [old_id, new_id])
         old_trust = eff.get(old_id, DEFAULT_TRUST)
         if new_trust is None:
@@ -6169,7 +6115,7 @@ class Store:
         is the same whatever else was asked and whatever the visit order, and a
         cycle gets the meet of its members' contributions. A depth-first walk that
         skipped the source on its path answered by query set and id order, and
-        graduated a relayed claim (lane B, ``p1d.py``).
+        trusted a relayed claim (lane B, ``p1d.py``).
 
         ``missing``: the class an id with NO episode reads as (default: the same
         ``agent`` absence reads as), for the ids in ``missing_for`` (default: all
@@ -6344,7 +6290,7 @@ class Store:
 
         Origin is a separate axis from authority (``trust_ceiling``: what a
         principal may assert, refused above) and from corroboration (the
-        graduation gate, ``trust-corroborative-v1``). This changes only the
+        effective trust read, ``trust-corroborative-v1``). This changes only the
         origin that is stored and read (:meth:`origin_map`); nothing gates on it.
 
         ``floor`` unknown to ``types.TRUST_LEVELS`` raises ``ValueError``, as every
@@ -7393,36 +7339,6 @@ class Store:
             out, len(order) - len(chosen),
             sum(count_by_head[h] - len(kept_by_head[h]) for h in chosen), head_rows, trust)
 
-    def _scan_containing_oldest(
-        self, keyword: str, visit: Callable[[Episode], bool], *, page: int = 500,
-    ) -> None:
-        """Visit live (not superseded) episodes whose content contains ``keyword``
-        (case-insensitive substring, as :meth:`recall` matches), OLDEST first, until
-        ``visit`` returns True. One read snapshot for the whole scan and keyset paging
-        on ``(timestamp, id)``, so a concurrent write can neither repeat nor skip a row
-        (L3 1007: per-page snapshots with OFFSET could)."""
-        with self._db_boundary("keyword_candidates"), self._read_snapshot():
-            conditions, params, _ = self._recall_conditions(
-                since=None, until=None, episode_type=None, source=None,
-                include_superseded=False,
-            )
-            base = " AND ".join(conditions) if conditions else "1=1"
-            pattern = _keyword_like_pattern(keyword)
-            after: tuple[str, str] | None = None
-            while True:
-                cursor = "" if after is None else " AND (timestamp, id) > (?, ?)"
-                rows = self._conn.execute(
-                    f"SELECT * FROM episodes WHERE {base} AND {_KEYWORD_LIKE_SQL}{cursor} "
-                    f"ORDER BY timestamp ASC, id ASC LIMIT ?",
-                    [*params, pattern, *(after or ()), page],
-                ).fetchall()
-                for r in rows:
-                    if visit(self._row_to_episode(r)):
-                        return
-                if len(rows) < page:
-                    return
-                after = (rows[-1]["timestamp"], rows[-1]["id"])
-
     def episodes_since_wrap(self) -> list[Episode]:
         """Get all episodes since the last completed wrap.
 
@@ -8353,11 +8269,6 @@ class Store:
                 # post-commit emit sites while it lived here as a comment
                 # (15 in this file + validated_save_continuity; counted
                 # mechanically over the routed call sites, not by hand).
-                # (This comment said "five" until the L1 pass: the first census
-                # scoped by the SYMPTOM `self._audit.log` and so could not see
-                # the seven association sites that reach a commit through a
-                # helper's `commit=` argument. The count in a comment about a
-                # miscount was itself produced by the miscount.)
                 self._audit_log_after_commit(
                     "wrap_cancelled",
                     payload,
@@ -8993,7 +8904,7 @@ class Store:
             )
             # 10.5c.5: defer the commit when we're inside a ``_batch()``
             # context — the outer two-phase-commit pipeline wraps the
-            # whole sequence (associations + meta tmp write + wrap_completed)
+            # whole sequence (meta tmp write + wrap_completed)
             # in a single SQLite transaction so a mid-pipeline crash
             # cannot leave the wraps table ahead of the episodes.session_id
             # UPDATE or the metadata-key clears.
@@ -10048,8 +9959,8 @@ class Store:
         return text
 
     def save_continuity(self, text: str, *, lease_token: str | None = None) -> str:
-        """Low-level continuity file write. **Bypasses the immune system** and the
-        hard maximum on size.
+        """Low-level continuity file write. **Bypasses the save checks** (a wrap's
+        size limit among them).
 
         This method records the continuity text as a ``raw_save`` identity
         version (generation 3), projects the sidecar file from it with an
@@ -12209,8 +12120,8 @@ class Store:
                 # writes against. Without it the lock arrived with the first
                 # DML, and a read before that (the save's superseded-set
                 # recheck) was an unlocked read that only happened to be locked
-                # because the association decay writes first (complement L3,
-                # reproduced 1002+20 with a no-op decay). Inside this try, so a
+                # because an earlier write took it (complement L3, reproduced
+                # 1002+20 with a no-op write). Inside this try, so a
                 # BUSY here still resets ``_defer_commit`` in the finally.
                 with self._db_boundary("batch_begin"):
                     self._conn.execute("BEGIN IMMEDIATE")

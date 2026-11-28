@@ -723,7 +723,7 @@ def cmd_trust(args: argparse.Namespace) -> None:
             print(f"Error: no episode {args.episode_id!r}.", file=sys.stderr)
             sys.exit(1)
     if args.level is None:
-        # The class graduation and supersession judge by is the effective one; a
+        # The class supersession and recall judge by is the effective one; a
         # summary derived from an external page printed its own "agent" (run,
         # 1009+22). The stored class is what a change below sets and gates on.
         if args.json:
@@ -1253,14 +1253,21 @@ def cmd_save_continuity(args: argparse.Namespace) -> None:
             )
             sys.exit(1)
 
-        wrap_id = cast("dict[str, Any]", result).get("wrap_result", {}).get("wrap_id")
+        # The result is a fresh save or, on a keyed retry, the replay of a saved step; a
+        # replay carries no pending_count (it is a record of a past step, never today's
+        # window) and has the wrap id at the top level.
+        res = cast("dict[str, Any]", result)
+        wrap_id = res.get("wrap_id")
+        if wrap_id is None:
+            wrap_id = res.get("wrap_result", {}).get("wrap_id")
+        pending = res.get("pending_count", 0)
         if args.json:
             _print_json({
                 "saved": True,
                 "path": result["path"],
                 "chars": result["chars"],
                 "episodes_compressed": result["episodes_compressed"],
-                "pending_count": result["pending_count"],
+                "pending_count": pending,
                 "wrap_id": wrap_id,
                 "content_hash": result["content_hash"],
             })
@@ -1270,9 +1277,9 @@ def cmd_save_continuity(args: argparse.Namespace) -> None:
         if wrap_id is not None:
             print(f"Wrap id: {wrap_id}")
         print(f"Episodes compressed: {result['episodes_compressed']}")
-        if result["pending_count"]:
+        if pending:
             print(
-                f"{result['pending_count']} episode(s) are still waiting: "
+                f"{pending} episode(s) are still waiting: "
                 f"run prepare-wrap again for the next step."
             )
 
@@ -2655,7 +2662,7 @@ def cmd_audit(args: argparse.Namespace) -> None:
             summary = f"episodes={data.get('episodes_compressed', '?')} chars={data.get('continuity_chars', '?')}"
         elif event == "continuity_saved":
             summary = f"chars={data.get('chars', '?')}"
-        elif event == "continuity_refused":
+        elif event == "continuity_refused":  # a 3.x event, still in old trails
             summary = (f"reason={data.get('reason', '?')} chars={data.get('chars', '?')} "
                        f"bound={data.get('bound', '?')}")
         elif event == "prune":
@@ -3665,14 +3672,14 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_argument(
         "--derived-from", action="append", metavar="ID", default=None,
         help="Id of an episode this content was derived from (repeatable), e.g. a "
-             "summary of a page recorded as external. Each must exist. For graduation "
-             "the episode counts at most as trusted as its most trusted source.",
+             "summary of a page recorded as external. Each must exist. The episode "
+             "counts at most as trusted as its most trusted source.",
     )
     sub.add_argument(
         "--trust", choices=list(TRUST_LEVELS), default=DEFAULT_TRUST,
         help="Where the content came from (default: agent). tool = a relayed tool "
-             "result, external = a web page, document or another party; a pattern "
-             "grounded only in those does not graduate past 1x. operator needs a yes "
+             "result, external = a web page, document or another party; recall marks "
+             "both as data, not instruction. operator needs a yes "
              "on a terminal, or ANNEAL_OPERATOR=1.",
     )
     sub.set_defaults(func=cmd_record)

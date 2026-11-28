@@ -25,7 +25,7 @@ class EpisodeType(str, Enum):
 # Where an episode came from, lowest trust first (CAP-08). ``agent`` is the
 # default and is never stored, so a store with no trust rows reads as all-agent.
 # ``tool`` and ``external`` are content the agent relayed from a tool result or
-# an outside source; a graduation grounded only in them does not climb.
+# an outside source.
 TRUST_LEVELS: tuple[str, ...] = ("external", "tool", "agent", "operator")
 DEFAULT_TRUST = "agent"
 
@@ -124,16 +124,18 @@ class WrapResult:
 
     saved: bool
     chars: int
-    section_sizes: dict[str, int]  # section name -> char count
+    section_sizes: dict[str, int]  # 3.x field; empty on a 4.0 wrap (the file has no sections)
+    # The five counts below are 3.x graduation and association counts, kept so the
+    # shape stays stable; a 4.0 wrap leaves them 0.
     graduations_validated: int = 0
     graduations_demoted: int = 0
-    citation_reuse_max: int = 0  # Max times any single node was cited
+    citation_reuse_max: int = 0
     patterns_extracted: int = 0
     episodes_compressed: int = 0
     pruned_count: int = 0  # Episodes pruned by auto-prune after wrap
-    associations_formed: int = 0  # New association links created this wrap
-    associations_strengthened: int = 0  # Existing links reinforced this wrap
-    associations_decayed: int = 0  # Links weakened by decay this wrap
+    associations_formed: int = 0
+    associations_strengthened: int = 0
+    associations_decayed: int = 0
     # The wraps-table id of this wrap. Last, with a default, so positional and
     # keyword construction written before it existed still builds.
     wrap_id: int | None = None
@@ -147,6 +149,9 @@ class WrapRecord:
     ``WrapResult`` is the return value of ``wrap_completed()`` — the just-
     recorded wrap. ``WrapRecord`` represents a past wrap retrieved from
     storage for monitoring/audit (history, diff, stats CLI subcommands).
+
+    The graduation, citation, pattern and association counts are 3.x fields, kept
+    for old rows and always 0 on a 4.0 wrap.
 
     All integer fields are non-None. The underlying schema permits NULL
     for ``episodes_compressed`` and ``continuity_chars`` on legacy rows
@@ -251,8 +256,7 @@ class StoreStatus:
     # downgrades on a protected store. See Store.consolidate_requires_baton.
     consolidate_requires_baton: bool = False
     # B4: live episodes by ORIGIN (``TRUST_LEVELS``, every class listed), beside
-    # authority (the store's ``trust_ceiling``) and corroboration (graduation's
-    # gate). Nothing gates on it. See Store.origin_map.
+    # authority (the store's ``trust_ceiling``). Nothing gates on it. See Store.origin_map.
     origin_counts: dict[str, int] = field(default_factory=dict)
 
 
@@ -316,105 +320,13 @@ REPLACED_CONTENT_MAX = 300
 # -- TypedDict return shapes for the canonical pipeline --
 #
 # These describe the dict shapes returned by ``prepare_wrap`` and
-# ``validated_save_continuity`` in ``continuity.py`` (and indirectly
-# by the private ``_build_wrap_package`` helper). They are pure type
-# hints — runtime behavior is unchanged. Library users get
-# autocomplete and mypy-level key-typo detection; transport adapters
-# can annotate their boundaries precisely.
-#
-# **Shape choice — TypedDict over dataclass.** We use ``TypedDict``
-# rather than ``dataclass`` because the canonical pipeline returns
-# plain dicts and library users can serialize them via ``json.dumps``
-# with no extra conversion step. Dataclass returns would force every
-# transport to call ``dataclasses.asdict()`` before serialization,
-# which is exactly the footgun we hit and closed with ``SaveContinuityResult``
-# during 10.5c.3 (``wrap_result`` was initially a dataclass, now a plain
-# dict). The whole canonical pipeline is JSON-serializable all the way
-# down, and TypedDict expresses that at the type level.
-#
-# **Construction idiom.** The functions in ``continuity.py`` construct
-# these at return sites with the *callable* form
-# (``WrapPackageDict(episodes=..., episode_count=...)``) rather than the
-# literal-dict form (``{"episodes": ..., "episode_count": ...}``). Both
-# are valid per PEP 589 and mypy/pyright validate both.
-#
-# **TypedDict does NOT provide runtime validation** — neither the
-# callable form nor the literal form catches key-name typos at
-# runtime. ``WrapPackageDict(episodez=...)`` silently returns a dict
-# with the wrong key. Static type-checkers (mypy, pyright) catch this
-# at type-check time. We rely on the drift-check tests
-# (``test_prepare_wrap_result_has_declared_keys``,
-# ``test_save_continuity_result_has_declared_keys`` in
-# ``tests/test_continuity.py``) as the runtime safety net; mypy is
-# the static one.
-#
-# We use the callable form anyway because it's more readable at
-# return sites (keyword arguments make the field names explicit)
-# and because mypy's error messages are slightly clearer on the
-# callable form when a key is missing. This is a readability
-# judgment call, not a runtime safety claim. Either form is fine.
-
-
-class StalePatternDict(TypedDict):
-    """A stale-pattern entry inside ``WrapPackageDict.stale_patterns``.
-
-    Emitted by the wrap-prep pipeline when an existing pattern in the
-    current continuity file has not been validated within the staleness
-    window and should be considered for removal during compression.
-    """
-
-    line: int  # 1-indexed line number in the continuity file
-    content: str  # The pattern line content
-    level: int  # Current graduation level (1x, 2x, 3x)
-    last_date: str  # Last validation date (YYYY-MM-DD)
-    days_stale: int  # Days since last validation
-
-
-class _WrapPackageOptional(TypedDict, total=False):
-    # Present ONLY on a derived-state (project schema) store that is opted in to
-    # re-derive and has a continuity, when any State line was not confirmed
-    # while the package was built (every status but ok and judged), each
-    # written "line N: <flag>" (spore-1233). Wider than the save result's
-    # ``stale_state``, which lists only the lines that do not refuse a save.
-    unconfirmed_state: list[str]
-
-
-class WrapPackageDict(_WrapPackageOptional):
-    """The agent-facing compression package built by ``_build_wrap_package``.
-
-    Contains everything the agent needs to produce a compressed
-    continuity file: the formatted episode listing, the current
-    continuity text, any stale patterns flagged for review, the
-    compression instructions, and the sizing constraints.
-    """
-
-    episodes: str  # Formatted episode listing (grouped by type)
-    episode_count: int
-    continuity: str | None  # Current continuity text, or None for first wrap
-    stale_patterns: list[StalePatternDict]
-    # AM-CONTRASCAN-EMIT (v0.4.3): existing Proven (2x+) pattern names the
-    # agent must run the contradiction-scan discipline against before any new
-    # Proven graduation this wrap. Computed once here (from the existing
-    # continuity) so the scan INSTRUCTION embedded in ``instructions`` and the
-    # ``uncovered_proven_to_check`` field on PrepareWrapResult are the same
-    # list — one source of truth, no drift between the discipline and its data.
-    # NOTE: this is ALL existing Proven — the scan-AGAINST set — NOT a filtered
-    # "undeclared" subset. The ``uncovered`` name is historical (it mirrors the
-    # pre-existing ``PrepareWrapResult.uncovered_proven_to_check``); the
-    # agent-facing instruction renders it as "Existing Proven to scan against".
-    uncovered_proven: list[str]
-    # AM-CRYSTAL-MIGRATE (v0.6): cold-Proven (2x+ and stale) patterns in the
-    # graduating section ready to route OUT — the composer judges each (→ always-on
-    # constitution / → crystallized store / → compost). Subset of stale_patterns;
-    # ``[]`` when no crystal store is passed or none qualify. Propose-not-auto.
-    crystallization_candidates: list["StalePatternDict"]
-    # AM-CRYSTAL-MIGRATE (v0.6): names of HOT crystallized patterns the working set
-    # should consider re-caching into ## Patterns (the prefetch half of
-    # activation-driven working⇄crystallized movement). ``[]`` without a crystal store.
-    rewarm_candidates: list[str]
-    instructions: str  # Compression instructions for the agent (incl. contradiction scan)
-    today: str  # YYYY-MM-DD (may be caller-pinned for determinism)
-    max_chars: int  # Target max size for the compressed continuity
+# ``validated_save_continuity`` in ``continuity.py``. They are pure type
+# hints: runtime behavior is unchanged, and TypedDict does no runtime
+# validation. We use ``TypedDict`` rather than ``dataclass`` because the
+# pipeline returns plain dicts that ``json.dumps`` serializes with no
+# conversion step; the whole result is JSON-serializable down to
+# ``SaveContinuityResult.wrap_result``. ``tests/test_rolling_wrap.py`` pins the
+# declared keys at runtime; mypy checks them statically.
 
 
 class WrapSnapshot(TypedDict):
@@ -427,7 +339,7 @@ class WrapSnapshot(TypedDict):
     The snapshot exists to close the TOCTOU window between
     ``prepare_wrap`` (which shows the agent a set of episodes for
     compression) and ``validated_save_continuity`` (which re-fetches
-    the episode set to run graduation validation). Without a frozen
+    the episode set to mark as wrapped). Without a frozen
     snapshot, episodes recorded between those two calls silently join
     the wrap, even though the agent's compression was produced from
     the smaller set.

@@ -1,7 +1,7 @@
 """Prospective-intention layer for anneal-memory — typed open cognitive loops.
 
-anneal's episodic + continuity + Hebbian + limbic layers are RETROSPECTIVE
-memory: they accrete, compress, and graduate, and never complete. This module
+anneal's episodic + continuity layers are RETROSPECTIVE
+memory: they accrete and compress, and never complete. This module
 adds the PROSPECTIVE layer — a parallel store of *open cognitive loops* that
 MUST resolve. The discriminator from memory is **lifecycle**: memory never
 completes; a spore completes.
@@ -24,7 +24,7 @@ All three share ONE lifecycle::
                                                                             retrospective memory
 
 ``ascend`` is the membrane between the prospective and retrospective halves: a
-question answered becomes a finding, a thought graduated becomes a pattern. In
+question answered becomes a finding, a thought matured becomes a line of the memory file. In
 **v1 ``ascend`` RECORDS A POINTER** to what the spore became (the ``ref``) — the
 actual episode write stays the host's act. (v2 candidate: ``ascend`` auto-writes
 the episode into the episodic store.)

@@ -61,6 +61,9 @@ def test_a_catch_up_is_one_step_per_day_never_one_merged_log(store):
         seen.append(step["day"])
         # only this day's log is in the prompt, never an earlier or later one
         assert step["day"] in step["user"]
+        # the log line is as the method was measured: (observation), never EpisodeType.OBSERVATION
+        assert ") note 0 of" in step["user"] and "(observation) note 0 of" in step["user"]
+        assert "EpisodeType" not in step["user"]
         others = [d for d in ("2026-03-01", "2026-03-02", "2026-03-04") if d != step["day"]]
         assert not any(f"note 0 of {d}" in step["user"] for d in others)
         validated_save_continuity(

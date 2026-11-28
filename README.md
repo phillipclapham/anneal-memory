@@ -271,7 +271,7 @@ Reading needs nothing special. To put a fact back, record it again as a new epis
 | `status` | Memory health: episode counts, wraps, file size, whether a wrap is open, audit health |
 | `spore_*`, `intention_*` | The prospective layer: `add`, `list`, `surface`, `get`, `update`, `touch`, and `descend`/`ascend` (`close`/`promote`) |
 
-The server also exposes the resource `anneal://continuity` (the current memory file) and `anneal://integrity/manifest` (SHA-256 hashes of the tool descriptions).
+The server registers **24 tools total**, counting each `spore_*` and `intention_*` name once. It also exposes the resource `anneal://continuity` (the current memory file) and `anneal://integrity/manifest` (SHA-256 hashes of the tool descriptions).
 
 ## Compliance and audit
 

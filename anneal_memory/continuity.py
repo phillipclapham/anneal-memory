@@ -168,7 +168,12 @@ def _consolidate_gate(
 
 
 def _rows(episodes: list[Episode]) -> list[tuple[str, str, str, str]]:
-    return [(ep.id, ep.timestamp, str(ep.type), ep.content) for ep in episodes]
+    # The prompt's log line reads ``(observation)``. ``str()`` of the enum member is
+    # ``EpisodeType.OBSERVATION`` on current Pythons, so the string value is taken.
+    return [
+        (ep.id, ep.timestamp, getattr(ep.type, "value", str(ep.type)), ep.content)
+        for ep in episodes
+    ]
 
 
 def _fingerprint(episode_ids: list[str], memory: str | None, max_chars: int) -> str:

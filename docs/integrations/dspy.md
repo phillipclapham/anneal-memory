@@ -215,4 +215,4 @@ optimized.save("optimized_rag.json")
 - **Callbacks are global:** Registered via `dspy.configure(callbacks=[...])` — they fire for ALL module executions in the program. Use `call_id` to track nesting and parent-child relationships.
 - **Don't mutate in callbacks:** DSPy callbacks should not modify inputs or outputs. Create copies if you need to transform data. Recording to anneal-memory is a side effect, which is fine.
 - **Signatures as episode types:** DSPy's typed signatures (`question -> answer`, `context, question -> answer, confidence`) provide natural episode type mapping — inputs are context, outputs are observations/decisions.
-- **The wrap prompt is fixed text.** It is the prompt the method was measured with, so call the LM with it directly, as `wrap_all` does, rather than wrapping it in a signature that a DSPy optimizer could rewrite.
+- **The wrap prompt is fixed text.** The method depends on it as written, so call the LM with it directly, as `wrap_all` does, rather than wrapping it in a signature that a DSPy optimizer could rewrite.

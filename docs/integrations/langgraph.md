@@ -137,6 +137,6 @@ graph.invoke(input, config={"callbacks": [AnnealMemoryCallback("./memory.db", "m
 
 - **Middleware vs Callbacks:** Middleware can mutate state and control execution flow. Callbacks are read-only observers. Use middleware for full integration, callbacks for logging-only.
 - **Store thread safety:** Each `Store` instance is safe for single-threaded use. For concurrent LangGraph nodes, create one Store per thread or use locks.
-- **Compression timing:** The `after_agent` hook fires once per `create_agent` invocation — this is the natural session boundary for wraps.
+- **Wrap timing:** The `after_agent` hook fires once per `create_agent` invocation — this is the natural session boundary for wraps.
 - **The wrap is a separate model call.** Don't run the wrap prompt inside the agent's conversation. It is built to run with nothing but the memory file and one day's log, so give it its own call, as above. The model can be the same one the agent uses.
 - **Baton.** On a store made by `anneal-memory init`, pass `session_id=` to both calls (see the [library quickstart](../library-quickstart.md#the-baton)).

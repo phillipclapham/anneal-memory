@@ -2,9 +2,9 @@
 
 > The hook wiring was checked against `claude-agent-sdk 0.1.59` in April 2026. The anneal-memory calls were updated for 4.0 and not re-run against the SDK.
 
-anneal-memory integrates with Anthropic's ecosystem through two complementary paths: the **CLAUDE.md snippet** (proven at scale, zero code) and the **Claude Agent SDK hooks** (programmatic control).
+anneal-memory integrates with Anthropic's ecosystem through two complementary paths: the **CLAUDE.md snippet** (no code) and the **Claude Agent SDK hooks** (programmatic control).
 
-The CLAUDE.md snippet is the most validated integration path — it's the same approach every Claude Code user relies on. The agent reads instructions from a file, then uses tools naturally.
+The CLAUDE.md snippet is the path most users take. The agent reads instructions from a file, then uses the tools.
 
 ## Install
 
@@ -16,7 +16,7 @@ For the Agent SDK: `pip install claude-agent-sdk`
 
 ## Path 1: CLAUDE.md Snippet (Recommended)
 
-This is the simplest and most battle-tested integration. Copy the agent-instructions snippet into your project's `CLAUDE.md`, configure anneal-memory as an MCP server or CLI tool, and the agent follows the workflow automatically.
+This is the simplest integration. Copy the agent-instructions snippet into your project's `CLAUDE.md`, configure anneal-memory as an MCP server or CLI tool, and the agent follows the workflow automatically.
 
 **For MCP (Claude Code):**
 1. Add anneal-memory to your MCP config (see [README](../../README.md#mcp-server))
@@ -123,4 +123,4 @@ async for message in query(
 
 - **Snippet vs SDK hooks:** The CLAUDE.md snippet works without any code changes — it's the right choice for most users. SDK hooks give programmatic control for custom agent frameworks built on the Claude Agent SDK.
 - **The wrap runs in a fresh context on both paths.** With the snippet, the agent hands the prompt to a subagent. With SDK hooks, the hook makes the model call itself, as above. Either way the wrap prompt does not run inside the agent's own conversation.
-- **Session boundaries:** In Claude Code, each conversation is a natural session. The snippet teaches the agent to detect session-end signals ("let's wrap up", "we're done") and run the wrap sequence automatically.
+- **Session boundaries:** In Claude Code, each conversation is a natural session. The snippet teaches the agent to detect session-end signals ("let's wrap up", "we're done") and run the wrap sequence. On a store that requires the baton, the wrap consolidates only after the operator has claimed the baton for the server's session id; until then `prepare_wrap` downgrades to capture-only and says what to run.

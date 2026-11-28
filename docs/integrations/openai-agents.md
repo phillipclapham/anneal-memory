@@ -179,7 +179,7 @@ For a lighter-weight integration, use a custom `TracingProcessor` that captures 
 
 ```python
 from agents import TracingProcessor, Trace, Span, add_trace_processor
-from anneal_memory import Store, EpisodeType
+from anneal_memory import Store, EpisodeType, prepare_wrap
 
 
 class AnnealMemoryTracer(TracingProcessor):

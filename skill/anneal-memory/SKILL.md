@@ -27,7 +27,7 @@ Memory versus spores is a lifecycle cut: memory accretes, a spore closes. If you
 ## Session workflow
 
 ### Start of session
-Read the memory file: MCP `read_continuity` (or the `anneal://continuity` resource); CLI `anneal-memory continuity`. A first-ever session has none. The CLI prints `No continuity file yet` and **exits non-zero**: that is the first-session signal, not an error. Start recording. Recall specific episodes when you need them.
+Read the memory file: MCP `read_continuity` (or the `anneal://continuity` resource); CLI `anneal-memory continuity`. A first-ever session has none. The MCP tool then returns a note that there is no memory file yet, and the CLI prints `No continuity file yet` and **exits non-zero**: that is the first-session signal, not an error. Start recording. Recall specific episodes when you need them.
 
 ### During work
 Record an episode when something happens that would change a later decision. Record the **reasoning, not just the fact**: "Chose X because Y" beats "using X". Do it without being asked.
@@ -51,7 +51,7 @@ When the user signals the end ("wrap up", "save memory", "we're done", or anythi
 
 The save checks that the reply is not empty, is within the character limit (26,000 by default), and answers the step that was opened. If it is refused, nothing was written and the step is still open: run the step again and save again. If a reply is too long, the refusal message says what to append to the prompt on the retry.
 
-If `prepare_wrap` reports no episodes, there is nothing to do. If it **downgrades to capture-only** (a store created by the CLI requires the consolidate baton), nothing is lost: tell your human what the message says, which is how many episodes are waiting and the one command that lets this session consolidate (`anneal-memory baton claim NAME`; the CLI wraps with `--session-id NAME`, and an MCP server is started with it). Consolidating is the operator's act, so never claim the baton yourself.
+If `prepare_wrap` reports no episodes, there is nothing to do. If it **downgrades to capture-only** (a store created by the CLI or the MCP server requires the consolidate baton), nothing is lost: tell your human what the message says, which is how many episodes are waiting and the one command that lets this session consolidate (`anneal-memory baton claim NAME`; the CLI wraps with `--session-id NAME`, and an MCP server is started with it). Consolidating is the operator's act, so never claim the baton yourself.
 
 **Once per prepare.** A second save with no fresh `prepare_wrap` is refused by design.
 

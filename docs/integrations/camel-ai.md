@@ -228,6 +228,6 @@ while True:
 ## Key Considerations
 
 - **WorkforceCallback vs step wrapping:** `WorkforceCallback` is the mature integration for multi-agent orchestration — 11 lifecycle hooks with structured Pydantic events. For single `ChatAgent` use, wrapping `step()` is necessary since ChatAgent has no lifecycle hooks.
-- **Per-agent identity:** Use the `source` parameter on `store.record()` to attribute episodes to specific agents/roles. This matters for the flagship paper's identity-through-memory thesis.
+- **Per-agent identity:** Use the `source` parameter on `store.record()` to attribute episodes to specific agents/roles. It lets a later wrap and a later recall tell which agent did what.
 - **Shared memory:** CAMEL-AI's `share_memory=True` flag on Workforce enables memory sharing among workers. With anneal-memory, all agents write to the same store but are distinguished by `source` — natural multi-agent memory.
 - **The wrap:** The WorkforceCallback handles recording. Run the wrap in `log_all_tasks_completed()` with a fresh `ChatAgent` per step, as above.

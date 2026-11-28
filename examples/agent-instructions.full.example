@@ -27,7 +27,8 @@ already tracks open loops elsewhere, plant them here and let your list point
 at them; don't keep two trackers.
 
 **Start of session.** Call `read_continuity` (or read the
-`anneal://continuity` resource). Empty means a first session. Call `status`
+`anneal://continuity` resource). A note that there is no memory file yet
+means a first session. Call `status`
 if you want the store's health: episode counts, whether a wrap is open.
 
 **During work.** `record` when something happens that would change a later
@@ -71,7 +72,8 @@ reply was too long, the message says what to append to the prompt.
 Saving twice without a new `prepare_wrap` is refused by design. If
 `prepare_wrap` reports no episodes, there is nothing to do.
 
-**Downgrade.** A store created by the CLI requires the consolidate baton.
+**Downgrade.** A store created by the CLI or the MCP server requires the
+consolidate baton.
 Until the operator claims it for this server's session id, `prepare_wrap`
 downgrades to capture-only and nothing is lost. Tell your human what it
 says: how many episodes are waiting and the one command to run

@@ -178,5 +178,5 @@ def memory_tool(query: str, context_variables: ContextVariables) -> str:
 - **Hook execution order:** `update_agent_state` → `process_last_received_message` → `process_all_messages_before_reply` → (LLM generates reply) → `process_message_before_send`. Memory injection goes in the first three; episode recording goes in the last.
 - **`process_message_before_send` is permanent:** Changes to the message in this hook persist in chat history. This makes it the best place for recording — you see the final message that will be sent.
 - **`process_all_messages_before_reply` is transient:** Changes here affect the current LLM call only, not the stored chat history. Good for injecting memory context without polluting the conversation.
-- **No built-in persistence:** AG2 keeps conversation history in memory only (`chat_messages` dict). anneal-memory provides cross-session persistence and compressed knowledge.
+- **No built-in persistence:** AG2 keeps conversation history in memory only (`chat_messages` dict). anneal-memory provides cross-session persistence: an episode log and a memory file.
 - **The wrap:** The hooks handle recording. Run the wrap after `initiate_chat()` returns, with a fresh agent per step as above, so the prompt is not read inside the conversation it summarises.

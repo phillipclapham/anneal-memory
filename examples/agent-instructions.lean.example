@@ -18,7 +18,7 @@ A separate **spore** store holds open loops (`task` / `question` /
 naturally; don't narrate the tooling.
 
 **Start:** call `read_continuity` (or read the `anneal://continuity`
-resource). Empty means a first session.
+resource). A note that there is no memory file yet means a first session.
 
 **During work:** `record` decisions, observations, tensions, questions,
 outcomes and context as they happen: the *reasoning*, not just the fact

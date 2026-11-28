@@ -875,11 +875,14 @@ def validated_save_continuity(
             try:
                 locks.enter_context(sessions._baton_lock(store.continuity_path))
             except OSError as exc:
-                raise SaveAuthorityError(
-                    f"Session {session_id!r} cannot be confirmed as the consolidate baton "
-                    f"holder (the baton lock could not be taken: {exc}), so it may not "
-                    f"commit this wrap. Nothing was written."
-                ) from None
+                # A store that requires the baton fails closed; any other save goes on
+                # unlocked, as it does where the platform has no flock.
+                if store.consolidate_requires_baton():
+                    raise SaveAuthorityError(
+                        f"Session {session_id!r} cannot be confirmed as the consolidate baton "
+                        f"holder (the baton lock could not be taken: {exc}), so it may not "
+                        f"commit this wrap. Nothing was written."
+                    ) from None
         with store._batch(after_commit=locks.close):
             # First under the batch's write lock: a concurrent save with the same
             # idempotency key (its result is returned; nothing is written yet), then
@@ -904,7 +907,7 @@ def validated_save_continuity(
                 raise ValueError(
                     f"validated_save_continuity: the wrap token '{wrap_token[:8]}…' now names "
                     f"a different wrap than the one this save checked its reply against (the "
-                    f"wrap was cancelled, completed or prepared again). Nothing was "
+                    f"wrap was cancelled, completed or prepared again, or the memory file was saved over). Nothing was "
                     f"saved. Re-run prepare_wrap and save its reply."
                 )
             lease_prepared = store._wrap_lease_prepared()

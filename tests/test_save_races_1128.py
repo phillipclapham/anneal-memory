@@ -295,6 +295,34 @@ def test_a_wrap_prepared_again_on_a_changed_memory_file_is_refused(store, monkey
     assert store.last_wrap_id() == 0
 
 
+def test_a_baton_lock_that_cannot_be_opened_refuses_only_a_baton_store(store, monkeypatch):
+    from contextlib import contextmanager
+
+    @contextmanager
+    def cannot_open(_path):
+        raise OSError(13, "Permission denied")
+        yield  # pragma: no cover
+
+    real_lock = sessions._baton_lock
+    _record(store)
+    prep = prepare_wrap(store, tz="UTC", session_id="s1", allow_sole_live=True)
+    monkeypatch.setattr(sessions, "_baton_lock", cannot_open)
+    out = validated_save_continuity(
+        store, "memory", wrap_token=prep["wrap_token"], session_id="s1", allow_sole_live=True)
+    assert out["episodes_compressed"] == 2  # a store without the policy goes on unlocked
+
+    monkeypatch.setattr(sessions, "_baton_lock", real_lock)
+    _record(store, day="2026-03-02")
+    sessions.claim_baton(store.continuity_path, "s1")
+    prep = prepare_wrap(store, tz="UTC", session_id="s1")
+    store.set_consolidate_requires_baton(True)
+    monkeypatch.setattr(sessions, "_baton_lock", cannot_open)
+    from anneal_memory import SaveAuthorityError
+    with pytest.raises(SaveAuthorityError, match="baton lock could not be taken"):
+        validated_save_continuity(
+            store, "memory two", wrap_token=prep["wrap_token"], session_id="s1")
+
+
 def test_a_save_whose_wrap_is_unchanged_still_commits(store):
     """The identity check must not refuse an ordinary save, caller token or minted."""
     _record(store)

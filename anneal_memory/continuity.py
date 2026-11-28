@@ -781,7 +781,10 @@ def validated_save_continuity(
     # whatever the text says, and the agent should hear that first. These reads are
     # unlocked and only fail the save early: the batch below reads the wrap again under
     # the write lock. The prepare timestamp is read first, so a wrap replaced after that
-    # read has another timestamp in the batch, whatever else of it matches.
+    # read has another timestamp in the batch, whatever else of it matches. The newest
+    # memory-file version is read first for the same reason: a wrap prepared again on a
+    # memory file that was saved over in between must not look like this one.
+    head_version = store._latest_identity_version()
     started_at = store.get_wrap_started_at()
     snapshot = store.load_wrap_snapshot()
     if snapshot is None:
@@ -887,11 +890,13 @@ def validated_save_continuity(
                     return _save_replay(store, idem_stored)
                 if idem_status == "conflict":
                     store._idempotency_conflict(idempotency_key, "save_continuity")
-            # The wrap's identity is its token, when it was prepared, and the episodes it
-            # froze. A caller's own token can name a wrap prepared again after a cancel, so
-            # the token alone does not say this is the wrap the reply was checked against.
+            # The wrap's identity is its token, when it was prepared, the episodes it
+            # froze and the memory file it was prepared on. A caller's own token can name a
+            # wrap prepared again after a cancel, so the token alone does not say this is
+            # the wrap the reply was checked against.
             if (
-                store.get_wrap_started_at() != started_at
+                store._latest_identity_version() != head_version
+                or store.get_wrap_started_at() != started_at
                 or store.load_wrap_snapshot() != snapshot
                 or (store.wrap_max_chars() or rolling.DEFAULT_MAX_CHARS) != step_limit
                 or store.wrap_gated_session() != gated_by

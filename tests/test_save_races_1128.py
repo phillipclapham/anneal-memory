@@ -265,6 +265,36 @@ def test_a_replaced_wrap_with_the_same_prepare_time_is_still_refused(store, monk
         validated_save_continuity(store, "x" * 3000, wrap_token=token)
 
 
+def test_a_wrap_prepared_again_on_a_changed_memory_file_is_refused(store, monkeypatch):
+    """Same token, same prepare time, same episodes, same limit and session: only the
+    memory file differs, because it was saved over between the cancel and the new prepare."""
+    _record(store)
+    token = "ab" * 16
+    assert prepare_wrap(store, tz="UTC", wrap_token=token)["status"] == "ready"
+    stale_started_at = store.get_wrap_started_at()
+    real = rolling.check_reply
+    state = {"replaced": False}
+
+    def replace_after_the_check(text, limit):
+        body = real(text, limit)
+        if not state["replaced"]:
+            state["replaced"] = True
+            other = Store(store.path, project_name="T")
+            try:
+                other.wrap_cancelled(expect_token=token)
+                other.save_continuity("a memory file written in between")
+                assert prepare_wrap(other, tz="UTC", wrap_token=token)["status"] == "ready"
+            finally:
+                other.close()
+            monkeypatch.setattr(store, "get_wrap_started_at", lambda: stale_started_at)
+        return body
+
+    monkeypatch.setattr(rolling, "check_reply", replace_after_the_check)
+    with pytest.raises(ValueError, match="different wrap"):
+        validated_save_continuity(store, "an old reply", wrap_token=token)
+    assert store.last_wrap_id() == 0
+
+
 def test_a_save_whose_wrap_is_unchanged_still_commits(store):
     """The identity check must not refuse an ordinary save, caller token or minted."""
     _record(store)

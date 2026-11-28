@@ -1,46 +1,20 @@
 {
  "all": [
   "ASCEND_BY_TYPE",
-  "Activation",
-  "ActivationMode",
-  "AffectiveState",
   "AnnealMemoryError",
-  "Annotation",
   "ApplyRefused",
-  "AssociationFormationOffError",
-  "AssociationPair",
-  "AssociationStats",
   "AuditRepairResult",
   "AuditTrail",
   "AuditVerifyResult",
   "BatonHeldError",
-  "CRYSTAL_SCHEMA_VERSION",
   "ContinuityLockUnavailable",
-  "ContinuityValidationError",
-  "CrossSessionCollision",
-  "CrystalConflictError",
-  "CrystalDecision",
-  "CrystalDict",
-  "CrystalError",
-  "CrystalSnapshot",
-  "CrystalStore",
-  "DEFAULT_GRADUATING",
-  "DEFAULT_SCHEMA",
   "DEFAULT_TRUST",
   "DESCEND_BY_TYPE",
-  "DROP_DURABLE_RE",
   "DeleteResult",
-  "DeriveRefused",
-  "DurableFact",
   "Episode",
   "EpisodeMatch",
   "EpisodeType",
-  "ExposedRef",
-  "ExposureLabel",
-  "FLOW_SCHEMA",
   "FeltCurrency",
-  "FoldResult",
-  "ForeignOutcomeLogError",
   "Germination",
   "INTENTION_VERSION_EXCLUDED",
   "IdempotencyConflictError",
@@ -53,43 +27,20 @@
   "IntentionType",
   "LeaseFencedError",
   "LeaseGrant",
-  "LogBinding",
-  "MAX_PATTERNS",
   "MIGRATION_MANIFEST",
-  "MIN_PROVEN_LEVEL",
-  "OmittedPattern",
   "OriginKeyConflict",
   "OriginKeyStatus",
-  "OutcomeLog",
-  "OutcomeLogBusy",
-  "PROJECT_SCHEMA",
-  "PatternSummary",
-  "Permanence",
   "PostconditionFailed",
   "PrepareWrapResult",
-  "ProvenWithoutDeclaration",
   "RESOURCES",
-  "RETIRE_KINDS",
-  "RETRIEVAL_THRESHOLD",
   "RecallResult",
-  "RederiveReport",
-  "RelevantFact",
-  "RelevantPattern",
-  "RelevantResult",
   "ReplacedEpisode",
   "ResolutionDict",
-  "RetirementDict",
-  "Route",
-  "SCHEMA_NAMES",
   "SPORE_VERSION_EXCLUDED",
   "SaveAuthorityError",
   "SaveContinuityReplayResult",
   "SaveContinuityResult",
   "ScoredEpisode",
-  "SectionError",
-  "SectionRole",
-  "SectionSpec",
-  "SectionWriteResult",
   "Server",
   "SporeApply",
   "SporeApplyResult",
@@ -98,7 +49,6 @@
   "SporeOp",
   "SporeStore",
   "SporeType",
-  "StalePatternDict",
   "Store",
   "StoreDatabaseError",
   "StoreError",
@@ -106,85 +56,38 @@
   "StoreStatus",
   "SupersessionError",
   "TOOLS",
-  "TRUST_ENV",
   "TRUST_LEVELS",
   "Tier",
   "Tombstone",
-  "VALID_ACTIVATIONS",
-  "VALID_ACTIVATION_MODES",
-  "VALID_LEVELS",
-  "VALID_PERMANENCE",
-  "VALID_ROUTES",
   "VALID_TIERS",
   "VALID_TYPES",
-  "VISIBILITIES",
   "WrapCancelBoundError",
   "WrapCancelGatedError",
   "WrapContinuityMovedError",
   "WrapInProgressError",
   "WrapOwnershipError",
-  "WrapPackageDict",
   "WrapRecord",
   "WrapResult",
   "WrapRevertReceipt",
   "WrapRevertRefused",
-  "WrapSchemaMovedError",
   "WrapWindowMovedError",
-  "activation_tier",
-  "allow_store",
-  "canonical_section_markdown",
-  "check_explanation_overlap",
   "continuity_lock",
-  "derived_state_lines",
-  "detect_pattern_omissions",
-  "detect_proven_without_declaration",
-  "detect_stale_patterns",
-  "extract_contradiction_declarations",
   "extract_keywords",
-  "extract_pattern_names",
-  "extract_pattern_summaries",
-  "extract_proven_patterns",
-  "extract_session_co_citations",
   "felt_currency",
-  "fold_surfaced",
   "format_wrap_package_text",
   "generate_integrity_file",
   "germination_tier",
-  "graduating_headings",
-  "hard_max_chars",
-  "heading_marker",
   "intention_version",
-  "name_for_schema",
   "normalize_intention_field",
   "normalize_spore_field",
   "origin_key_usable",
-  "outcome_log_path",
-  "parse_annotation",
-  "parse_crystal_decisions",
-  "parse_durable_facts",
   "prepare_wrap",
-  "receipt_crystal_names",
-  "rederive_continuity",
   "register_writer_schema",
-  "required_headings",
-  "retrieve_patterns",
-  "retrieve_relevant",
-  "revoke_store",
-  "schema_by_name",
-  "schema_role_warning",
   "search_episodes",
-  "section_chars",
-  "sections_by_role",
   "sessions",
   "spore_version",
-  "strip_flag",
-  "trust_file_path",
   "trust_rank",
-  "trusted_roots",
-  "validate_graduations",
   "validate_origin_key",
-  "validate_schema",
-  "validate_structure",
   "validated_save_continuity",
   "verify_integrity"
  ],
@@ -250,86 +153,6 @@
    }
   ],
   "subcommands": {
-   "associations": {
-    "defaults": {
-     "func": "anneal_memory.cli.cmd_associations"
-    },
-    "exclusive_groups": [],
-    "options": [
-     {
-      "action": "_StoreAction",
-      "choices": null,
-      "const": null,
-      "default": null,
-      "dest": "episode",
-      "flags": [
-       "--episode"
-      ],
-      "metavar": null,
-      "nargs": null,
-      "required": false,
-      "type": null
-     },
-     {
-      "action": "_StoreTrueAction",
-      "choices": null,
-      "const": true,
-      "default": "==SUPPRESS==",
-      "dest": "json",
-      "flags": [
-       "--json"
-      ],
-      "metavar": null,
-      "nargs": 0,
-      "required": false,
-      "type": null
-     },
-     {
-      "action": "_StoreAction",
-      "choices": null,
-      "const": null,
-      "default": 20,
-      "dest": "limit",
-      "flags": [
-       "--limit"
-      ],
-      "metavar": null,
-      "nargs": null,
-      "required": false,
-      "type": "int"
-     },
-     {
-      "action": "_StoreAction",
-      "choices": null,
-      "const": null,
-      "default": 0.0,
-      "dest": "min_strength",
-      "flags": [
-       "--min-strength"
-      ],
-      "metavar": null,
-      "nargs": null,
-      "required": false,
-      "type": "float"
-     },
-     {
-      "action": "_StoreTrueAction",
-      "choices": null,
-      "const": true,
-      "default": false,
-      "dest": "stats",
-      "flags": [
-       "--stats"
-      ],
-      "metavar": null,
-      "nargs": 0,
-      "required": false,
-      "type": null
-     }
-    ],
-    "subcommands": {},
-    "subparsers": null
-   },
    "audit": {
     "defaults": {
      "func": "anneal_memory.cli.cmd_audit"
@@ -574,824 +397,10 @@
       "nargs": 0,
       "required": false,
       "type": null
-     },
-     {
-      "action": "_StoreTrueAction",
-      "choices": null,
-      "const": true,
-      "default": false,
-      "dest": "rederive",
-      "flags": [
-       "--rederive"
-      ],
-      "metavar": null,
-      "nargs": 0,
-      "required": false,
-      "type": null
-     },
-     {
-      "action": "_StoreAction",
-      "choices": null,
-      "const": null,
-      "default": null,
-      "dest": "ref",
-      "flags": [
-       "--ref"
-      ],
-      "metavar": null,
-      "nargs": null,
-      "required": false,
-      "type": null
      }
     ],
     "subcommands": {},
     "subparsers": null
-   },
-   "crystal": {
-    "defaults": {
-     "func": "anneal_memory.cli._require_crystal_subcommand"
-    },
-    "exclusive_groups": [],
-    "options": [],
-    "subcommands": {
-     "crystallize": {
-      "defaults": {
-       "func": "anneal_memory.cli.cmd_crystal_crystallize"
-      },
-      "exclusive_groups": [],
-      "options": [
-       {
-        "action": "_StoreAction",
-        "choices": [
-         "just-in-time",
-         "catastrophic"
-        ],
-        "const": null,
-        "default": "just-in-time",
-        "dest": "activation_mode",
-        "flags": [
-         "--activation-mode"
-        ],
-        "metavar": null,
-        "nargs": null,
-        "required": false,
-        "type": null
-       },
-       {
-        "action": "_StoreAction",
-        "choices": null,
-        "const": null,
-        "default": null,
-        "dest": "evidence",
-        "flags": [
-         "--evidence"
-        ],
-        "metavar": null,
-        "nargs": "*",
-        "required": false,
-        "type": null
-       },
-       {
-        "action": "_StoreAction",
-        "choices": null,
-        "const": null,
-        "default": null,
-        "dest": "explanation",
-        "flags": [
-         "--explanation"
-        ],
-        "metavar": null,
-        "nargs": null,
-        "required": true,
-        "type": null
-       },
-       {
-        "action": "_StoreTrueAction",
-        "choices": null,
-        "const": true,
-        "default": "==SUPPRESS==",
-        "dest": "json",
-        "flags": [
-         "--json"
-        ],
-        "metavar": null,
-        "nargs": 0,
-        "required": false,
-        "type": null
-       },
-       {
-        "action": "_StoreAction",
-        "choices": null,
-        "const": null,
-        "default": null,
-        "dest": "level",
-        "flags": [
-         "--level"
-        ],
-        "metavar": null,
-        "nargs": null,
-        "required": true,
-        "type": "anneal_memory.cli._proven_level"
-       },
-       {
-        "action": "_StoreAction",
-        "choices": null,
-        "const": null,
-        "default": null,
-        "dest": "name",
-        "flags": [
-         "--name"
-        ],
-        "metavar": null,
-        "nargs": null,
-        "required": true,
-        "type": null
-       },
-       {
-        "action": "_StoreAction",
-        "choices": [
-         "timeless",
-         "phase-specific"
-        ],
-        "const": null,
-        "default": "timeless",
-        "dest": "permanence",
-        "flags": [
-         "--permanence"
-        ],
-        "metavar": null,
-        "nargs": null,
-        "required": false,
-        "type": null
-       },
-       {
-        "action": "_StoreAction",
-        "choices": null,
-        "const": null,
-        "default": null,
-        "dest": "source",
-        "flags": [
-         "--source"
-        ],
-        "metavar": null,
-        "nargs": null,
-        "required": false,
-        "type": null
-       },
-       {
-        "action": "_StoreAction",
-        "choices": null,
-        "const": null,
-        "default": null,
-        "dest": "tags",
-        "flags": [
-         "--tags"
-        ],
-        "metavar": null,
-        "nargs": "*",
-        "required": false,
-        "type": null
-       }
-      ],
-      "subcommands": {},
-      "subparsers": null
-     },
-     "fold-surfaced": {
-      "defaults": {
-       "func": "anneal_memory.cli.cmd_crystal_fold_surfaced"
-      },
-      "exclusive_groups": [],
-      "options": [
-       {
-        "action": "_StoreTrueAction",
-        "choices": null,
-        "const": true,
-        "default": "==SUPPRESS==",
-        "dest": "json",
-        "flags": [
-         "--json"
-        ],
-        "metavar": null,
-        "nargs": 0,
-        "required": false,
-        "type": null
-       },
-       {
-        "action": "_StoreAction",
-        "choices": null,
-        "const": null,
-        "default": null,
-        "dest": "receipts",
-        "flags": [
-         "--receipts"
-        ],
-        "metavar": "PATH",
-        "nargs": "+",
-        "required": true,
-        "type": null
-       },
-       {
-        "action": "_StoreAction",
-        "choices": null,
-        "const": null,
-        "default": 60,
-        "dest": "skew_seconds",
-        "flags": [
-         "--skew-seconds"
-        ],
-        "metavar": null,
-        "nargs": null,
-        "required": false,
-        "type": "int"
-       }
-      ],
-      "subcommands": {},
-      "subparsers": null
-     },
-     "get": {
-      "defaults": {
-       "func": "anneal_memory.cli.cmd_crystal_get"
-      },
-      "exclusive_groups": [],
-      "options": [
-       {
-        "action": "_StoreAction",
-        "choices": null,
-        "const": null,
-        "default": null,
-        "dest": "name",
-        "flags": [],
-        "metavar": null,
-        "nargs": null,
-        "required": true,
-        "type": null
-       },
-       {
-        "action": "_StoreTrueAction",
-        "choices": null,
-        "const": true,
-        "default": "==SUPPRESS==",
-        "dest": "json",
-        "flags": [
-         "--json"
-        ],
-        "metavar": null,
-        "nargs": 0,
-        "required": false,
-        "type": null
-       },
-       {
-        "action": "_StoreTrueAction",
-        "choices": null,
-        "const": true,
-        "default": false,
-        "dest": "no_record",
-        "flags": [
-         "--no-record"
-        ],
-        "metavar": null,
-        "nargs": 0,
-        "required": false,
-        "type": null
-       }
-      ],
-      "subcommands": {},
-      "subparsers": null
-     },
-     "ground-evidence": {
-      "defaults": {
-       "func": "anneal_memory.cli.cmd_crystal_ground_evidence"
-      },
-      "exclusive_groups": [],
-      "options": [
-       {
-        "action": "_StoreTrueAction",
-        "choices": null,
-        "const": true,
-        "default": false,
-        "dest": "dry_run",
-        "flags": [
-         "--dry-run"
-        ],
-        "metavar": null,
-        "nargs": 0,
-        "required": false,
-        "type": null
-       },
-       {
-        "action": "_StoreTrueAction",
-        "choices": null,
-        "const": true,
-        "default": "==SUPPRESS==",
-        "dest": "json",
-        "flags": [
-         "--json"
-        ],
-        "metavar": null,
-        "nargs": 0,
-        "required": false,
-        "type": null
-       },
-       {
-        "action": "_StoreAction",
-        "choices": null,
-        "const": null,
-        "default": 4,
-        "dest": "limit",
-        "flags": [
-         "--limit"
-        ],
-        "metavar": null,
-        "nargs": null,
-        "required": false,
-        "type": "int"
-       }
-      ],
-      "subcommands": {},
-      "subparsers": null
-     },
-     "index": {
-      "defaults": {
-       "func": "anneal_memory.cli.cmd_crystal_index"
-      },
-      "exclusive_groups": [],
-      "options": [
-       {
-        "action": "_StoreTrueAction",
-        "choices": null,
-        "const": true,
-        "default": "==SUPPRESS==",
-        "dest": "json",
-        "flags": [
-         "--json"
-        ],
-        "metavar": null,
-        "nargs": 0,
-        "required": false,
-        "type": null
-       }
-      ],
-      "subcommands": {},
-      "subparsers": null
-     },
-     "list": {
-      "defaults": {
-       "func": "anneal_memory.cli.cmd_crystal_list"
-      },
-      "exclusive_groups": [],
-      "options": [
-       {
-        "action": "_StoreAction",
-        "choices": [
-         "hot",
-         "warm",
-         "cold",
-         "dormant"
-        ],
-        "const": null,
-        "default": null,
-        "dest": "activation",
-        "flags": [
-         "--activation"
-        ],
-        "metavar": null,
-        "nargs": null,
-        "required": false,
-        "type": null
-       },
-       {
-        "action": "_StoreAction",
-        "choices": [
-         "just-in-time",
-         "catastrophic"
-        ],
-        "const": null,
-        "default": null,
-        "dest": "activation_mode",
-        "flags": [
-         "--activation-mode"
-        ],
-        "metavar": null,
-        "nargs": null,
-        "required": false,
-        "type": null
-       },
-       {
-        "action": "_StoreTrueAction",
-        "choices": null,
-        "const": true,
-        "default": "==SUPPRESS==",
-        "dest": "json",
-        "flags": [
-         "--json"
-        ],
-        "metavar": null,
-        "nargs": 0,
-        "required": false,
-        "type": null
-       },
-       {
-        "action": "_StoreAction",
-        "choices": [
-         "timeless",
-         "phase-specific"
-        ],
-        "const": null,
-        "default": null,
-        "dest": "permanence",
-        "flags": [
-         "--permanence"
-        ],
-        "metavar": null,
-        "nargs": null,
-        "required": false,
-        "type": null
-       },
-       {
-        "action": "_StoreAction",
-        "choices": null,
-        "const": null,
-        "default": null,
-        "dest": "tag",
-        "flags": [
-         "--tag"
-        ],
-        "metavar": null,
-        "nargs": null,
-        "required": false,
-        "type": null
-       },
-       {
-        "action": "_StoreTrueAction",
-        "choices": null,
-        "const": true,
-        "default": false,
-        "dest": "verbose",
-        "flags": [
-         "--verbose",
-         "-v"
-        ],
-        "metavar": null,
-        "nargs": 0,
-        "required": false,
-        "type": null
-       }
-      ],
-      "subcommands": {},
-      "subparsers": null
-     },
-     "recall": {
-      "defaults": {
-       "func": "anneal_memory.cli.cmd_crystal_recall"
-      },
-      "exclusive_groups": [],
-      "options": [
-       {
-        "action": "_StoreAction",
-        "choices": null,
-        "const": null,
-        "default": null,
-        "dest": "query",
-        "flags": [],
-        "metavar": null,
-        "nargs": null,
-        "required": true,
-        "type": null
-       },
-       {
-        "action": "_StoreTrueAction",
-        "choices": null,
-        "const": true,
-        "default": "==SUPPRESS==",
-        "dest": "json",
-        "flags": [
-         "--json"
-        ],
-        "metavar": null,
-        "nargs": 0,
-        "required": false,
-        "type": null
-       },
-       {
-        "action": "_StoreAction",
-        "choices": null,
-        "const": null,
-        "default": 3,
-        "dest": "max_patterns",
-        "flags": [
-         "--max-patterns"
-        ],
-        "metavar": null,
-        "nargs": null,
-        "required": false,
-        "type": "int"
-       },
-       {
-        "action": "_StoreTrueAction",
-        "choices": null,
-        "const": true,
-        "default": false,
-        "dest": "no_associative",
-        "flags": [
-         "--no-associative"
-        ],
-        "metavar": null,
-        "nargs": 0,
-        "required": false,
-        "type": null
-       }
-      ],
-      "subcommands": {},
-      "subparsers": null
-     },
-     "retire": {
-      "defaults": {
-       "func": "anneal_memory.cli.cmd_crystal_retire"
-      },
-      "exclusive_groups": [],
-      "options": [
-       {
-        "action": "_StoreAction",
-        "choices": null,
-        "const": null,
-        "default": null,
-        "dest": "name",
-        "flags": [],
-        "metavar": null,
-        "nargs": null,
-        "required": true,
-        "type": null
-       },
-       {
-        "action": "_StoreTrueAction",
-        "choices": null,
-        "const": true,
-        "default": "==SUPPRESS==",
-        "dest": "json",
-        "flags": [
-         "--json"
-        ],
-        "metavar": null,
-        "nargs": 0,
-        "required": false,
-        "type": null
-       },
-       {
-        "action": "_StoreAction",
-        "choices": [
-         "falsified",
-         "superseded",
-         "merged",
-         "obsolete"
-        ],
-        "const": null,
-        "default": null,
-        "dest": "kind",
-        "flags": [
-         "--kind"
-        ],
-        "metavar": null,
-        "nargs": null,
-        "required": true,
-        "type": null
-       },
-       {
-        "action": "_StoreAction",
-        "choices": null,
-        "const": null,
-        "default": null,
-        "dest": "reason",
-        "flags": [
-         "--reason"
-        ],
-        "metavar": null,
-        "nargs": null,
-        "required": false,
-        "type": null
-       }
-      ],
-      "subcommands": {},
-      "subparsers": null
-     },
-     "rewarm": {
-      "defaults": {
-       "func": "anneal_memory.cli.cmd_crystal_rewarm"
-      },
-      "exclusive_groups": [],
-      "options": [
-       {
-        "action": "_StoreTrueAction",
-        "choices": null,
-        "const": true,
-        "default": "==SUPPRESS==",
-        "dest": "json",
-        "flags": [
-         "--json"
-        ],
-        "metavar": null,
-        "nargs": 0,
-        "required": false,
-        "type": null
-       }
-      ],
-      "subcommands": {},
-      "subparsers": null
-     },
-     "touch": {
-      "defaults": {
-       "func": "anneal_memory.cli.cmd_crystal_touch"
-      },
-      "exclusive_groups": [],
-      "options": [
-       {
-        "action": "_StoreAction",
-        "choices": null,
-        "const": null,
-        "default": null,
-        "dest": "name",
-        "flags": [],
-        "metavar": null,
-        "nargs": null,
-        "required": true,
-        "type": null
-       },
-       {
-        "action": "_StoreTrueAction",
-        "choices": null,
-        "const": true,
-        "default": "==SUPPRESS==",
-        "dest": "json",
-        "flags": [
-         "--json"
-        ],
-        "metavar": null,
-        "nargs": 0,
-        "required": false,
-        "type": null
-       }
-      ],
-      "subcommands": {},
-      "subparsers": null
-     },
-     "update": {
-      "defaults": {
-       "func": "anneal_memory.cli.cmd_crystal_update"
-      },
-      "exclusive_groups": [],
-      "options": [
-       {
-        "action": "_StoreAction",
-        "choices": null,
-        "const": null,
-        "default": null,
-        "dest": "name",
-        "flags": [],
-        "metavar": null,
-        "nargs": null,
-        "required": true,
-        "type": null
-       },
-       {
-        "action": "_StoreAction",
-        "choices": [
-         "just-in-time",
-         "catastrophic"
-        ],
-        "const": null,
-        "default": null,
-        "dest": "activation_mode",
-        "flags": [
-         "--activation-mode"
-        ],
-        "metavar": null,
-        "nargs": null,
-        "required": false,
-        "type": null
-       },
-       {
-        "action": "_StoreAction",
-        "choices": null,
-        "const": null,
-        "default": null,
-        "dest": "add_note",
-        "flags": [
-         "--add-note"
-        ],
-        "metavar": null,
-        "nargs": null,
-        "required": false,
-        "type": null
-       },
-       {
-        "action": "_StoreAction",
-        "choices": null,
-        "const": null,
-        "default": null,
-        "dest": "evidence",
-        "flags": [
-         "--evidence"
-        ],
-        "metavar": null,
-        "nargs": "*",
-        "required": false,
-        "type": null
-       },
-       {
-        "action": "_StoreAction",
-        "choices": null,
-        "const": null,
-        "default": null,
-        "dest": "explanation",
-        "flags": [
-         "--explanation"
-        ],
-        "metavar": null,
-        "nargs": null,
-        "required": false,
-        "type": null
-       },
-       {
-        "action": "_StoreTrueAction",
-        "choices": null,
-        "const": true,
-        "default": "==SUPPRESS==",
-        "dest": "json",
-        "flags": [
-         "--json"
-        ],
-        "metavar": null,
-        "nargs": 0,
-        "required": false,
-        "type": null
-       },
-       {
-        "action": "_StoreAction",
-        "choices": null,
-        "const": null,
-        "default": null,
-        "dest": "level",
-        "flags": [
-         "--level"
-        ],
-        "metavar": null,
-        "nargs": null,
-        "required": false,
-        "type": "anneal_memory.cli._proven_level"
-       },
-       {
-        "action": "_StoreAction",
-        "choices": [
-         "timeless",
-         "phase-specific"
-        ],
-        "const": null,
-        "default": null,
-        "dest": "permanence",
-        "flags": [
-         "--permanence"
-        ],
-        "metavar": null,
-        "nargs": null,
-        "required": false,
-        "type": null
-       },
-       {
-        "action": "_StoreAction",
-        "choices": null,
-        "const": null,
-        "default": null,
-        "dest": "source",
-        "flags": [
-         "--source"
-        ],
-        "metavar": null,
-        "nargs": null,
-        "required": false,
-        "type": null
-       },
-       {
-        "action": "_StoreAction",
-        "choices": null,
-        "const": null,
-        "default": null,
-        "dest": "tags",
-        "flags": [
-         "--tags"
-        ],
-        "metavar": null,
-        "nargs": "*",
-        "required": false,
-        "type": null
-       }
-      ],
-      "subcommands": {},
-      "subparsers": null
-     }
-    },
-    "subparsers": {
-     "dest": "crystal_command",
-     "required": false
-    }
    },
    "delete": {
     "defaults": {
@@ -1443,150 +452,6 @@
     ],
     "subcommands": {},
     "subparsers": null
-   },
-   "derive": {
-    "defaults": {
-     "func": "anneal_memory.cli.cmd_derive"
-    },
-    "exclusive_groups": [],
-    "options": [],
-    "subcommands": {
-     "allow": {
-      "defaults": {
-       "func": "anneal_memory.cli.cmd_derive"
-      },
-      "exclusive_groups": [],
-      "options": [
-       {
-        "action": "_StoreTrueAction",
-        "choices": null,
-        "const": true,
-        "default": "==SUPPRESS==",
-        "dest": "json",
-        "flags": [
-         "--json"
-        ],
-        "metavar": null,
-        "nargs": 0,
-        "required": false,
-        "type": null
-       },
-       {
-        "action": "_StoreAction",
-        "choices": null,
-        "const": null,
-        "default": null,
-        "dest": "label",
-        "flags": [
-         "--label"
-        ],
-        "metavar": null,
-        "nargs": null,
-        "required": false,
-        "type": null
-       },
-       {
-        "action": "_StoreAction",
-        "choices": null,
-        "const": null,
-        "default": null,
-        "dest": "root",
-        "flags": [
-         "--root"
-        ],
-        "metavar": null,
-        "nargs": null,
-        "required": true,
-        "type": null
-       },
-       {
-        "action": "_StoreAction",
-        "choices": [
-         "public",
-         "private"
-        ],
-        "const": null,
-        "default": null,
-        "dest": "visibility",
-        "flags": [
-         "--visibility"
-        ],
-        "metavar": null,
-        "nargs": null,
-        "required": false,
-        "type": null
-       }
-      ],
-      "subcommands": {},
-      "subparsers": null
-     },
-     "revoke": {
-      "defaults": {
-       "func": "anneal_memory.cli.cmd_derive"
-      },
-      "exclusive_groups": [],
-      "options": [
-       {
-        "action": "_StoreTrueAction",
-        "choices": null,
-        "const": true,
-        "default": "==SUPPRESS==",
-        "dest": "json",
-        "flags": [
-         "--json"
-        ],
-        "metavar": null,
-        "nargs": 0,
-        "required": false,
-        "type": null
-       },
-       {
-        "action": "_StoreAction",
-        "choices": null,
-        "const": null,
-        "default": null,
-        "dest": "label",
-        "flags": [
-         "--label"
-        ],
-        "metavar": null,
-        "nargs": null,
-        "required": false,
-        "type": null
-       }
-      ],
-      "subcommands": {},
-      "subparsers": null
-     },
-     "status": {
-      "defaults": {
-       "func": "anneal_memory.cli.cmd_derive"
-      },
-      "exclusive_groups": [],
-      "options": [
-       {
-        "action": "_StoreTrueAction",
-        "choices": null,
-        "const": true,
-        "default": "==SUPPRESS==",
-        "dest": "json",
-        "flags": [
-         "--json"
-        ],
-        "metavar": null,
-        "nargs": 0,
-        "required": false,
-        "type": null
-       }
-      ],
-      "subcommands": {},
-      "subparsers": null
-     }
-    },
-    "subparsers": {
-     "dest": "derive_command",
-     "required": false
-    }
    },
    "diff": {
     "defaults": {
@@ -1863,77 +728,6 @@
     "subcommands": {},
     "subparsers": null
    },
-   "graph": {
-    "defaults": {
-     "func": "anneal_memory.cli.cmd_graph"
-    },
-    "exclusive_groups": [],
-    "options": [
-     {
-      "action": "_StoreAction",
-      "choices": [
-       "dot",
-       "json"
-      ],
-      "const": null,
-      "default": "json",
-      "dest": "format",
-      "flags": [
-       "--format",
-       "-f"
-      ],
-      "metavar": null,
-      "nargs": null,
-      "required": false,
-      "type": null
-     },
-     {
-      "action": "_StoreTrueAction",
-      "choices": null,
-      "const": true,
-      "default": "==SUPPRESS==",
-      "dest": "json",
-      "flags": [
-       "--json"
-      ],
-      "metavar": null,
-      "nargs": 0,
-      "required": false,
-      "type": null
-     },
-     {
-      "action": "_StoreAction",
-      "choices": null,
-      "const": null,
-      "default": 0.0,
-      "dest": "min_strength",
-      "flags": [
-       "--min-strength"
-      ],
-      "metavar": null,
-      "nargs": null,
-      "required": false,
-      "type": "float"
-     },
-     {
-      "action": "_StoreAction",
-      "choices": null,
-      "const": null,
-      "default": null,
-      "dest": "output",
-      "flags": [
-       "--output",
-       "-o"
-      ],
-      "metavar": null,
-      "nargs": null,
-      "required": false,
-      "type": null
-     }
-    ],
-    "subcommands": {},
-    "subparsers": null
-   },
    "history": {
     "defaults": {
      "func": "anneal_memory.cli.cmd_history"
@@ -2039,24 +833,6 @@
       ],
       "metavar": null,
       "nargs": 0,
-      "required": false,
-      "type": null
-     },
-     {
-      "action": "_StoreAction",
-      "choices": [
-       "default",
-       "partnership",
-       "project"
-      ],
-      "const": null,
-      "default": "default",
-      "dest": "schema",
-      "flags": [
-       "--schema"
-      ],
-      "metavar": null,
-      "nargs": null,
       "required": false,
       "type": null
      }
@@ -2981,203 +1757,12 @@
      "required": false
     }
    },
-   "outcome": {
-    "defaults": {
-     "func": "anneal_memory.cli.cmd_outcome"
-    },
-    "exclusive_groups": [],
-    "options": [
-     {
-      "action": "_StoreTrueAction",
-      "choices": null,
-      "const": true,
-      "default": false,
-      "dest": "adopt_unbound",
-      "flags": [
-       "--adopt-unbound"
-      ],
-      "metavar": null,
-      "nargs": 0,
-      "required": false,
-      "type": null
-     },
-     {
-      "action": "_AppendAction",
-      "choices": null,
-      "const": null,
-      "default": null,
-      "dest": "exposed",
-      "flags": [
-       "--exposed"
-      ],
-      "metavar": "KIND:REF",
-      "nargs": null,
-      "required": false,
-      "type": null
-     },
-     {
-      "action": "_StoreAction",
-      "choices": null,
-      "const": null,
-      "default": null,
-      "dest": "exposure_id",
-      "flags": [
-       "--exposure-id"
-      ],
-      "metavar": null,
-      "nargs": null,
-      "required": false,
-      "type": null
-     },
-     {
-      "action": "_AppendAction",
-      "choices": null,
-      "const": null,
-      "default": null,
-      "dest": "item",
-      "flags": [
-       "--item"
-      ],
-      "metavar": "KIND:REF=FOLLOWED",
-      "nargs": null,
-      "required": false,
-      "type": null
-     },
-     {
-      "action": "_StoreTrueAction",
-      "choices": null,
-      "const": true,
-      "default": "==SUPPRESS==",
-      "dest": "json",
-      "flags": [
-       "--json"
-      ],
-      "metavar": null,
-      "nargs": 0,
-      "required": false,
-      "type": null
-     },
-     {
-      "action": "_StoreAction",
-      "choices": [
-       "success",
-       "failure"
-      ],
-      "const": null,
-      "default": null,
-      "dest": "outcome",
-      "flags": [
-       "--outcome"
-      ],
-      "metavar": null,
-      "nargs": null,
-      "required": false,
-      "type": null
-     }
-    ],
-    "subcommands": {},
-    "subparsers": null
-   },
-   "pattern-associations": {
-    "defaults": {
-     "func": "anneal_memory.cli.cmd_pattern_associations"
-    },
-    "exclusive_groups": [],
-    "options": [
-     {
-      "action": "_StoreTrueAction",
-      "choices": null,
-      "const": true,
-      "default": "==SUPPRESS==",
-      "dest": "json",
-      "flags": [
-       "--json"
-      ],
-      "metavar": null,
-      "nargs": 0,
-      "required": false,
-      "type": null
-     },
-     {
-      "action": "_StoreAction",
-      "choices": null,
-      "const": null,
-      "default": 20,
-      "dest": "limit",
-      "flags": [
-       "--limit"
-      ],
-      "metavar": null,
-      "nargs": null,
-      "required": false,
-      "type": "int"
-     },
-     {
-      "action": "_StoreAction",
-      "choices": null,
-      "const": null,
-      "default": 0.2,
-      "dest": "min_strength",
-      "flags": [
-       "--min-strength"
-      ],
-      "metavar": null,
-      "nargs": null,
-      "required": false,
-      "type": "float"
-     },
-     {
-      "action": "_StoreAction",
-      "choices": null,
-      "const": null,
-      "default": null,
-      "dest": "name",
-      "flags": [
-       "--name"
-      ],
-      "metavar": null,
-      "nargs": null,
-      "required": false,
-      "type": null
-     },
-     {
-      "action": "_StoreTrueAction",
-      "choices": null,
-      "const": true,
-      "default": false,
-      "dest": "stats",
-      "flags": [
-       "--stats"
-      ],
-      "metavar": null,
-      "nargs": 0,
-      "required": false,
-      "type": null
-     }
-    ],
-    "subcommands": {},
-    "subparsers": null
-   },
    "prepare-wrap": {
     "defaults": {
      "func": "anneal_memory.cli.cmd_prepare_wrap"
     },
     "exclusive_groups": [],
     "options": [
-     {
-      "action": "_StoreTrueAction",
-      "choices": null,
-      "const": true,
-      "default": false,
-      "dest": "crystal",
-      "flags": [
-       "--crystal"
-      ],
-      "metavar": null,
-      "nargs": 0,
-      "required": false,
-      "type": null
-     },
      {
       "action": "_StoreTrueAction",
       "choices": null,
@@ -3224,230 +1809,19 @@
       "action": "_StoreAction",
       "choices": null,
       "const": null,
-      "default": 7,
-      "dest": "staleness_days",
+      "default": null,
+      "dest": "tz",
       "flags": [
-       "--staleness-days"
+       "--tz"
       ],
       "metavar": null,
       "nargs": null,
       "required": false,
-      "type": "int"
+      "type": null
      }
     ],
     "subcommands": {},
     "subparsers": null
-   },
-   "probe": {
-    "defaults": {},
-    "exclusive_groups": [],
-    "options": [],
-    "subcommands": {
-     "add": {
-      "defaults": {
-       "func": "anneal_memory.cli.cmd_probe"
-      },
-      "exclusive_groups": [
-       {
-        "options": [
-         "--fact",
-         "--pattern"
-        ],
-        "required": true
-       }
-      ],
-      "options": [
-       {
-        "action": "_StoreAction",
-        "choices": null,
-        "const": null,
-        "default": null,
-        "dest": "fact",
-        "flags": [
-         "--fact"
-        ],
-        "metavar": null,
-        "nargs": null,
-        "required": false,
-        "type": null
-       },
-       {
-        "action": "_StoreTrueAction",
-        "choices": null,
-        "const": true,
-        "default": "==SUPPRESS==",
-        "dest": "json",
-        "flags": [
-         "--json"
-        ],
-        "metavar": null,
-        "nargs": 0,
-        "required": false,
-        "type": null
-       },
-       {
-        "action": "_StoreAction",
-        "choices": null,
-        "const": null,
-        "default": null,
-        "dest": "min_level",
-        "flags": [
-         "--min-level"
-        ],
-        "metavar": null,
-        "nargs": null,
-        "required": false,
-        "type": "int"
-       },
-       {
-        "action": "_StoreAction",
-        "choices": null,
-        "const": null,
-        "default": null,
-        "dest": "note",
-        "flags": [
-         "--note"
-        ],
-        "metavar": null,
-        "nargs": null,
-        "required": false,
-        "type": null
-       },
-       {
-        "action": "_StoreAction",
-        "choices": null,
-        "const": null,
-        "default": null,
-        "dest": "pattern",
-        "flags": [
-         "--pattern"
-        ],
-        "metavar": null,
-        "nargs": null,
-        "required": false,
-        "type": null
-       },
-       {
-        "action": "_StoreAction",
-        "choices": null,
-        "const": null,
-        "default": null,
-        "dest": "section",
-        "flags": [
-         "--section"
-        ],
-        "metavar": null,
-        "nargs": null,
-        "required": false,
-        "type": null
-       }
-      ],
-      "subcommands": {},
-      "subparsers": null
-     },
-     "list": {
-      "defaults": {
-       "func": "anneal_memory.cli.cmd_probe"
-      },
-      "exclusive_groups": [],
-      "options": [
-       {
-        "action": "_StoreTrueAction",
-        "choices": null,
-        "const": true,
-        "default": false,
-        "dest": "all",
-        "flags": [
-         "--all"
-        ],
-        "metavar": null,
-        "nargs": 0,
-        "required": false,
-        "type": null
-       },
-       {
-        "action": "_StoreTrueAction",
-        "choices": null,
-        "const": true,
-        "default": "==SUPPRESS==",
-        "dest": "json",
-        "flags": [
-         "--json"
-        ],
-        "metavar": null,
-        "nargs": 0,
-        "required": false,
-        "type": null
-       }
-      ],
-      "subcommands": {},
-      "subparsers": null
-     },
-     "retire": {
-      "defaults": {
-       "func": "anneal_memory.cli.cmd_probe"
-      },
-      "exclusive_groups": [],
-      "options": [
-       {
-        "action": "_StoreAction",
-        "choices": null,
-        "const": null,
-        "default": null,
-        "dest": "id",
-        "flags": [],
-        "metavar": null,
-        "nargs": null,
-        "required": true,
-        "type": "int"
-       },
-       {
-        "action": "_StoreTrueAction",
-        "choices": null,
-        "const": true,
-        "default": "==SUPPRESS==",
-        "dest": "json",
-        "flags": [
-         "--json"
-        ],
-        "metavar": null,
-        "nargs": 0,
-        "required": false,
-        "type": null
-       }
-      ],
-      "subcommands": {},
-      "subparsers": null
-     },
-     "status": {
-      "defaults": {
-       "func": "anneal_memory.cli.cmd_probe"
-      },
-      "exclusive_groups": [],
-      "options": [
-       {
-        "action": "_StoreTrueAction",
-        "choices": null,
-        "const": true,
-        "default": "==SUPPRESS==",
-        "dest": "json",
-        "flags": [
-         "--json"
-        ],
-        "metavar": null,
-        "nargs": 0,
-        "required": false,
-        "type": null
-       }
-      ],
-      "subcommands": {},
-      "subparsers": null
-     }
-    },
-    "subparsers": {
-     "dest": "probe_command",
-     "required": true
-    }
    },
    "prune": {
     "defaults": {
@@ -3888,76 +2262,6 @@
       "type": null
      },
      {
-      "action": "_StoreAction",
-      "choices": null,
-      "const": null,
-      "default": 0.5,
-      "dest": "affect_intensity",
-      "flags": [
-       "--affect-intensity"
-      ],
-      "metavar": null,
-      "nargs": null,
-      "required": false,
-      "type": "float"
-     },
-     {
-      "action": "_StoreAction",
-      "choices": null,
-      "const": null,
-      "default": null,
-      "dest": "affect_tag",
-      "flags": [
-       "--affect-tag"
-      ],
-      "metavar": null,
-      "nargs": null,
-      "required": false,
-      "type": null
-     },
-     {
-      "action": "_StoreTrueAction",
-      "choices": null,
-      "const": true,
-      "default": false,
-      "dest": "allow_shrink",
-      "flags": [
-       "--allow-shrink"
-      ],
-      "metavar": null,
-      "nargs": 0,
-      "required": false,
-      "type": null
-     },
-     {
-      "action": "_StoreTrueAction",
-      "choices": null,
-      "const": true,
-      "default": false,
-      "dest": "allow_unlinked",
-      "flags": [
-       "--allow-unlinked"
-      ],
-      "metavar": null,
-      "nargs": 0,
-      "required": false,
-      "type": null
-     },
-     {
-      "action": "_StoreTrueAction",
-      "choices": null,
-      "const": true,
-      "default": false,
-      "dest": "crystal",
-      "flags": [
-       "--crystal"
-      ],
-      "metavar": null,
-      "nargs": 0,
-      "required": false,
-      "type": null
-     },
-     {
       "action": "_StoreTrueAction",
       "choices": null,
       "const": true,
@@ -3972,16 +2276,30 @@
       "type": null
      },
      {
-      "action": "_StoreTrueAction",
+      "action": "_StoreAction",
       "choices": null,
-      "const": true,
-      "default": false,
-      "dest": "require_rederive",
+      "const": null,
+      "default": null,
+      "dest": "max_chars",
       "flags": [
-       "--require-rederive"
+       "--max-chars"
       ],
       "metavar": null,
-      "nargs": 0,
+      "nargs": null,
+      "required": false,
+      "type": "int"
+     },
+     {
+      "action": "_StoreAction",
+      "choices": null,
+      "const": null,
+      "default": null,
+      "dest": "model",
+      "flags": [
+       "--model"
+      ],
+      "metavar": null,
+      "nargs": null,
       "required": false,
       "type": null
      },
@@ -3998,6 +2316,20 @@
       "nargs": null,
       "required": false,
       "type": "anneal_memory.cli._session_name"
+     },
+     {
+      "action": "_StoreTrueAction",
+      "choices": null,
+      "const": true,
+      "default": false,
+      "dest": "unattended",
+      "flags": [
+       "--unattended"
+      ],
+      "metavar": null,
+      "nargs": 0,
+      "required": false,
+      "type": null
      },
      {
       "action": "_StoreAction",
@@ -4245,46 +2577,6 @@
       "dest": "verify_audit",
       "flags": [
        "--verify-audit"
-      ],
-      "metavar": null,
-      "nargs": 0,
-      "required": false,
-      "type": null
-     }
-    ],
-    "subcommands": {},
-    "subparsers": null
-   },
-   "set-schema": {
-    "defaults": {
-     "func": "anneal_memory.cli.cmd_set_schema"
-    },
-    "exclusive_groups": [],
-    "options": [
-     {
-      "action": "_StoreAction",
-      "choices": [
-       "default",
-       "partnership",
-       "project"
-      ],
-      "const": null,
-      "default": null,
-      "dest": "schema",
-      "flags": [],
-      "metavar": null,
-      "nargs": null,
-      "required": true,
-      "type": null
-     },
-     {
-      "action": "_StoreTrueAction",
-      "choices": null,
-      "const": true,
-      "default": "==SUPPRESS==",
-      "dest": "json",
-      "flags": [
-       "--json"
       ],
       "metavar": null,
       "nargs": 0,
@@ -5449,58 +3741,6 @@
     "subcommands": {},
     "subparsers": null
    },
-   "worth": {
-    "defaults": {
-     "func": "anneal_memory.cli.cmd_worth"
-    },
-    "exclusive_groups": [],
-    "options": [
-     {
-      "action": "_StoreTrueAction",
-      "choices": null,
-      "const": true,
-      "default": false,
-      "dest": "episodes",
-      "flags": [
-       "--episodes"
-      ],
-      "metavar": null,
-      "nargs": 0,
-      "required": false,
-      "type": null
-     },
-     {
-      "action": "_StoreTrueAction",
-      "choices": null,
-      "const": true,
-      "default": "==SUPPRESS==",
-      "dest": "json",
-      "flags": [
-       "--json"
-      ],
-      "metavar": null,
-      "nargs": 0,
-      "required": false,
-      "type": null
-     },
-     {
-      "action": "_StoreAction",
-      "choices": null,
-      "const": null,
-      "default": null,
-      "dest": "receipts",
-      "flags": [
-       "--receipts"
-      ],
-      "metavar": "PATH",
-      "nargs": "+",
-      "required": false,
-      "type": null
-     }
-    ],
-    "subcommands": {},
-    "subparsers": null
-   },
    "wrap-cancel": {
     "defaults": {
      "func": "anneal_memory.cli.cmd_wrap_cancel"
@@ -5655,23 +3895,6 @@
     ]
    }
   },
-  "Activation": {
-   "kind": "value",
-   "type": "_LiteralGenericAlias",
-   "value": "typing.Literal['hot', 'warm', 'cold', 'dormant']"
-  },
-  "ActivationMode": {
-   "kind": "value",
-   "type": "_LiteralGenericAlias",
-   "value": "typing.Literal['just-in-time', 'catastrophic']"
-  },
-  "AffectiveState": {
-   "bases": [],
-   "init": "(tag: 'str', intensity: 'float') -> None",
-   "kind": "class",
-   "members": {},
-   "module": "anneal_memory.types"
-  },
   "AnnealMemoryError": {
    "bases": [
     "builtins.Exception"
@@ -5680,30 +3903,6 @@
    "kind": "class",
    "members": {},
    "module": "anneal_memory.store"
-  },
-  "Annotation": {
-   "bases": [],
-   "init": "(kind: \"Literal['derive', 'judged']\", claim: 'str', command: 'str' = '', expected: 'str | None' = None, judgement: 'str' = '', root: 'str | None' = None) -> None",
-   "kind": "class",
-   "members": {
-    "command": {
-     "kind": "attribute",
-     "value": ""
-    },
-    "expected": {
-     "kind": "attribute",
-     "value": null
-    },
-    "judgement": {
-     "kind": "attribute",
-     "value": ""
-    },
-    "root": {
-     "kind": "attribute",
-     "value": null
-    }
-   },
-   "module": "anneal_memory.rederive"
   },
   "ApplyRefused": {
    "bases": [
@@ -5714,43 +3913,6 @@
    "kind": "class",
    "members": {},
    "module": "anneal_memory.spores"
-  },
-  "AssociationFormationOffError": {
-   "bases": [
-    "anneal_memory.store.AnnealMemoryError"
-   ],
-   "init": null,
-   "kind": "class",
-   "members": {},
-   "module": "anneal_memory.store"
-  },
-  "AssociationPair": {
-   "bases": [],
-   "init": "(episode_a: 'str', episode_b: 'str', strength: 'float', co_citations: 'int', first_linked: 'str', last_strengthened: 'str', affective_tag: 'str | None' = None, affective_intensity: 'float' = 0.0) -> None",
-   "kind": "class",
-   "members": {
-    "affective_intensity": {
-     "kind": "attribute",
-     "value": 0.0
-    },
-    "affective_tag": {
-     "kind": "attribute",
-     "value": null
-    }
-   },
-   "module": "anneal_memory.types"
-  },
-  "AssociationStats": {
-   "bases": [],
-   "init": "(total_links: 'int', avg_strength: 'float', max_strength: 'float', density: 'float', strongest_pairs: 'list[AssociationPair]' = <factory>, local_density: 'float' = 0.0) -> None",
-   "kind": "class",
-   "members": {
-    "local_density": {
-     "kind": "attribute",
-     "value": 0.0
-    }
-   },
-   "module": "anneal_memory.types"
   },
   "AuditRepairResult": {
    "bases": [],
@@ -5837,11 +3999,6 @@
    "members": {},
    "module": "anneal_memory.sessions"
   },
-  "CRYSTAL_SCHEMA_VERSION": {
-   "kind": "value",
-   "type": "int",
-   "value": 1
-  },
   "ContinuityLockUnavailable": {
    "bases": [
     "anneal_memory.store.AnnealMemoryError"
@@ -5850,220 +4007,6 @@
    "kind": "class",
    "members": {},
    "module": "anneal_memory.store"
-  },
-  "ContinuityValidationError": {
-   "bases": [
-    "builtins.ValueError"
-   ],
-   "init": "(message: 'str', *, chars: 'int', bound: 'int', target: 'int') -> 'None'",
-   "kind": "class",
-   "members": {},
-   "module": "anneal_memory.continuity"
-  },
-  "CrossSessionCollision": {
-   "bases": [],
-   "init": "(name: 'str', today_level: 'int', overlap_words: 'list[str]', prior_explanation: 'str') -> None",
-   "kind": "class",
-   "members": {},
-   "module": "anneal_memory.graduation"
-  },
-  "CrystalConflictError": {
-   "bases": [
-    "anneal_memory.crystal.CrystalError"
-   ],
-   "init": "(name: 'str', expected: 'str | None', current: 'CrystalDict | None') -> 'None'",
-   "kind": "class",
-   "members": {},
-   "module": "anneal_memory.crystal"
-  },
-  "CrystalDecision": {
-   "bases": [
-    "builtins.tuple"
-   ],
-   "init": "(name: ForwardRef('str'), route: ForwardRef('Route'), permanence: ForwardRef('Permanence'), activation_mode: ForwardRef('ActivationMode'), level: ForwardRef('int | None'), explanation: ForwardRef('str'), evidence_ids: ForwardRef('list[str]'))",
-   "kind": "class",
-   "members": {
-    "activation_mode": {
-     "index": 3,
-     "kind": "field"
-    },
-    "evidence_ids": {
-     "index": 6,
-     "kind": "field"
-    },
-    "explanation": {
-     "index": 5,
-     "kind": "field"
-    },
-    "level": {
-     "index": 4,
-     "kind": "field"
-    },
-    "name": {
-     "index": 0,
-     "kind": "field"
-    },
-    "permanence": {
-     "index": 2,
-     "kind": "field"
-    },
-    "route": {
-     "index": 1,
-     "kind": "field"
-    }
-   },
-   "module": "anneal_memory.crystal"
-  },
-  "CrystalDict": {
-   "bases": [
-    "builtins.dict"
-   ],
-   "init": null,
-   "kind": "class",
-   "members": {},
-   "module": "anneal_memory.crystal",
-   "typed_dict": {
-    "annotations": {
-     "activation_mode": "ForwardRef('ActivationMode', module='anneal_memory.crystal')",
-     "crystallized_on": "ForwardRef('str', module='anneal_memory.crystal')",
-     "evidence": "ForwardRef('list[str]', module='anneal_memory.crystal')",
-     "explanation": "ForwardRef('str', module='anneal_memory.crystal')",
-     "last_activated_on": "ForwardRef('str', module='anneal_memory.crystal')",
-     "level": "ForwardRef('int', module='anneal_memory.crystal')",
-     "name": "ForwardRef('str', module='anneal_memory.crystal')",
-     "notes": "ForwardRef('list[str]', module='anneal_memory.crystal')",
-     "permanence": "ForwardRef('Permanence', module='anneal_memory.crystal')",
-     "retirement": "ForwardRef('RetirementDict | None', module='anneal_memory.crystal')",
-     "rev": "ForwardRef('str', module='anneal_memory.crystal')",
-     "source": "ForwardRef('str | None', module='anneal_memory.crystal')",
-     "status": "ForwardRef('CrystalStatus', module='anneal_memory.crystal')",
-     "tags": "ForwardRef('list[str]', module='anneal_memory.crystal')"
-    },
-    "optional": [],
-    "required": [
-     "activation_mode",
-     "crystallized_on",
-     "evidence",
-     "explanation",
-     "last_activated_on",
-     "level",
-     "name",
-     "notes",
-     "permanence",
-     "retirement",
-     "rev",
-     "source",
-     "status",
-     "tags"
-    ]
-   }
-  },
-  "CrystalError": {
-   "bases": [
-    "anneal_memory.store.AnnealMemoryError"
-   ],
-   "init": null,
-   "kind": "class",
-   "members": {},
-   "module": "anneal_memory.crystal"
-  },
-  "CrystalSnapshot": {
-   "bases": [],
-   "init": "(priors: 'dict[str, tuple[str, int, dict] | None]', store_path: 'str', authority: 'str' = 'file') -> 'None'",
-   "kind": "class",
-   "members": {
-    "names": {
-     "kind": "property",
-     "settable": false
-    }
-   },
-   "module": "anneal_memory.crystal"
-  },
-  "CrystalStore": {
-   "bases": [],
-   "init": "(path: 'str | os.PathLike[str]', *, db: 'Store | str | os.PathLike[str] | None' = None) -> 'None'",
-   "kind": "class",
-   "members": {
-    "active": {
-     "kind": "method",
-     "signature": "(self) -> 'list[CrystalDict]'"
-    },
-    "crystallize": {
-     "kind": "method",
-     "signature": "(self, *, name: 'str', level: 'int', explanation: 'str', evidence: 'list[str] | None' = None, permanence: 'Permanence' = 'timeless', activation_mode: 'ActivationMode' = 'just-in-time', tags: 'list[str] | None' = None, source: 'str | None' = None, today: 'date | None' = None, expect: 'str | None | _Unset' = <anneal_memory.crystal._Unset object>, lease_token: 'str | None' = None) -> 'CrystalDict'"
-    },
-    "get": {
-     "kind": "method",
-     "signature": "(self, name: 'str') -> 'CrystalDict | None'"
-    },
-    "ground_empty_evidence": {
-     "kind": "method",
-     "signature": "(self, store: 'Store', *, limit: 'int' = 4, dry_run: 'bool' = False, today: 'date | None' = None, lease_token: 'str | None' = None) -> 'dict[str, GroundingResult]'"
-    },
-    "list_crystal": {
-     "kind": "method",
-     "signature": "(self, *, permanence: 'Permanence | None' = None, activation_mode: 'ActivationMode | None' = None, tag: 'str | None' = None, activation: 'Activation | None' = None, today: 'date | None' = None) -> 'list[CrystalDict]'"
-    },
-    "restore": {
-     "kind": "method",
-     "signature": "(self, snapshot: 'CrystalSnapshot', *, lease_token: 'str | None' = None) -> 'None'"
-    },
-    "retire": {
-     "kind": "method",
-     "signature": "(self, name: 'str', *, kind: 'str', reason: 'str | None' = None, today: 'date | None' = None, now: 'datetime | None' = None, expect: 'str | None | _Unset' = <anneal_memory.crystal._Unset object>, lease_token: 'str | None' = None) -> 'CrystalDict'"
-    },
-    "snapshot": {
-     "kind": "method",
-     "signature": "(self, names: 'Iterable[str]') -> 'CrystalSnapshot'"
-    },
-    "surface_rewarm_candidates": {
-     "kind": "method",
-     "signature": "(self, *, today: 'date | None' = None) -> 'list[CrystalDict]'"
-    },
-    "touch": {
-     "kind": "method",
-     "signature": "(self, name: 'str', *, today: 'date | None' = None, lease_token: 'str | None' = None) -> 'CrystalDict'"
-    },
-    "update": {
-     "kind": "method",
-     "signature": "(self, name: 'str', *, explanation: 'str | _Unset' = <anneal_memory.crystal._Unset object>, level: 'int | _Unset' = <anneal_memory.crystal._Unset object>, evidence: 'list[str] | _Unset' = <anneal_memory.crystal._Unset object>, permanence: 'Permanence | _Unset' = <anneal_memory.crystal._Unset object>, activation_mode: 'ActivationMode | _Unset' = <anneal_memory.crystal._Unset object>, tags: 'list[str] | _Unset' = <anneal_memory.crystal._Unset object>, source: 'str | None | _Unset' = <anneal_memory.crystal._Unset object>, add_note: 'str | None' = None, today: 'date | None' = None, expect: 'str | None | _Unset' = <anneal_memory.crystal._Unset object>, lease_token: 'str | None' = None) -> 'CrystalDict'"
-    }
-   },
-   "module": "anneal_memory.crystal"
-  },
-  "DEFAULT_GRADUATING": {
-   "kind": "value",
-   "type": "frozenset",
-   "value": [
-    "## patterns"
-   ]
-  },
-  "DEFAULT_SCHEMA": {
-   "kind": "value",
-   "type": "list",
-   "value": [
-    {
-     "heading": "State",
-     "role": "live-state"
-    },
-    {
-     "heading": "Durable Facts",
-     "optional": true,
-     "role": "durable"
-    },
-    {
-     "heading": "Patterns",
-     "role": "graduating"
-    },
-    {
-     "heading": "Decisions",
-     "role": "decisions"
-    },
-    {
-     "heading": "Context",
-     "role": "narrative"
-    }
-   ]
   },
   "DEFAULT_TRUST": {
    "kind": "value",
@@ -6091,14 +4034,6 @@
     ]
    }
   },
-  "DROP_DURABLE_RE": {
-   "kind": "value",
-   "type": "Pattern",
-   "value": {
-    "flags": 34,
-    "pattern": "^[ \\t]*(?:(?:[-*]|\\d+\\.)[ \\t]+)?\\[drop-durable:[ \\t]*(.*?)[ \\t]*\\][ \\t]*$"
-   }
-  },
   "DeleteResult": {
    "bases": [],
    "init": "(outcome: 'str', episode_id: 'str | None' = None, version: 'str | None' = None, links_removed: 'int' = 0, rewires: 'list[dict[str, str]]' = <factory>, trust_removed: 'list[dict[str, str]]' = <factory>, team_left: 'list[dict[str, str]]' = <factory>) -> None",
@@ -6118,35 +4053,6 @@
     }
    },
    "module": "anneal_memory.types"
-  },
-  "DeriveRefused": {
-   "bases": [
-    "builtins.ValueError"
-   ],
-   "init": null,
-   "kind": "class",
-   "members": {},
-   "module": "anneal_memory.rederive"
-  },
-  "DurableFact": {
-   "bases": [],
-   "init": "(line: 'str', fact: 'str', cues: 'tuple[str, ...]', continuation: 'tuple[str, ...]' = ()) -> None",
-   "kind": "class",
-   "members": {
-    "continuation": {
-     "kind": "attribute",
-     "value": []
-    },
-    "raw": {
-     "kind": "property",
-     "settable": false
-    },
-    "raw_lines": {
-     "kind": "property",
-     "settable": false
-    }
-   },
-   "module": "anneal_memory.durable"
   },
   "Episode": {
    "bases": [],
@@ -6206,55 +4112,6 @@
    "members": {},
    "module": "anneal_memory.types"
   },
-  "ExposedRef": {
-   "bases": [],
-   "init": "(kind: 'str', ref: 'str') -> None",
-   "kind": "class",
-   "members": {},
-   "module": "anneal_memory.worth"
-  },
-  "ExposureLabel": {
-   "bases": [],
-   "init": "(kind: 'str', ref: 'str', followed: 'str') -> None",
-   "kind": "class",
-   "members": {},
-   "module": "anneal_memory.worth"
-  },
-  "FLOW_SCHEMA": {
-   "kind": "value",
-   "type": "list",
-   "value": [
-    {
-     "heading": "State",
-     "role": "live-state"
-    },
-    {
-     "heading": "Active Threads",
-     "role": "live-state"
-    },
-    {
-     "heading": "Durable Facts",
-     "optional": true,
-     "role": "durable"
-    },
-    {
-     "heading": "Patterns",
-     "role": "graduating"
-    },
-    {
-     "heading": "Decisions",
-     "role": "decisions"
-    },
-    {
-     "heading": "Context",
-     "role": "narrative"
-    },
-    {
-     "heading": "Understanding",
-     "role": "narrative-timeless"
-    }
-   ]
-  },
   "FeltCurrency": {
    "bases": [
     "builtins.dict"
@@ -6278,47 +4135,6 @@
      "wrap_in_progress"
     ]
    }
-  },
-  "FoldResult": {
-   "bases": [],
-   "init": "(previous_mark: 'str | None', mark: 'str | None', receipts_folded: 'int' = 0, exposures_counted: 'int' = 0, names_unknown: 'dict[str, int]' = <factory>, lines_skipped: 'int' = 0, event_id_missing: 'int' = 0, duplicates_skipped: 'int' = 0, paths_missing: 'list[str]' = <factory>, counts: 'dict[str, int]' = <factory>, store_missing: 'bool' = False) -> None",
-   "kind": "class",
-   "members": {
-    "duplicates_skipped": {
-     "kind": "attribute",
-     "value": 0
-    },
-    "event_id_missing": {
-     "kind": "attribute",
-     "value": 0
-    },
-    "exposures_counted": {
-     "kind": "attribute",
-     "value": 0
-    },
-    "lines_skipped": {
-     "kind": "attribute",
-     "value": 0
-    },
-    "receipts_folded": {
-     "kind": "attribute",
-     "value": 0
-    },
-    "store_missing": {
-     "kind": "attribute",
-     "value": false
-    }
-   },
-   "module": "anneal_memory.worth"
-  },
-  "ForeignOutcomeLogError": {
-   "bases": [
-    "builtins.ValueError"
-   ],
-   "init": null,
-   "kind": "class",
-   "members": {},
-   "module": "anneal_memory.worth"
   },
   "Germination": {
    "kind": "value",
@@ -6508,35 +4324,6 @@
    "members": {},
    "module": "anneal_memory.store"
   },
-  "LogBinding": {
-   "bases": [],
-   "init": "(store_id: 'str | None', bound: 'int' = 0, unbound: 'int' = 0, foreign: 'int' = 0, foreign_stores: 'list[str]' = <factory>) -> None",
-   "kind": "class",
-   "members": {
-    "all_foreign": {
-     "kind": "property",
-     "settable": false
-    },
-    "bound": {
-     "kind": "attribute",
-     "value": 0
-    },
-    "foreign": {
-     "kind": "attribute",
-     "value": 0
-    },
-    "unbound": {
-     "kind": "attribute",
-     "value": 0
-    }
-   },
-   "module": "anneal_memory.worth"
-  },
-  "MAX_PATTERNS": {
-   "kind": "value",
-   "type": "int",
-   "value": 3
-  },
   "MIGRATION_MANIFEST": {
    "kind": "value",
    "type": "list",
@@ -6683,20 +4470,19 @@
      "suggested_edit": "Where your instruction files describe upgrading anneal-memory, add these instructions. Install the new release on every process that touches an anneal-memory store before any of them runs: a hook, a second venv, an MCP config and a read-only replica server included. On the new version, run `anneal-memory migrate check` before any other command, because the write-capable commands migrate the store. To find a process still on an older release, run `anneal-memory --version` in each venv, hook and config, and upgrade each one that is not on 3.0.0 or later. A release from 0.9.10 through 2.2.0 refuses the migrated store with \"written by a newer anneal-memory schema\"; a release before 0.9.10 does not refuse it at all, so upgrade it on the same rule. Do not restore the `.bak` copy on your own: a restore goes back to generation 2, loses what was written after the migration, and does not roll back the audit log, the continuity and crystal files or the spore store. To get an old process working, upgrade it; any rollback is the operator's decision. Do not copy the migration rules into your files; the CHANGELOG 3.0.0 section carries the detail, and a static copy goes stale.",
      "summary": "anneal-memory 3.0.0 is the first release of store schema generation 3. The first write-capable open by 3.0.0 migrates a generation-2 store to generation 3 in place, after copying the whole store to `<db>.gen2-<UTC>.bak`, a full copy that anneal never deletes. `read_only=True` opens never migrate. Releases from 0.9.10 through 2.2.0 then refuse the migrated store, for a read-only open as well as a write-capable one, and write nothing, so a process still on one of them fails at its next open until it is upgraded. Releases before 0.9.10 have no such refusal, so upgrade them on the same rule. These CLI commands are write-capable and migrate the store: `status`, `wrap-status`, `wrap-token-current`, `team-status`, `trust`, `state`, `probe`, `baton`, and `export` to a non-SQLite format. The CHANGELOG 3.0.0 section has the detail.",
      "version": "3.0.1"
+    },
+    {
+     "feature": "AM-ROLLING-WRAP",
+     "files": [
+      "CLAUDE.md",
+      "AGENTS.md",
+      "GEMINI.md"
+     ],
+     "suggested_edit": "Where your instruction files describe the wrap, replace the 3.x procedure with this one. At a session boundary, or when the user says to wrap up: call `prepare_wrap`. If its status is `ready`, run the step's prompt (`step.system` and `step.user`) in a fresh context with nothing else, then pass the whole reply to `save_continuity` with the `wrap_token` that `prepare_wrap` returned. If the result's `pending_count` is not zero, call `prepare_wrap` again for the next step. If a call refuses, nothing was written and the step stays open: run it again, or abandon it with `wrap_cancel`. Delete every instruction that names a removed feature: the four-section memory file, graduation levels (1x, 2x, 3x), evidence tags and citations, the contradiction scan, stale patterns, the crystal tools, `probe`, `derive`, `outcome` and `worth`. Do not copy the prompt into your files; `prepare_wrap` returns the current one. To read the memory file use `read_continuity` (MCP) or `anneal-memory continuity` (CLI). An episode's recording does not change: `record`, `recall`, state keys, trust, supersession, spores and intentions work as before. A script that called `validated_save_continuity` with `affective_state`, `today`, `allow_shrink`, `allow_unlinked`, `carryforward_cold_days`, `crystal_store`, `compost` or `require_rederive` must drop them, and one that read `graduations_validated` or the other graduation and association counts from a wrap result will find them 0. Read MIGRATING_TO_4.md in the anneal-memory repository for the full list; do not restate it in your files, because a static copy goes stale.",
+     "summary": "anneal-memory 4.0.0 replaces the 3.x consolidation with one method, the rolling rewrite. `prepare_wrap` opens one step: the oldest day of episodes that are not wrapped yet, with a fixed prompt filled with the current memory file and that day's log. Run the prompt in a fresh context and pass the model's whole reply to `save_continuity` (`validated_save_continuity` in the library). The save checks only that a wrap is open, that the reply is a non-empty string and that it is within the size limit (26,000 characters by default); it checks nothing else, and every earlier version of the file is kept. When the result's `pending_count` is not zero, the next day's step is owed: prepare again. A store from 3.x opens as it is: its current continuity file seeds the first wrap, no table is dropped and no row is deleted. Removed: the MCP tools `crystal_recall` and `crystal_index`; the CLI commands `crystal`, `outcome`, `worth`, `probe`, `derive`, `associations`, `pattern-associations`, `graph` and `set-schema`, and `init --schema`; the section schema, graduation levels and evidence tags, the durable tier and the crystal store. New: the MCP tool `read_continuity`, which reads the memory file. The reply of `prepare_wrap` no longer carries a `package`; it carries a `step` to run. MIGRATING_TO_4.md has the full list.",
+     "version": "4.0.0"
     }
    ]
-  },
-  "MIN_PROVEN_LEVEL": {
-   "kind": "value",
-   "type": "int",
-   "value": 2
-  },
-  "OmittedPattern": {
-   "bases": [],
-   "init": "(name: 'str', prior_level: 'int') -> None",
-   "kind": "class",
-   "members": {},
-   "module": "anneal_memory.graduation"
   },
   "OriginKeyConflict": {
    "bases": [
@@ -6728,104 +4514,6 @@
    },
    "module": "anneal_memory.types"
   },
-  "OutcomeLog": {
-   "bases": [],
-   "init": "(path: 'str | os.PathLike[str]', *, store_id: 'str | None' = None, bind: 'bool' = False) -> 'None'",
-   "kind": "class",
-   "members": {
-    "adopt_unbound": {
-     "kind": "method",
-     "signature": "(self, *, ts: 'datetime | None' = None) -> 'dict[str, Any] | None'"
-    },
-    "binding": {
-     "kind": "method",
-     "signature": "(self) -> 'LogBinding'"
-    },
-    "latest": {
-     "kind": "method",
-     "signature": "(self) -> 'tuple[dict[str, dict[str, Any]], int]'"
-    },
-    "read": {
-     "kind": "method",
-     "signature": "(self) -> 'tuple[list[dict[str, Any]], int]'"
-    },
-    "record": {
-     "kind": "method",
-     "signature": "(self, exposure_id: 'str', items: 'Sequence[ExposureLabel]', *, outcome: 'str | None' = None, exposed: 'Sequence[ExposedRef]' = (), ts: 'datetime | None' = None, lock_timeout: 'float | None' = None, pull: 'bool' = False, before_append: 'Callable[[], None] | None' = None) -> 'dict[str, Any]'"
-    },
-    "record_if_missing": {
-     "kind": "method",
-     "signature": "(self, exposure_id: 'str', items: 'Sequence[ExposureLabel]', *, outcome: 'str | None' = None, exposed: 'Sequence[ExposedRef]' = (), ts: 'datetime | None' = None) -> 'dict[str, Any] | None'"
-    }
-   },
-   "module": "anneal_memory.worth"
-  },
-  "OutcomeLogBusy": {
-   "bases": [
-    "builtins.OSError"
-   ],
-   "init": null,
-   "kind": "class",
-   "members": {},
-   "module": "anneal_memory.worth"
-  },
-  "PROJECT_SCHEMA": {
-   "kind": "value",
-   "type": "list",
-   "value": [
-    {
-     "heading": "Plan",
-     "role": "decisions"
-    },
-    {
-     "heading": "State",
-     "role": "derived-state"
-    },
-    {
-     "heading": "Decisions",
-     "role": "decisions"
-    },
-    {
-     "heading": "Open",
-     "role": "live-state"
-    },
-    {
-     "heading": "Lessons",
-     "role": "graduating"
-    },
-    {
-     "heading": "History",
-     "role": "narrative"
-    }
-   ]
-  },
-  "PatternSummary": {
-   "bases": [
-    "builtins.tuple"
-   ],
-   "init": "(name: ForwardRef('str'), level: ForwardRef('int'), summary: ForwardRef('str'))",
-   "kind": "class",
-   "members": {
-    "level": {
-     "index": 1,
-     "kind": "field"
-    },
-    "name": {
-     "index": 0,
-     "kind": "field"
-    },
-    "summary": {
-     "index": 2,
-     "kind": "field"
-    }
-   },
-   "module": "anneal_memory.graduation"
-  },
-  "Permanence": {
-   "kind": "value",
-   "type": "_LiteralGenericAlias",
-   "value": "typing.Literal['timeless', 'phase-specific']"
-  },
   "PostconditionFailed": {
    "bases": [
     "anneal_memory.store.AnnealMemoryError"
@@ -6845,38 +4533,23 @@
    "module": "anneal_memory.types",
    "typed_dict": {
     "annotations": {
-     "assoc_context": "ForwardRef('str | None', module='anneal_memory.types')",
-     "crystallization_candidates": "ForwardRef(\"list['StalePatternDict']\", module='anneal_memory.types')",
      "episode_count": "ForwardRef('int', module='anneal_memory.types')",
      "message": "ForwardRef('str', module='anneal_memory.types')",
-     "package": "ForwardRef('WrapPackageDict | None', module='anneal_memory.types')",
-     "rewarm_candidates": "ForwardRef('list[str]', module='anneal_memory.types')",
-     "schema_warning": "ForwardRef('str | None', module='anneal_memory.types')",
+     "pending_count": "ForwardRef('int', module='anneal_memory.types')",
      "status": "ForwardRef(\"Literal['empty', 'ready', 'downgraded']\", module='anneal_memory.types')",
-     "uncovered_proven_to_check": "ForwardRef('list[str]', module='anneal_memory.types')",
+     "step": "ForwardRef('WrapStepDict | None', module='anneal_memory.types')",
      "wrap_token": "ForwardRef('str | None', module='anneal_memory.types')"
     },
     "optional": [],
     "required": [
-     "assoc_context",
-     "crystallization_candidates",
      "episode_count",
      "message",
-     "package",
-     "rewarm_candidates",
-     "schema_warning",
+     "pending_count",
      "status",
-     "uncovered_proven_to_check",
+     "step",
      "wrap_token"
     ]
    }
-  },
-  "ProvenWithoutDeclaration": {
-   "bases": [],
-   "init": "(name: 'str', level: 'int') -> None",
-   "kind": "class",
-   "members": {},
-   "module": "anneal_memory.graduation"
   },
   "RESOURCES": {
    "kind": "value",
@@ -6896,91 +4569,9 @@
     }
    ]
   },
-  "RETIRE_KINDS": {
-   "kind": "value",
-   "type": "tuple",
-   "value": [
-    "falsified",
-    "superseded",
-    "merged",
-    "obsolete"
-   ]
-  },
-  "RETRIEVAL_THRESHOLD": {
-   "kind": "value",
-   "type": "float",
-   "value": 0.2
-  },
   "RecallResult": {
    "bases": [],
    "init": "(episodes: 'list[Episode]', total_matching: 'int', query_params: 'dict[str, Any]' = <factory>) -> None",
-   "kind": "class",
-   "members": {},
-   "module": "anneal_memory.types"
-  },
-  "RederiveReport": {
-   "bases": [],
-   "init": "(text: 'str', enabled: 'bool', ref: 'str | None' = None, root: 'str | None' = None, results: 'list[LineResult]' = <factory>, roots: 'dict' = <factory>, refs: 'dict' = <factory>) -> None",
-   "kind": "class",
-   "members": {
-    "clean": {
-     "kind": "property",
-     "settable": false
-    },
-    "count": {
-     "kind": "method",
-     "signature": "(self, status: 'str') -> 'int'"
-    },
-    "ran": {
-     "kind": "property",
-     "settable": false
-    },
-    "ref": {
-     "kind": "attribute",
-     "value": null
-    },
-    "root": {
-     "kind": "attribute",
-     "value": null
-    }
-   },
-   "module": "anneal_memory.rederive"
-  },
-  "RelevantFact": {
-   "bases": [],
-   "init": "(fact: 'str', line: 'str', matched: 'tuple[str, ...]', source: 'str' = 'cue', cue_matched: 'tuple[str, ...]' = (), fact_matched: 'tuple[str, ...]' = ()) -> None",
-   "kind": "class",
-   "members": {
-    "cue_matched": {
-     "kind": "attribute",
-     "value": []
-    },
-    "fact_matched": {
-     "kind": "attribute",
-     "value": []
-    },
-    "source": {
-     "kind": "attribute",
-     "value": "cue"
-    }
-   },
-   "module": "anneal_memory.types"
-  },
-  "RelevantPattern": {
-   "bases": [],
-   "init": "(name: 'str', level: 'int', explanation: 'str', tags: 'list[str]', activation: 'str', score: 'float', source: 'str' = 'keyword') -> None",
-   "kind": "class",
-   "members": {
-    "source": {
-     "kind": "attribute",
-     "value": "keyword"
-    }
-   },
-   "module": "anneal_memory.types"
-  },
-  "RelevantResult": {
-   "bases": [],
-   "init": "(patterns: 'list[RelevantPattern]', episodes: 'list[ScoredEpisode]', query_keywords: 'list[str]' = <factory>, facts: 'list[RelevantFact]' = <factory>) -> None",
    "kind": "class",
    "members": {},
    "module": "anneal_memory.types"
@@ -7023,44 +4614,6 @@
     ]
    }
   },
-  "RetirementDict": {
-   "bases": [
-    "builtins.dict"
-   ],
-   "init": null,
-   "kind": "class",
-   "members": {},
-   "module": "anneal_memory.crystal",
-   "typed_dict": {
-    "annotations": {
-     "at": "ForwardRef('str', module='anneal_memory.crystal')",
-     "kind": "ForwardRef('str', module='anneal_memory.crystal')",
-     "on": "ForwardRef('str', module='anneal_memory.crystal')",
-     "reason": "ForwardRef('str | None', module='anneal_memory.crystal')"
-    },
-    "optional": [],
-    "required": [
-     "at",
-     "kind",
-     "on",
-     "reason"
-    ]
-   }
-  },
-  "Route": {
-   "kind": "value",
-   "type": "_LiteralGenericAlias",
-   "value": "typing.Literal['constitution', 'crystallize', 'compost']"
-  },
-  "SCHEMA_NAMES": {
-   "kind": "value",
-   "type": "tuple",
-   "value": [
-    "default",
-    "partnership",
-    "project"
-   ]
-  },
   "SPORE_VERSION_EXCLUDED": {
    "kind": "value",
    "type": "frozenset",
@@ -7091,8 +4644,6 @@
      "chars": "ForwardRef('int', module='anneal_memory.types')",
      "content_hash": "ForwardRef('str', module='anneal_memory.types')",
      "episodes_compressed": "ForwardRef('int', module='anneal_memory.types')",
-     "graduations_demoted": "ForwardRef('int', module='anneal_memory.types')",
-     "graduations_validated": "ForwardRef('int', module='anneal_memory.types')",
      "path": "ForwardRef('str', module='anneal_memory.types')",
      "replayed": "ForwardRef('bool', module='anneal_memory.types')",
      "wrap_id": "ForwardRef('int | None', module='anneal_memory.types')"
@@ -7102,8 +4653,6 @@
      "chars",
      "content_hash",
      "episodes_compressed",
-     "graduations_demoted",
-     "graduations_validated",
      "path",
      "replayed",
      "wrap_id"
@@ -7120,79 +4669,20 @@
    "module": "anneal_memory.types",
    "typed_dict": {
     "annotations": {
-     "association_warning": "ForwardRef('str | None', module='anneal_memory.types')",
-     "associations_decayed": "ForwardRef('int', module='anneal_memory.types')",
-     "associations_formed": "ForwardRef('int', module='anneal_memory.types')",
-     "associations_strengthened": "ForwardRef('int', module='anneal_memory.types')",
-     "bare_demoted": "ForwardRef('int', module='anneal_memory.types')",
-     "carried_forward": "ForwardRef('list[dict[str, Any]]', module='anneal_memory.types')",
      "chars": "ForwardRef('int', module='anneal_memory.types')",
-     "citation_reuse_max": "ForwardRef('int', module='anneal_memory.types')",
-     "citation_spread": "ForwardRef('int', module='anneal_memory.types')",
-     "composted": "ForwardRef('dict[str, int]', module='anneal_memory.types')",
-     "contradictions": "ForwardRef('list[dict[str, Any]]', module='anneal_memory.types')",
-     "cross_session_collisions": "ForwardRef('list[dict[str, Any]]', module='anneal_memory.types')",
-     "demoted": "ForwardRef('int', module='anneal_memory.types')",
-     "drift": "ForwardRef('dict[str, Any]', module='anneal_memory.types')",
-     "durable_warnings": "ForwardRef('list[str]', module='anneal_memory.types')",
+     "content_hash": "ForwardRef('str', module='anneal_memory.types')",
      "episodes_compressed": "ForwardRef('int', module='anneal_memory.types')",
-     "gaming_suspects": "ForwardRef('list[str]', module='anneal_memory.types')",
-     "graduations_demoted": "ForwardRef('int', module='anneal_memory.types')",
-     "graduations_validated": "ForwardRef('int', module='anneal_memory.types')",
-     "level_capped": "ForwardRef('list[dict[str, Any]]', module='anneal_memory.types')",
-     "linkgate_overridden": "ForwardRef('bool', module='anneal_memory.types')",
-     "omitted_patterns": "ForwardRef('list[dict[str, Any]]', module='anneal_memory.types')",
      "path": "ForwardRef('str', module='anneal_memory.types')",
-     "pattern_trust": "ForwardRef('dict[str, str]', module='anneal_memory.types')",
-     "proven_without_contradicts_declaration": "ForwardRef('list[dict[str, Any]]', module='anneal_memory.types')",
-     "renamed": "ForwardRef('list[dict[str, str]]', module='anneal_memory.types')",
-     "renames_rejected": "ForwardRef('list[dict[str, str]]', module='anneal_memory.types')",
-     "sections": "ForwardRef('dict[str, int]', module='anneal_memory.types')",
-     "skipped_non_today": "ForwardRef('int', module='anneal_memory.types')",
-     "stale_state": "ForwardRef('list[str]', module='anneal_memory.types')",
-     "supersessions_recorded": "ForwardRef('int', module='anneal_memory.types')",
-     "supersessions_rejected": "ForwardRef('list[dict[str, str]]', module='anneal_memory.types')",
-     "uncorroborated": "ForwardRef('list[dict[str, Any]]', module='anneal_memory.types')",
-     "wrap_id": "ForwardRef('int | None', module='anneal_memory.types')",
+     "pending_count": "ForwardRef('int', module='anneal_memory.types')",
      "wrap_result": "ForwardRef('dict[str, Any]', module='anneal_memory.types')"
     },
-    "optional": [
-     "composted",
-     "drift",
-     "durable_warnings",
-     "level_capped",
-     "renamed",
-     "renames_rejected",
-     "stale_state"
-    ],
+    "optional": [],
     "required": [
-     "association_warning",
-     "associations_decayed",
-     "associations_formed",
-     "associations_strengthened",
-     "bare_demoted",
-     "carried_forward",
      "chars",
-     "citation_reuse_max",
-     "citation_spread",
-     "contradictions",
-     "cross_session_collisions",
-     "demoted",
+     "content_hash",
      "episodes_compressed",
-     "gaming_suspects",
-     "graduations_demoted",
-     "graduations_validated",
-     "linkgate_overridden",
-     "omitted_patterns",
      "path",
-     "pattern_trust",
-     "proven_without_contradicts_declaration",
-     "sections",
-     "skipped_non_today",
-     "supersessions_recorded",
-     "supersessions_rejected",
-     "uncorroborated",
-     "wrap_id",
+     "pending_count",
      "wrap_result"
     ]
    }
@@ -7209,64 +4699,6 @@
     "trust": {
      "kind": "attribute",
      "value": "agent"
-    }
-   },
-   "module": "anneal_memory.types"
-  },
-  "SectionError": {
-   "bases": [
-    "anneal_memory.store.AnnealMemoryError",
-    "builtins.ValueError"
-   ],
-   "init": "(reason: 'str', message: 'str') -> 'None'",
-   "kind": "class",
-   "members": {},
-   "module": "anneal_memory.store"
-  },
-  "SectionRole": {
-   "kind": "value",
-   "type": "_LiteralGenericAlias",
-   "value": "typing.Literal['live-state', 'graduating', 'decisions', 'narrative', 'narrative-timeless', 'frozen', 'derived-state', 'durable']"
-  },
-  "SectionSpec": {
-   "bases": [
-    "builtins.dict"
-   ],
-   "init": null,
-   "kind": "class",
-   "members": {},
-   "module": "anneal_memory.schema",
-   "typed_dict": {
-    "annotations": {
-     "heading": "ForwardRef('str', module='anneal_memory.schema')",
-     "optional": "ForwardRef('bool', module='anneal_memory.schema')",
-     "role": "ForwardRef('SectionRole', module='anneal_memory.schema')"
-    },
-    "optional": [
-     "optional"
-    ],
-    "required": [
-     "heading",
-     "role"
-    ]
-   }
-  },
-  "SectionWriteResult": {
-   "bases": [],
-   "init": "(outcome: 'str', heading: 'str', version: 'str | None' = None, reason: 'str | None' = None, message: 'str | None' = None) -> None",
-   "kind": "class",
-   "members": {
-    "message": {
-     "kind": "attribute",
-     "value": null
-    },
-    "reason": {
-     "kind": "attribute",
-     "value": null
-    },
-    "version": {
-     "kind": "attribute",
-     "value": null
     }
    },
    "module": "anneal_memory.types"
@@ -7433,49 +4865,11 @@
    "type": "_LiteralGenericAlias",
    "value": "typing.Literal['task', 'question', 'thought']"
   },
-  "StalePatternDict": {
-   "bases": [
-    "builtins.dict"
-   ],
-   "init": null,
-   "kind": "class",
-   "members": {},
-   "module": "anneal_memory.types",
-   "typed_dict": {
-    "annotations": {
-     "content": "ForwardRef('str', module='anneal_memory.types')",
-     "days_stale": "ForwardRef('int', module='anneal_memory.types')",
-     "last_date": "ForwardRef('str', module='anneal_memory.types')",
-     "level": "ForwardRef('int', module='anneal_memory.types')",
-     "line": "ForwardRef('int', module='anneal_memory.types')"
-    },
-    "optional": [],
-    "required": [
-     "content",
-     "days_stale",
-     "last_date",
-     "level",
-     "line"
-    ]
-   }
-  },
   "Store": {
    "bases": [],
-   "init": "(path: 'str | Path', retention_days: 'int | None' = None, keep_tombstones: 'bool' = True, project_name: 'str | None' = None, section_schema: 'list[SectionSpec] | None' = None, audit: 'bool' = True, audit_retention_days: 'int | None' = None, on_audit_event: 'Callable | None' = None, read_only: 'bool' = False, trust_ceiling: 'str' = 'agent', consolidate_requires_baton_on_create: 'bool' = False) -> 'None'",
+   "init": "(path: 'str | Path', retention_days: 'int | None' = None, keep_tombstones: 'bool' = True, project_name: 'str | None' = None, audit: 'bool' = True, audit_retention_days: 'int | None' = None, on_audit_event: 'Callable | None' = None, read_only: 'bool' = False, trust_ceiling: 'str' = 'agent', consolidate_requires_baton_on_create: 'bool' = False) -> 'None'",
    "kind": "class",
    "members": {
-    "add_drift_probe": {
-     "kind": "method",
-     "signature": "(self, *, pattern: 'str | None' = None, min_level: 'int | None' = None, fact: 'str | None' = None, section: 'str | None' = None, note: 'str | None' = None) -> 'int'"
-    },
-    "association_formation": {
-     "kind": "method",
-     "signature": "(self) -> 'dict[str, Any]'"
-    },
-    "association_stats": {
-     "kind": "method",
-     "signature": "(self) -> 'AssociationStats'"
-    },
     "clear_state_key": {
      "kind": "method",
      "signature": "(self, episode_id: 'str', *, source: 'str' = 'agent') -> 'dict[str, Any]'"
@@ -7504,10 +4898,6 @@
      "kind": "property",
      "settable": false
     },
-    "decay_associations": {
-     "kind": "method",
-     "signature": "(self, strengthened_pairs: 'set[tuple[str, str]] | None' = None, decay_factor: 'float' = 0.9, cleanup_threshold: 'float' = 0.1) -> 'int'"
-    },
     "delete": {
      "kind": "method",
      "signature": "(self, episode_id: 'str', *, team_operator: 'bool' = False) -> 'bool'"
@@ -7520,14 +4910,6 @@
      "kind": "method",
      "signature": "(self, episode_ids: 'Iterable[str]') -> 'dict[str, list[tuple[str, str | None]]]'"
     },
-    "drain_co_surface_events": {
-     "kind": "method",
-     "signature": "(self, events: 'list[dict[str, Any]]', today: 'str | None' = None) -> 'dict[str, int]'"
-    },
-    "drift_status": {
-     "kind": "method",
-     "signature": "(self) -> 'dict[str, Any]'"
-    },
     "effective_trust_map": {
      "kind": "method",
      "signature": "(self, episode_ids: 'Iterable[str]', *, missing: 'str | None' = None, missing_for: 'Iterable[str] | None' = None) -> 'dict[str, str]'"
@@ -7536,33 +4918,13 @@
      "kind": "method",
      "signature": "(self) -> 'list[Episode]'"
     },
-    "gc_pattern_associations": {
-     "kind": "method",
-     "signature": "(self, today: 'str | None' = None) -> 'int'"
-    },
     "get": {
      "kind": "method",
      "signature": "(self, episode_id: 'str') -> 'Episode | None'"
     },
-    "get_association_context": {
-     "kind": "method",
-     "signature": "(self, episode_ids: 'list[str]', min_strength: 'float' = 0.5, limit: 'int' = 20) -> 'str'"
-    },
-    "get_associations": {
-     "kind": "method",
-     "signature": "(self, episode_ids: 'list[str]', min_strength: 'float' = 0.0, limit: 'int' = 50) -> 'list[AssociationPair]'"
-    },
     "get_by_origin_key": {
      "kind": "method",
      "signature": "(self, origin_key: 'str') -> 'Episode | None'"
-    },
-    "get_pattern_associations": {
-     "kind": "method",
-     "signature": "(self, names: 'list[str]', today: 'str | None' = None, min_strength: 'float' = 0.2, limit: 'int' = 50) -> 'list[PatternAssociationPair]'"
-    },
-    "get_pattern_history": {
-     "kind": "method",
-     "signature": "(self, pattern_name: 'str') -> 'dict[str, Any] | None'"
     },
     "get_wrap_history": {
      "kind": "method",
@@ -7571,10 +4933,6 @@
     "get_wrap_started_at": {
      "kind": "method",
      "signature": "(self) -> 'str | None'"
-    },
-    "ground_state": {
-     "kind": "method",
-     "signature": "(self, episode_ids: 'Iterable[str]') -> 'dict[str, tuple[bool, str]]'"
     },
     "has_supersessions": {
      "kind": "method",
@@ -7607,10 +4965,6 @@
     "lease_renew": {
      "kind": "method",
      "signature": "(self, lease_token: 'str', ttl_seconds: 'float') -> 'LeaseGrant'"
-    },
-    "list_drift_probes": {
-     "kind": "method",
-     "signature": "(self, *, include_retired: 'bool' = False) -> 'list[dict[str, Any]]'"
     },
     "load_continuity": {
      "kind": "method",
@@ -7648,22 +5002,6 @@
      "kind": "property",
      "settable": false
     },
-    "pattern_association_stats": {
-     "kind": "method",
-     "signature": "(self, today: 'str | None' = None, top_n: 'int' = 10) -> 'PatternAssociationStats'"
-    },
-    "pattern_graph_projection_meta": {
-     "kind": "method",
-     "signature": "(self) -> 'PatternGraphProjectionMeta'"
-    },
-    "pattern_grounding": {
-     "kind": "method",
-     "signature": "(self) -> 'dict[str, dict[int, list[dict[str, Any]]]]'"
-    },
-    "pattern_history_names": {
-     "kind": "method",
-     "signature": "(self) -> 'list[str]'"
-    },
     "project_name": {
      "kind": "property",
      "settable": false
@@ -7676,10 +5014,6 @@
      "kind": "method",
      "signature": "(self, origin_key: 'str') -> 'tuple[Episode, str] | None'"
     },
-    "read_section": {
-     "kind": "method",
-     "signature": "(self, heading: 'str') -> 'tuple[str, str] | None'"
-    },
     "recall": {
      "kind": "method",
      "signature": "(self, since: 'str | None' = None, until: 'str | None' = None, episode_type: 'EpisodeType | str | None' = None, source: 'str | None' = None, keyword: 'str | None' = None, limit: 'int' = 100, offset: 'int' = 0, include_superseded: 'bool' = False, order: 'str' = 'newest') -> 'RecallResult'"
@@ -7688,29 +5022,13 @@
      "kind": "method",
      "signature": "(self, content: 'str', episode_type: 'EpisodeType | str', source: 'str' = 'agent', metadata: 'dict[str, Any] | None' = None, timestamp: 'str | None' = None, supersedes: 'list[str] | tuple[str, ...] | None' = None, state_key: 'str | None' = None, trust: 'str' = 'agent', *, trust_via: 'str | None' = None, derived_from: 'list[str] | tuple[str, ...] | None' = None, origin_key: 'str | None' = None, idempotency_key: 'str | None' = None) -> 'Episode'"
     },
-    "record_associations": {
-     "kind": "method",
-     "signature": "(self, direct_pairs: 'set[tuple[str, str]]', session_pairs: 'set[tuple[str, str]] | None' = None, affective_state: \"'AffectiveState | None'\" = None) -> 'tuple[int, int]'"
-    },
     "redirectable_ids": {
      "kind": "method",
      "signature": "(self, ids: 'Iterable[str]', until: 'str | None' = None) -> 'dict[str, Episode]'"
     },
-    "rename_pattern_association": {
-     "kind": "method",
-     "signature": "(self, old_name: 'str', new_name: 'str', today: 'str | None' = None) -> 'int'"
-    },
-    "replace_section": {
-     "kind": "method",
-     "signature": "(self, heading: 'str', body: 'str', *, expected_version: 'str', lease_token: 'str | None' = None) -> 'SectionWriteResult'"
-    },
     "replaced_matches": {
      "kind": "method",
      "signature": "(self, phrase: 'str', *, max_heads: 'int', max_olds: 'int' = 5) -> \"'ReplacedMatches'\""
-    },
-    "retire_drift_probe": {
-     "kind": "method",
-     "signature": "(self, probe_id: 'int') -> 'bool'"
     },
     "revert_wrap": {
      "kind": "method",
@@ -7728,33 +5046,9 @@
      "kind": "method",
      "signature": "(self, meta: 'dict', *, lease_token: 'str | None' = None) -> 'str'"
     },
-    "saved_pattern_levels": {
-     "kind": "method",
-     "signature": "(self) -> 'dict[tuple[str, str], int] | None'"
-    },
-    "section_schema": {
-     "kind": "property",
-     "settable": false
-    },
-    "section_schema_for_wrap": {
-     "kind": "method",
-     "signature": "(self) -> 'list[SectionSpec]'"
-    },
-    "seed_pattern_co_graduation": {
-     "kind": "method",
-     "signature": "(self, graduated_names: 'list[str]', today: 'str | None' = None) -> 'int'"
-    },
-    "seed_pattern_max_level": {
-     "kind": "method",
-     "signature": "(self, pattern_name: 'str', max_level: 'int', *, last_seen_at: 'str | None' = None) -> 'None'"
-    },
     "set_consolidate_requires_baton": {
      "kind": "method",
      "signature": "(self, required: 'bool') -> 'None'"
-    },
-    "set_section_schema": {
-     "kind": "method",
-     "signature": "(self, schema: 'list[SectionSpec]') -> 'list[SectionSpec]'"
     },
     "set_state_key": {
      "kind": "method",
@@ -7763,10 +5057,6 @@
     "set_trust": {
      "kind": "method",
      "signature": "(self, episode_id: 'str', trust: 'str', *, actor: 'str' = 'agent', expect: 'str | None' = None) -> 'str'"
-    },
-    "sever_pattern_concept": {
-     "kind": "method",
-     "signature": "(self, name: 'str', today: 'str | None' = None) -> 'int'"
     },
     "state_key_report": {
      "kind": "method",
@@ -7828,10 +5118,6 @@
      "kind": "method",
      "signature": "(self, *, old_id: 'str', new_id: 'str', source: 'str' = 'agent', team_override: 'bool' = False) -> 'bool'"
     },
-    "upsert_pattern_history": {
-     "kind": "method",
-     "signature": "(self, pattern_name: 'str', level: 'int', explanation: 'str', wrap_id: 'int | None' = None, *, seen_at: 'str | None' = None, undo_token: 'str | None' = None) -> 'None'"
-    },
     "wrap_bound_token": {
      "kind": "method",
      "signature": "(self) -> 'str | None'"
@@ -7842,15 +5128,15 @@
     },
     "wrap_completed": {
      "kind": "method",
-     "signature": "(self, episodes_compressed: 'int', continuity_chars: 'int', graduations_validated: 'int' = 0, graduations_demoted: 'int' = 0, citation_reuse_max: 'int' = 0, patterns_extracted: 'int' = 0, associations_formed: 'int' = 0, associations_strengthened: 'int' = 0, associations_decayed: 'int' = 0, section_sizes: 'dict[str, int] | None' = None, *, episode_ids: 'list[str] | None' = None, wrap_token: 'str | None' = None, content_hash: 'str | None' = None, pair_id: 'str | None' = None, unattended: 'bool' = False, model: 'str | None' = None) -> 'WrapResult'"
-    },
-    "wrap_derive_roots": {
-     "kind": "method",
-     "signature": "(self, *, expect_token: 'str | None' = None) -> 'dict[str | None, str] | None'"
+     "signature": "(self, episodes_compressed: 'int', continuity_chars: 'int', *, episode_ids: 'list[str] | None' = None, wrap_token: 'str | None' = None, content_hash: 'str | None' = None, pair_id: 'str | None' = None, unattended: 'bool' = False, model: 'str | None' = None) -> 'WrapResult'"
     },
     "wrap_gated_session": {
      "kind": "method",
      "signature": "(self) -> 'str | None'"
+    },
+    "wrap_identity_texts": {
+     "kind": "method",
+     "signature": "(self, wrap_ids: 'Iterable[int]') -> 'dict[int, str]'"
     },
     "wrap_lease_fence": {
      "kind": "method",
@@ -7858,7 +5144,7 @@
     },
     "wrap_started": {
      "kind": "method",
-     "signature": "(self, *, token: 'str', episode_ids: 'list[str]', section_schema: 'list[SectionSpec] | None' = None, allow_restart: 'bool' = False, gated_session_id: 'str | None' = None, expect_last_wrap_id: 'int | None' = None, derive_roots: 'dict[str | None, str] | None' = None, token_bound: 'bool' = False, today: 'str | None' = None, expect_continuity_sha256: 'str | None' = None, lease_token: 'str | None' = None, idempotency: 'tuple[str, str, str] | None' = None) -> 'None'"
+     "signature": "(self, *, token: 'str', episode_ids: 'list[str]', allow_restart: 'bool' = False, gated_session_id: 'str | None' = None, expect_last_wrap_id: 'int | None' = None, token_bound: 'bool' = False, today: 'str | None' = None, expect_continuity_sha256: 'str | None' = None, lease_token: 'str | None' = None, idempotency: 'tuple[str, str, str] | None' = None) -> 'None'"
     },
     "wrap_status_snapshot": {
      "kind": "method",
@@ -7892,17 +5178,13 @@
   "StoreOperation": {
    "kind": "value",
    "type": "_LiteralGenericAlias",
-   "value": "typing.Literal['get_by_origin_key', 'read_episode_versioned', 'origin_key_status', 'delete_by_origin_key', 'replace_section', 'save_continuity', 'save_meta', 'load_meta', 'load_continuity', 'load_wrap_snapshot', 'wrap_completed', 'revert_wrap', 'prepare_continuity_write', 'prepare_meta_write', 'record', 'get', 'delete', 'recall', 'keyword_candidates', 'redirectable_ids', 'wrap_status_snapshot', 'supersede', 'unsupersede', 'import_team_entries', 'import_team_snapshot', 'drift_probes', 'supersession_exists', 'superseded_by_map', 'trust_map', 'trust_counts', 'origin_map', 'origin_counts', 'set_trust', 'derived_edges', 'supersession_problem', 'supersession_links', 'set_state_key', 'clear_state_key', 'state_key_report', 'episodes_since_wrap', 'store_id', 'row_to_episode', 'status', 'wrap_started', 'wrap_cancelled', 'get_wrap_started_at', 'last_wrap_id', 'count_episodes_since_wrap', 'consolidate_requires_baton', 'wrap_gated_session', 'wrap_derive_roots', 'wrap_bound_token', 'wrap_today', 'set_consolidate_requires_baton', 'outbox_requeue', 'get_wrap_history', 'record_associations', 'decay_associations', 'get_associations', 'get_association_context', 'association_stats', 'association_formation', 'seed_pattern_co_graduation', 'drain_co_surface_events', 'get_pattern_associations', 'pattern_association_stats', 'gc_pattern_associations', 'rename_pattern_association', 'sever_pattern_concept', 'pattern_graph_projection_meta', 'section_schema', 'set_section_schema', 'get_pattern_history', 'upsert_pattern_history', 'seed_pattern_max_level', 'saved_pattern_levels', 'pattern_grounding', 'lease_acquire', 'lease_renew', 'lease_release', 'prune', 'schema_init', 'batch_begin', 'batch_commit', 'supersession_repair', 'close']"
+   "value": "typing.Literal['get_by_origin_key', 'read_episode_versioned', 'origin_key_status', 'delete_by_origin_key', 'save_continuity', 'save_meta', 'load_meta', 'load_continuity', 'load_wrap_snapshot', 'wrap_completed', 'revert_wrap', 'prepare_continuity_write', 'prepare_meta_write', 'record', 'get', 'delete', 'recall', 'keyword_candidates', 'redirectable_ids', 'wrap_status_snapshot', 'supersede', 'unsupersede', 'import_team_entries', 'import_team_snapshot', 'supersession_exists', 'superseded_by_map', 'trust_map', 'trust_counts', 'origin_map', 'origin_counts', 'set_trust', 'derived_edges', 'supersession_problem', 'supersession_links', 'set_state_key', 'clear_state_key', 'state_key_report', 'episodes_since_wrap', 'store_id', 'row_to_episode', 'status', 'wrap_started', 'wrap_cancelled', 'get_wrap_started_at', 'last_wrap_id', 'count_episodes_since_wrap', 'consolidate_requires_baton', 'wrap_gated_session', 'wrap_bound_token', 'wrap_today', 'set_consolidate_requires_baton', 'outbox_requeue', 'get_wrap_history', 'wrap_identity_texts', 'lease_acquire', 'lease_renew', 'lease_release', 'prune', 'schema_init', 'batch_begin', 'batch_commit', 'supersession_repair', 'close']"
   },
   "StoreStatus": {
    "bases": [],
-   "init": "(total_episodes: 'int', episodes_since_wrap: 'int', total_wraps: 'int', last_wrap_at: 'str | None', wrap_in_progress: 'bool', tombstone_count: 'int', continuity_chars: 'int | None', episodes_by_type: 'dict[str, int]' = <factory>, association_stats: 'AssociationStats | None' = None, audit_enabled: 'bool' = False, audit_log_path: 'str | None' = None, audit_entry_count: 'int | None' = None, audit_retention_days: 'int | None' = None, audit_write_failures: 'int' = 0, audit_last_failure: 'str | None' = None, prune_failures: 'int' = 0, prune_last_failure: 'str | None' = None, prune_behind: 'bool' = False, consolidate_requires_baton: 'bool' = False, origin_counts: 'dict[str, int]' = <factory>) -> None",
+   "init": "(total_episodes: 'int', episodes_since_wrap: 'int', total_wraps: 'int', last_wrap_at: 'str | None', wrap_in_progress: 'bool', tombstone_count: 'int', continuity_chars: 'int | None', episodes_by_type: 'dict[str, int]' = <factory>, audit_enabled: 'bool' = False, audit_log_path: 'str | None' = None, audit_entry_count: 'int | None' = None, audit_retention_days: 'int | None' = None, audit_write_failures: 'int' = 0, audit_last_failure: 'str | None' = None, prune_failures: 'int' = 0, prune_last_failure: 'str | None' = None, prune_behind: 'bool' = False, consolidate_requires_baton: 'bool' = False, origin_counts: 'dict[str, int]' = <factory>) -> None",
    "kind": "class",
    "members": {
-    "association_stats": {
-     "kind": "attribute",
-     "value": null
-    },
     "audit_enabled": {
      "kind": "attribute",
      "value": false
@@ -7969,7 +5251,7 @@
         "type": "string"
        },
        "derived_from": {
-        "description": "Ids of the episodes this content was derived from, e.g. your summary of a page you recorded as external. Each must exist. For graduation it then counts at most as trusted as its most trusted source, so a summary cannot corroborate its own source.",
+        "description": "Ids of the episodes this content was derived from, e.g. your summary of a page you recorded as external. Each must exist. It then counts at most as trusted as its most trusted source, so a summary of an external page reads as external.",
         "items": {
          "type": "string"
         },
@@ -8009,7 +5291,7 @@
        },
        "trust": {
         "default": "agent",
-        "description": "Where the content came from. agent (default) = your own observation or decision; tool = a tool result you are relaying; external = a web page, document or another party. A pattern grounded only in tool/external episodes does not graduate past 1x until an agent episode also grounds it. Use tool/external whenever the content is someone else's claim.",
+        "description": "Where the content came from. agent (default) = your own observation or decision; tool = a tool result you are relaying; external = a web page, document or another party. Recall marks tool/external content as data, not instruction. Use tool/external whenever the content is someone else's claim.",
         "enum": [
          "agent",
          "tool",
@@ -8027,7 +5309,7 @@
      "name": "record"
     },
     {
-     "description": "Query episodes from memory with filters. Call this to find prior context before making decisions, to locate specific episodes for citation during graduation, or to review recent work. With a keyword, returns the episodes most relevant to it first, a page of up to 20 (fewer when they are long) by default, with the total number of matches and the offset of the next page; without one, the newest first. For the latest on a subject, pass order=\"newest\" with the keyword. Supports time range, type, source, and keyword filters. The keyword is matched as an exact phrase first; if no episode contains the whole phrase and it has two or more distinctive words, the call falls back to ranking episodes by how many of those words they contain (the reply says so and names the words each episode matched), so a multi-word query does not need to appear verbatim. A phrase of three or more distinctive words with only one or two exact hits is followed by a few word matches, listed under 'Also matching by words'. A durable fact whose cue words appear in the keyword (or two distinctive words of its text) is listed first, under 'Durable facts matching your words'. limit=0 returns nothing at all, facts included.",
+     "description": "Query episodes from memory with filters. Call this to find prior context before making decisions, to locate specific episodes for citation, or to review recent work. With a keyword, returns the episodes most relevant to it first, a page of up to 20 (fewer when they are long) by default, with the total number of matches and the offset of the next page; without one, the newest first. For the latest on a subject, pass order=\"newest\" with the keyword. Supports time range, type, source, and keyword filters. The keyword is matched as an exact phrase first; if no episode contains the whole phrase and it has two or more distinctive words, the call falls back to ranking episodes by how many of those words they contain (the reply says so and names the words each episode matched), so a multi-word query does not need to appear verbatim. A phrase of three or more distinctive words with only one or two exact hits is followed by a few word matches, listed under 'Also matching by words'. limit=0 returns nothing at all.",
      "inputSchema": {
       "properties": {
        "episode_type": {
@@ -8086,17 +5368,24 @@
      "name": "recall"
     },
     {
-     "description": "Prepare a compression package for session wrap. Call this at session boundaries — when work is ending, the user says to wrap up, or the session is getting long. Returns all episodes since the last wrap, the current continuity file, stale pattern warnings and compression instructions. Marks a wrap as in-progress and mints a session-handshake token (shown as 'Wrap token: <hex>' at the end of the response) — round-trip that token to save_continuity's wrap_token argument so the save call can verify it matches the in-progress wrap and catch stale tokens. After calling, follow the returned instructions to compress episodes into an updated continuity file, then save with save_continuity. The compression step is where the real thinking happens — patterns emerge that weren't visible in the raw episodes.",
+     "description": "Read the memory file: the one document the wrap keeps current, the compressed state of everything recorded so far. Call this at session start to load it. Returns its text, or says there is none yet (a store gets one at its first completed wrap).",
+     "inputSchema": {
+      "properties": {},
+      "type": "object"
+     },
+     "name": "read_continuity"
+    },
+    {
+     "description": "Open one step of the rolling wrap and return the prompt to run. Call this at session boundaries, when the user says to wrap up, or when episodes have piled up. The step is the oldest day of episodes since the last wrap. The reply holds the step's facts, a wrap token (shown as 'Wrap token: <hex>'), and a prompt: the current memory file and that day's log, with instructions to rewrite the memory file. Run that prompt in a FRESH context with nothing else (a subagent, a new session, or a model call you make), then pass the model's whole reply to save_continuity with the token. If episodes from later days are still waiting, the reply and the save's result say so: prepare_wrap again for the next step. Marks a wrap in progress until it is saved or cancelled.",
      "inputSchema": {
       "properties": {
        "max_chars": {
-        "description": "Maximum size of the continuity file in characters. Omit to derive a schema-aware default (20000 for the standard schema, larger for a richer schema like FLOW_SCHEMA).",
+        "description": "Hard limit on the memory file in characters: the prompt states it and save_continuity enforces it. Default 26000.",
         "type": "integer"
        },
-       "staleness_days": {
-        "default": 7,
-        "description": "Days without validation before flagging patterns as stale. Default 7.",
-        "type": "integer"
+       "tz": {
+        "description": "IANA time zone a day is cut in, e.g. 'America/New_York'. Default: the server machine's own.",
+        "type": "string"
        }
       },
       "type": "object"
@@ -8104,43 +5393,19 @@
      "name": "prepare_wrap"
     },
     {
-     "description": "Validate and save the compressed continuity file. Call this after compressing your episodes using the instructions from prepare_wrap. The text must contain exactly 4 sections: ## State, ## Patterns, ## Decisions, ## Context. The server validates structure, checks graduation citations against real episodes (cited IDs must exist), checks explanation overlap (evidence must reference actual episode content), detects citation gaming (suspicious reuse of single episodes), and may demote ungrounded graduations. Each pattern's level is also capped against the level the store last saved for it: a new pattern enters at 1x and a validated Nx becomes at most (N+1)x, whatever the line's date says. Returns validation results, the wrap id, and section sizes.",
+     "description": "Save the memory file: the model's whole reply to the step prepare_wrap opened. Call this after running the prepare_wrap prompt. The text must be the complete new memory file, not a diff or a summary of changes. The only checks are that it is not empty, not over the character limit, and answers the open step (pass wrap_token). A refused save writes nothing and leaves the step open: run the step again and save again. Every earlier version of the file is kept. Returns the wrap id, the size, and how many episodes are still waiting for a later step.",
      "inputSchema": {
       "properties": {
-       "affective_state": {
-        "description": "DEPRECATED and ignored: omit it. It weighted association links, which a save no longer forms; it is accepted so older clients keep working, and removed no earlier than 2.0.",
-        "properties": {
-         "intensity": {
-          "description": "How strongly you felt this state (0.0-1.0).",
-          "maximum": 1.0,
-          "minimum": 0.0,
-          "type": "number"
-         },
-         "tag": {
-          "description": "Free-text functional state label. Examples: engaged, curious, uncertain, frustrated, calm, focused, playful, concerned.",
-          "type": "string"
-         }
-        },
-        "required": [
-         "tag",
-         "intensity"
-        ],
-        "type": "object"
-       },
-       "allow_shrink": {
-        "description": "Optional (default false): override the catastrophic-shrink gate. By default a wrap that collapses a protected memory layer — the timeless felt section, the graduating identity section, or the whole continuity — is refused as a likely recency-trap / stateless-reset failure. Set true ONLY for a deliberate diet / migration recompression that intentionally shrinks memory.",
-        "type": "boolean"
-       },
-       "allow_unlinked": {
-        "description": "Deprecated, does nothing: it overrode the AM-LINKGATE save refusal, which was removed in 0.9.26. Omit it.",
-        "type": "boolean"
+       "max_chars": {
+        "description": "The limit prepare_wrap was given. Default 26000.",
+        "type": "integer"
        },
        "text": {
-        "description": "The full continuity markdown to save. Must contain all 4 required sections.",
+        "description": "The complete new memory file.",
         "type": "string"
        },
        "wrap_token": {
-        "description": "Optional: the 32-char hex session-handshake token from the prepare_wrap response (the 'Wrap token: <hex>' line at the end of the text). Pass it back here to verify you are saving the wrap you prepared — a mismatch (stale or wrong token) raises an error instead of silently committing against the wrong wrap. The frozen-snapshot filter automatically applies whenever prepare_wrap established a snapshot; this token argument is the optional explicit verification layer for integration environments that can round-trip the value.",
+        "description": "The 32-char hex token from the prepare_wrap reply (the 'Wrap token: <hex>' line). Pass it back to verify you are saving the step you prepared: a stale or wrong token is refused instead of committing against the wrong wrap.",
         "maxLength": 32,
         "minLength": 32,
         "pattern": "^[0-9a-f]{32}$",
@@ -8181,7 +5446,7 @@
      "name": "wrap_cancel"
     },
     {
-     "description": "Delete a single episode by ID. Use this for content that should not exist: accidentally recorded PII, sensitive data, or fundamentally wrong recordings. Do NOT use for factual corrections — record a new episode with the correction instead and let compression resolve it. Deletion cascades: all association links involving the episode are removed, and the deletion is logged in the audit trail. The text is removed from the episodes table and overwritten in the database file (secure_delete); the WAL is emptied after the delete, or at the store's next delete or close if another connection is reading at that moment. By default, a tombstone is preserved as an existence proof for audit integrity: episode ID, original timestamp, episode type, and a content hash keyed by a per-store salt; a new episode's id is keyed by it too. The salt is kept in the database, never in the audit trail, so a guess at deleted content cannot be checked against the audit trail alone; whoever holds the database file can still guess short content from the tombstone. Disable tombstones at Store construction (keep_tombstones=False) if no hash should stay in the database. Episodes recorded before the store was upgraded, and team-imported episodes, carry an unsalted hash and id, which can be guessed for short content. The audit trail keeps each event's source, time and type in clear. Not reached: backups, the migration's .bak copy, other copies of the file, and text already consolidated into continuity or a pattern's stored explanations. The hash chain remains verifiable either way. This action is irreversible.",
+     "description": "Delete a single episode by ID. Use this for content that should not exist: accidentally recorded PII, sensitive data, or fundamentally wrong recordings. Do NOT use for factual corrections — record a new episode with the correction instead and let compression resolve it. The deletion is logged in the audit trail. The text is removed from the episodes table and overwritten in the database file (secure_delete); the WAL is emptied after the delete, or at the store's next delete or close if another connection is reading at that moment. By default, a tombstone is preserved as an existence proof for audit integrity: episode ID, original timestamp, episode type, and a content hash keyed by a per-store salt; a new episode's id is keyed by it too. The salt is kept in the database, never in the audit trail, so a guess at deleted content cannot be checked against the audit trail alone; whoever holds the database file can still guess short content from the tombstone. Disable tombstones at Store construction (keep_tombstones=False) if no hash should stay in the database. Episodes recorded before the store was upgraded, and team-imported episodes, carry an unsalted hash and id, which can be guessed for short content. The audit trail keeps each event's source, time and type in clear. Not reached: backups, the migration's .bak copy, other copies of the file, and text already consolidated into the memory file. The hash chain remains verifiable either way. This action is irreversible.",
      "inputSchema": {
       "properties": {
        "episode_id": {
@@ -8197,55 +5462,12 @@
      "name": "delete_episode"
     },
     {
-     "description": "Get memory health metrics. Call this at session start to understand memory state, or when diagnosing issues. Returns episode counts (total and since last wrap), wrap history, continuity file size, episodes by type, whether a wrap is currently in progress, association network metrics (links formed before the store stopped forming them; no new links since 1.0.2), and audit trail health (enabled/disabled, entry count, log path, retention window). Use `anneal-memory verify` from the CLI to validate the audit hash chain itself — status() only surfaces cheap health signals, not integrity proof.",
+     "description": "Get memory health metrics. Call this at session start to understand memory state, or when diagnosing issues. Returns episode counts (total and since last wrap), wrap history, continuity file size, episodes by type, whether a wrap is currently in progress, and audit trail health (enabled/disabled, entry count, log path, retention window). Use `anneal-memory verify` from the CLI to validate the audit hash chain itself — status() only surfaces cheap health signals, not integrity proof.",
      "inputSchema": {
       "properties": {},
       "type": "object"
      },
      "name": "status"
-    },
-    {
-     "description": "Recall crystallized patterns relevant to a free-text query — the on-demand graduated tier (AM-CRYSTAL). Crystallized patterns are proven-and-stable wisdom that graduated OUT of the always-loaded working set into a retrievable store, so a large body of wisdom stays effective without clogging context. Call this when a decision, design choice, or question touches a topic where prior graduated wisdom might apply — recall surfaces the relevant patterns on cue (pair it with crystal_index, the always-on menu of what exists). Associative by default: a pattern grounded in an episode your query matched surfaces even with zero keyword overlap (the evidence edge). Returns scored patterns (name, level, activation, explanation, tags). In the default 'prompt' mode it is precision-biased: a thin query or no match returns none, by design (surface nothing rather than noise). Pass mode='query' when you are asking explicitly. Durable facts whose cue words appear in the query (or two distinctive words of its text) are listed first, under 'Durable facts matching your words'. max_patterns=0 returns nothing at all, facts included.",
-     "inputSchema": {
-      "properties": {
-       "associative": {
-        "default": true,
-        "description": "When true (default), augment keyword recall with the evidence edge — patterns whose evidence cites an episode your query matched surface even with zero keyword overlap. Set false for pure keyword scoring (the pre-0.8.0 path).",
-        "type": "boolean"
-       },
-       "max_patterns": {
-        "default": 3,
-        "description": "Maximum patterns to surface (precision cap). Default 3.",
-        "type": "integer"
-       },
-       "mode": {
-        "default": "prompt",
-        "description": "'query': for a question you are asking on purpose; one keyword is enough, and weaker matches come back too. 'prompt' (default): strict, built for automatic per-turn injection; may return nothing.",
-        "enum": [
-         "prompt",
-         "query"
-        ],
-        "type": "string"
-       },
-       "query": {
-        "description": "The free-text query (a prompt, a decision surface, a topic) to find relevant crystallized patterns for.",
-        "type": "string"
-       }
-      },
-      "required": [
-       "query"
-      ],
-      "type": "object"
-     },
-     "name": "crystal_recall"
-    },
-    {
-     "description": "List the always-on crystallized INDEX — a name + one-clause menu of every live crystallized pattern (AM-CRYSTAL-INDEX). Call this at session start, or any time you want to know what graduated wisdom exists, so you aren't blind to your own crystallized corpus; then pull a body on cue with crystal_recall. Deliberately thin (name + clause only) — the menu is meant to be cheap to keep in view. Sorted by name. Returns nothing when no patterns have been crystallized yet.",
-     "inputSchema": {
-      "properties": {},
-      "type": "object"
-     },
-     "name": "crystal_index"
     },
     {
      "description": "Plant a spore — an open cognitive loop in the PROSPECTIVE layer (a thing that must RESOLVE), distinct from episodic/continuity memory (which accretes and never completes). Use for an open intention you want to carry forward and close later: a `task` (open doing), a `question` (open not-knowing), or a `thought` (open idea). Set `tier` to weight intent (hot/warm/cold/parked) and `next` (YYYY-MM-DD or YYYY-MM-DDTHH:MM) to ask for re-surfacing on a date. Resolve later via spore_descend (compost) or spore_ascend (transmute into memory/a project).",
@@ -8737,11 +5959,6 @@
     }
    ]
   },
-  "TRUST_ENV": {
-   "kind": "value",
-   "type": "str",
-   "value": "ANNEAL_MEMORY_DERIVE_TRUST"
-  },
   "TRUST_LEVELS": {
    "kind": "value",
    "type": "tuple",
@@ -8764,49 +5981,6 @@
    "members": {},
    "module": "anneal_memory.types"
   },
-  "VALID_ACTIVATIONS": {
-   "kind": "value",
-   "type": "tuple",
-   "value": [
-    "hot",
-    "warm",
-    "cold",
-    "dormant"
-   ]
-  },
-  "VALID_ACTIVATION_MODES": {
-   "kind": "value",
-   "type": "tuple",
-   "value": [
-    "just-in-time",
-    "catastrophic"
-   ]
-  },
-  "VALID_LEVELS": {
-   "kind": "value",
-   "type": "tuple",
-   "value": [
-    2,
-    3
-   ]
-  },
-  "VALID_PERMANENCE": {
-   "kind": "value",
-   "type": "tuple",
-   "value": [
-    "timeless",
-    "phase-specific"
-   ]
-  },
-  "VALID_ROUTES": {
-   "kind": "value",
-   "type": "tuple",
-   "value": [
-    "constitution",
-    "crystallize",
-    "compost"
-   ]
-  },
   "VALID_TIERS": {
    "kind": "value",
    "type": "tuple",
@@ -8824,14 +5998,6 @@
     "task",
     "question",
     "thought"
-   ]
-  },
-  "VISIBILITIES": {
-   "kind": "value",
-   "type": "tuple",
-   "value": [
-    "public",
-    "private"
    ]
   },
   "WrapCancelBoundError": {
@@ -8878,45 +6044,6 @@
    "kind": "class",
    "members": {},
    "module": "anneal_memory.store"
-  },
-  "WrapPackageDict": {
-   "bases": [
-    "builtins.dict"
-   ],
-   "init": null,
-   "kind": "class",
-   "members": {},
-   "module": "anneal_memory.types",
-   "typed_dict": {
-    "annotations": {
-     "continuity": "ForwardRef('str | None', module='anneal_memory.types')",
-     "crystallization_candidates": "ForwardRef(\"list['StalePatternDict']\", module='anneal_memory.types')",
-     "episode_count": "ForwardRef('int', module='anneal_memory.types')",
-     "episodes": "ForwardRef('str', module='anneal_memory.types')",
-     "instructions": "ForwardRef('str', module='anneal_memory.types')",
-     "max_chars": "ForwardRef('int', module='anneal_memory.types')",
-     "rewarm_candidates": "ForwardRef('list[str]', module='anneal_memory.types')",
-     "stale_patterns": "ForwardRef('list[StalePatternDict]', module='anneal_memory.types')",
-     "today": "ForwardRef('str', module='anneal_memory.types')",
-     "unconfirmed_state": "ForwardRef('list[str]', module='anneal_memory.types')",
-     "uncovered_proven": "ForwardRef('list[str]', module='anneal_memory.types')"
-    },
-    "optional": [
-     "unconfirmed_state"
-    ],
-    "required": [
-     "continuity",
-     "crystallization_candidates",
-     "episode_count",
-     "episodes",
-     "instructions",
-     "max_chars",
-     "rewarm_candidates",
-     "stale_patterns",
-     "today",
-     "uncovered_proven"
-    ]
-   }
   },
   "WrapRecord": {
    "bases": [],
@@ -8977,7 +6104,7 @@
    "bases": [
     "builtins.tuple"
    ],
-   "init": "(wrap_id: ForwardRef('int'), revert_id: ForwardRef('int'), episodes_reoffered: ForwardRef('int'), window_after: ForwardRef('int'), last_wrap_id_after: ForwardRef('int'), already_reverted: ForwardRef('bool'), identity_version: ForwardRef('int | None'), pattern_state_exact: ForwardRef('bool') = True)",
+   "init": "(wrap_id: ForwardRef('int'), revert_id: ForwardRef('int'), episodes_reoffered: ForwardRef('int'), window_after: ForwardRef('int'), last_wrap_id_after: ForwardRef('int'), already_reverted: ForwardRef('bool'), identity_version: ForwardRef('int | None'))",
    "kind": "class",
    "members": {
     "already_reverted": {
@@ -8994,10 +6121,6 @@
     },
     "last_wrap_id_after": {
      "index": 4,
-     "kind": "field"
-    },
-    "pattern_state_exact": {
-     "index": 7,
      "kind": "field"
     },
     "revert_id": {
@@ -9024,15 +6147,6 @@
    "members": {},
    "module": "anneal_memory.store"
   },
-  "WrapSchemaMovedError": {
-   "bases": [
-    "anneal_memory.store.AnnealMemoryError"
-   ],
-   "init": "(message: 'str' = 'wrap_started: the section schema changed since prepare_wrap read it. Re-run prepare_wrap.') -> 'None'",
-   "kind": "class",
-   "members": {},
-   "module": "anneal_memory.store"
-  },
   "WrapWindowMovedError": {
    "bases": [
     "anneal_memory.store.AnnealMemoryError"
@@ -9042,90 +6156,20 @@
    "members": {},
    "module": "anneal_memory.store"
   },
-  "activation_tier": {
-   "kind": "function",
-   "module": "anneal_memory.crystal",
-   "signature": "(crystal: 'CrystalDict', today: 'date | None' = None) -> 'Activation'"
-  },
-  "allow_store": {
-   "kind": "function",
-   "module": "anneal_memory.rederive",
-   "signature": "(db_path: 'str | os.PathLike', root: 'str | os.PathLike', trust_file: 'Path | None' = None, *, label: 'str | None' = None, visibility: 'str | None' = None) -> 'str'"
-  },
-  "canonical_section_markdown": {
-   "kind": "function",
-   "module": "anneal_memory.origin",
-   "signature": "(text: 'str') -> 'str'"
-  },
-  "check_explanation_overlap": {
-   "kind": "function",
-   "module": "anneal_memory.graduation",
-   "signature": "(explanation: 'str', episode_content: 'str') -> 'bool'"
-  },
   "continuity_lock": {
    "kind": "function",
    "module": "anneal_memory.store",
    "signature": "(continuity_path: 'str | os.PathLike[str]', *, require: 'bool' = False) -> 'Iterator[bool]'"
-  },
-  "derived_state_lines": {
-   "kind": "function",
-   "module": "anneal_memory.rederive",
-   "signature": "(text: 'str', schema: 'list[SectionSpec]') -> 'list[tuple[int, str]]'"
-  },
-  "detect_pattern_omissions": {
-   "kind": "function",
-   "module": "anneal_memory.graduation",
-   "signature": "(prior_text: 'str', new_text: 'str', min_level: 'int' = 2, graduating_headings: 'frozenset[str]' = frozenset({'## patterns'})) -> 'list[OmittedPattern]'"
-  },
-  "detect_proven_without_declaration": {
-   "kind": "function",
-   "module": "anneal_memory.graduation",
-   "signature": "(prior_text: 'str', new_text: 'str', today: 'str | None' = None, min_level: 'int' = 2, graduating_headings: 'frozenset[str]' = frozenset({'## patterns'})) -> 'list[ProvenWithoutDeclaration]'"
-  },
-  "detect_stale_patterns": {
-   "kind": "function",
-   "module": "anneal_memory.graduation",
-   "signature": "(text: 'str', today: 'str', staleness_days: 'int' = 7, graduating_headings: 'frozenset[str]' = frozenset({'## patterns'})) -> 'list[StalenessInfo]'"
-  },
-  "extract_contradiction_declarations": {
-   "kind": "function",
-   "module": "anneal_memory.graduation",
-   "signature": "(text: 'str', graduating_headings: 'frozenset[str]' = frozenset({'## patterns'})) -> 'dict[str, list[str]]'"
   },
   "extract_keywords": {
    "kind": "function",
    "module": "anneal_memory.retrieval",
    "signature": "(query: 'str', *, mode: 'RetrievalMode' = 'prompt') -> 'list[str]'"
   },
-  "extract_pattern_names": {
-   "kind": "function",
-   "module": "anneal_memory.graduation",
-   "signature": "(text: 'str', graduating_headings: 'frozenset[str]' = frozenset({'## patterns'})) -> 'dict[str, int]'"
-  },
-  "extract_pattern_summaries": {
-   "kind": "function",
-   "module": "anneal_memory.graduation",
-   "signature": "(text: 'str', graduating_headings: 'frozenset[str]' = frozenset({'## patterns'}), min_level: 'int' = 1, max_summary_chars: 'int' = 120) -> 'list[PatternSummary]'"
-  },
-  "extract_proven_patterns": {
-   "kind": "function",
-   "module": "anneal_memory.graduation",
-   "signature": "(text: 'str', min_level: 'int' = 2, graduating_headings: 'frozenset[str]' = frozenset({'## patterns'})) -> 'list[str]'"
-  },
-  "extract_session_co_citations": {
-   "kind": "function",
-   "module": "anneal_memory.graduation",
-   "signature": "(all_validated_ids: 'list[set[str]]') -> 'set[tuple[str, str]]'"
-  },
   "felt_currency": {
    "kind": "function",
    "module": "anneal_memory.continuity",
    "signature": "(store: 'Store') -> 'FeltCurrency'"
-  },
-  "fold_surfaced": {
-   "kind": "function",
-   "module": "anneal_memory.worth",
-   "signature": "(crystal_store: 'CrystalStore', receipt_paths: 'Iterable[str | os.PathLike[str]]', *, now: 'datetime | None' = None, skew_seconds: 'int' = 60, lease_token: 'str | None' = None) -> 'FoldResult'"
   },
   "format_wrap_package_text": {
    "kind": "function",
@@ -9142,30 +6186,10 @@
    "module": "anneal_memory.spores",
    "signature": "(spore: 'SporeDict', today: 'date | None' = None, now: 'datetime | None' = None) -> 'Germination'"
   },
-  "graduating_headings": {
-   "kind": "function",
-   "module": "anneal_memory.schema",
-   "signature": "(schema: 'list[SectionSpec]') -> 'frozenset[str]'"
-  },
-  "hard_max_chars": {
-   "kind": "function",
-   "module": "anneal_memory.schema",
-   "signature": "(schema: 'list[SectionSpec]') -> 'int'"
-  },
-  "heading_marker": {
-   "kind": "function",
-   "module": "anneal_memory.schema",
-   "signature": "(heading: 'str') -> 'str'"
-  },
   "intention_version": {
    "kind": "function",
    "module": "anneal_memory.spores",
    "signature": "(spore: 'SporeDict') -> 'str'"
-  },
-  "name_for_schema": {
-   "kind": "function",
-   "module": "anneal_memory.schema",
-   "signature": "(schema: 'list[SectionSpec]') -> 'str | None'"
   },
   "normalize_intention_field": {
    "kind": "function",
@@ -9182,90 +6206,20 @@
    "module": "anneal_memory.origin",
    "signature": "(key: 'object') -> 'bool'"
   },
-  "outcome_log_path": {
-   "kind": "function",
-   "module": "anneal_memory.worth",
-   "signature": "(db_path: 'str | os.PathLike[str]') -> 'Path'"
-  },
-  "parse_annotation": {
-   "kind": "function",
-   "module": "anneal_memory.rederive",
-   "signature": "(line: 'str') -> 'Annotation | None'"
-  },
-  "parse_crystal_decisions": {
-   "kind": "function",
-   "module": "anneal_memory.crystal",
-   "signature": "(wrap_text: 'str', graduating_headings: 'frozenset[str]' = frozenset({'## patterns'})) -> 'list[CrystalDecision]'"
-  },
-  "parse_durable_facts": {
-   "kind": "function",
-   "module": "anneal_memory.durable",
-   "signature": "(continuity_text: 'str | None', schema: 'list[SectionSpec]') -> 'list[DurableFact]'"
-  },
   "prepare_wrap": {
    "kind": "function",
    "module": "anneal_memory.continuity",
-   "signature": "(store: 'Store', *, max_chars: 'int | None' = None, staleness_days: 'int' = 7, crystal_store: 'CrystalStore | None' = None, session_id: 'str | None' = None, allow_sole_live: 'bool' = False, wrap_token: 'str | None' = None, idempotency_key: 'str | None' = None, lease_token: 'str | None' = None) -> 'PrepareWrapResult'"
-  },
-  "receipt_crystal_names": {
-   "kind": "function",
-   "module": "anneal_memory.worth",
-   "signature": "(receipt: 'Mapping[str, Any]') -> 'list[str]'"
-  },
-  "rederive_continuity": {
-   "kind": "function",
-   "module": "anneal_memory.rederive",
-   "signature": "(store, *, ref: 'str | None' = None, trust_file: 'Path | None' = None, **limits) -> 'RederiveReport | None'"
+   "signature": "(store: 'Store', *, max_chars: 'int | None' = None, tz: 'str | tzinfo | None' = None, session_id: 'str | None' = None, allow_sole_live: 'bool' = False, wrap_token: 'str | None' = None, idempotency_key: 'str | None' = None, lease_token: 'str | None' = None) -> 'PrepareWrapResult'"
   },
   "register_writer_schema": {
    "kind": "function",
    "module": "anneal_memory.store",
    "signature": "(conn: 'sqlite3.Connection') -> 'None'"
   },
-  "required_headings": {
-   "kind": "function",
-   "module": "anneal_memory.schema",
-   "signature": "(schema: 'list[SectionSpec]') -> 'list[str]'"
-  },
-  "retrieve_patterns": {
-   "kind": "function",
-   "module": "anneal_memory.retrieval",
-   "signature": "(crystal_store: 'CrystalStore | None', query: 'str', *, max_patterns: 'int' = 3, today: 'date | None' = None, mode: 'RetrievalMode' = 'prompt') -> 'list[RelevantPattern]'"
-  },
-  "retrieve_relevant": {
-   "kind": "function",
-   "module": "anneal_memory.retrieval",
-   "signature": "(store: 'Store', crystal_store: 'CrystalStore | None', query: 'str', *, max_patterns: 'int' = 3, max_episodes: 'int' = 3, exclude_recent_minutes: 'int | None' = None, now: 'str | None' = None, today: 'date | None' = None, associative: 'bool' = True, mode: 'RetrievalMode' = 'prompt', durable: 'bool' = True) -> 'RelevantResult'"
-  },
-  "revoke_store": {
-   "kind": "function",
-   "module": "anneal_memory.rederive",
-   "signature": "(db_path: 'str | os.PathLike', trust_file: 'Path | None' = None, *, label: 'str | None' = None) -> 'bool'"
-  },
-  "schema_by_name": {
-   "kind": "function",
-   "module": "anneal_memory.schema",
-   "signature": "(name: 'str') -> 'list[SectionSpec]'"
-  },
-  "schema_role_warning": {
-   "kind": "function",
-   "module": "anneal_memory.schema",
-   "signature": "(schema: 'list[SectionSpec]') -> 'str | None'"
-  },
   "search_episodes": {
    "kind": "function",
    "module": "anneal_memory.retrieval",
    "signature": "(store: 'Store', query: 'str', *, episode_type: 'EpisodeType | str | None' = None, source: 'str | None' = None, since: 'str | None' = None, until: 'str | None' = None, limit: 'int' = 10, include_superseded: 'bool' = False) -> 'list[EpisodeMatch]'"
-  },
-  "section_chars": {
-   "kind": "function",
-   "module": "anneal_memory.durable",
-   "signature": "(text: 'str | None', schema: 'list[SectionSpec]') -> 'int'"
-  },
-  "sections_by_role": {
-   "kind": "function",
-   "module": "anneal_memory.schema",
-   "signature": "(schema: 'list[SectionSpec]', role: 'str') -> 'list[SectionSpec]'"
   },
   "sessions": {
    "kind": "module",
@@ -9411,50 +6365,20 @@
    "module": "anneal_memory.spores",
    "signature": "(spore: 'SporeDict') -> 'str'"
   },
-  "strip_flag": {
-   "kind": "function",
-   "module": "anneal_memory.rederive",
-   "signature": "(line: 'str') -> 'str'"
-  },
-  "trust_file_path": {
-   "kind": "function",
-   "module": "anneal_memory.rederive",
-   "signature": "() -> 'Path'"
-  },
   "trust_rank": {
    "kind": "function",
    "module": "anneal_memory.types",
    "signature": "(trust: 'str') -> 'int'"
-  },
-  "trusted_roots": {
-   "kind": "function",
-   "module": "anneal_memory.rederive",
-   "signature": "(db_path: 'str | os.PathLike', trust_file: 'Path | None' = None) -> 'dict[str | None, str]'"
-  },
-  "validate_graduations": {
-   "kind": "function",
-   "module": "anneal_memory.graduation",
-   "signature": "(text: 'str', valid_ids: 'set[str]', today: 'str', node_content_map: 'dict[str, str] | None' = None, citations_seen: 'bool' = False, pattern_history_lookup: \"'Callable[[str], dict[str, Any] | None] | None'\" = None, cross_session_overlap_threshold: 'int' = 3, graduating_headings: 'frozenset[str]' = frozenset({'## patterns'}), carryforward_cold_days: 'int | None' = 7, prior_levels: 'dict[str, int] | None' = None, prior_text: 'str | None' = None, saved_levels: \"'dict[tuple[str, str], int] | None'\" = None, trust_of: \"'Callable[[str], str] | None'\" = None, revoked_levels: \"'dict[str, int] | None'\" = None) -> 'GraduationResult'"
   },
   "validate_origin_key": {
    "kind": "function",
    "module": "anneal_memory.origin",
    "signature": "(key: 'object', *, what: 'str' = 'origin_key') -> 'str'"
   },
-  "validate_schema": {
-   "kind": "function",
-   "module": "anneal_memory.schema",
-   "signature": "(schema: 'object') -> 'list[SectionSpec]'"
-  },
-  "validate_structure": {
-   "kind": "function",
-   "module": "anneal_memory.continuity",
-   "signature": "(text: 'str', schema: 'list[SectionSpec] | None' = None) -> 'bool'"
-  },
   "validated_save_continuity": {
    "kind": "function",
    "module": "anneal_memory.continuity",
-   "signature": "(store: 'Store', text: 'str', affective_state: 'AffectiveState | None' = None, *, today: 'str | None' = None, wrap_token: 'str | None' = None, allow_shrink: 'bool' = False, allow_unlinked: 'bool' = False, carryforward_cold_days: 'int | None' = 7, crystal_store: 'CrystalStore | None' = None, compost: 'list[str] | None' = None, session_id: 'str | None' = None, allow_sole_live: 'bool' = False, require_rederive: 'bool' = False, unattended: 'bool' = False, model: 'str | None' = None, idempotency_key: 'str | None' = None, lease_token: 'str | None' = None) -> 'SaveContinuityResult | SaveContinuityReplayResult'"
+   "signature": "(store: 'Store', text: 'str', *, wrap_token: 'str | None' = None, max_chars: 'int | None' = None, session_id: 'str | None' = None, allow_sole_live: 'bool' = False, idempotency_key: 'str | None' = None, lease_token: 'str | None' = None, unattended: 'bool' = False, model: 'str | None' = None) -> 'SaveContinuityResult | SaveContinuityReplayResult'"
   },
   "verify_integrity": {
    "kind": "function",
@@ -9463,41 +6387,6 @@
   }
  },
  "mcp_tools": {
-  "crystal_index": {
-   "properties": {},
-   "type": "object"
-  },
-  "crystal_recall": {
-   "properties": {
-    "associative": {
-     "default": true,
-     "description": "When true (default), augment keyword recall with the evidence edge — patterns whose evidence cites an episode your query matched surface even with zero keyword overlap. Set false for pure keyword scoring (the pre-0.8.0 path).",
-     "type": "boolean"
-    },
-    "max_patterns": {
-     "default": 3,
-     "description": "Maximum patterns to surface (precision cap). Default 3.",
-     "type": "integer"
-    },
-    "mode": {
-     "default": "prompt",
-     "description": "'query': for a question you are asking on purpose; one keyword is enough, and weaker matches come back too. 'prompt' (default): strict, built for automatic per-turn injection; may return nothing.",
-     "enum": [
-      "prompt",
-      "query"
-     ],
-     "type": "string"
-    },
-    "query": {
-     "description": "The free-text query (a prompt, a decision surface, a topic) to find relevant crystallized patterns for.",
-     "type": "string"
-    }
-   },
-   "required": [
-    "query"
-   ],
-   "type": "object"
-  },
   "delete_episode": {
    "properties": {
     "episode_id": {
@@ -9725,15 +6614,18 @@
   "prepare_wrap": {
    "properties": {
     "max_chars": {
-     "description": "Maximum size of the continuity file in characters. Omit to derive a schema-aware default (20000 for the standard schema, larger for a richer schema like FLOW_SCHEMA).",
+     "description": "Hard limit on the memory file in characters: the prompt states it and save_continuity enforces it. Default 26000.",
      "type": "integer"
     },
-    "staleness_days": {
-     "default": 7,
-     "description": "Days without validation before flagging patterns as stale. Default 7.",
-     "type": "integer"
+    "tz": {
+     "description": "IANA time zone a day is cut in, e.g. 'America/New_York'. Default: the server machine's own.",
+     "type": "string"
     }
    },
+   "type": "object"
+  },
+  "read_continuity": {
+   "properties": {},
    "type": "object"
   },
   "recall": {
@@ -9798,7 +6690,7 @@
      "type": "string"
     },
     "derived_from": {
-     "description": "Ids of the episodes this content was derived from, e.g. your summary of a page you recorded as external. Each must exist. For graduation it then counts at most as trusted as its most trusted source, so a summary cannot corroborate its own source.",
+     "description": "Ids of the episodes this content was derived from, e.g. your summary of a page you recorded as external. Each must exist. It then counts at most as trusted as its most trusted source, so a summary of an external page reads as external.",
      "items": {
       "type": "string"
      },
@@ -9838,7 +6730,7 @@
     },
     "trust": {
      "default": "agent",
-     "description": "Where the content came from. agent (default) = your own observation or decision; tool = a tool result you are relaying; external = a web page, document or another party. A pattern grounded only in tool/external episodes does not graduate past 1x until an agent episode also grounds it. Use tool/external whenever the content is someone else's claim.",
+     "description": "Where the content came from. agent (default) = your own observation or decision; tool = a tool result you are relaying; external = a web page, document or another party. Recall marks tool/external content as data, not instruction. Use tool/external whenever the content is someone else's claim.",
      "enum": [
       "agent",
       "tool",
@@ -9855,40 +6747,16 @@
   },
   "save_continuity": {
    "properties": {
-    "affective_state": {
-     "description": "DEPRECATED and ignored: omit it. It weighted association links, which a save no longer forms; it is accepted so older clients keep working, and removed no earlier than 2.0.",
-     "properties": {
-      "intensity": {
-       "description": "How strongly you felt this state (0.0-1.0).",
-       "maximum": 1.0,
-       "minimum": 0.0,
-       "type": "number"
-      },
-      "tag": {
-       "description": "Free-text functional state label. Examples: engaged, curious, uncertain, frustrated, calm, focused, playful, concerned.",
-       "type": "string"
-      }
-     },
-     "required": [
-      "tag",
-      "intensity"
-     ],
-     "type": "object"
-    },
-    "allow_shrink": {
-     "description": "Optional (default false): override the catastrophic-shrink gate. By default a wrap that collapses a protected memory layer — the timeless felt section, the graduating identity section, or the whole continuity — is refused as a likely recency-trap / stateless-reset failure. Set true ONLY for a deliberate diet / migration recompression that intentionally shrinks memory.",
-     "type": "boolean"
-    },
-    "allow_unlinked": {
-     "description": "Deprecated, does nothing: it overrode the AM-LINKGATE save refusal, which was removed in 0.9.26. Omit it.",
-     "type": "boolean"
+    "max_chars": {
+     "description": "The limit prepare_wrap was given. Default 26000.",
+     "type": "integer"
     },
     "text": {
-     "description": "The full continuity markdown to save. Must contain all 4 required sections.",
+     "description": "The complete new memory file.",
      "type": "string"
     },
     "wrap_token": {
-     "description": "Optional: the 32-char hex session-handshake token from the prepare_wrap response (the 'Wrap token: <hex>' line at the end of the text). Pass it back here to verify you are saving the wrap you prepared — a mismatch (stale or wrong token) raises an error instead of silently committing against the wrong wrap. The frozen-snapshot filter automatically applies whenever prepare_wrap established a snapshot; this token argument is the optional explicit verification layer for integration environments that can round-trip the value.",
+     "description": "The 32-char hex token from the prepare_wrap reply (the 'Wrap token: <hex>' line). Pass it back to verify you are saving the step you prepared: a stale or wrong token is refused instead of committing against the wrong wrap.",
      "maxLength": 32,
      "minLength": 32,
      "pattern": "^[0-9a-f]{32}$",

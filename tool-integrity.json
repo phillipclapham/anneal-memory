@@ -1,8 +1,6 @@
 {
   "tools": {
-    "crystal_index": "922b7f3e593b43c596ad58c6b16e07f115a25485ba561895ffe6dcb8c15759e6",
-    "crystal_recall": "ec0656965486ba902e9dec0ee2ffd8f482cac0c4930320eb07f3d1eec28e55ca",
-    "delete_episode": "60b6e204158b33b0de9d576db0be799daece2de7686ffdc0e06f227add04c1bb",
+    "delete_episode": "1625ee89d534ed8ae0ede1e1d780e667950b09b77156c6f3f4415a644b343812",
     "intention_add": "978c05e9f9d622ccd8e8678868883e71c86ef17e9a6b1ca495202f1122b155bd",
     "intention_close": "5f3bc6c277e3c1d8aad9f9b77c068df2993e9e6f7c5558f75672ad9ef2b3714a",
     "intention_get": "3a8a16d809a130e2ceead489406ff74816e36c28e29532e3cfd5bdda3f145cf3",
@@ -11,10 +9,11 @@
     "intention_surface": "5f1d34beace5db6e41be064e72e0c74deef475a0a50e673d75afd3f19713e9a6",
     "intention_touch": "4b0e4df5dd8c9a0142fdce58fe8b2379e948fab1642b329911368f1eeeef884a",
     "intention_update": "7f655e359e979f8c2a5db80c66c8c6ee57f87951fd9bc29ecbb2e9a4c2366276",
-    "prepare_wrap": "738ba1b83451fac3b91a30d1d653d36cb2cb7007e016c9694aca267a3f7d9ee8",
-    "recall": "1a96ebcb0feb2bed84e3e4439bb5cb32ecddb49ab626a981ad490ffdeece27cc",
-    "record": "30a35fc11a2b24451cfcbc795382fc535baf7af74820e5ec1487999aeb2fa71d",
-    "save_continuity": "28e809b999c70ac11f56dc959a18a326fe810ec60ff278ccaed933b858dbeec9",
+    "prepare_wrap": "4d19f5c9f2ee845dc682988640923184d5767ee275a32e5503efe37b3e4214dd",
+    "read_continuity": "aa497fa3d066b7be7f46a995058102ba7161ecee67945898e757c016c9c16d43",
+    "recall": "933cb53903abd9abd8e1ee28336d14152b8b46ba41895d67c880510844118e6e",
+    "record": "3c37b57771316ebed8727aadb2f35eaa8b34db4e1375b3a25793219436dd1bb4",
+    "save_continuity": "a31b4ed7eb37c12222537960dd6f506a11f8cb0e1a56776f7cfd9844374185f7",
     "spore_add": "c8971195ae6075f3fc608d95218e41011df2b789e7982c1114bdbd7cef7515ec",
     "spore_ascend": "ce52fd8fb08215d706a39efaa28e1eca4e82018217a7b514feafcbea8e849f35",
     "spore_descend": "1f4cc5141a445609847f295f0ab92306c3aa788129e6b7bd20a4f0436ba831d4",
@@ -23,7 +22,7 @@
     "spore_surface": "85abef310598c9cb04ea14f6eb086b44e3bc4b82646c00240bba652204081776",
     "spore_touch": "fe7131cc73e116200ce58e6610b65ceb83fe6bc1b6e64aebd97a1b4fb0b40d19",
     "spore_update": "eaf8e56d1d9953f67f61bbcd5a41ad2e717739490079a376ee621cb7dfc2e7b9",
-    "status": "0480032f55ace56ee6e7f1f84c12911b5184bad1c333dcab98261332de7e0c6d",
+    "status": "a5093b1d9c4a83b2a072ac51bae5d629eaee4dd1f7ec4081caf0a792c523b4ff",
     "wrap_cancel": "471c3bdf3d5088d2ef333d43fb02968e8942569065ab84130714c1a6287b7ab9"
   },
   "version": 1

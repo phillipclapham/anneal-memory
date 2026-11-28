@@ -207,7 +207,7 @@ class TestVerifyIntegrity:
         path.write_text(json.dumps({"version": 1, "tools": {}}))
         valid, issues = verify_integrity(path)
         assert valid is False
-        assert len(issues) == 25  # All 25 tools missing
+        assert len(issues) == len(TOOLS)  # every tool missing
 
 
 class TestTheTwoManifestsCannotDrift:
@@ -778,119 +778,6 @@ class TestDocumentedToolCount:
         assert "`wrap_cancel`" in text, (
             "SKILL.md never names the wrap_cancel MCP tool — an agent reading it "
             "still has no in-band way out of a stuck wrap"
-        )
-
-    def test_skill_does_not_teach_a_terminating_graduation_ladder(self):
-        """SKILL.md must not teach a ceiling the library removed in 0.9.7.
-
-        ⚠ THIS ROTTED FOR TWENTY DAYS AND NOTHING FIRED. AM-LEVELCAP (0.9.7,
-        2026-08-14) replaced the `level in (2, 3)` gate with `MIN_PROVEN_LEVEL`
-        and no ceiling, because a pattern earned 4+ times could neither validate
-        nor crystallize out. The generated wrap instructions were pinned to the
-        reader's range by ``TestTeacherCoversReaderRange``; **SKILL.md — the doc
-        an AGENT loads — was pinned by nothing**, and went on teaching
-        `1x → 2x → 3x` full stop until 2026-09-04.
-
-        ⛔ A WIDENING EMITS NO ERROR SIGNAL ANYWHERE DOWNSTREAM. Nothing breaks:
-        every consumer keeps working correctly against the narrower contract it
-        already knows, and the only symptom is absence — which is precisely why
-        this needs a test rather than review. Same shape as the `wrap_cancel`
-        row in this same file, and as the removed crystal tier's consumer contract, which
-        kept instructing readers to guard `level in (2, 3)` and so RE-CREATED
-        the cap in at least one consumer that trusted it.
-
-        Positive assertion on purpose: an absence-scan would trip on the
-        historical note that quotes the old ladder, and a negative guard that
-        matches nothing cannot be told from a broken one.
-
-        ⛔ THIS GATE ASSERTED PER-FILE UNTIL 2026-09-04 AND THAT MADE IT BLIND
-        TO ITS OWN SUBJECT. It took ``max()`` over the UNION of levels across
-        every ladder line, so ONE corrected line certified EVERY uncorrected
-        one. Measured at the time: line 85 contributed ``12x`` and passed the
-        file, while line 35 went on teaching ``1x→2x→3x`` — the exact ceiling
-        this test is named for, in the same document, unseen. The assertion's
-        subject was the union; the claim's subject is every ladder the file
-        teaches. An agent does not read the union, it reads a line and stops.
-
-        MUTATION-CHECKED: restore `1x → 2x → 3x` on EITHER ladder line and this
-        fails. (Under the old union form only the last one did.)
-        """
-        import re
-
-        skill = self._root() / "skill" / "anneal-memory" / "SKILL.md"
-        if not skill.is_file():
-            pytest.skip("skill/ not present in this checkout")
-
-        ladder_lines = [
-            (num, line)
-            for num, line in enumerate(
-                skill.read_text(encoding="utf-8").splitlines(), 1
-            )
-            if "graduate" in line.lower() and re.search(r"\d+x", line)
-        ]
-        assert ladder_lines, "SKILL.md no longer teaches graduation at all"
-
-        # ⚠ THE SUBJECT IS THE LADDER, NOT THE LINE. A per-line max over every
-        # ``Nx`` on the line is still a proxy: line 85 also mentions 12x/18x in
-        # its DEMOTION sentence, so a truncated ladder on that line would pass
-        # on the strength of text that is not a ladder at all. Measured
-        # 2026-09-04 by mutation — the per-line form did not kill that mutant.
-        # So extract the ladder RUNS themselves and judge each one.
-        #
-        # A run is a taught ladder when it ASCENDS (``4x``→``3x`` is a demotion
-        # example, not a ladder) and is not a quote of a retired ladder.
-        #
-        # ⛔ THE HISTORICAL EXEMPTION IS DECIDED BY INTENT, NOT BY FORMATTING,
-        # AND THIS IS THE SECOND CORRECTION TO IT. It used to exempt ANY
-        # whole-span-backticked ascending run, unconditionally — and the
-        # comment here claimed the gate "cannot silently pass a real ceiling".
-        # MEASURED FALSE 2026-09-04 by one backtick pair: the same sentence
-        # re-teaching the removed ceiling as live guidance passed when written
-        # `1x -> 2x -> 3x` and failed when written 1x -> 2x -> 3x. Same claim,
-        # same line, same file. Code-formatting a ladder is the natural
-        # markdown instinct — the fix landed that same morning reached for
-        # backticks on its first move — so the blind spot sat in the ONLY
-        # downstream detector this class has, for a class that rotted twenty
-        # days unnoticed.
-        #
-        # So a whole-span quote is exempt only when the LINE also carries a
-        # retrospective cue, which a writer has to mean. Deliberately tight:
-        # an unrecognised cue makes the gate FIRE, which is the direction the
-        # old comment claimed and did not have. Quote a retired ladder as one
-        # backticked span AND say it is retired ("until 0.9.7 the ladder was
-        # `1x → 2x → 3x`"); teach a live one unquoted or with per-token
-        # backticks.
-        retrospective_cue = re.compile(
-            r"\b(retired|superseded|deprecated|formerly|previously|historical|"
-            r"legacy|no longer|used to|until|before 0\.9\.7|pre-0\.9\.7)\b",
-            re.IGNORECASE,
-        )
-        ladder_run = re.compile(r"(?:`?\d+x`?\s*(?:→|->)\s*)+(?:`?\d+x`?|…|\.\.\.)")
-        capped = []
-        for num, line in ladder_lines:
-            for match in ladder_run.finditer(line):
-                run = match.group(0)
-                levels = [int(x) for x in re.findall(r"(\d+)x", run)]
-                if not all(b > a for a, b in zip(levels, levels[1:])):
-                    continue  # descending: a demotion example, not a ladder
-                if (
-                    run.startswith("`")
-                    and run.endswith("`")
-                    and "`" not in run[1:-1]
-                    and retrospective_cue.search(line)
-                ):
-                    continue  # a quote of a retired ladder, marked as one
-                if run.rstrip().endswith(("…", "...")) or max(levels) > 3:
-                    continue  # open-ended, or demonstrably past the old cap
-                capped.append((num, max(levels), run))
-        assert not capped, (
-            "SKILL.md line(s) teach a ladder topping out at 3x or below. The "
-            "library has had NO ceiling since 0.9.7 (MIN_PROVEN_LEVEL, no upper "
-            "bound) — an agent following such a line flattens mature patterns "
-            "back to 3x and loses the high-water mark. A sibling line elsewhere "
-            "in the file teaching the open ladder does NOT fix this: an agent "
-            "reads a line, not the union. Offending line(s): "
-            + "; ".join(f"L{n} (ladder tops out at {lv}x): {t[:90]}" for n, lv, t in capped)
         )
 
     def test_skill_documents_every_tool(self):

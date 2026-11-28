@@ -1,7 +1,7 @@
 """MCP server for anneal-memory.
 
 Implements the Model Context Protocol over stdio transport (JSON-RPC 2.0,
-newline-delimited). 25 tools + 2 resources. Zero dependencies beyond Python
+newline-delimited). 24 tools + 2 resources. Zero dependencies beyond Python
 stdlib.
 
 Usage:

@@ -23,11 +23,20 @@ from anneal_memory import continuity
 from anneal_memory.continuity import prepare_wrap, validated_save_continuity
 from anneal_memory.store import IdempotencyConflictError
 
-try:
-    import fcntl  # noqa: F401
-    HAS_FLOCK = True
-except ImportError:  # the Windows job: the baton lock is a no-op there
-    HAS_FLOCK = False
+def _flock_works() -> bool:
+    """Whether the baton lock really locks here: it is a no-op without fcntl (the Windows
+    job) and on a filesystem that refuses flock, and the race tests need a lock."""
+    import tempfile
+    from pathlib import Path
+    try:
+        with tempfile.TemporaryDirectory() as d:
+            with sessions._baton_lock(Path(d) / "x.continuity.md") as held:
+                return bool(held)
+    except OSError:
+        return False
+
+
+HAS_FLOCK = _flock_works()
 
 
 def _record(store: Store, n: int = 2, day: str = "2026-03-01", pad: int = 0) -> None:
@@ -151,6 +160,26 @@ def test_an_audit_callback_can_release_the_baton_the_save_held(tmp_path):
         assert seen.get("released") is True
     finally:
         s.close()
+
+
+@pytest.mark.skipif(not HAS_FLOCK, reason="the baton lock is an flock")
+def test_a_failed_unlock_does_not_fail_a_claim_or_a_release(store, monkeypatch):
+    """The descriptor's close drops the lock, so an unlock error after the baton was
+    written or removed must not report the claim or the release as failed."""
+    import fcntl
+    path = store.continuity_path
+    real_flock = fcntl.flock
+
+    def flock(fd, op):
+        if op == fcntl.LOCK_UN:
+            raise OSError(5, "I/O error")
+        return real_flock(fd, op)
+
+    monkeypatch.setattr(fcntl, "flock", flock)
+    assert sessions.claim_baton(path, "s1").get("session_id") == "s1"
+    assert sessions.baton_holder(path) == "s1"
+    assert sessions.release_baton(path, "s1") is True
+    assert sessions.baton_holder(path) is None
 
 
 @pytest.mark.skipif(not HAS_FLOCK, reason="the baton lock is an flock")

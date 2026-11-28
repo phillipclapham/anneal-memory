@@ -12286,6 +12286,8 @@ class Store:
             self._defer_commit = False
 
         if commit_succeeded and after_commit is not None:
+            # BaseException on purpose, as for the audit replay below: nothing after the
+            # commit may propagate, and a Ctrl+C here is not delivered.
             try:
                 after_commit()
             except BaseException:

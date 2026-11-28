@@ -3865,7 +3865,8 @@ class TestTrailingProseIsGrounded:
             node_content_map={"abc12345": self.EPISODE, "def67890": "we shipped it"},
         )
         assert (res.validated, res.demoted) == (0, 1)
-        assert '- beta | 2x (2026-05-21) [evidence: def67890 "we shipped it"]' in res.text
+        # a second marker carrying its own evidence tag is cut with the prose: the tag's quote is a claim no check reads
+        assert "we shipped it" not in res.text
         res2 = self._run(" claim words here - beta | 2x (2026-05-21)")
         assert "claim words" not in res2.text and "- beta | 2x (2026-05-21)" in res2.text
 
@@ -3963,3 +3964,46 @@ class TestTrailingProseIsGrounded:
     def test_a_fake_second_marker_leaves_nothing_on_the_cold_line_either(self):
         res = self._run(" - x | 2x (2026-05-21) totally unsupported claim")
         assert "unsupported" not in res.text
+
+    # -- L3 round 6 --
+
+    @pytest.mark.parametrize(
+        "suffix",
+        [
+            " - x | 2x (2026-05-21) [evidence: the team loved shipping on fridays]",
+            ' - x | 2x (2026-05-21) [evidence: deadbeef "the team loved shipping on fridays"]',
+            " - x | 2x (2026-05-21) [evidence: 团队喜欢在周五发布]",
+        ],
+    )
+    def test_a_second_markers_own_evidence_tag_is_cut_with_its_claim(self, suffix):
+        for run in (self._run, self._warm_run):
+            res = run(suffix)
+            assert res.validated == 0
+            assert "fridays" not in res.text and "团队" not in res.text
+
+    def test_an_unclosed_second_evidence_tag_hoists_no_marker(self):
+        res = self._run(' [evidence: deadbeef "[no-contradicts] fridays were great')
+        assert res.validated == 0
+        assert "no-contradicts" not in res.text and "fridays" not in res.text
+
+    def test_a_marker_inside_a_quote_with_a_closing_bracket_is_not_hoisted(self):
+        res = self._run(' [evidence: deadbeef "[x] [no-contradicts] fridays"]')
+        assert "no-contradicts" not in res.text and "fridays" not in res.text
+
+    @pytest.mark.parametrize("opener", ["[contradicts:", "[provenance:"])
+    def test_cutting_a_tag_never_fuses_a_marker_from_its_pieces(self, opener):
+        res = self._run(f' {opener}[evidence: deadbeef "fridays"]beta]')
+        assert res.validated == 0
+        assert "fridays" not in res.text and f"{opener} beta]" not in res.text
+
+    def test_a_second_marker_needs_whitespace_after_its_bullet(self):
+        res = self._run(" -totally_unsupported_claim | 2x (2026-05-21)")
+        assert res.validated == 0
+        assert "totally_unsupported_claim" not in res.text
+
+    def test_a_second_markers_name_starting_at_the_window_edge_is_kept(self):
+        from anneal_memory.graduation import _MARKER_NAME_WINDOW
+        name = "n" * (_MARKER_NAME_WINDOW - 3)  # "- " + name + " " fills the window exactly
+        res = self._run(f" — nothing grounded here - {name} | 2x (2026-05-21)")
+        assert (res.validated, res.demoted) == (0, 1)
+        assert f"(ungrounded) - {name} | 2x (2026-05-21)\n" in res.text

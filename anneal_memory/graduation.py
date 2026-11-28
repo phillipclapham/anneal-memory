@@ -2293,12 +2293,14 @@ _TAIL_MARKER_RE = re.compile(
 # has one way to match.
 _DATED_LEVEL_TOKEN_RE = re.compile(r"\|[ \t]*[0-9]+x[ \t]*\([0-9]{4}-[0-9]{2}-[0-9]{2}\)")
 _NEXT_MARKER_NAME_RE = re.compile(
-    r"(?:^|(?<=[ \t]))(?:[-*•>!?✓][ \t]*)+[A-Za-z][A-Za-z0-9_.\-]*[ \t]*$"
+    r"(?:^|(?<=[ \t]))(?:[-*•>!?✓]+[ \t]+)+[A-Za-z][A-Za-z0-9_.\-]*[ \t]*$"
 )
+# No evidence tag: a second marker's own tag would carry a claim no check reads, so a
+# tail holding one is cut whole. The bullet or marker is followed by whitespace, as the
+# line grammar requires.
 _SECOND_MARKER_RE = re.compile(
-    r"(?:[-*•>!?✓][ \t]*)+[A-Za-z][A-Za-z0-9_.\-]*[ \t]*"
+    r"(?:[-*•>!?✓]+[ \t]+)+[A-Za-z][A-Za-z0-9_.\-]*[ \t]*"
     r"\|[ \t]*[0-9]+x[ \t]*\([0-9]{4}-[0-9]{2}-[0-9]{2}\)"
-    r'(?:[ \t]*\[evidence:(?:[^\]"]|"[^"]*"){0,4096}\])?'
     rf"(?:[ \t]*(?:{_TAIL_MARKER_RE.pattern}))*[ \t]*",
     re.ASCII | re.IGNORECASE,
 )
@@ -2330,7 +2332,7 @@ def _split_tail(line: str, match: "re.Match[str]") -> tuple[str, str]:
         if _DATED_LEVEL_TOKEN_RE.match(tail, cut):
             lo = max(0, cut - _MARKER_NAME_WINDOW)
             m = _NEXT_MARKER_NAME_RE.search(tail[lo:cut])
-            if m and (lo == 0 or m.start() > 0):
+            if m and (lo == 0 or m.start() > 0 or tail[lo - 1] in " \t"):
                 start = lo + m.start()
                 if _SECOND_MARKER_RE.fullmatch(tail, start):
                     return tail[:start], tail[start:]
@@ -2378,11 +2380,13 @@ def _has_non_ascii_letter(text: str) -> bool:
 
 def _cut_tail(line: str, match: "re.Match[str]") -> str:
     """``line`` with the prose after ``match``'s evidence tag removed: the declarative
-    markers stay, as written, unless they sit inside another evidence tag's quoted
-    explanation, which is text; a second pattern marker that is nothing but a marker stays
-    whole; every other character of the tail goes."""
+    markers stay, as written, when they come before any further ``[evidence:`` (a second
+    tag, closed or not, and everything after it is text and goes, so no marker is lifted
+    out of a quote and none is fused from the pieces); a second pattern marker that is
+    nothing but a marker stays whole; every other character of the tail goes."""
     own, rest = _split_tail(line, match)
-    found = [m.group(0) for m in _KEPT_MARKER_RE.finditer(_ANY_EVIDENCE_TAG_RE.sub(" ", own))]
+    before_tag = re.split(r"\[evidence:", own, maxsplit=1, flags=re.IGNORECASE)[0]
+    found = [m.group(0) for m in _KEPT_MARKER_RE.finditer(before_tag)]
     kept = (" " + " ".join(found)) if found else ""
     sep = " " if rest and not rest[0].isspace() and not kept.endswith(" ") else ""
     return line[:match.end()] + kept + sep + rest

@@ -2,9 +2,9 @@
 
 All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project uses [SemVer](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [4.0.1] - 2026-11-28
 
-Three fixes to `prepare_wrap` and `validated_save_continuity`, found by the 4.0 review. All three are present in 3.0.2 and 4.0.0; each was reproduced on a scratch store before it was fixed. No API changes. This section becomes the 4.0.1 entry at the release cut.
+Three fixes to `prepare_wrap` and `validated_save_continuity`, found by the 4.0 review. All three are present in 3.0.2 and 4.0.0; each was reproduced on a scratch store before it was fixed. No API changes.
 
 ### Fixed
 - **A baton take could land between a save's baton check and its commit.** The baton is a file, the commit is SQLite's, and nothing serialised them: `baton claim --take` run from another process in that gap left a save committed under a session that no longer held the baton. A save that names a `session_id` now holds the baton lock (the one claims and releases take) from before its write lock until its commit, so a take waits for the commit. 0.9.13 tried a lock across the commit and withdrew it; its two objections are answered: the lock is released before the audit callbacks run (a callback may release the baton), and a failed unlock never fails a save that committed. Two windows stay open: where the platform or filesystem has no `flock` the lock is a no-op, and a save with `allow_sole_live=True` decides from the session registry, which registering a session does not lock. A save whose baton lock file cannot be opened is refused with `SaveAuthorityError` on a store that requires the baton, and goes on unlocked on any other.
